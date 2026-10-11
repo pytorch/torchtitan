@@ -33,9 +33,10 @@ def _turn(
 ) -> RolloutTurn:
     return RolloutTurn(
         rollout_id=RolloutTurnID(group_id=_GROUP_ID, rollout_id=0, turn_id=0),
-        # The full prompt for now; `_scored_rollout` stores it as a delta like the Rollouter does
+        # A root with the full prompt for now; `_scored_rollout` stores it as a delta on its parent
+        parent_turn_id=None,
         prompt_prefix_len=0,
-        prompt_delta_token_ids=prompt_token_ids,
+        prompt_delta_token_ids=np.array(prompt_token_ids, dtype=np.int32),
         completion_token_ids=np.array(completion_token_ids, dtype=np.int32),
         completion_logprobs=np.full(len(completion_token_ids), -0.1, dtype=np.float32),
         min_policy_version=version,
@@ -45,17 +46,27 @@ def _turn(
 
 
 def _scored_rollout(
-    turns: list[RolloutTurn], *, reward: float, advantage: float
+    turns: list[RolloutTurn],
+    *,
+    reward: float,
+    advantage: float,
+    parent_turn_ids: list[int | None] | None = None,
 ) -> Rollout:
-    previous_token_ids: list[int] = []
-    for rollout_turn in turns:
-        prompt_token_ids = rollout_turn.prompt_delta_token_ids
-        prefix_len, delta = split_prompt(prompt_token_ids, previous_token_ids)
+    """Store each turn's full prompt as a delta on its parent: the previous turn unless given."""
+    if parent_turn_ids is None:
+        parent_turn_ids = [None, *range(len(turns) - 1)]
+    # Each turn's prompt + completion, to split later prompts against
+    token_ids: list[list[int]] = []
+    for rollout_turn, parent_turn_id in zip(turns, parent_turn_ids, strict=True):
+        prompt_token_ids = rollout_turn.prompt_delta_token_ids.tolist()
+        prefix_len, delta = split_prompt(
+            prompt_token_ids,
+            token_ids[parent_turn_id] if parent_turn_id is not None else [],
+        )
+        rollout_turn.parent_turn_id = parent_turn_id
         rollout_turn.prompt_prefix_len = prefix_len
         rollout_turn.prompt_delta_token_ids = delta
-        previous_token_ids = (
-            prompt_token_ids + rollout_turn.completion_token_ids.tolist()
-        )
+        token_ids.append(prompt_token_ids + rollout_turn.completion_token_ids.tolist())
     return Rollout(
         group_id=_GROUP_ID,
         rollout_id=0,
@@ -222,6 +233,7 @@ def test_prefix_that_is_not_the_longest_raises(
     rollout.turns.append(
         RolloutTurn(
             rollout_id=RolloutTurnID(group_id=_GROUP_ID, rollout_id=0, turn_id=1),
+            parent_turn_id=0,
             prompt_prefix_len=prompt_prefix_len,
             prompt_delta_token_ids=np.array(prompt_delta_token_ids, dtype=np.int32),
             completion_token_ids=np.array([5], dtype=np.int32),
@@ -234,21 +246,160 @@ def test_prefix_that_is_not_the_longest_raises(
         rollout_to_training_samples(rollout)
 
 
+@pytest.mark.parametrize("parent_turn_id", [1, 2, -1])
+def test_parent_that_is_not_an_earlier_turn_raises(parent_turn_id: int) -> None:
+    rollout = _scored_rollout(
+        [
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1),
+            _turn(prompt_token_ids=[1, 2, 4, 8], completion_token_ids=[5], version=1),
+        ],
+        reward=0.0,
+        advantage=0.0,
+    )
+    rollout.turns[1].parent_turn_id = parent_turn_id
+    with pytest.raises(ValueError, match="not an earlier turn"):
+        rollout_to_training_samples(rollout)
+
+
 @pytest.mark.parametrize(
-    "prompt, previous, expected",
+    "prompt, parent, expected",
     [
         ([1, 2, 4, 5, 9], [1, 2, 4, 5], (4, [9])),  # continues
         ([1, 2, 7], [1, 2, 4, 5], (2, [7])),  # history rewritten after [1, 2]
-        ([1, 2], [1, 2, 4, 5], (2, [])),  # strict prefix of the previous tokens
-        ([1, 2], [], (0, [1, 2])),  # first turn
+        ([1, 2], [1, 2, 4, 5], (2, [])),  # strict prefix of the parent's tokens
+        ([1, 2], [], (0, [1, 2])),  # no parent
         ([], [1, 2], (0, [])),  # empty prompt
     ],
 )
-def test_split_prompt(prompt, previous, expected) -> None:
+def test_split_prompt(prompt, parent, expected) -> None:
     prompt_prefix_len, prompt_delta_token_ids = split_prompt(
-        prompt, previous_token_ids=previous
+        prompt, parent_token_ids=parent
     )
     assert (prompt_prefix_len, prompt_delta_token_ids.tolist()) == expected
+
+
+def test_fork_from_an_older_turn_opens_a_sample_with_its_prefix_as_context() -> None:
+    # Turn 2 retries turn 0's tool call with another reply [9]. Turn 1 already continued turn 0's
+    # sample, so turn 2 opens a new one; [4] trains once, in sample 0.
+    rollout = _scored_rollout(
+        [
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1),
+            _turn(prompt_token_ids=[1, 2, 4, 8], completion_token_ids=[5], version=2),
+            _turn(prompt_token_ids=[1, 2, 4, 9], completion_token_ids=[6], version=3),
+        ],
+        reward=0.5,
+        advantage=0.1,
+        parent_turn_ids=[None, 0, 0],
+    )
+    stored = [
+        (
+            turn.parent_turn_id,
+            turn.prompt_prefix_len,
+            turn.prompt_delta_token_ids.tolist(),
+        )
+        for turn in rollout.turns
+    ]
+    assert stored == [(None, 0, [1, 2]), (0, 3, [8]), (0, 3, [9])]
+
+    first, second = rollout_to_training_samples(rollout)
+    assert first.token_ids.tolist() == [1, 2, 4, 8, 5]
+    assert first.loss_mask.tolist() == [False, False, True, False, True]
+    assert second.token_ids.tolist() == [1, 2, 4, 9, 6]
+    assert second.loss_mask.tolist() == [False, False, False, False, True]
+    assert second.logprobs.tolist() == pytest.approx([0.0, 0.0, 0.0, 0.0, -0.1])
+    assert second.advantage.tolist() == pytest.approx([0.0, 0.0, 0.0, 0.0, 0.1])
+    assert second.rollout_id.turn_id == 2
+    assert (second.min_policy_version, second.max_policy_version) == (3, 3)
+
+
+def test_resample_and_mid_completion_branch() -> None:
+    # Turn 1 resamples turn 0 (same prompt, prefix stops before turn 0's completion); turn 2 branches
+    # inside turn 0's completion, after [4]. Each stores only its new tokens.
+    rollout = _scored_rollout(
+        [
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=[4, 5, 6], version=1),
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=[7], version=1),
+            _turn(prompt_token_ids=[1, 2, 4], completion_token_ids=[8, 9], version=1),
+        ],
+        reward=0.5,
+        advantage=1.0,
+        parent_turn_ids=[None, 0, 0],
+    )
+    stored = [
+        (turn.prompt_prefix_len, turn.prompt_delta_token_ids.tolist())
+        for turn in rollout.turns
+    ]
+    assert stored == [(0, [1, 2]), (2, []), (3, [])]
+    samples = rollout_to_training_samples(rollout)
+    assert [sample.token_ids.tolist() for sample in samples] == [
+        [1, 2, 4, 5, 6],
+        [1, 2, 7],
+        [1, 2, 4, 8, 9],
+    ]
+    # [4] trains in sample 0 only; in sample 2 it is context
+    assert samples[2].loss_mask.tolist() == [False, False, False, True, True]
+
+
+def test_interleaved_subagent_turns_continue_their_own_samples() -> None:
+    # The main agent (turns 0, 1, 3) and a subagent (turns 2, 4) alternate; each turn names its own
+    # agent's previous turn, so each agent packs into one sample and nothing is re-forwarded.
+    rollout = _scored_rollout(
+        [
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=[3], version=1),
+            _turn(prompt_token_ids=[1, 2, 3, 4], completion_token_ids=[5], version=1),
+            _turn(prompt_token_ids=[50, 51], completion_token_ids=[52], version=2),
+            _turn(
+                prompt_token_ids=[1, 2, 3, 4, 5, 6], completion_token_ids=[7], version=3
+            ),
+            _turn(
+                prompt_token_ids=[50, 51, 52, 53], completion_token_ids=[54], version=3
+            ),
+        ],
+        reward=0.5,
+        advantage=1.0,
+        parent_turn_ids=[None, 0, None, 1, 2],
+    )
+    assert [turn.prompt_delta_token_ids.tolist() for turn in rollout.turns] == [
+        [1, 2],
+        [4],
+        [50, 51],
+        [6],
+        [53],
+    ]
+    main_agent, subagent = rollout_to_training_samples(rollout)
+    assert main_agent.token_ids.tolist() == [1, 2, 3, 4, 5, 6, 7]
+    assert np.flatnonzero(main_agent.loss_mask).tolist() == [
+        2,
+        4,
+        6,
+    ]  # completions [3], [5], [7]
+    assert (main_agent.min_policy_version, main_agent.max_policy_version) == (1, 3)
+    assert subagent.token_ids.tolist() == [50, 51, 52, 53, 54]
+    assert subagent.rollout_id.turn_id == 2
+    assert (subagent.min_policy_version, subagent.max_policy_version) == (2, 3)
+
+
+def test_fork_from_the_middle_of_a_sample() -> None:
+    # Turn 3 forks from turn 1, which sits inside sample 0: its context is turn 1's prompt + completion.
+    rollout = _scored_rollout(
+        [
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=[3], version=1),
+            _turn(prompt_token_ids=[1, 2, 3, 4], completion_token_ids=[5], version=1),
+            _turn(
+                prompt_token_ids=[1, 2, 3, 4, 5, 6], completion_token_ids=[7], version=1
+            ),
+            _turn(
+                prompt_token_ids=[1, 2, 3, 4, 5, 8], completion_token_ids=[9], version=1
+            ),
+        ],
+        reward=0.5,
+        advantage=1.0,
+        parent_turn_ids=[None, 0, 1, 1],
+    )
+    first, second = rollout_to_training_samples(rollout)
+    assert first.token_ids.tolist() == [1, 2, 3, 4, 5, 6, 7]
+    assert second.token_ids.tolist() == [1, 2, 3, 4, 5, 8, 9]
+    assert np.flatnonzero(second.loss_mask).tolist() == [6]
 
 
 def test_empty_completion_on_a_later_turn_raises() -> None:

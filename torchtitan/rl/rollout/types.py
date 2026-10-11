@@ -144,16 +144,22 @@ class RolloutTurn:
     the env's reply, in both token and message space. Rubrics score it and
     `rollout_to_training_samples` packs the rollout into training tokens.
 
-    A turn doesn't store its full prompt. It stores how many leading tokens it copies from the previous
-    turn's prompt + completion, then its new tokens (`prompt_messages` stay in full):
+    A turn doesn't store its full prompt. It names a parent, any earlier turn (the previous one in a
+    plain multi-turn loop), and stores how many leading tokens it copies from the parent's prompt +
+    completion, then its new tokens:
 
-        full prompt = (previous prompt + completion)[:prompt_prefix_len] + prompt_delta_token_ids
+        full prompt = (parent prompt + parent completion)[:prompt_prefix_len] + prompt_delta_token_ids
 
-    Example: the previous turn's prompt is [0, 1, 2] and its completion [3].
+    Example: turn 0's prompt is [0, 1, 2] and its completion [3].
 
-        this turn's prompt   prompt_prefix_len  prompt_delta_token_ids
-        [0, 1, 2, 3, 4, 5]   4                  [4, 5]                  # continues
-        [0, 1, 9, 3]         2                  [9, 3]                  # edited 2 -> 9: 3 is stored again
+        turn  parent  full prompt          prompt_prefix_len  prompt_delta_token_ids
+        0     None    [0, 1, 2]            0                  [0, 1, 2]
+        1     0       [0, 1, 2, 3, 4, 5]   4                  [4, 5]      # continues turn 0
+        2     0       [0, 1, 9, 3]         2                  [9, 3]      # forks from turn 0, edits 2 -> 9
+        3     None    [7, 8]               0                  [7, 8]      # a subagent's own context
+
+    Prompt messages are stored the same way, against the parent's prompt messages + `completion_message`
+    + `env_messages`.
 
     Per-token fields are numpy arrays, not lists: a group pickles as raw bytes from the rollout worker
     to the controller, and the GC doesn't track them.
@@ -166,8 +172,11 @@ class RolloutTurn:
     """Identifies this turn (group, sibling index, turn index)."""
 
     # Fields needed for training
+    parent_turn_id: int | None
+    """Index in `Rollout.turns` of the earlier turn this prompt is a delta on; `None` for a root."""
+
     prompt_prefix_len: int
-    """Length of the longest prefix shared with the previous turn's prompt + completion; set by `split_prompt`."""
+    """Length of the longest prefix shared with the parent turn's prompt + completion; set by `split_prompt`."""
 
     prompt_delta_token_ids: np.ndarray  # [num_prompt_tokens - prompt_prefix_len] int32
     """The prompt after its first `prompt_prefix_len` tokens."""
@@ -186,10 +195,14 @@ class RolloutTurn:
     """Newest policy version this turn was sampled under; `None` if no generation happened."""
 
     # Logging
-    prompt_messages: list[Message] = field(
+    prompt_message_prefix_len: int = 0
+    """Like `prompt_prefix_len`, for messages: how many leading messages it copies from the parent turn's
+    prompt messages + `completion_message` + `env_messages`."""
+
+    prompt_delta_messages: list[Message] = field(
         default_factory=list
-    )  # [num_prompt_messages]
-    """Full conversation up to this turn, not a delta."""
+    )  # [num_prompt_messages - prompt_message_prefix_len]
+    """The prompt messages after the first `prompt_message_prefix_len`."""
 
     completion_message: Message | None = None
     """This turn's completion decoded into a message by the renderer (the TokenEnv's parse,
@@ -212,30 +225,30 @@ class RolloutTurn:
 
 
 def split_prompt(
-    prompt_token_ids: list[int], previous_token_ids: list[int]
+    prompt_token_ids: list[int], parent_token_ids: list[int]
 ) -> tuple[int, np.ndarray]:
-    """Split a prompt into the part shared with the previous turn and the new part.
+    """Split a prompt into the part shared with the parent turn and the new part.
 
     Args:
         prompt_token_ids: this turn's full prompt.
-        previous_token_ids: the previous turn's prompt + completion; [] on the first turn.
+        parent_token_ids: the parent turn's prompt + completion; [] for a root.
 
     Returns:
         `(prompt_prefix_len, prompt_delta_token_ids)`: the length of the longest shared prefix, and the
         prompt after it.
 
     Example:
-        split_prompt([0, 1, 2, 3, 4, 5], previous_token_ids=[0, 1, 2, 3])  # -> (4, array([4, 5])): continues
-        split_prompt([0, 1, 9, 3], previous_token_ids=[0, 1, 2, 3])        # -> (2, array([9, 3])): history edited
-        split_prompt([0, 1, 2], previous_token_ids=[])                     # -> (0, array([0, 1, 2])): first turn
+        split_prompt([0, 1, 2, 3, 4, 5], parent_token_ids=[0, 1, 2, 3])  # -> (4, array([4, 5])): continues
+        split_prompt([0, 1, 9, 3], parent_token_ids=[0, 1, 2, 3])        # -> (2, array([9, 3])): history edited
+        split_prompt([0, 1, 2], parent_token_ids=[])                     # -> (0, array([0, 1, 2])): a root
     """
-    # Common case: the prompt extends the previous turn. One list compare, no Python loop.
-    if prompt_token_ids[: len(previous_token_ids)] == previous_token_ids:
-        prefix_len = len(previous_token_ids)
+    # Common case: the prompt extends the parent. One list compare, no Python loop.
+    if prompt_token_ids[: len(parent_token_ids)] == parent_token_ids:
+        prefix_len = len(parent_token_ids)
     else:
         prefix_len = 0
-        for token, previous in zip(prompt_token_ids, previous_token_ids):
-            if token != previous:
+        for token, parent_token in zip(prompt_token_ids, parent_token_ids):
+            if token != parent_token:
                 break
             prefix_len += 1
     return prefix_len, np.asarray(prompt_token_ids[prefix_len:], dtype=np.int32)
@@ -252,9 +265,7 @@ class Rollout:
     """Sibling index within the group (0..group_size-1)."""
 
     turns: list[RolloutTurn] = field(default_factory=list)  # [num_turns]
-    """Ordered rollout turns; each stores its prompt as a delta on the previous turn (see `RolloutTurn`)."""
-    # TODO: let a turn be a delta on any earlier turn, not just the previous one, so a turn that resumes
-    # an older turn (a retry, or a main agent after a subagent) stores only its new tokens.
+    """Ordered rollout turns; each stores its prompt as a delta on its parent, an earlier turn (see `RolloutTurn`)."""
 
     status: RolloutStatus
     """Rollout-level terminal status."""

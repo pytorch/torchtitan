@@ -286,4 +286,31 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
                 (s.rollout_id.turn_id, s.token_ids.tolist()) for s in samples
             ] == expected
 
+            assert [turn.parent_turn_id for turn in rollout.turns] == [
+                None,
+                *range(len(rollout.turns) - 1),
+            ]
+            # Prompt messages rebuild from their deltas: TokenEnv appends each completion + env reply
+            messages: list[list[dict]] = []
+            expected_messages = [[{"role": "user", "content": "task"}]]
+            for turn in rollout.turns:
+                parent_messages = []
+                if turn.parent_turn_id is not None:
+                    parent = rollout.turns[turn.parent_turn_id]
+                    parent_messages = (
+                        messages[turn.parent_turn_id]
+                        + [parent.completion_message]
+                        + parent.env_messages
+                    )
+                messages.append(
+                    parent_messages[: turn.prompt_message_prefix_len]
+                    + turn.prompt_delta_messages
+                )
+                expected_messages.append(
+                    expected_messages[-1]
+                    + [turn.completion_message]
+                    + turn.env_messages
+                )
+            assert messages == expected_messages[: len(messages)]
+
     asyncio.run(run())

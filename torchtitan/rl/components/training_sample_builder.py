@@ -87,6 +87,8 @@ class _SampleInProgress:
     rollout_id: RolloutTurnID
     min_policy_version: int
     max_policy_version: int
+    last_turn_id: int
+    """The last turn appended; a later turn extends this training_sample only if that turn is its parent."""
     token_ids: list[np.ndarray] = field(default_factory=list)
     loss_mask: list[np.ndarray] = field(default_factory=list)
     logprobs: list[np.ndarray] = field(default_factory=list)
@@ -255,33 +257,40 @@ class TrainingSampleBuilder(Configurable):
         """Pack a scored `Rollout` into training training_samples — usually one, or several where its turns branch.
 
         Override this to change how a rollout becomes trainable training_samples (the main extension point of
-        this class). Turns that share a growing prefix (each prompt continues the previous prompt +
+        this class). Turns that share a growing prefix (each prompt continues its parent turn's prompt +
         completion) are packed into ONE training_sample: prompts and env replies are masked out, completions
-        are trained. A new training_sample (branch) opens wherever that prefix breaks (history was edited).
+        are trained. A new training_sample (branch) opens wherever that prefix breaks, or the parent's
+        training_sample already holds a later turn.
 
-        This branching has three common causes:
+        This branching has four common causes:
         1) The rollout loop purposely edits the history: For example, when compacting a long conversation;
         2) Thinking is removed from history: This is a flag in the `renderer` used in the `Rollouter`. Choose
             `preserve_all_thinking=True` to avoid stripping thinking (default=True);
         3) Some error or change from retokenization: Those can be avoided by doing token-in-token-out (TITO),
             i.e. you give tokens to the generators, and you append (bridge) the tokens received, leaving no room for changes.
             TITO is our default;
+        4) The rollout forks: a turn resamples its parent's prompt, or continues a parent that another turn
+            already continued. Its training_sample starts with the parent's first `prompt_prefix_len` tokens
+            as untrained context, so each completion trains once.
 
         Each packed training_sample records the min/max policy version across its turns: `min_policy_version`
         = the oldest (opening) turn's version (the off-policy filter reads it), `max_policy_version` = the
         newest version any of its turns reached.
 
-        Example (5 turns; the env compacts history before turn 3, so the prefix breaks -> 2 training_samples).
+        Example (6 turns -> 3 training_samples; each turn's parent is the previous turn, except turn 5's).
         P = prompt; C = completion; E = env reply
             turn0 (v5): prompt=[P1]              completion=[C1]
             turn1 (v6): prompt=[P1,C1,E1]        completion=[C2]
             turn2 (v6): prompt=[P1,C1,E1,C2,E2]  completion=[C3]
             turn3 (v6): prompt=[P2]              completion=[C4]   # history compacted -> prefix breaks
             turn4 (v7): prompt=[P2,C4,E4]        completion=[C5]
+            turn5 (v7): prompt=[P1,C1,E1']       completion=[C6]   # parent: turn 0, already continued by turn 1
             # -> training_sample 0: token_ids=[P1,C1,E1,C2,E2,C3], loss_mask=[0,1,0,1,0,1]
             #              rollout_id.turn_id=0, min_policy_version=5, max_policy_version=6
             #    training_sample 1: token_ids=[P2,C4,E4,C5],        loss_mask=[0,1,0,1]
             #              rollout_id.turn_id=3, min_policy_version=6, max_policy_version=7
+            #    training_sample 2: token_ids=[P1,C1,E1',C6],       loss_mask=[0,0,0,1]   # C1 trains in sample 0
+            #              rollout_id.turn_id=5, min_policy_version=7, max_policy_version=7
         """
         rollout_advantage = rollout.advantage
         if rollout_advantage is None:
@@ -289,11 +298,9 @@ class TrainingSampleBuilder(Configurable):
                 f"rollout {rollout.group_id}/rollout={rollout.rollout_id} has no advantage; the Rollouter "
                 "must fill it (via its advantage estimator) before training_samples are built."
             )
-        training_samples: list[TrainingSample] = []
-        # The training_sample that later turns may still extend; None until the first trained turn
-        sample_in_progress: _SampleInProgress | None = None
-        # Length of the previous turn's prompt + completion
-        prev_len = 0
+        samples_in_progress: list[_SampleInProgress] = []
+        # The training_sample each turn was appended to, by turn index
+        sample_of_turn: list[_SampleInProgress] = []
 
         # Skip if no completion (nothing to train on). This happens when the prompt is too
         # long in the first turn, before any generation. We keep these rollouts for debugging.
@@ -310,41 +317,56 @@ class TrainingSampleBuilder(Configurable):
                     f"non-final turn {turn_idx} has no completion"
                 )
 
+            # The parent's training_sample, and the length of the parent's prompt + completion
+            parent_turn_id = rollout_turn.parent_turn_id
+            parent_sample, parent_len = None, 0
+            if parent_turn_id is not None:
+                if not 0 <= parent_turn_id < turn_idx:
+                    raise ValueError(
+                        f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn {turn_idx}'s "
+                        f"parent_turn_id={parent_turn_id} is not an earlier turn"
+                    )
+                parent = rollout.turns[parent_turn_id]
+                parent_sample = sample_of_turn[parent_turn_id]
+                parent_len = parent.num_prompt_tokens + len(parent.completion_token_ids)
+
             prompt_prefix_len = rollout_turn.prompt_prefix_len
             prompt_delta_token_ids = rollout_turn.prompt_delta_token_ids
 
-            # Too many: e.g. prev = [0, 1, 2, 3] has 4 tokens; a turn can't reuse 6.
-            if prompt_prefix_len > prev_len:
+            # Too many: e.g. the parent's prompt + completion [0, 1, 2, 3] has 4 tokens; a turn can't reuse 6.
+            if prompt_prefix_len > parent_len:
                 raise ValueError(
                     f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn {turn_idx} "
-                    f"reuses {prompt_prefix_len} tokens, but the previous turn has only "
-                    f"{prev_len}; build it with `split_prompt`"
+                    f"reuses {prompt_prefix_len} tokens, but its parent turn has only "
+                    f"{parent_len}; build it with `split_prompt`"
                 )
 
-            # True when this prompt continues the previous one (prefix-preserving);
-            # False when the env edited history -> open a new training_sample (branch).
-            extends_prev = prompt_prefix_len == prev_len
-            if sample_in_progress is not None and not extends_prev:
-                training_samples.append(sample_in_progress.to_training_sample())
-                sample_in_progress = None
-
-            if sample_in_progress is None:
-                # Each turn appended to the last training_sample, so its token_ids are exactly the
-                # previous turn's prompt + completion.
-                prev_prompt_and_completion = (
-                    training_samples[-1].token_ids
-                    if training_samples
+            # True when this prompt holds the parent's whole prompt + completion and the parent is still its
+            # training_sample's last turn; otherwise (a root, a rewrite, a fork) open a new training_sample.
+            extends_parent = (
+                parent_sample is not None
+                and prompt_prefix_len == parent_len
+                and parent_sample.last_turn_id == parent_turn_id
+            )
+            if extends_parent:
+                sample_in_progress = parent_sample
+                prompt_delta = prompt_delta_token_ids
+            else:
+                # Each turn in a training_sample continues the one before it, so the parent's prompt +
+                # completion are its training_sample's first `parent_len` tokens.
+                parent_token_ids = (
+                    np.concatenate(parent_sample.token_ids)[:parent_len]
+                    if parent_sample is not None
                     else np.empty(0, dtype=np.int64)
                 )
 
-                # Too few: the first new token equals prev's token at the same position, so the turn
-                # could reuse at least one more. E.g. prev = [0, 1, 2, 3], stored (0, [0, 1, 9, 3]):
-                # 0 == prev[0]; split_prompt gives (2, [9, 3]). Catches a full prompt stored as the delta.
+                # Too few: the first new token equals the parent's token at the same position, so the turn
+                # could reuse at least one more. E.g. parent = [0, 1, 2, 3], stored (0, [0, 1, 9, 3]):
+                # 0 == parent[0]; split_prompt gives (2, [9, 3]). Catches a full prompt stored as the delta.
                 could_reuse_one_more = (
-                    prompt_prefix_len < prev_len
+                    prompt_prefix_len < parent_len
                     and len(prompt_delta_token_ids) > 0
-                    and prompt_delta_token_ids[0]
-                    == prev_prompt_and_completion[prompt_prefix_len]
+                    and prompt_delta_token_ids[0] == parent_token_ids[prompt_prefix_len]
                 )
                 if could_reuse_one_more:
                     raise ValueError(
@@ -362,16 +384,13 @@ class TrainingSampleBuilder(Configurable):
                         rollout_id=rollout.rollout_id,
                         turn_id=turn_idx,
                     ),
+                    last_turn_id=turn_idx,
                 )
+                samples_in_progress.append(sample_in_progress)
                 # A new training_sample needs the full prompt: the shared prefix + the delta.
                 prompt_delta = np.concatenate(
-                    [
-                        prev_prompt_and_completion[:prompt_prefix_len],
-                        prompt_delta_token_ids,
-                    ]
+                    [parent_token_ids[:prompt_prefix_len], prompt_delta_token_ids]
                 )
-            else:
-                prompt_delta = prompt_delta_token_ids
 
             # Append this turn's chunks: prompt delta (untrained) + completion (trained).
             num_delta = len(prompt_delta)
@@ -397,8 +416,7 @@ class TrainingSampleBuilder(Configurable):
                 sample_in_progress.max_policy_version, rollout_turn.max_policy_version
             )
 
-            prev_len = rollout_turn.num_prompt_tokens + num_completion
+            sample_in_progress.last_turn_id = turn_idx
+            sample_of_turn.append(sample_in_progress)
 
-        if sample_in_progress is not None:
-            training_samples.append(sample_in_progress.to_training_sample())
-        return training_samples
+        return [sample.to_training_sample() for sample in samples_in_progress]

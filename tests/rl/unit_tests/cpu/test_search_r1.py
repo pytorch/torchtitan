@@ -85,6 +85,7 @@ def _rollout(*, answer: str | None, tool_results: list[str] | None = None) -> Ro
         turns.append(
             RolloutTurn(
                 rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=len(turns)),
+                parent_turn_id=None,
                 prompt_prefix_len=0,
                 prompt_delta_token_ids=np.array([1], dtype=np.int32),
                 completion_token_ids=np.array([2], dtype=np.int32),
@@ -104,6 +105,7 @@ def _rollout(*, answer: str | None, tool_results: list[str] | None = None) -> Ro
     turns.append(
         RolloutTurn(
             rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=len(turns)),
+            parent_turn_id=None,
             prompt_prefix_len=0,
             prompt_delta_token_ids=np.array([3], dtype=np.int32),
             completion_token_ids=np.array([4], dtype=np.int32),

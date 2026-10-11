@@ -30,12 +30,13 @@ def _recorder(tmp_path, **config_kwargs) -> RolloutSampleRecorder:
 def _turn(*, completion_logprobs: list[float], policy_version: int = 1) -> RolloutTurn:
     return RolloutTurn(
         rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
+        parent_turn_id=None,
         prompt_prefix_len=0,
         prompt_delta_token_ids=np.array([1, 2, 3], dtype=np.int32),
         completion_token_ids=np.array([4, 5], dtype=np.int32),
         completion_logprobs=np.array(completion_logprobs, dtype=np.float32),
         min_policy_version=policy_version,
-        prompt_messages=[{"role": "user", "content": "sort: b a c"}],
+        prompt_delta_messages=[{"role": "user", "content": "sort: b a c"}],
         completion_message={"role": "assistant", "content": "a b c"},
         env_messages=[{"role": "user", "content": "ok"}],
     )
@@ -133,7 +134,10 @@ def test_record_dumps_the_rollout_minus_token_arrays(tmp_path) -> None:
 
     (turn,) = record["turns"]
     assert turn["turn_id"] == 0
+    assert turn["parent_turn_id"] is None
     assert turn["min_policy_version"] == 1
+    assert turn["prompt_message_prefix_len"] == 0
+    assert turn["prompt_delta_messages"] == [{"role": "user", "content": "sort: b a c"}]
     assert turn["completion_message"] == {"role": "assistant", "content": "a b c"}
     assert turn["env_messages"] == [{"role": "user", "content": "ok"}]
     # token-id / logprob arrays are large, so they are dropped unless opted in.
@@ -212,6 +216,7 @@ def test_turn_metrics_are_excluded_not_serialized(tmp_path) -> None:
 def test_none_policy_version_and_completion_message(tmp_path) -> None:
     turn = RolloutTurn(
         rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
+        parent_turn_id=None,
         prompt_prefix_len=0,
         prompt_delta_token_ids=[1, 2],
         completion_token_ids=[],
