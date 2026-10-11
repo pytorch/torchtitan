@@ -8,6 +8,7 @@
 
 import asyncio
 import json
+import pickle
 import subprocess
 import sys
 from pathlib import PurePosixPath
@@ -22,6 +23,7 @@ import verifiers.v1 as vf
 from torchtitan.config import ConfigLoader
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.rl.controller import Controller
+from torchtitan.rl.examples.verifiers import env_server
 from torchtitan.rl.examples.verifiers.terminal_bench import taskset
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarness,
@@ -174,6 +176,46 @@ print(type(load_harness(env_config.agent.harness)).__name__)
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert result.stdout.strip().endswith("TerminalBenchTerminusHarness")
+
+
+def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
+    """A pool worker loads the broker's ``__main__``, the pickled ``log_setup``
+    and the taskset module. None of them may import torch, vLLM or Monarch.
+    """
+    captured = {}
+
+    def serve_env(**kwargs) -> None:
+        captured["main"] = sys.modules["__main__"]
+        captured["log_setup"] = pickle.dumps(kwargs["log_setup"])
+
+    monkeypatch.setattr(env_server, "serve_env", serve_env)
+    # _run_env_server_process replaces __main__ and edits no_proxy; restore both after the test.
+    monkeypatch.setitem(sys.modules, "__main__", sys.modules["__main__"])
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setenv("NO_PROXY", "")
+    config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET).verifiers_env_server
+    env_server._run_env_server_process(
+        environment=env_config_data(config.environment),
+        serve=config.serve,
+        local_taskset_module=config.local_taskset_module,
+        address_queue=None,
+        death_pipe=None,
+    )
+
+    # Spawn re-runs __main__ in each worker if it has a module name or a file.
+    assert captured["main"].__spec__ is None
+    assert not hasattr(captured["main"], "__file__")
+    worker = f"""
+import pickle, sys
+pickle.loads({captured["log_setup"]!r})
+import {taskset.__name__}
+print([name for name in ("torch", "vllm", "monarch") if name in sys.modules])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", worker], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.strip() == "[]"
 
 
 def test_training_cannot_read_benchmark_as_training_data() -> None:
