@@ -240,6 +240,8 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     performance override as ``rl_grpo_qwen3_30b_a3b_varlen_perf`` to both models.
     """
     seq_len = 4096
+    # vLLM's per-step token budget; it sizes the generator's DeepEP buffers.
+    max_num_batched_tokens = 2048  # TODO: TBD
     trainer_parallelism = ParallelismConfig(
         data_parallel_shard_degree=8,  # TODO: TBD
         tensor_parallel_degree=1,
@@ -308,8 +310,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
             checkpointer=None,
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
-            # vLLM's per-step token budget; it sizes the generator's DeepEP buffers.
-            max_num_batched_tokens=2048,  # TODO: TBD
+            max_num_batched_tokens=max_num_batched_tokens,
         ),
         # Same opt-in throughput override as rl_grpo_qwen3_30b_a3b_varlen_perf.
         override=OverrideConfig(
@@ -341,7 +342,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 dispatcher=DeepEPTokenDispatcher,
                 # vLLM shards each engine step's token budget across TP ranks.
                 num_max_tokens_per_rank=(
-                    config.generator.max_num_batched_tokens
+                    max_num_batched_tokens
                     // config.generator.parallelism.tensor_parallel_degree
                 ),
                 kwargs={"cuda_graph_compatible": True},
