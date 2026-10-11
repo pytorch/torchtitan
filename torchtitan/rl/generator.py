@@ -1566,10 +1566,8 @@ class VLLMGenerator(Configurable):
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
         model_sd = self._prefetched_model_state_dict
-        model.prepare_for_state_dict_load()
         # Perform the local CPU-to-GPU copy
-        model.model.load_state_dict(model_sd, strict=True)
-        model.prepare_for_forward()
+        model.load_state_dict(model_sd)
         self.policy_version = version
         if self.config.reset_kv_cache_on_weight_sync:
             # Always reset running requests too: the only reason to reset is a strict

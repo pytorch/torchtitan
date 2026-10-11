@@ -277,10 +277,9 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     """Copy the trainer model's weights into the vLLM model in-process."""
 
     wrapper = engine.model_executor.driver_worker.get_model()
-    vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
-    wrapper.prepare_for_state_dict_load()
-    vllm_sd = vllm_model.state_dict()
+    # As a weight sync: fill the pinned CPU copy, then load it with load_state_dict.
+    vllm_sd = wrapper._prefetched_model_state_dict
 
     missing = []
     for name, vparam in vllm_sd.items():
@@ -297,8 +296,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             else:
                 vparam.copy_(full)
 
-    vllm_model.load_state_dict(vllm_sd, strict=False)
-    wrapper.prepare_for_forward()
+    wrapper.load_state_dict(vllm_sd)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)

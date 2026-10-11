@@ -13,7 +13,9 @@ TorchTitan models for vLLM.
 
 import copy
 import dataclasses
-from typing import cast
+from collections import defaultdict
+from collections.abc import Mapping
+from typing import Any, cast
 
 import spmd_types as spmd
 
@@ -375,70 +377,97 @@ class VLLMModelWrapper(Module):
 
         # Unshard the model here so vLLM performs its GPU memory profiling
         # based on the model's actual representation used during forward
-        self.prepare_for_forward()
+        for module in self.model.modules():
+            if isinstance(module, FSDPModule):
+                self.prepare_for_forward(module)
 
-    def prepare_for_state_dict_load(self) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, Any]):
+        """Copy new weights into `self.model`, allocating about one FSDP group's sharded buffers at a time.
+
+        Each group is allocated right before its first module loads and freed right after its last:
+
+            load order:     tok_embeddings | layers.0 | ... | layers.N | norm     lm_head
+            FSDP group:     [emb]          | [l0]     |     | [lN]     | [norm,   lm_head]
+            allocate:       emb            | l0       |     | lN       | norm
+            unshard, free:  emb            | l0       |     | lN       |          lm_head
+
+        With tied embeddings the group is [tok_embeddings, norm, lm_head], so it stays
+        allocated for the whole load.
+
+        Why this shape:
+          - Memory: allocating every sharded buffer first adds a second copy of the weights at
+            FSDP degree 1: 64.6 GiB extra for bf16 Qwen3.5-35B-A3B at TP1, vs 1.6 GiB here.
+          - Per group: modules from one `fully_shard` call share one FSDP state, so unsharding
+            after `norm` would all-gather `lm_head` before it loads.
+          - Hooks: a `load_state_dict` per module would also load its nested FSDP modules
+            (the root holds every block), whose sharded buffers are still freed.
+
+        Args:
+            state_dict: Keyed like `self.model.state_dict()`, not `self.state_dict()`
+                (no `model.` prefix), e.g. the generator's pinned CPU copy.
         """
-        Re-allocate previously freed sharded buffers for receiving weights.
+        # One entry per FSDP group: fully_shard([norm, lm_head]) gives both modules one
+        # state, and its sharded buffers are allocated and freed together.
+        modules_by_fsdp_state = defaultdict(list)
+        for module in self.model.modules():
+            if isinstance(module, FSDPModule):
+                modules_by_fsdp_state[module._get_fsdp_state()].append(module)
+        # Hooks run inside the one load_state_dict call, just before and after each group
+        # loads; a call per module would also load its nested modules while they are freed.
+        handles = []
+        for modules in modules_by_fsdp_state.values():
+            handles.append(
+                modules[0].register_load_state_dict_pre_hook(
+                    lambda module, *args: self.prepare_for_state_dict_load(module)
+                )
+            )
+            handles.append(
+                modules[-1].register_load_state_dict_post_hook(
+                    lambda module, *args: self.prepare_for_forward(module)
+                )
+            )
+        incompatible_keys = self.model.load_state_dict(state_dict, strict=True)
+        for handle in handles:
+            handle.remove()
+        return incompatible_keys
 
-        Weight sync lifecycle:
-          1. prepare_for_state_dict_load: re-allocate sharded buffers
-          2. model.state_dict() hook: reshard model + keep unsharded buffers
-          3. ts.get_state_dict: fetch new weights into sharded buffers
-          4. prepare_for_forward: unshard model + free sharded buffers
+    def prepare_for_state_dict_load(self, module: FSDPModule) -> None:
+        """Re-allocate the sharded buffers of `module`'s FSDP group so new weights can be copied in.
 
-        At the end of weight sync, only unsharded buffers are resident in
-        memory. Sharded buffers are only re-allocated temporarily to receive
-        updated weights during weight sync, and are promptly freed afterwards.
-
-        Note: This currently incurs a memory spike every weight sync (step 2),
-        since FSDP maintains separate buffers for sharded and unsharded weights,
-        and both must be resident during the weight sync. E.g. for bf16 generator
-        and fsdp=1, weight sync currently maintains 2x model memory. This may be
-        fine since this is not peak memory, but we should revisit in the future.
+        before:  sharded: freed                     unsharded: old weights (what CUDA graphs read)
+        after:   sharded: allocated, uninitialized  unsharded: unchanged
         """
         from torch.distributed.fsdp._fully_shard._fsdp_param import alloc_storage
 
-        for module in self.model.modules():
-            if not isinstance(module, FSDPModule):
-                continue
-            # TODO: replace this with FSDPModule._restore_sharded_params()
-            for param_group in module._get_fsdp_state()._fsdp_param_groups:
-                if param_group.is_sharded:
-                    continue
-                for param in param_group.fsdp_params:
-                    sharded_data = param._sharded_param_data
-                    if isinstance(sharded_data, _ShardedFSDPTensor):
-                        sharded_data = sharded_data._tensor
-                    alloc_storage(sharded_data)
+        # TODO: replace this with FSDPModule._restore_sharded_params()
+        for param_group in module._get_fsdp_state()._fsdp_param_groups:
+            # FSDP's own load pre-hook may have resharded this group already (e.g.
+            # tok_embeddings), so is_sharded can be True while the storage is still freed.
+            for param in param_group.fsdp_params:
+                sharded_data = param._sharded_param_data
+                if isinstance(sharded_data, _ShardedFSDPTensor):
+                    sharded_data = sharded_data._tensor
+                alloc_storage(sharded_data)
 
-    def prepare_for_forward(self) -> None:
-        """
-        After weight sync, prepare the model for prefill/decode by:
-          1. Explicitly unsharding model to refill existing unsharded operands
-          2. Freeing sharded buffers since they are not needed during forward
+    def prepare_for_forward(self, module: FSDPModule) -> None:
+        """Unshard `module`'s FSDP group into its unsharded buffers, then free its sharded ones.
 
-        For (1), unshard must be an explicit call here, since CUDA graph replays
-        are not guaranteed to execute the forward pre hook (which normally
-        triggers unshard).
+            before:  sharded: new weights   unsharded: old weights
+            after:   sharded: freed         unsharded: new weights (what CUDA graphs read)
 
-        This should be called during initialization and after each weight sync.
-        For the full weight sync lifecycle, see `prepare_for_state_dict_load`.
+        The unshard is explicit because CUDA graph replays skip FSDP's forward pre-hook.
         """
         from torch.distributed.fsdp._fully_shard._fsdp_param import free_storage
 
         with torch.inference_mode():
-            for module in self.model.modules():
-                if not isinstance(module, FSDPModule):
-                    continue
-                module.unshard()
-                # TODO: replace this with FSDPModule._free_sharded_params()
-                for param_group in module._get_fsdp_state()._fsdp_param_groups:
-                    for param in param_group.fsdp_params:
-                        sharded_data = param._sharded_param_data
-                        if isinstance(sharded_data, _ShardedFSDPTensor):
-                            sharded_data = sharded_data._tensor
-                        free_storage(sharded_data)
+            module.unshard()
+            # TODO: replace this with FSDPModule._free_sharded_params()
+            for param_group in module._get_fsdp_state()._fsdp_param_groups:
+                for param in param_group.fsdp_params:
+                    sharded_data = param._sharded_param_data
+                    if isinstance(sharded_data, _ShardedFSDPTensor):
+                        sharded_data = sharded_data._tensor
+                    free_storage(sharded_data)
 
     def set_num_valid_tokens(self, num_valid_tokens: int) -> None:
         """Publish how many of this step's tokens are real, for the padding mask.
