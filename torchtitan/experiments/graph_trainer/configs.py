@@ -15,7 +15,7 @@ from torchtitan.experiments.graph_trainer.chunked_loss import (
 from torchtitan.experiments.graph_trainer.common_utils import (
     disable_inplace_wgrad_accum,
 )
-from torchtitan.protocols.model import BaseModel
+from torchtitan.models.base.model import BaseModel
 from torchtitan.trainer import Trainer
 
 EpOverlapChunkDim = Literal["batch", "seq"]

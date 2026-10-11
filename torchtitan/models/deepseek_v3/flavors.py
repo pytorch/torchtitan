@@ -17,6 +17,7 @@ from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
+from torchtitan.models.base.module import Module
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -40,7 +41,6 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.protocols.module import Module
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router

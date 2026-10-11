@@ -161,18 +161,21 @@ class ConfigLoader:
 
     @staticmethod
     def _trainer_config(config: Configurable.Config):
-        from torchtitan.trainer import Trainer
+        """Return the training-engine config of a pretraining or RL recipe.
 
-        if isinstance(config, Trainer.Config):
+        Pretraining recipes are a ``TrainingEngine.Config`` subclass; RL recipes
+        nest one under ``trainer``.
+        """
+        from torchtitan.training_engine import TrainingEngine
+
+        if isinstance(config, TrainingEngine.Config):
             return config
-
-        from torchtitan.rl.controller import Controller
-
-        if isinstance(config, Controller.Config):
-            return config.trainer
+        trainer_config = getattr(config, "trainer", None)
+        if isinstance(trainer_config, TrainingEngine.Config):
+            return trainer_config
         raise ValueError(
-            "--comm-backend and --resume-step require a Trainer.Config or "
-            "Controller.Config recipe."
+            "--override, --comm-backend and --resume-step require a recipe that "
+            "is or contains a training-engine config (TrainingEngine.Config)."
         )
 
     @staticmethod

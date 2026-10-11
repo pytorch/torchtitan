@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING
 
-from torchtitan.protocols.module import Module
+from torchtitan.models.base.module import Module
 
 if TYPE_CHECKING:
     from torchtitan.config.configs import TrainingConfig

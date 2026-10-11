@@ -34,9 +34,9 @@ from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGen
 from torchtitan.rl.losses import DAPOLoss
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.environment import TokenEnv
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
-from torchtitan.rl.rubric import Rubric
+from torchtitan.rl.rollout.rubric import Rubric
+from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer import Trainer
 
 # TODO: Enable CUDA graphs for RL trainers after eager/graph numerics parity is
@@ -83,7 +83,7 @@ def _qwen3_4b_dapo_math_config(
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-4B-Base",
+        hf_assets_path="./assets/hf/Qwen3-4B-Base",
         dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
             num_training_steps=150,

@@ -24,16 +24,20 @@ import torch.distributed as dist
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torch.distributed.tensor import DTensor, Replicate
+
+# Registers the "loss" local-compile region. The generator shares the trainer's
+# model config, whose local_compile_regions may name it, but never builds a loss.
+from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import apply_overrides, OverrideConfig, TrainingConfig
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
-from torchtitan.protocols.module import Module
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from vllm.compilation.decorators import support_torch_compile

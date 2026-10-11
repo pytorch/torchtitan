@@ -27,12 +27,12 @@ from torchtitan_recipes.tests.graph_trainer.qwen3 import (
     graph_trainer_qwen3_debugmodel,
     graph_trainer_qwen3_debugmodel_moe,
 )
-from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
-from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
-from torchtitan_recipes.tests.models.qwen3 import qwen3_debugmodel, qwen3_moe_debug
-from torchtitan_recipes.tests.suites.b200 import (
+from torchtitan_recipes.tests.models.deepseek_v3 import (
+    deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
 )
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
+from torchtitan_recipes.tests.models.qwen3 import qwen3_debugmodel, qwen3_moe_debug
 
 
 def _without_inplace_wgrad_accum(config):

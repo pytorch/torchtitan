@@ -21,21 +21,24 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
 from torchtitan.rl.components.data import RLDataLoader, RLDataset
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.environment import MessageEnv, TokenEnv
+from torchtitan.rl.rollout.message_env import MessageEnv
+from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
+from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import (
     GenerateFn,
     Rollout,
     RolloutGroup,
     RolloutStatus,
     RolloutTurn,
+    RolloutTurnID,
 )
-from torchtitan.rl.rubric import Rubric, RubricOutput
-from torchtitan.rl.types import RolloutTurnID
 
 if TYPE_CHECKING:
     from renderers import Renderer
 
-    from torchtitan.rl.distributed.actors.rollout_worker import RolloutWorkerActor
+    from torchtitan.rl.distributed.monarch_actors.rollout_worker import (
+        RolloutWorkerActor,
+    )
 
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.rl.generator import SamplingConfig
@@ -159,7 +162,9 @@ class Rollouter(Configurable):
     ) -> None:
         """Spawn and initialize the owned worker proc mesh and actor pool."""
         # Import lazily to avoid a circular dependency through Rollouter.Config.
-        from torchtitan.rl.distributed.actors.rollout_worker import RolloutWorkerActor
+        from torchtitan.rl.distributed.monarch_actors.rollout_worker import (
+            RolloutWorkerActor,
+        )
 
         if self._worker_mesh is not None or self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")

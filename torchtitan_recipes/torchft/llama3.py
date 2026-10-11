@@ -7,6 +7,7 @@
 """Verified TorchFT Llama 3 recipes."""
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW, LRSchedulersContainer
 from torchtitan.config import CommConfig, TrainingConfig
@@ -19,7 +20,6 @@ from torchtitan.experiments.torchft.optimizer import (
     TorchFTOptimizersContainer,
 )
 from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
-from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler

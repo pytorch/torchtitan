@@ -11,6 +11,7 @@ from types import ModuleType
 from typing import cast
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -28,7 +29,6 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import build_model_config, DeepSeekV3Model

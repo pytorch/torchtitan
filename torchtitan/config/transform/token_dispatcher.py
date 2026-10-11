@@ -9,9 +9,10 @@
 from dataclasses import dataclass, field, fields
 from typing import Any
 
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
-from torchtitan.protocols.module import Module
 
 from .base import ModelConfigTransform, ModelConfigTransformContext
 

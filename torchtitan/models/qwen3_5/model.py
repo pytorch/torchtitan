@@ -24,6 +24,7 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
+from torchtitan.models.base.module import Module
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMetadata,
@@ -40,6 +41,11 @@ from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
 )
+from torchtitan.models.common.flops import (
+    delta_rule_flops_per_token,
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -51,12 +57,6 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.utils import (
-    delta_rule_flops_per_token,
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
-from torchtitan.protocols.module import Module
 
 from .rope import MRoPE
 from .state_dict_adapter import Qwen35StateDictAdapter

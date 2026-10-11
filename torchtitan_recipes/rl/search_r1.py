@@ -43,6 +43,7 @@ from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
+from torchtitan.models.muse_glimmer.renderer import MuseGlimmerRendererConfig
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
@@ -52,12 +53,11 @@ from torchtitan.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.rl.examples.search_r1.rubric import RewardExactMatch
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.losses import DAPOLoss
-from torchtitan.rl.model.muse_glimmer.renderer import MuseGlimmerRendererConfig
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.environment import TokenEnv
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
-from torchtitan.rl.rubric import Rubric
+from torchtitan.rl.rollout.rubric import Rubric
+from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer import Trainer
 
 # TODO: Enable CUDA graphs for RL trainers after eager/graph numerics parity is
@@ -106,7 +106,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-1.7B",
+        hf_assets_path="./assets/hf/Qwen3-1.7B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
             num_prompts_per_train_step=8,
@@ -184,7 +184,7 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
         attn_backend="varlen",
         converters=[LMHeadFP32OutputConverter.Config()],
     )
-    config.hf_assets_path = "torchtitan/rl/example_checkpoint/Qwen3-8B"
+    config.hf_assets_path = "./assets/hf/Qwen3-8B"
     loss_config = config.trainer.loss
     assert isinstance(loss_config, ChunkedLossWrapper.Config)
     assert isinstance(loss_config.loss_fn, DAPOLoss.Config)
@@ -242,7 +242,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
 
     config = Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-30B-A3B",
+        hf_assets_path="./assets/hf/Qwen3-30B-A3B",
         num_generators=2,  # TODO: TBD -- number of generator proc meshes to spawn
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
@@ -349,7 +349,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
     model_config = build_muse_glimmer_model_config("30B", attn_backend="varlen")
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Muse-Glimmer-30B",
+        hf_assets_path="./assets/hf/Muse-Glimmer-30B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
             num_prompts_per_train_step=8,

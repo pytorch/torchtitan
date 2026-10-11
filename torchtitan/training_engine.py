@@ -36,6 +36,7 @@ from torchtitan.distributed.cuda_graph import (
     wrap_fwd_bwd_with_cuda_graph,
     wrap_with_cuda_graph,
 )
+from torchtitan.models.base import BaseModel
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -44,7 +45,6 @@ from torchtitan.observability.metrics import (
 )
 from torchtitan.observability.profiler import Profiler
 from torchtitan.observability.sdc_replayer import SDCReplayer
-from torchtitan.protocols import BaseModel
 from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
 from torchtitan.tools.garbage_collector import GarbageCollector

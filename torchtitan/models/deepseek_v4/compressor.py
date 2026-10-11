@@ -13,11 +13,12 @@ import torch_remat as remat
 from torch import nn
 from torch.distributed.tensor import DTensor, Replicate
 
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.attn_gym import lightning_indexer
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import has_cuda_capability
 
 # Shape suffixes: G = compressed groups, R = compression ratio.

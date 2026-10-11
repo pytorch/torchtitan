@@ -81,10 +81,7 @@ from torchtitan.experiments.graph_trainer.mutation_utils import (
     mutation_deps,
     mutation_target_nodes,
 )
-from torchtitan.experiments.graph_trainer.passes import (
-    apply_graph_passes,
-    construct_mandatory_graph_passes,
-)
+from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )

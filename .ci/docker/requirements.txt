@@ -9,5 +9,6 @@ einops
 pillow
 spmd_types @ git+https://github.com/meta-pytorch/spmd_types.git@2ae49fce3e0175b76aa55361e415fa1be0aabebb
 attn-gym[linear,cudnn]==0.0.16
-# Keep this commit pin in sync with pyproject.toml.
 torch_remat @ git+https://github.com/meta-pytorch/remat.git@4fd000acba6dc66762b7f3217ecadb8e07243dd4
+# PyPI 0.1.0 predates torch_checkpointing.default_resharder.
+torch_checkpointing @ git+https://github.com/meta-pytorch/torch_checkpointing.git@dcbb3a59cfad1cbeb95994f0d6cb1802c1d91825

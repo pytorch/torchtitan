@@ -20,14 +20,9 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux import build_model_config
-from torchtitan.models.flux.configs import FluxEncoderConfig
-from torchtitan.models.flux.flux_datasets import (
-    DATASETS,
-    FluxCollator,
-    FluxSampleProcessor,
-)
+from torchtitan.models.flux.data import DATASETS, FluxCollator, FluxSampleProcessor
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
-from torchtitan.models.flux.trainer import FluxTrainer
+from torchtitan.models.flux.trainer import FluxEncoderConfig, FluxTrainer
 from torchtitan.models.flux.utils import (
     IMAGE_LATENT_SIZE_RATIO,
     PATCH_HEIGHT,

@@ -10,6 +10,7 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     colwise_config,
@@ -27,7 +28,6 @@ from torchtitan.models.common.vision_encoder_sharding import (
     set_vision_transformer_block_sharding_config,
     vision_invariant_linear_config,
 )
-from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from .model import MuseGlimmerModel, MuseGlimmerTransformerBlock

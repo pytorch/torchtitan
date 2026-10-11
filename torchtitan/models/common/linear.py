@@ -24,11 +24,11 @@ import torch_remat as remat
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.inplace_wgrad_accum import (
     running_grad,
     uses_inplace_wgrad_accum,
 )
-from torchtitan.protocols.module import Module
 
 
 class Linear(nn.Linear, Module):

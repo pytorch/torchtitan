@@ -49,21 +49,9 @@ jobs:
         # The DAPO math example's rubric needs math-verify.
         uv pip install -r torchtitan/rl/examples/dapo_math/requirements.txt
 
-        # Install matching torch, torchvision, and vLLM CUDA nightlies here.
-        uv pip install --upgrade torch torchvision vllm xformers --pre \
-          --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
-          --index-strategy unsafe-best-match \
-          --constraint .ci/docker/requirements.txt \
+        # Install matching CUDA nightlies, constrained to keep math-verify's pins.
+        bash scripts/install_rl_env.sh --skip-base --flash-attn none \
           --constraint torchtitan/rl/examples/dapo_math/requirements.txt
-        python -c '
-        from importlib.metadata import version
-        wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
-        print(wheels)
-        assert all(".dev" in wheel and "+cu132" in wheel for wheel in wheels.values()), wheels
-        '
-
-        # TorchStore is not on PyPI; do not let its dependencies change torch.
-        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 
         # The shared HF cache is read-only and does not contain this tokenizer.
         # Fetch only tokenizer files into a writable cache (no model weights).

@@ -15,11 +15,12 @@ The package is organized by ownership:
 - `graph_trainer/`, `torchft/`, and `rl/` mirror their owning experimental or
   training subsystem.
 - `overrides/` contains opt-in component implementations.
-- `tests/` contains CI-only model fixtures and composed test suites.
+- `tests/` contains CI-only model fixtures (integration-suite configurations
+  live with their test definitions in the repository's `tests/integration_tests/`).
 
 | Module | Scope | Validation reference |
 | --- | --- | --- |
-| `torchtitan_recipes.models.llama3` | Llama 3 pretraining | `docs/converging.md`, `benchmarks/` |
+| `torchtitan_recipes.models.llama3` | Llama 3 pretraining | `torchtitan/models/llama3/README.md`, `docs/benchmarks/` |
 | `torchtitan_recipes.models.deepseek_v3` | DeepSeek V3 pretraining | `torchtitan/models/deepseek_v3/README.md` |
 | `torchtitan_recipes.models.qwen3` | Qwen3 pretraining and SFT | `torchtitan/models/qwen3/README.md` |
 | `torchtitan_recipes.models.flux` | Flux pretraining | `torchtitan/models/flux/README.md` |

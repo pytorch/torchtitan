@@ -20,10 +20,10 @@ from torchtitan.components.data.types import (
 from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
+from torchtitan.rl.components.batcher import TrainingMicrobatch
 from torchtitan.rl.components.checkpointer import MirroredState
-from torchtitan.rl.distributed.actors.trainer import TrainerActor
+from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
 from torchtitan.rl.trainer import Trainer
-from torchtitan.rl.types import TrainingMicrobatch
 from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
@@ -208,7 +208,9 @@ def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
     assert isinstance(config.sdc_replayer, SDCReplayer.Config)
 
 
-def test_rl_trainer_validates_model_training_config_before_initialization() -> None:
+def test_rl_trainer_validates_model_training_config_before_initialization(
+    tmp_path,
+) -> None:
     class ValidationReachedError(Exception):
         pass
 
@@ -224,7 +226,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
                 config,
                 model_config=model_config,
                 max_num_documents=None,
-                output_dir="",
+                output_dir=str(tmp_path),
             )
 
     validate.assert_called_once_with(

@@ -11,10 +11,10 @@ import torch
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.models.base.sharding import ShardingConfig
 
 if TYPE_CHECKING:
-    from torchtitan.models.flux.model.model import FluxModel
+    from torchtitan.models.flux.model import FluxModel
 
 
 DP = MeshAxisName.DP

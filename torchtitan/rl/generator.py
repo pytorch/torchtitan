@@ -48,7 +48,7 @@ from torchtitan.rl.model.vllm_registry import (
 )
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
-from torchtitan.rl.types import Completion
+from torchtitan.rl.rollout.types import Completion
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)

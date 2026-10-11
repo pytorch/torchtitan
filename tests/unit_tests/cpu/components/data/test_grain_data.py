@@ -38,13 +38,13 @@ from torchtitan.components.data.sources import (
     HuggingFaceStreamingSource,
     IndexedJsonlSource,
 )
+from torchtitan.components.data.text_datasets import ChatProcessor, TextProcessor
 from torchtitan.components.data.types import (
     DatasetBuildContext,
     DatasetIterationPolicy,
     TrainingMicrobatch,
 )
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.hf_datasets.text_datasets import ChatProcessor, TextProcessor
 
 
 class FakeTokenizer:

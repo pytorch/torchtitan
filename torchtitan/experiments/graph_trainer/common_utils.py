@@ -26,10 +26,10 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     FSDP_PARAM_FQNS_META,
     MixedPrecisionPolicy,
 )
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.module import Module
 
 
 logger = logging.getLogger(__name__)

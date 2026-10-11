@@ -9,12 +9,9 @@ import asyncio
 from renderers import ParsedResponse
 from torchtitan.rl.rollout import RolloutStatus
 
-from torchtitan.rl.rollout.environment.message import (
-    MessageEnvInitOutput,
-    MessageEnvStepOutput,
-)
-from torchtitan.rl.rollout.environment.token import TokenEnv
-from torchtitan.rl.types import Completion
+from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
+from torchtitan.rl.rollout.token_env import TokenEnv
+from torchtitan.rl.rollout.types import Completion
 
 _TOOLS = [
     {

@@ -48,7 +48,7 @@ from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGen
 from torchtitan.rl.losses import GRPOLoss
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
-from torchtitan.rl.rubric import Rubric
+from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
@@ -98,7 +98,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-0.6B",
+        hf_assets_path="./assets/hf/Qwen3-0.6B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -170,7 +170,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-0.6B",
+        hf_assets_path="./assets/hf/Qwen3-0.6B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -297,7 +297,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/gpt-oss-20b",
+        hf_assets_path="./assets/hf/gpt-oss-20b",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=5,
@@ -367,7 +367,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-1.7B",
+        hf_assets_path="./assets/hf/Qwen3-1.7B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -432,7 +432,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-14B",
+        hf_assets_path="./assets/hf/Qwen3-14B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -506,7 +506,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-30B-A3B",
+        hf_assets_path="./assets/hf/Qwen3-30B-A3B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -619,7 +619,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
     model_config.local_compile_regions = []
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-0.6B",
+        hf_assets_path="./assets/hf/Qwen3-0.6B",
         num_generators=3,
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
@@ -715,7 +715,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3.5-9B",
+        hf_assets_path="./assets/hf/Qwen3.5-9B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -810,7 +810,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
     config.model = _build_qwen3_5_rl_model_config(
         "27B", seq_len=seq_len, attn_backend="varlen"
     )
-    config.hf_assets_path = "torchtitan/rl/example_checkpoint/Qwen3.6-27B"
+    config.hf_assets_path = "./assets/hf/Qwen3.6-27B"
     loss_config = config.trainer.loss
     assert isinstance(loss_config, ChunkedLossWrapper.Config)
     assert isinstance(loss_config.loss_fn, GRPOLoss.Config)

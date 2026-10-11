@@ -56,7 +56,7 @@ if TYPE_CHECKING:
         LRSchedulersContainer,
         OptimizersContainer,
     )
-    from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+    from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 
 
 class AsyncMode(str, enum.Enum):

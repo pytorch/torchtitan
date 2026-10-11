@@ -38,7 +38,7 @@ import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from PIL import Image
 
-from torchtitan.hf_datasets.multimodal.utils.image import (
+from torchtitan.components.data.multimodal.utils.image import (
     process_image,
     resize_to_navit_patch_grid,
     vision_to_patches,

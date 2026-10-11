@@ -108,15 +108,15 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
-from torchtitan.rl.components.batcher import Batcher
+from torchtitan.rl.components.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.components.checkpointer import DATALOADER_STATE_KEY
 from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
-from torchtitan.rl.distributed.actors.generator import VLLMGeneratorActor
-from torchtitan.rl.distributed.actors.trainer import TrainerActor
+from torchtitan.rl.distributed.monarch_actors.generator import VLLMGeneratorActor
+from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.distributed.torch_elastic import setup_torch_elastic_env
 from torchtitan.rl.distributed.weight_sync import WeightSyncManager
@@ -131,9 +131,8 @@ from torchtitan.rl.observability.controller import (
 from torchtitan.rl.observability.rollout_recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.types import GenerateFn
+from torchtitan.rl.rollout.types import Completion, GenerateFn
 from torchtitan.rl.trainer import Trainer
-from torchtitan.rl.types import Completion, TrainerStepBatch
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +169,7 @@ class AsyncLoopConfig(Configurable.Config):
     target: when rollout generation is the bottleneck, the buffer may not fill
     and observed offpolicy steps will be lower. A finite `windowed_fifo_batches` bounds
     how far a slow group may exceed this target; None leaves it unbounded. See
-    ``torchtitan/rl/docs/windowed_fifo.md`` for details."""
+    ``torchtitan/rl/components/WINDOWED_FIFO.md`` for details."""
 
     windowed_fifo_batches: int | None = None
     """FIFO look-ahead window in train batches.
@@ -182,7 +181,7 @@ class AsyncLoopConfig(Configurable.Config):
     Set to `n >= 1` to limit consumption to `n * P` group ids from the oldest
     group in the buffer. Maximum policy age is bounded by
     `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
-    ``torchtitan/rl/docs/windowed_fifo.md``."""
+    ``torchtitan/rl/components/WINDOWED_FIFO.md``."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config

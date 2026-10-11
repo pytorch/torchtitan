@@ -26,12 +26,12 @@ import torch.nn as nn
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
 )
-from torchtitan.protocols.sharding import ShardingConfig
 
 logger = logging.getLogger(__name__)
 

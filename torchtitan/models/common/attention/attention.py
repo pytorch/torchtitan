@@ -43,10 +43,10 @@ from torch.nn.attention.varlen import (
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
 if TYPE_CHECKING:

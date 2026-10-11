@@ -43,13 +43,13 @@ for MoE models. Generator sequence parallelism was disabled.
 
 ## Architecture
 
-![TitanRL async rollout pipeline](./docs/async_rollout_pipeline.png)
+![TitanRL async rollout pipeline](../../assets/images/rl_async_rollout_pipeline.png)
 
 The pipeline has three layers.
 
 **1. Experiment logic.** A `Rollouter` composes training/validation data, a `MessageEnv`, a rubric, and a function to run rollouts. It should be flexible enough to express most custom patterns.
 
-**2. Controller and dataflow.** Independent loops load data, produce rollouts, pack batches, and update the policy. `RolloutGroupWorkBuffer` connects them: `target_offpolicy_steps` sets its depth and so the mean policy age, `windowed_fifo_batches` bounds how far one slow group may exceed it (`None`, the default, leaves it unbounded; `1` is FIFO by batch; see [docs/windowed_fifo.md](docs/windowed_fifo.md)). Set `target_offpolicy_steps=0` for synchronous execution.
+**2. Controller and dataflow.** Independent loops load data, produce rollouts, pack batches, and update the policy. `RolloutGroupWorkBuffer` connects them: `target_offpolicy_steps` sets its depth and so the mean policy age, `windowed_fifo_batches` bounds how far one slow group may exceed it (`None`, the default, leaves it unbounded; `1` is FIFO by batch; see [components/WINDOWED_FIFO.md](components/WINDOWED_FIFO.md)). Set `target_offpolicy_steps=0` for synchronous execution.
 
 **3. Distributed execution.** A router sends requests to one or more vLLM generator replicas. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
 
@@ -69,10 +69,14 @@ The package is organized by responsibility and dependency boundary:
 - `trainer.py` and `generator.py` contain standalone services. They are usable
   without constructing Monarch actors.
 - `components/` contains configurable RL dataflow components such as batching,
-  training-sample construction, and the bounded work buffer.
-- `rollout/` contains rollout execution, environments, advantages, and rollout
-  data types. `rubric.py` and `renderer.py` remain at the package root as
-  prominent user extension APIs.
+  training-sample construction, and the bounded work buffer. Each defines the
+  data types it produces (e.g. `TrainingSample` in `training_sample_builder.py`,
+  `TrainerStepBatch` in `batcher.py`).
+- `rollout/` contains rollout execution (`rollouter.py`), the user extension
+  APIs for environments (`message_env.py`, `token_env.py`) and rewards
+  (`rubric.py`), advantages, and the rollout data types including the
+  generation contract (`types.py`: `GenerateFn`, `Completion`). Renderers are
+  shared with SFT and live in core `torchtitan/components/renderer.py`.
 - `distributed/` contains Monarch actor adapters, routing, and TorchStore weight
   synchronization. Actor wrappers should contain endpoint adaptation rather
   than domain behavior.
@@ -171,56 +175,38 @@ uv venv --python 3.12 titan-rl
 source titan-rl/bin/activate
 ```
 
-1. Install Monarch, TorchStore, and Renderers:
+1. Install the RL environment from the TorchTitan repository root:
 ```bash
-uv pip install -r torchtitan/rl/requirements.txt
-uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+scripts/install_rl_env.sh
 ```
 
-2. Install the Flash Attention kernels for your GPU architecture:
-```bash
-# Hopper (H100/H200, SM90): Flash Attention 3
-uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu130
-
-# Blackwell (GB200/GB300, SM100): Flash Attention 4. b34+ splits head_dim 256 paged KV at decode.
-uv pip install "flash-attn-4[cu13]>=4.0.0b34"
-```
-
-TorchTitan selects FA4 on Blackwell, FA3 on Hopper, and the FA2 implementation
-bundled with PyTorch on older GPUs such as A100.
+The script installs the core and RL requirements (Monarch, OpenTelemetry, ...),
+matching PyTorch, torchvision and vLLM CUDA nightlies, TorchStore and
+batch-invariant ops (git main, without dependencies so they cannot replace the
+nightly torch), and the Flash Attention build for the local GPU: FA4 on
+Blackwell (SM100+), FA3 on Hopper (SM90). TorchTitan uses the FA2
+implementation bundled with PyTorch on older GPUs such as A100. Flags
+documented in the script header select another CUDA tag (`--cuda`), force
+Flash Attention versions (`--flash-attn`), or install `nvcc` for FlashInfer's
+JIT when no CUDA toolkit is present (`--nvcc`).
 
 Gated DeltaNet (Qwen3.5) runs Attention Gym's cuDNN chunk kernels on Blackwell
 (SM100/SM103) and its fused kernels elsewhere. The `cudnn` extra in the
 `attn-gym[linear,cudnn]` dependency installs them.
 
-3. Install batch-invariant ops if you need to run batch-invariant mode (Triton kernels for bitwise-reproducible training):
-```bash
-uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
-```
+**NOTE:** The pre-built vLLM wheels are built for CUDA 13.2, though they should
+work with most older CUDA versions. A vLLM nightly must match the PyTorch
+nightly build date, which installing both from the same index ensures.
 
-4. Install PyTorch and torchvision nightlies and the pre-built vllm wheel (based on the PyTorch nightly version).
-
-`torchvision` is only needed because the current vllm nightly imports it during kernel warmup; TorchTitan RL does not otherwise require it.
-
-```bash
-# Install vllm with nightly torch and torchvision
-uv pip install torch torchvision vllm --pre \
---extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
---index-strategy unsafe-best-match
-```
-
-**NOTE:** The pre-built vLLM wheels are only compatible with CUDA 13.2, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu132, for example: `uv pip install vllm-1.0.0.dev20260219+cu132-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
-
-
-5. From the TorchTitan repository root, add the checkout to `PYTHONPATH`. Monarch-spawned RL worker processes inherit this environment variable, so they can import the local `torchtitan` package:
+2. From the TorchTitan repository root, add the checkout to `PYTHONPATH`. Monarch-spawned RL worker processes inherit this environment variable, so they can import the local `torchtitan` package:
 ```bash
 cd {your_local_torchtitan_root_path}
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 ```
 
-6. Follow the [DAPO Math setup](./examples/dapo_math#setup) to install Math-Verify and download the Qwen3-4B checkpoint.
+3. Follow the [DAPO Math setup](./examples/dapo_math#setup) to install Math-Verify and download the Qwen3-4B checkpoint.
 
-7. Run the DAPO Math reference experiment:
+4. Run the DAPO Math reference experiment:
 ```bash
 python -m torchtitan.rl.train \
   --module torchtitan_recipes.rl.dapo_math \
@@ -235,7 +221,7 @@ python -m torchtitan.rl.train \
 
 ## Trainer/generator consistency
 
-Install the batch-invariant kernels shown in [Prerequisites](#prerequisites), then follow the [bitwise parity guide](./docs/bitwise_parity.md) for configuration, supported layouts, verification, and limitations.
+Install the batch-invariant kernels shown in [Prerequisites](#prerequisites), then follow the [bitwise parity guide](./BITWISE_PARITY.md) for configuration, supported layouts, verification, and limitations.
 
 For background, see [train/inference mismatch in asynchronous RL](https://yichuan-w.github.io/blog/GDN-train-inference-mismatch-asyncRL/) and [Defeating Nondeterminism in LLM Inference](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/).
 
@@ -262,7 +248,7 @@ memory snapshots. Configure it under `config.trainer.profiler` in the recipe.
 
 ### Actor endpoints use `@concurrent_endpoint`
 
-**Every endpoint on a Monarch actor, e.g. `TrainerActor`, `VLLMGeneratorActor`, and `RolloutWorkerActor`, is declared with `@concurrent_endpoint`, not `@endpoint`.** New endpoints follow the same rule. The standalone `Trainer` and `VLLMGenerator` classes contain no Monarch dependency; their actor subclasses are thin transport adapters under `distributed/actors/`.
+**Every endpoint on a Monarch actor, e.g. `TrainerActor`, `VLLMGeneratorActor`, and `RolloutWorkerActor`, is declared with `@concurrent_endpoint`, not `@endpoint`.** New endpoints follow the same rule. The standalone `Trainer` and `VLLMGenerator` classes contain no Monarch dependency; their actor subclasses are thin transport adapters under `distributed/monarch_actors/`.
 
 When messages are sent to an actor, the messages are put on this actor's internal queue first, and then dispatched to the corresponding endpoints sequentially. When a plain `@endpoint` is processing a message, it will block the actor from processing the next next message. `@concurrent_endpoint` on the other hand allows the actor to process messages concurrently. Under the hood, `@concurrent_endpoint` is a wrapper of `@endpoint`, but it runs each message in its own asyncio task, in order to avoid the blocking. The caveat is when an actor has both `@endpoint` and `@concurrent_endpoint` endpoints, `@endpoint` will block all the other endpoints, including `@concurrent_endpoint`. This could lead to surprising behaviors. More details can be found in [Monarch's documentation](https://meta-pytorch.org/monarch/stable/actors.html#concurrent-endpoints).
 

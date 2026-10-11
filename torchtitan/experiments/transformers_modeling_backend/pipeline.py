@@ -29,9 +29,9 @@ from torchtitan.distributed.pipeline_parallel import (
     _build_get_mesh_callback,
     _build_pipeline_schedule,
 )
+from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.module import ModuleDict, ModuleList
 from torchtitan.models.common.nn_modules import Identity
-from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import ModuleDict, ModuleList
 
 # NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
 

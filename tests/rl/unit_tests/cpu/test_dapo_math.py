@@ -26,7 +26,7 @@ from torchtitan.rl.examples.dapo_math import (
     score_math_response,
 )
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
-from torchtitan.rl.types import RolloutTurnID
+from torchtitan.rl.rollout.types import RolloutTurnID
 
 
 def _dapo_rows() -> list[dict]:
