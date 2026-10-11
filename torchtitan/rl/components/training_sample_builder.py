@@ -271,13 +271,15 @@ class TrainingSampleBuilder(Configurable):
             )
             prompt_prefix_len = rollout_turn.prompt_prefix_len
             prompt_delta_token_ids = rollout_turn.prompt_delta_token_ids
-            # Too many: prev = [0, 1, 2, 3] has 4 tokens; a turn can't reuse 6.
+
+            # Too many: e.g. prev = [0, 1, 2, 3] has 4 tokens; a turn can't reuse 6.
             if prompt_prefix_len > len(prev_prompt_and_completion):
                 raise ValueError(
                     f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn {turn_idx} "
                     f"reuses {prompt_prefix_len} tokens, but the previous turn has only "
                     f"{len(prev_prompt_and_completion)}; build it with `split_prompt`"
                 )
+
             # Too few: the first new token equals prev's token at the same position, so the turn could
             # reuse at least one more. E.g. prev = [0, 1, 2, 3], stored (0, [0, 1, 9, 3]): 0 == prev[0];
             # split_prompt gives (2, [9, 3]). Catches a full prompt stored as the delta.
@@ -293,6 +295,7 @@ class TrainingSampleBuilder(Configurable):
                     f"reuses {prompt_prefix_len} tokens but could reuse more; build it with "
                     "`split_prompt`"
                 )
+
             # True when this prompt continues the previous one (prefix-preserving);
             # False when the env edited history -> open a new training_sample (branch).
             extends_prev = prompt_prefix_len == len(prev_prompt_and_completion)

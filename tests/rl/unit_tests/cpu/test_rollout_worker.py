@@ -10,7 +10,7 @@ import asyncio
 import random
 from types import SimpleNamespace
 
-from renderers import Qwen3RendererConfig
+from renderers import ParsedResponse, Qwen3RendererConfig
 
 from torchtitan.components.renderer import from_renderers
 
@@ -19,9 +19,10 @@ from torchtitan.rl.components.training_sample_builder import TrainingSampleBuild
 
 from torchtitan.rl.generator import SamplingConfig
 from torchtitan.rl.rollout import RolloutStatus
+from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.rollouter import RolloutWorker
 from torchtitan.rl.rollout.rubric import RubricOutput
-from torchtitan.rl.rollout.token_env import TokenEnvOutput
+from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
 
 
@@ -167,42 +168,72 @@ def test_worker_executes_group_without_actor_mesh() -> None:
     asyncio.run(run())
 
 
-class _RewritingTokenEnv:
-    """Each step continues the history, strips the completion's first token (thinking), shrinks
-    to a prefix, or keeps only BOS, at random."""
+class _RewritingRenderer:
+    """Each turn bridges (appends the completion + an env reply) or, at random, re-renders a
+    rewritten history: the completion's first token (thinking) stripped, a prefix, or only BOS."""
 
-    def __init__(self, rng: random.Random, num_turns: int) -> None:
-        self.rng, self.num_turns = rng, num_turns
+    def __init__(self, rng: random.Random) -> None:
+        self.rng = rng
         self.prompts: list[list[int]] = []
+        self._rewritten_prompt = [1, 2, 3]
 
-    def _prompt(self, prompt_token_ids: list[int]) -> TokenEnvOutput:
-        self.prompts.append(prompt_token_ids)
-        return TokenEnvOutput(
-            next_prompt_token_ids=prompt_token_ids, status=RolloutStatus.ONGOING
-        )
+    def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
+        self.prompts.append(self._rewritten_prompt)
+        return self._rewritten_prompt
 
-    async def init(self) -> TokenEnvOutput:
-        return self._prompt([1, 2, 3])
-
-    async def step(self, completion: Completion) -> TokenEnvOutput:
-        if len(self.prompts) == self.num_turns:
-            return TokenEnvOutput(
-                next_prompt_token_ids=None, status=RolloutStatus.COMPLETED
-            )
-        prompt, reply = self.prompts[-1], [self.rng.randrange(100)]
+    def bridge_to_next_turn(
+        self, previous_prompt_ids, previous_completion_ids, new_messages, *, tools=None
+    ):
+        reply = [self.rng.randrange(100)]
         kind = self.rng.choice(["continue", "strip_thinking", "prefix", "reset"])
         if kind == "continue":
-            return self._prompt(prompt + completion.token_ids + reply)
+            self.prompts.append(previous_prompt_ids + previous_completion_ids + reply)
+            return SimpleNamespace(token_ids=self.prompts[-1])
+
+        # A rewrite: return None so TokenEnv re-renders, as when a renderer can't bridge
         if kind == "strip_thinking":
-            return self._prompt(prompt + completion.token_ids[1:] + reply)
-        if kind == "prefix":
-            return self._prompt(prompt[: self.rng.randint(0, len(prompt))])
-        return self._prompt([1] + reply)
+            self._rewritten_prompt = (
+                previous_prompt_ids + previous_completion_ids[1:] + reply
+            )
+        elif kind == "prefix":
+            num_kept = self.rng.randint(0, len(previous_prompt_ids))
+            self._rewritten_prompt = previous_prompt_ids[:num_kept]
+        else:
+            self._rewritten_prompt = [1] + reply
+        return None
+
+    def parse_response(self, token_ids, *, tools=None):
+        return ParsedResponse(
+            content=str(token_ids), reasoning_content=None, tool_calls=[]
+        )
+
+
+class _CountingMessageEnv:
+    """Replies to every turn and ends the rollout after `num_turns` turns."""
+
+    def __init__(self, num_turns: int) -> None:
+        self.num_turns = num_turns
+        self.num_steps = 0
+
+    async def init(self) -> MessageEnvInitOutput:
+        return MessageEnvInitOutput(
+            init_prompt_messages=[{"role": "user", "content": "task"}]
+        )
+
+    async def step(self, completion_message) -> MessageEnvStepOutput:
+        self.num_steps += 1
+        return MessageEnvStepOutput(
+            env_messages=[{"role": "user", "content": "reply"}],
+            done=self.num_steps == self.num_turns,
+        )
+
+    async def close(self) -> None:
+        pass
 
 
 def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
-    # Delta prompts must pack into the same samples as full prompts: a turn joins the last sample
-    # iff its prompt extends the previous turn's prompt + completion.
+    # TokenEnv stores each prompt as a delta. Delta prompts must pack into the same samples as full
+    # prompts: a turn joins the last sample iff its prompt extends the previous turn's prompt + completion.
     rng = random.Random(0)
     worker = RolloutWorker(
         SimpleNamespace(
@@ -222,11 +253,16 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             request_id=kwargs["request_id"],
             token_ids=token_ids,
             token_logprobs=[-0.5] * len(token_ids),
+            finish_reason="stop",
         )
 
     async def run() -> None:
         for rollout_id in range(20):
-            env = _RewritingTokenEnv(rng, num_turns=rng.randint(1, 6))
+            renderer = _RewritingRenderer(rng)
+            env = TokenEnv.Config().build(
+                message_env=_CountingMessageEnv(num_turns=rng.randint(1, 6)),
+                renderer=renderer,
+            )
             rollout = await worker._run_single_rollout(
                 generate_fn=generate_fn,
                 env=env,
@@ -239,7 +275,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
 
             expected, previous = [], []
             for turn_id, (turn, prompt) in enumerate(
-                zip(rollout.turns, env.prompts, strict=True)
+                zip(rollout.turns, renderer.prompts, strict=True)
             ):
                 completion = turn.completion_token_ids
                 if expected and prompt[: len(previous)] == previous:

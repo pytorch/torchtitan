@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+from types import SimpleNamespace
 
 from renderers import ParsedResponse
 from torchtitan.rl.rollout import RolloutStatus
@@ -91,3 +92,59 @@ def test_env_passes_tools_to_render_parse_and_bridge() -> None:
     assert renderer.calls["render_ids"]["tools"] == _TOOLS
     assert renderer.calls["parse_response"] == {"token_ids": [7, 8], "tools": _TOOLS}
     assert renderer.calls["bridge_to_next_turn"]["tools"] == _TOOLS
+
+
+class _BridgeThenRerenderRenderer(_RecordingRenderer):
+    """Renders [1, 2, 3], bridges the first step by appending the env reply [7], and re-renders the
+    second step as [1, 2, 9] (a rewritten history)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rendered_prompts = [[1, 2, 3], [1, 2, 9]]
+        self.num_bridges = 0
+
+    def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
+        return self.rendered_prompts.pop(0)
+
+    def bridge_to_next_turn(
+        self, previous_prompt_ids, previous_completion_ids, new_messages, *, tools=None
+    ):
+        self.num_bridges += 1
+        if self.num_bridges > 1:
+            return None
+        return SimpleNamespace(
+            token_ids=previous_prompt_ids + previous_completion_ids + [7]
+        )
+
+
+def test_env_stores_each_next_prompt_as_a_delta() -> None:
+    env = TokenEnv.Config().build(
+        message_env=_ToolMessageEnv(), renderer=_BridgeThenRerenderRenderer()
+    )
+
+    def completion(token_ids: list[int]) -> Completion:
+        return Completion(
+            min_policy_version=0,
+            max_policy_version=0,
+            request_id="r0",
+            token_ids=token_ids,
+            token_logprobs=[-0.1] * len(token_ids),
+            finish_reason="stop",
+        )
+
+    async def run():
+        return [
+            await env.init(),
+            await env.step(completion([4])),
+            await env.step(completion([5])),
+        ]
+
+    outputs = asyncio.run(run())
+    assert [
+        (output.next_prompt_prefix_len, output.next_prompt_delta_token_ids)
+        for output in outputs
+    ] == [
+        (0, [1, 2, 3]),  # first prompt: nothing to reuse
+        (4, [7]),  # bridged: reuses [1, 2, 3] + completion [4]
+        (2, [9]),  # re-rendered [1, 2, 9]: reuses [1, 2] of [1, 2, 3, 4, 7, 5]
+    ]
