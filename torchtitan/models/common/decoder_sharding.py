@@ -117,7 +117,7 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
     }
 
 
-def colwise_config(*, input_layout: SpmdType) -> ShardingConfig:
+def colwise_sharding_config(*, input_layout: SpmdType) -> ShardingConfig:
     """Sharding contract for a column-parallel projection boundary."""
     return ShardingConfig(
         state_shardings={
@@ -129,7 +129,7 @@ def colwise_config(*, input_layout: SpmdType) -> ShardingConfig:
     )
 
 
-def stacked_colwise_config(*, input_layout: SpmdType) -> ShardingConfig:
+def stacked_colwise_sharding_config(*, input_layout: SpmdType) -> ShardingConfig:
     """Shard each ``[F, D]`` matrix in a ``[N, F, D]`` weight over ``F``.
 
     The input is ``[T, D]`` and the output is ``[T, N, F]``. DP and CP shard
@@ -156,7 +156,7 @@ def stacked_colwise_config(*, input_layout: SpmdType) -> ShardingConfig:
     )
 
 
-def rowwise_config(
+def rowwise_sharding_config(
     *,
     output_layout: SpmdType,
 ) -> ShardingConfig:
@@ -173,7 +173,7 @@ def rowwise_config(
     )
 
 
-def norm_config(*, enable_sp: bool) -> ShardingConfig:
+def norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """
     Norm sharding.
     Weight is unsharded@TP: R if SP (pending BWD AR handled by FSDP), else I.
@@ -187,7 +187,7 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
+def pre_lm_head_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Root decoder norm sharding before ``lm_head`` / chunked CE loss.
 
     Decoder blocks emit sequence-sharded hidden states when sequence
@@ -221,19 +221,19 @@ def residual_activation_placement(*, enable_sp: bool) -> SpmdType:
     return dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
 
 
-def replicated_state_config(*names: str) -> ShardingConfig:
+def replicated_state_sharding_config(*names: str) -> ShardingConfig:
     """Replicate the named states across TP; no activation contract."""
     return ShardingConfig(
         state_shardings={name: dense_param_placement(tp=spmd.R) for name in names},
     )
 
 
-def rope_cache_config() -> ShardingConfig:
+def rope_cache_sharding_config() -> ShardingConfig:
     """Replicate a RoPE cache buffer across TP."""
-    return replicated_state_config("cache")
+    return replicated_state_sharding_config("cache")
 
 
-def head_norm_config() -> ShardingConfig:
+def head_norm_sharding_config() -> ShardingConfig:
     """Norm over ``(tokens, heads, dim)`` activations sharded on heads.
 
     Used for QK norms; independent of sequence parallelism.
@@ -248,7 +248,7 @@ def head_norm_config() -> ShardingConfig:
     )
 
 
-def gqa_attention_config(*, enable_sp: bool) -> ShardingConfig:
+def gqa_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """GQA attention boundary: ``x_TD`` in and out in the residual layout.
 
     The block gathers its input to Replicate internally and uses the
@@ -261,7 +261,7 @@ def gqa_attention_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def inner_attention_local_spmd_config() -> ShardingConfig:
+def inner_attention_local_spmd_sharding_config() -> ShardingConfig:
     """Localize TNH attention inputs without changing their placements.
 
     q/k use ``(T, H, K)`` and v uses ``(T, H, V)``. DP/CP shard T and TP
@@ -289,7 +289,7 @@ def inner_attention_local_spmd_config() -> ShardingConfig:
     )
 
 
-def feed_forward_config(*, enable_sp: bool) -> ShardingConfig:
+def feed_forward_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Dense FFN boundary: ``x`` in and out in the residual layout."""
     layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
@@ -298,7 +298,7 @@ def feed_forward_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def token_embedding_config(*, enable_sp: bool) -> ShardingConfig:
+def token_embedding_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Vocab-sharded token embedding whose output enters the residual layout.
 
     The local lookup produces a TP-Partial output that is reduced (and
@@ -315,16 +315,16 @@ def token_embedding_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def replicated_input_colwise_config() -> ShardingConfig:
+def replicated_input_colwise_sharding_config() -> ShardingConfig:
     """Column-parallel projection of an input already gathered to Replicate.
 
     Used where one module boundary gathers an input shared by several
     projections (e.g. MLA up-projections, gated attention projections).
     """
-    return colwise_config(input_layout=replicated_activation_placement())
+    return colwise_sharding_config(input_layout=replicated_activation_placement())
 
 
-def lm_head_config() -> ShardingConfig:
+def lm_head_sharding_config() -> ShardingConfig:
     """Vocab-sharded ``lm_head`` over replicated hidden states."""
     replicated = replicated_activation_placement()
     vocab_sharded = dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))

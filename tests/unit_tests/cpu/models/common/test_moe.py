@@ -449,7 +449,7 @@ class TestMoE(unittest.TestCase):
     def test_padding_mask_enters_moe_replicated_and_router_sharded(self):
         for enable_sp in (False, True):
             with self.subTest(enable_sp=enable_sp):
-                moe_config = moe_sharding.moe_config(enable_sp=enable_sp)
+                moe_config = moe_sharding.moe_sharding_config(enable_sp=enable_sp)
                 assert moe_config.in_src_shardings is not None
                 self.assertIsNone(moe_config.in_dst_shardings)
                 self.assertEqual(
@@ -457,7 +457,7 @@ class TestMoE(unittest.TestCase):
                     _per_axis_types(token_id_placement()),
                 )
 
-                router_config = moe_sharding.router_config()
+                router_config = moe_sharding.router_sharding_config()
                 router_inputs = router_config.in_src_shardings
                 assert router_inputs is not None
                 self.assertIsNone(router_config.in_dst_shardings)
@@ -484,7 +484,7 @@ class TestMoE(unittest.TestCase):
         self.assertEqual(config.w13.num_linears, 2)
 
     def test_common_shared_expert_input_gather_is_owned_by_w13(self):
-        moe_config = moe_sharding.moe_config(enable_sp=True)
+        moe_config = moe_sharding.moe_sharding_config(enable_sp=True)
         shared = make_shared_expert_ffn_config(
             dim=4, hidden_dim=8, w13_param_init={}, w2_param_init={}, enable_sp=True
         )

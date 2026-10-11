@@ -46,7 +46,7 @@ from torchtitan.models.common.async_linear import (
 )
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
+    colwise_sharding_config,
     dense_sequence_parallel_placement,
 )
 from torchtitan.models.common.feed_forward import FeedForward
@@ -319,7 +319,9 @@ class TestAsyncQKVNumerics(DTensorTestBase):
             ),
         )
         input_layout = dense_sequence_parallel_placement()
-        async_config.wqkv.sharding_config = colwise_config(input_layout=input_layout)
+        async_config.wqkv.sharding_config = colwise_sharding_config(
+            input_layout=input_layout
+        )
         stock = stock_config.build().to(device=device, dtype=torch.bfloat16)
         async_qkv = async_config.build().to(device=device, dtype=torch.bfloat16)
 

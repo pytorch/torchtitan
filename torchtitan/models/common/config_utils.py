@@ -27,15 +27,15 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
-    feed_forward_config,
-    gqa_attention_config,
-    head_norm_config,
-    inner_attention_local_spmd_config,
+    colwise_sharding_config,
+    feed_forward_sharding_config,
+    gqa_attention_sharding_config,
+    head_norm_sharding_config,
+    inner_attention_local_spmd_sharding_config,
     residual_activation_placement,
-    rope_cache_config,
-    rowwise_config,
-    stacked_colwise_config,
+    rope_cache_sharding_config,
+    rowwise_sharding_config,
+    stacked_colwise_sharding_config,
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
@@ -52,14 +52,14 @@ from torchtitan.models.common.moe import (
     TokenChoiceTopKRouter,
 )
 from torchtitan.models.common.moe_sharding import (
-    moe_config,
-    routed_expert_linear_config,
-    routed_experts_config,
-    router_config,
-    router_gate_config,
-    shared_expert_rowwise_config,
-    shared_experts_config,
+    moe_sharding_config,
+    routed_expert_linear_sharding_config,
+    routed_experts_sharding_config,
+    router_gate_sharding_config,
+    router_sharding_config,
+    shared_expert_rowwise_sharding_config,
     shared_experts_output_placement,
+    shared_experts_sharding_config,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -249,14 +249,16 @@ def make_gqa_config(
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
     rope = (
-        dataclasses.replace(rope, sharding_config=rope_cache_config())
+        dataclasses.replace(rope, sharding_config=rope_cache_sharding_config())
         if rope is not None
         else None
     )
     if qk_norm is not None:
-        qk_norm = dataclasses.replace(qk_norm, sharding_config=head_norm_config())
+        qk_norm = dataclasses.replace(
+            qk_norm, sharding_config=head_norm_sharding_config()
+        )
     inner_attention = dataclasses.replace(
-        inner_attention, sharding_config=inner_attention_local_spmd_config()
+        inner_attention, sharding_config=inner_attention_local_spmd_sharding_config()
     )
     x_layout = residual_activation_placement(enable_sp=enable_sp)
 
@@ -273,7 +275,7 @@ def make_gqa_config(
                 n_kv_heads=n_kv,
                 head_dim=per_head_dim,
             ),
-            sharding_config=colwise_config(input_layout=x_layout),
+            sharding_config=colwise_sharding_config(input_layout=x_layout),
         ),
     )
 
@@ -287,12 +289,12 @@ def make_gqa_config(
             in_features=n_heads * per_head_dim,
             out_features=dim,
             param_init=wo_param_init,
-            sharding_config=rowwise_config(output_layout=x_layout),
+            sharding_config=rowwise_sharding_config(output_layout=x_layout),
         ),
         qk_norm=qk_norm,
         inner_attention=inner_attention,
         rope=rope,
-        sharding_config=gqa_attention_config(enable_sp=enable_sp),
+        sharding_config=gqa_attention_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -317,15 +319,15 @@ def make_ffn_config(
             out_features=hidden_dim,
             num_linears=2,
             param_init=fused_gate_up_param_init(w13_param_init, w13_param_init),
-            sharding_config=stacked_colwise_config(input_layout=x_layout),
+            sharding_config=stacked_colwise_sharding_config(input_layout=x_layout),
         ),
         w2=RowParallelLinear.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=w2_param_init,
-            sharding_config=rowwise_config(output_layout=x_layout),
+            sharding_config=rowwise_sharding_config(output_layout=x_layout),
         ),
-        sharding_config=feed_forward_config(enable_sp=enable_sp),
+        sharding_config=feed_forward_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -347,7 +349,7 @@ def make_shared_expert_down_proj_config(
         in_features=in_features,
         out_features=out_features,
         param_init=param_init,
-        sharding_config=shared_expert_rowwise_config(
+        sharding_config=shared_expert_rowwise_sharding_config(
             output_layout=shared_experts_output_placement(enable_sp=enable_sp)
         ),
     )
@@ -374,7 +376,7 @@ def make_shared_expert_ffn_config(
             out_features=hidden_dim,
             num_linears=2,
             param_init=fused_gate_up_param_init(w13_param_init, w13_param_init),
-            sharding_config=stacked_colwise_config(input_layout=x_layout),
+            sharding_config=stacked_colwise_sharding_config(input_layout=x_layout),
         ),
         w2=make_shared_expert_down_proj_config(
             in_features=hidden_dim,
@@ -382,7 +384,7 @@ def make_shared_expert_ffn_config(
             param_init=w2_param_init,
             enable_sp=enable_sp,
         ),
-        sharding_config=shared_experts_config(enable_sp=enable_sp),
+        sharding_config=shared_experts_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -413,7 +415,7 @@ def make_moe_config(
         router=router,
         routed_experts=routed_experts,
         shared_experts=shared_experts,
-        sharding_config=moe_config(enable_sp=enable_sp),
+        sharding_config=moe_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -438,14 +440,14 @@ def make_router_config(
             backward_mode="hi_mid_lo",
             bias=bias,
             param_init=gate_param_init,
-            sharding_config=router_gate_config(),
+            sharding_config=router_gate_sharding_config(),
         ),
         top_k=top_k,
         score_func=score_func,
         route_norm=route_norm,
         route_norm_epsilon=route_norm_epsilon,
         route_scale=route_scale,
-        sharding_config=router_config(),
+        sharding_config=router_sharding_config(),
     )
 
 
@@ -476,18 +478,18 @@ def make_routed_experts_config(
             param_init=(
                 fused_grouped_gate_up_param_init(param_init) if param_init else None
             ),
-            sharding_config=routed_expert_linear_config(enable_ep=enable_ep),
+            sharding_config=routed_expert_linear_sharding_config(enable_ep=enable_ep),
         ),
         w2=GroupedLinear.Config(
             group_size=num_experts,
             in_features=hidden_dim,
             out_features=dim,
             param_init={"weight": param_init["w2_EDF"]} if param_init else None,
-            sharding_config=routed_expert_linear_config(enable_ep=enable_ep),
+            sharding_config=routed_expert_linear_sharding_config(enable_ep=enable_ep),
         ),
         token_dispatcher=AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
         ),
-        sharding_config=routed_experts_config(),
+        sharding_config=routed_experts_sharding_config(),
     )

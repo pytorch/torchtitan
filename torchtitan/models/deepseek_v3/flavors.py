@@ -42,25 +42,32 @@ from torchtitan.models.common.config_utils import (
     make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.decoder_sharding import (
-    inner_attention_local_spmd_config,
-    lm_head_config,
-    norm_config,
-    pre_lm_head_norm_config,
-    replicated_input_colwise_config,
-    replicated_state_config,
+    inner_attention_local_spmd_sharding_config,
+    lm_head_sharding_config,
+    norm_sharding_config,
+    pre_lm_head_norm_sharding_config,
+    replicated_input_colwise_sharding_config,
+    replicated_state_sharding_config,
     residual_activation_placement,
-    rope_cache_config,
-    rowwise_config,
-    token_embedding_config,
+    rope_cache_sharding_config,
+    rowwise_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
-from torchtitan.models.common.moe_sharding import router_config, router_gate_config
+from torchtitan.models.common.moe_sharding import (
+    router_gate_sharding_config,
+    router_sharding_config,
+)
 from torchtitan.models.common.param_init import depth_scaled_std
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
 from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
-from .sharding import mla_attention_config, mtp_block_config, mtp_projection_config
+from .sharding import (
+    mla_attention_sharding_config,
+    mtp_block_sharding_config,
+    mtp_projection_sharding_config,
+)
 
 __all__ = [
     "DeepSeekV3Model",
@@ -125,7 +132,7 @@ def make_deepseek_v3_router_config(
             backward_mode="hi_mid_lo",
             bias=bias,
             param_init=gate_param_init,
-            sharding_config=router_gate_config(),
+            sharding_config=router_gate_sharding_config(),
         ),
         top_k=top_k,
         score_func=Sigmoid.Config() if score_func is None else score_func,
@@ -133,7 +140,7 @@ def make_deepseek_v3_router_config(
         route_scale=route_scale,
         num_expert_groups=num_expert_groups,
         num_limited_groups=num_limited_groups,
-        sharding_config=router_config(),
+        sharding_config=router_sharding_config(),
     )
 
 
@@ -168,7 +175,7 @@ def make_mla_attention_config(
     """
     inner_attention = dataclasses.replace(
         attention_config_factory(attn_backend),
-        sharding_config=inner_attention_local_spmd_config(),
+        sharding_config=inner_attention_local_spmd_sharding_config(),
     )
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
@@ -177,7 +184,7 @@ def make_mla_attention_config(
             in_features=dim,
             out_features=n_heads * qk_head_dim,
             param_init=linear_init,
-            sharding_config=replicated_input_colwise_config(),
+            sharding_config=replicated_input_colwise_sharding_config(),
         )
         wq_a = None
         wq_b = None
@@ -190,19 +197,19 @@ def make_mla_attention_config(
             in_features=dim,
             out_features=q_lora_rank,
             param_init=linear_init,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         )
         wq_b = Linear.Config(
             in_features=q_lora_rank,
             out_features=n_heads * qk_head_dim,
             param_init=linear_init,
-            sharding_config=replicated_input_colwise_config(),
+            sharding_config=replicated_input_colwise_sharding_config(),
         )
         q_norm = RMSNorm.Config(
             normalized_shape=q_lora_rank,
             eps=1e-6,
             param_init=norm_init,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         )
 
     return Attention.Config(
@@ -222,31 +229,31 @@ def make_mla_attention_config(
             in_features=dim,
             out_features=kv_lora_rank + qk_rope_head_dim,
             param_init=linear_init,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         kv_norm=RMSNorm.Config(
             normalized_shape=kv_lora_rank,
             eps=1e-6,
             param_init=norm_init,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         wkv_b=Linear.Config(
             in_features=kv_lora_rank,
             out_features=n_heads * (qk_nope_head_dim + v_head_dim),
             param_init=linear_init,
-            sharding_config=replicated_input_colwise_config(),
+            sharding_config=replicated_input_colwise_sharding_config(),
         ),
         wo=RowParallelLinear.Config(
             in_features=n_heads * v_head_dim,
             out_features=dim,
             param_init=depth_init(layer_id),
-            sharding_config=rowwise_config(
+            sharding_config=rowwise_sharding_config(
                 output_layout=residual_activation_placement(enable_sp=enable_sp)
             ),
         ),
         inner_attention=inner_attention,
-        rope=dataclasses.replace(rope, sharding_config=rope_cache_config()),
-        sharding_config=mla_attention_config(enable_sp=enable_sp),
+        rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
+        sharding_config=mla_attention_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -297,7 +304,7 @@ def build_mla_moe_layers(
     ``first_layer_sharding_config`` sets layer 0's own boundary, for decoders
     whose embedding output is not in the residual layout.
     """
-    norm_sharding = norm_config(enable_sp=enable_sp)
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     layers = []
     for layer_id in range(n_layers):
         attn_cfg = make_mla_attention_config(
@@ -412,7 +419,7 @@ def _build_mtp_layers(
     enable_sp: bool,
 ) -> list[MTPTransformerBlock.Config]:
     """Build MTP blocks from copies of the (already sharded) ``inner_cfg``."""
-    norm_sharding = norm_config(enable_sp=enable_sp)
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     mtp_layers = []
     for _ in range(num_mtp_layers):
         mtp_layers.append(
@@ -432,14 +439,16 @@ def _build_mtp_layers(
                     in_features=dim * 2,
                     out_features=dim,
                     bias=False,
-                    sharding_config=mtp_projection_config(enable_sp=enable_sp),
+                    sharding_config=mtp_projection_sharding_config(enable_sp=enable_sp),
                 ),
                 mtp_norm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=1e-6,
-                    sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+                    sharding_config=pre_lm_head_norm_sharding_config(
+                        enable_sp=enable_sp
+                    ),
                 ),
-                sharding_config=mtp_block_config(enable_sp=enable_sp),
+                sharding_config=mtp_block_sharding_config(enable_sp=enable_sp),
             )
         )
     return mtp_layers
@@ -505,19 +514,19 @@ def _debugmodel(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(enable_sp=enable_sp),
+            sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
         ),
         norm=RMSNorm.Config(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
@@ -590,19 +599,19 @@ def _16b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(enable_sp=enable_sp),
+            sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
         ),
         norm=RMSNorm.Config(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
@@ -678,19 +687,19 @@ def _236b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(enable_sp=enable_sp),
+            sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
         ),
         norm=RMSNorm.Config(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
@@ -767,19 +776,19 @@ def _671b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(enable_sp=enable_sp),
+            sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
         ),
         norm=RMSNorm.Config(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(

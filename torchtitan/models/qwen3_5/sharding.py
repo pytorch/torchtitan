@@ -28,7 +28,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     replicated_activation_placement,
     residual_activation_placement,
-    stacked_colwise_config,
+    stacked_colwise_sharding_config,
 )
 
 DP = MeshAxisName.DP
@@ -36,7 +36,7 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
-def transformer_block_config(
+def transformer_block_sharding_config(
     *, enable_sp: bool, after_vision_scatter: bool
 ) -> ShardingConfig:
     """Transformer block boundary in the residual layout.
@@ -55,7 +55,7 @@ def transformer_block_config(
     )
 
 
-def decoder_norm_config(*, enable_sp: bool) -> ShardingConfig:
+def decoder_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Pre-attention norm: Replicate weight, residual-layout activations."""
     activation_layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
@@ -65,7 +65,7 @@ def decoder_norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def attention_config(*, enable_sp: bool) -> ShardingConfig:
+def attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Full-attention boundary: ``x_TD`` in and out in the residual layout."""
     layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
@@ -74,14 +74,14 @@ def attention_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def conv_weight_config() -> ShardingConfig:
+def conv_weight_sharding_config() -> ShardingConfig:
     """Depthwise Conv1d weight sharded Shard(0) on out-channels (head-sharded)."""
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
     )
 
 
-def gated_rms_norm_config() -> ShardingConfig:
+def gated_rms_norm_sharding_config() -> ShardingConfig:
     """GatedDeltaNet output norm over head-sharded ``[T, H, V]`` activations."""
     head_placement = attention_activation_placement()
     return ShardingConfig(
@@ -99,7 +99,7 @@ def gated_rms_norm_config() -> ShardingConfig:
     )
 
 
-def inner_gated_delta_net_config() -> ShardingConfig:
+def inner_gated_delta_net_sharding_config() -> ShardingConfig:
     """Local SPMD boundary for the head-parallel convolution and recurrence.
 
     The projections are 2D [T, C], while the recurrence output is 3D
@@ -129,7 +129,7 @@ def inner_gated_delta_net_config() -> ShardingConfig:
     )
 
 
-def gated_delta_net_config(*, enable_sp: bool) -> ShardingConfig:
+def gated_delta_net_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """GatedDeltaNet boundary with head-sharded ``A_log``/``dt_bias``."""
     layout = residual_activation_placement(enable_sp=enable_sp)
     parameter_placement = dense_param_placement(tp=spmd.S(0))
@@ -143,12 +143,14 @@ def gated_delta_net_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def sigmoid_gated_w13_config() -> ShardingConfig:
+def sigmoid_gated_w13_sharding_config() -> ShardingConfig:
     """Shared-expert ``w13`` over the input the shared FFN gathers once."""
-    return stacked_colwise_config(input_layout=replicated_activation_placement())
+    return stacked_colwise_sharding_config(
+        input_layout=replicated_activation_placement()
+    )
 
 
-def sigmoid_gate_config() -> ShardingConfig:
+def sigmoid_gate_sharding_config() -> ShardingConfig:
     """Shared-expert sigmoid gate: Replicate weights and activations."""
     replicated = replicated_activation_placement()
     return ShardingConfig(
@@ -161,7 +163,7 @@ def sigmoid_gate_config() -> ShardingConfig:
     )
 
 
-def vision_encoder_config() -> ShardingConfig:
+def vision_encoder_sharding_config() -> ShardingConfig:
     """Vision encoder root: invariant ``pos_embed``, replicated output.
 
     All activations flow without SP in the vision encoder.
@@ -173,7 +175,7 @@ def vision_encoder_config() -> ShardingConfig:
     )
 
 
-def vision_rotary_embedding_config() -> ShardingConfig:
+def vision_rotary_embedding_sharding_config() -> ShardingConfig:
     """Vision rotary embedding with a TP-invariant ``inv_freq``."""
     state_placement = SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
     return ShardingConfig(

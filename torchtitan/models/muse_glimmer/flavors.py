@@ -34,15 +34,15 @@ from torchtitan.models.common.config_utils import (
     make_ffn_config,
 )
 from torchtitan.models.common.decoder_sharding import (
-    inner_attention_local_spmd_config,
-    lm_head_config,
-    norm_config,
-    pre_lm_head_norm_config,
-    replicated_input_colwise_config,
+    inner_attention_local_spmd_sharding_config,
+    lm_head_sharding_config,
+    norm_sharding_config,
+    pre_lm_head_norm_sharding_config,
+    replicated_input_colwise_sharding_config,
     residual_activation_placement,
-    rope_cache_config,
-    rowwise_config,
-    token_embedding_config,
+    rope_cache_sharding_config,
+    rowwise_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
@@ -53,12 +53,12 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
-    invariant_norm_config,
-    vision_attention_config,
-    vision_colwise_config,
-    vision_inner_attention_config,
-    vision_invariant_linear_config,
-    vision_rowwise_config,
+    invariant_norm_sharding_config,
+    vision_attention_sharding_config,
+    vision_colwise_sharding_config,
+    vision_inner_attention_sharding_config,
+    vision_invariant_linear_sharding_config,
+    vision_rowwise_sharding_config,
 )
 from .model import (
     Attention,
@@ -69,13 +69,13 @@ from .model import (
     SoftCappedLinear,
 )
 from .sharding import (
-    attention_config,
-    perception_emb_norm_config,
-    scaleless_head_norm_config,
-    vision_encoder_config,
-    vision_pos_embed_config,
-    vision_rope_freq_config,
-    vision_token_permute_config,
+    attention_sharding_config,
+    perception_emb_norm_sharding_config,
+    scaleless_head_norm_sharding_config,
+    vision_encoder_sharding_config,
+    vision_pos_embed_sharding_config,
+    vision_rope_freq_sharding_config,
+    vision_token_permute_sharding_config,
 )
 from .vision_encoder import (
     _VisionPosEmbed,
@@ -210,7 +210,7 @@ def _build_muse_glimmer_attention(
             window_size=window,
         )
     inner_attention = dataclasses.replace(
-        inner_attention, sharding_config=inner_attention_local_spmd_config()
+        inner_attention, sharding_config=inner_attention_local_spmd_sharding_config()
     )
     return Attention.Config(
         n_heads=n_heads,
@@ -230,26 +230,26 @@ def _build_muse_glimmer_attention(
                     n_kv_heads=n_kv_heads,
                     head_dim=head_dim,
                 ),
-                sharding_config=replicated_input_colwise_config(),
+                sharding_config=replicated_input_colwise_sharding_config(),
             ),
         ),
         wo=RowParallelLinear.Config(
             in_features=n_heads * head_dim,
             out_features=dim,
             param_init=_depth_init(layer_id),
-            sharding_config=rowwise_config(
+            sharding_config=rowwise_sharding_config(
                 output_layout=residual_activation_placement(enable_sp=enable_sp)
             ),
         ),
         qk_norm=_scaleless_norm(
-            head_dim, _NORM_EPS, sharding_config=scaleless_head_norm_config()
+            head_dim, _NORM_EPS, sharding_config=scaleless_head_norm_sharding_config()
         ),
         inner_attention=inner_attention,
         rope=ComplexRoPE.Config(
             dim=head_dim,
             max_context_length=max_context_length,
             theta=_ROPE_THETA,
-            sharding_config=rope_cache_config(),
+            sharding_config=rope_cache_sharding_config(),
         )
         if _layer_use_rope(layer_id, n_layers)
         else None,
@@ -258,10 +258,10 @@ def _build_muse_glimmer_attention(
             in_features=dim,
             out_features=n_heads * head_dim,
             param_init=_LINEAR_INIT,
-            sharding_config=replicated_input_colwise_config(),
+            sharding_config=replicated_input_colwise_sharding_config(),
         ),
         window_size=window,
-        sharding_config=attention_config(enable_sp=enable_sp),
+        sharding_config=attention_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -279,7 +279,7 @@ def _build_muse_glimmer_layers(
 ) -> list[MuseGlimmerTransformerBlock.Config]:
     hidden_dim = int(_FFN_DIM_MULTIPLIER * dim)
     # All four norms operate on the residual activation.
-    norm_sharding = norm_config(enable_sp=enable_sp)
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     layers = []
     for layer_id in range(n_layers):
         layers.append(
@@ -328,7 +328,9 @@ def _build_muse_glimmer_layers(
 
 def _vision_layer_norm(dim: int) -> LayerNorm.Config:
     return LayerNorm.Config(
-        normalized_shape=dim, eps=_NORM_EPS, sharding_config=invariant_norm_config()
+        normalized_shape=dim,
+        eps=_NORM_EPS,
+        sharding_config=invariant_norm_sharding_config(),
     )
 
 
@@ -356,7 +358,7 @@ def _vision_row_parallel_linear(
         out_features=out_features,
         bias=True,
         param_init=_VISION_LINEAR_INIT,
-        sharding_config=vision_rowwise_config(),
+        sharding_config=vision_rowwise_sharding_config(),
     )
 
 
@@ -393,7 +395,7 @@ def muse_glimmer_vision_encoder_config(
         rope_freq=VisionRopeFreq.Config(
             head_dim=head_dim,
             rope_theta=rope_theta,
-            sharding_config=vision_rope_freq_config(),
+            sharding_config=vision_rope_freq_sharding_config(),
         ),
         param_init=_POS_EMB_INIT,
         # conv1 builds ``self.conv1_linear``. Plain pixel patches enter
@@ -402,7 +404,7 @@ def muse_glimmer_vision_encoder_config(
             patch_dim,
             latent_dim,
             bias=False,
-            sharding_config=vision_invariant_linear_config(),
+            sharding_config=vision_invariant_linear_sharding_config(),
         ),
         ln_pre=_vision_layer_norm(latent_dim),
         block=VisionTransformerBlock.Config(
@@ -416,25 +418,25 @@ def muse_glimmer_vision_encoder_config(
                     latent_dim,
                     num_heads * head_dim,
                     bias=True,
-                    sharding_config=vision_colwise_config(input_tp=spmd.R),
+                    sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
                 ),
                 wk=_vision_linear(
                     latent_dim,
                     num_heads * head_dim,
                     bias=True,
-                    sharding_config=vision_colwise_config(input_tp=spmd.R),
+                    sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
                 ),
                 wv=_vision_linear(
                     latent_dim,
                     num_heads * head_dim,
                     bias=True,
-                    sharding_config=vision_colwise_config(input_tp=spmd.R),
+                    sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
                 ),
                 proj=_vision_row_parallel_linear(num_heads * head_dim, latent_dim),
                 inner_attention=FlexInnerAttention.Config(
-                    sharding_config=vision_inner_attention_config()
+                    sharding_config=vision_inner_attention_sharding_config()
                 ),
-                sharding_config=vision_attention_config(rope_cache_dp=spmd.V),
+                sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
             ),
             norm2=_vision_layer_norm(latent_dim),
             mlp=VisionMLP.Config(
@@ -442,18 +444,20 @@ def muse_glimmer_vision_encoder_config(
                     latent_dim,
                     mlp_hidden,
                     bias=True,
-                    sharding_config=vision_colwise_config(),
+                    sharding_config=vision_colwise_sharding_config(),
                 ),
                 fc2=_vision_row_parallel_linear(mlp_hidden, latent_dim),
                 act_fn=GELU.Config(approximate="none"),
             ),
         ),
         ln_post=_vision_layer_norm(latent_dim),
-        pos_embed=_VisionPosEmbed.Config(sharding_config=vision_pos_embed_config()),
-        token_permute=_VisionTokenPermute.Config(
-            sharding_config=vision_token_permute_config()
+        pos_embed=_VisionPosEmbed.Config(
+            sharding_config=vision_pos_embed_sharding_config()
         ),
-        sharding_config=vision_encoder_config(),
+        token_permute=_VisionTokenPermute.Config(
+            sharding_config=vision_token_permute_sharding_config()
+        ),
+        sharding_config=vision_encoder_sharding_config(),
     )
 
 
@@ -470,13 +474,13 @@ def muse_glimmer_vision_adapter_config(
             input_dim,
             output_dim,
             bias=False,
-            sharding_config=vision_invariant_linear_config(),
+            sharding_config=vision_invariant_linear_sharding_config(),
         ),
         c_proj=_vision_linear(
             output_dim,
             output_dim,
             bias=False,
-            sharding_config=vision_invariant_linear_config(),
+            sharding_config=vision_invariant_linear_sharding_config(),
         ),
     )
 
@@ -524,12 +528,12 @@ def _muse_glimmer_config(
             in_features=vision_adapter_dim,
             out_features=dim,
             param_init=_LINEAR_INIT,
-            sharding_config=vision_invariant_linear_config(),
+            sharding_config=vision_invariant_linear_sharding_config(),
         )
         perception_emb_norm = _scaleless_norm(
             dim,
             _NORM_EPS,
-            sharding_config=perception_emb_norm_config(enable_sp=enable_sp),
+            sharding_config=perception_emb_norm_sharding_config(enable_sp=enable_sp),
         )
 
     return MuseGlimmerModel.Config(
@@ -546,12 +550,14 @@ def _muse_glimmer_config(
                 num_embeddings=vocab_size,
                 embedding_dim=dim,
                 param_init=_EMBEDDING_INIT,
-                sharding_config=token_embedding_config(enable_sp=enable_sp),
+                sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
             ),
-            # Scaleless: norm_config's weight declaration is ignored since
+            # Scaleless: norm_sharding_config's weight declaration is ignored since
             # there is no weight param.
             norm=_scaleless_norm(
-                dim, _NORM_EPS, sharding_config=norm_config(enable_sp=enable_sp)
+                dim,
+                _NORM_EPS,
+                sharding_config=norm_sharding_config(enable_sp=enable_sp),
             ),
         ),
         # lm_head applies the output multiplier + tanh soft-cap so the transform
@@ -562,7 +568,7 @@ def _muse_glimmer_config(
             param_init=_output_linear_init(dim),
             output_multiplier=output_multiplier,
             output_soft_cap_temp=20.0,
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         # Keep the checkpoint's zero gain center, but initialize to unit scale.
         norm=dataclasses.replace(
@@ -570,7 +576,7 @@ def _muse_glimmer_config(
                 dim,
                 _NORM_EPS,
                 gain_center=0.0,
-                sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+                sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
             ),
             param_init={"weight": nn.init.ones_},
         ),

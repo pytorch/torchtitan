@@ -21,7 +21,7 @@ from torchtitan.models.common.decoder_sharding import (
 )
 
 
-def mla_attention_config(*, enable_sp: bool) -> ShardingConfig:
+def mla_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """MLA attention boundary: ``x`` in and out in the residual layout.
 
     ``Attention.forward`` explicitly gathers x once for all MLA branches. This
@@ -34,7 +34,7 @@ def mla_attention_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def mtp_block_config(*, enable_sp: bool) -> ShardingConfig | None:
+def mtp_block_sharding_config(*, enable_sp: bool) -> ShardingConfig | None:
     """MTP block boundary: the valid mask follows token IDs under SP."""
     if not enable_sp:
         return None
@@ -45,7 +45,7 @@ def mtp_block_config(*, enable_sp: bool) -> ShardingConfig | None:
     )
 
 
-def mtp_projection_config(*, enable_sp: bool) -> ShardingConfig:
+def mtp_projection_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """MTP ``eh_proj``: replicated weight over residual-layout activations."""
     activation = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(

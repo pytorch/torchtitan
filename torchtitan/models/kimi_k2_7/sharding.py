@@ -11,7 +11,7 @@ it, and ``model.parallelize()`` applies TP/EP/SP through the Module protocol.
 
 - Decoder (MLA + MoE): built with DeepSeek V3's sharded layer builder.
   Multimodal configs keep the token embedding ``Replicate`` for the vision
-  scatter and resume SP at layer 0 (see ``sequence_parallel_first_layer_config``).
+  scatter and resume SP at layer 0 (see ``sequence_parallel_first_layer_sharding_config``).
 - Vision encoder: activations flow ``Invariant`` (no SP -- the patch sequence is
   short, so sequence-sharding would add gather/scatter around the block-diagonal
   attention for little memory gain). Only the linear layers are Colwise/Rowwise
@@ -33,7 +33,7 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
-def sequence_parallel_first_layer_config() -> ShardingConfig:
+def sequence_parallel_first_layer_sharding_config() -> ShardingConfig:
     """Layer 0 boundary that resumes SP after a ``Replicate`` embedding.
 
     Layer 0 takes a ``Replicate`` input and its rowwise ``wo`` reduce-scatters
@@ -51,7 +51,7 @@ def _moonvit_state_placement() -> SpmdType:
     return SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
 
 
-def moonvit_encoder_config() -> ShardingConfig:
+def moonvit_encoder_sharding_config() -> ShardingConfig:
     """MoonViT3d encoder boundary; its ``pos_embed`` table is TP-invariant.
 
     ``patch_embed`` wraps the plain ``pixel_values`` input as a TP-invariant
@@ -64,7 +64,7 @@ def moonvit_encoder_config() -> ShardingConfig:
     )
 
 
-def moonvit_rotary_config() -> ShardingConfig:
+def moonvit_rotary_sharding_config() -> ShardingConfig:
     """TP-invariant 2D rotary embedding frequencies and output."""
     state_placement = _moonvit_state_placement()
     return ShardingConfig(

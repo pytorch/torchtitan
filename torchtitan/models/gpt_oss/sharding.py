@@ -16,7 +16,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe_sharding import routed_expert_weight_placement
 
 
-def attention_config(*, enable_sp: bool) -> ShardingConfig:
+def attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Attention boundary; the ``sinks`` parameter is sharded across heads."""
     layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
@@ -26,7 +26,7 @@ def attention_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def routed_expert_linear_config(*, enable_ep: bool) -> ShardingConfig:
+def routed_expert_linear_sharding_config(*, enable_ep: bool) -> ShardingConfig:
     """Routed-expert linear whose bias shares its weight's placement."""
     placement = routed_expert_weight_placement(enable_ep=enable_ep)
     return ShardingConfig(state_shardings={"weight": placement, "bias": placement})

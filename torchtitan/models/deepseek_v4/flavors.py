@@ -39,18 +39,21 @@ from torchtitan.models.common.config_utils import (
     make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
+    colwise_sharding_config,
     dense_activation_placement,
-    lm_head_config,
-    norm_config,
-    pre_lm_head_norm_config,
-    replicated_state_config,
+    lm_head_sharding_config,
+    norm_sharding_config,
+    pre_lm_head_norm_sharding_config,
+    replicated_state_sharding_config,
     residual_activation_placement,
-    rope_cache_config,
-    rowwise_config,
-    token_embedding_config,
+    rope_cache_sharding_config,
+    rowwise_sharding_config,
+    token_embedding_sharding_config,
 )
-from torchtitan.models.common.moe_sharding import moe_config, router_gate_config
+from torchtitan.models.common.moe_sharding import (
+    moe_sharding_config,
+    router_gate_sharding_config,
+)
 from torchtitan.models.common.param_init import depth_scaled_std
 
 from .attention import (
@@ -65,18 +68,18 @@ from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4Router
 from .mtp import MTPBlock
 from .sharding import (
-    attention_config,
-    attn_sink_config,
-    compressor_config,
-    deepseek_v4_router_config,
-    dsa_inner_attention_config,
-    hc_head_config,
-    hc_post_config,
-    hc_pre_config,
-    indexer_config,
-    mtp_block_config,
-    mtp_hc_head_config,
-    wo_a_config,
+    attention_sharding_config,
+    attn_sink_sharding_config,
+    compressor_sharding_config,
+    deepseek_v4_router_sharding_config,
+    dsa_inner_attention_sharding_config,
+    hc_head_sharding_config,
+    hc_post_sharding_config,
+    hc_pre_sharding_config,
+    indexer_sharding_config,
+    mtp_block_sharding_config,
+    mtp_hc_head_sharding_config,
+    wo_a_sharding_config,
 )
 
 __all__ = [
@@ -132,7 +135,7 @@ def _make_compressor_config(
     rope: RoPE.Config,
 ) -> "Compressor.Config":
     return Compressor.Config(
-        rope=dataclasses.replace(rope, sharding_config=rope_cache_config()),
+        rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
         head_dim=head_dim,
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
@@ -144,7 +147,7 @@ def _make_compressor_config(
             bias=False,
             param_init=_LINEAR_INIT,
             inplace_wgrad_accum=False,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         wgate=Linear.Config(
             in_features=dim,
@@ -152,18 +155,18 @@ def _make_compressor_config(
             bias=False,
             param_init=_LINEAR_INIT,
             inplace_wgrad_accum=False,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         norm=RMSNorm.Config(
             normalized_shape=head_dim,
             eps=norm_eps,
             param_init=_NORM_INIT,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         param_init={
             "ape": partial(nn.init.trunc_normal_, std=0.02),
         },
-        sharding_config=compressor_config(),
+        sharding_config=compressor_sharding_config(),
     )
 
 
@@ -180,7 +183,7 @@ def _make_indexer_config(
 ) -> "Indexer.Config":
     coff = 2  # overlap always True for indexer
     return Indexer.Config(
-        rope=dataclasses.replace(rope, sharding_config=rope_cache_config()),
+        rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
         num_index_heads=num_index_heads,
         index_head_dim=index_head_dim,
         rope_head_dim=rope_head_dim,
@@ -189,14 +192,14 @@ def _make_indexer_config(
             out_features=num_index_heads * index_head_dim,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         weights_proj=Linear.Config(
             in_features=dim,
             out_features=num_index_heads,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         compressor=_make_compressor_config(
             dim=dim,
@@ -207,7 +210,7 @@ def _make_indexer_config(
             coff=coff,
             rope=rope,
         ),
-        sharding_config=indexer_config(),
+        sharding_config=indexer_sharding_config(),
     )
 
 
@@ -283,7 +286,9 @@ def _make_v4_attn_config(
         compress_ratio=compress_ratio,
         softmax_scale=softmax_scale,
         index_topk=index_topk,
-        sharding_config=dsa_inner_attention_config(compress_ratio=compress_ratio),
+        sharding_config=dsa_inner_attention_sharding_config(
+            compress_ratio=compress_ratio
+        ),
     )
     replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
@@ -302,53 +307,55 @@ def _make_v4_attn_config(
         n_layers=n_layers,
         layer_id=layer_id,
         inner_attention=inner_attention_cfg,
-        rope=dataclasses.replace(rope, sharding_config=rope_cache_config()),
+        rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
         wq_a=Linear.Config(
             in_features=dim,
             out_features=q_lora_rank,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         q_norm=RMSNorm.Config(
             normalized_shape=q_lora_rank,
             eps=norm_eps,
             param_init=_NORM_INIT,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         wq_b=Linear.Config(
             in_features=q_lora_rank,
             out_features=n_heads * hd,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=colwise_config(input_layout=replicated_input_layout),
+            sharding_config=colwise_sharding_config(
+                input_layout=replicated_input_layout
+            ),
         ),
         wkv=Linear.Config(
             in_features=dim,
             out_features=hd,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         kv_norm=RMSNorm.Config(
             normalized_shape=hd,
             eps=norm_eps,
             param_init=_NORM_INIT,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         wo_a=Linear.Config(
             in_features=per_group_in,
             out_features=per_group_out,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=wo_a_config(),
+            sharding_config=wo_a_sharding_config(),
         ),
         wo_b=RowParallelLinear.Config(
             in_features=per_group_out,
             out_features=dim,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=rowwise_config(
+            sharding_config=rowwise_sharding_config(
                 output_layout=residual_activation_placement(enable_sp=enable_sp)
             ),
         ),
@@ -360,12 +367,12 @@ def _make_v4_attn_config(
             out_features=n_heads,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=attn_sink_config(),
+            sharding_config=attn_sink_sharding_config(),
         ),
         compressor=compressor_cfg,
         compressor_128=compressor_128_cfg,
         indexer=indexer_cfg,
-        sharding_config=attention_config(enable_sp=enable_sp),
+        sharding_config=attention_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -395,7 +402,7 @@ def _make_v4_moe_config(
                 backward_mode="hi_mid_lo",
                 bias=False,
                 param_init=_depth_init(layer_id),
-                sharding_config=router_gate_config(),
+                sharding_config=router_gate_sharding_config(),
             ),
             top_k=top_k,
             score_func=SqrtSoftplus.Config(),
@@ -404,7 +411,7 @@ def _make_v4_moe_config(
             vocab_size=vocab_size,
             n_hash_layers=n_hash_layers,
             layer_id=layer_id,
-            sharding_config=deepseek_v4_router_config(
+            sharding_config=deepseek_v4_router_sharding_config(
                 layer_id=layer_id, n_hash_layers=n_hash_layers
             ),
         ),
@@ -428,7 +435,7 @@ def _make_v4_moe_config(
             else None
         ),
         load_balance_coeff=load_balance_coeff,
-        sharding_config=moe_config(enable_sp=enable_sp),
+        sharding_config=moe_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -488,8 +495,8 @@ def _build_v4_layers(
         dense_layers = set()
     if dense_hidden_dim is None:
         dense_hidden_dim = moe_inter_dim * 4
-    norm_sharding = norm_config(enable_sp=enable_sp)
-    hc_pre_sharding = hc_pre_config(enable_sp=enable_sp)
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
+    hc_pre_sharding = hc_pre_sharding_config(enable_sp=enable_sp)
 
     layers = []
     for layer_id in range(n_layers):
@@ -578,7 +585,7 @@ def _build_v4_layers(
                     sharding_config=hc_pre_sharding,
                 ),
                 hc_post=HcPost.Config(
-                    sharding_config=hc_post_config(enable_sp=enable_sp)
+                    sharding_config=hc_post_sharding_config(enable_sp=enable_sp)
                 ),
             )
         )
@@ -596,13 +603,15 @@ def _make_mtp_inner_block(
     attn_cfg.compressor = None
     attn_cfg.compressor_128 = None
     attn_cfg.indexer = None
-    attn_cfg.rope = dataclasses.replace(rope, sharding_config=rope_cache_config())
+    attn_cfg.rope = dataclasses.replace(
+        rope, sharding_config=rope_cache_sharding_config()
+    )
     attn_cfg.inner_attention = SlidingWindowAttention.Config(
         window_size=inner_attn_cfg.window_size,
         compress_ratio=1,
         softmax_scale=inner_attn_cfg.softmax_scale,
         index_topk=inner_attn_cfg.index_topk,
-        sharding_config=dsa_inner_attention_config(compress_ratio=1),
+        sharding_config=dsa_inner_attention_sharding_config(compress_ratio=1),
     )
     return block_cfg
 
@@ -627,7 +636,7 @@ def _build_mtp_layers(
             assert isinstance(router_cfg, DeepSeekV4Router.Config)
             router_cfg.gate.param_init = _depth_init(layer_id)
             router_cfg.layer_id = layer_id
-            router_cfg.sharding_config = deepseek_v4_router_config(
+            router_cfg.sharding_config = deepseek_v4_router_sharding_config(
                 layer_id=layer_id, n_hash_layers=router_cfg.n_hash_layers
             )
             expert_init = _depth_experts_init(layer_id)
@@ -658,32 +667,32 @@ def _build_mtp_layers(
                     out_features=dim,
                     bias=False,
                     param_init=_LINEAR_INIT,
-                    sharding_config=replicated_state_config("weight"),
+                    sharding_config=replicated_state_sharding_config("weight"),
                 ),
                 h_proj=Linear.Config(
                     in_features=dim,
                     out_features=dim,
                     bias=False,
                     param_init=_LINEAR_INIT,
-                    sharding_config=replicated_state_config("weight"),
+                    sharding_config=replicated_state_sharding_config("weight"),
                 ),
                 enorm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=norm_eps,
                     param_init=_NORM_INIT,
-                    sharding_config=replicated_state_config("weight"),
+                    sharding_config=replicated_state_sharding_config("weight"),
                 ),
                 hnorm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=norm_eps,
                     param_init=_NORM_INIT,
-                    sharding_config=replicated_state_config("weight"),
+                    sharding_config=replicated_state_sharding_config("weight"),
                 ),
                 mtp_norm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=norm_eps,
                     param_init=_NORM_INIT,
-                    sharding_config=replicated_state_config("weight"),
+                    sharding_config=replicated_state_sharding_config("weight"),
                 ),
                 hc_head=HcHead.Config(
                     hc_mult=hc_mult,
@@ -691,10 +700,10 @@ def _build_mtp_layers(
                     norm_eps=norm_eps,
                     eps=hc_eps,
                     param_init=_HC_INIT,
-                    sharding_config=mtp_hc_head_config(),
+                    sharding_config=mtp_hc_head_sharding_config(),
                 ),
                 param_init=_HC_INIT,
-                sharding_config=mtp_block_config(),
+                sharding_config=mtp_block_sharding_config(),
             )
         )
     return mtp_layers
@@ -796,7 +805,7 @@ def _debugmodel(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -804,7 +813,7 @@ def _debugmodel(
             normalized_shape=dim,
             eps=norm_eps,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -812,7 +821,7 @@ def _debugmodel(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         hc_mult=hc_mult,
@@ -824,7 +833,7 @@ def _debugmodel(
             norm_eps=norm_eps,
             eps=hc_eps,
             param_init=_HC_INIT,
-            sharding_config=hc_head_config(
+            sharding_config=hc_head_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -942,7 +951,7 @@ def _deepseek_v4_flash(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -950,7 +959,7 @@ def _deepseek_v4_flash(
             normalized_shape=dim,
             eps=norm_eps,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -958,7 +967,7 @@ def _deepseek_v4_flash(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         hc_mult=hc_mult,
@@ -970,7 +979,7 @@ def _deepseek_v4_flash(
             norm_eps=norm_eps,
             eps=hc_eps,
             param_init=_HC_INIT,
-            sharding_config=hc_head_config(
+            sharding_config=hc_head_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -1088,7 +1097,7 @@ def _deepseek_v4_pro(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -1096,7 +1105,7 @@ def _deepseek_v4_pro(
             normalized_shape=dim,
             eps=norm_eps,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -1104,7 +1113,7 @@ def _deepseek_v4_pro(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         hc_mult=hc_mult,
@@ -1116,7 +1125,7 @@ def _deepseek_v4_pro(
             norm_eps=norm_eps,
             eps=hc_eps,
             param_init=_HC_INIT,
-            sharding_config=hc_head_config(
+            sharding_config=hc_head_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),

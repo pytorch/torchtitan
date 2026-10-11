@@ -13,9 +13,9 @@ from torchtitan.config.transform import (
 )
 from torchtitan.models.common import Embedding, Linear
 from torchtitan.models.common.decoder_sharding import (
-    lm_head_config,
-    pre_lm_head_norm_config,
-    token_embedding_config,
+    lm_head_sharding_config,
+    pre_lm_head_norm_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.qwen3_5.flavors import (
     _27b,
@@ -59,7 +59,7 @@ def _qwen3_8_2_4t_a95b(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -67,7 +67,7 @@ def _qwen3_8_2_4t_a95b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -75,7 +75,7 @@ def _qwen3_8_2_4t_a95b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(

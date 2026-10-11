@@ -55,7 +55,7 @@ def multimodal_input_sharding() -> dict[str, SpmdType]:
     }
 
 
-def multimodal_token_embedding_config() -> ShardingConfig:
+def multimodal_token_embedding_sharding_config() -> ShardingConfig:
     """Vocab-sharded token embedding whose output stays Replicate across TP.
 
     The vision scatter writes features at arbitrary sequence positions, so it
@@ -72,7 +72,7 @@ def multimodal_token_embedding_config() -> ShardingConfig:
     )
 
 
-def invariant_norm_config() -> ShardingConfig:
+def invariant_norm_sharding_config() -> ShardingConfig:
     """Norm whose state and activations are invariant across TP ranks."""
     return ShardingConfig(
         state_shardings={
@@ -90,7 +90,7 @@ def invariant_norm_config() -> ShardingConfig:
     )
 
 
-def vision_invariant_linear_config() -> ShardingConfig:
+def vision_invariant_linear_sharding_config() -> ShardingConfig:
     """Unsharded linear whose state and activations are invariant at TP."""
     return ShardingConfig(
         state_shardings={
@@ -108,7 +108,7 @@ def vision_invariant_linear_config() -> ShardingConfig:
     )
 
 
-def vision_colwise_config(
+def vision_colwise_sharding_config(
     *,
     input_tp: spmd.PerMeshAxisSpmdType = spmd.I,
 ) -> ShardingConfig:
@@ -128,7 +128,7 @@ def vision_colwise_config(
     )
 
 
-def vision_rowwise_config() -> ShardingConfig:
+def vision_rowwise_sharding_config() -> ShardingConfig:
     """Sharding contract for an invariant-output vision row projection."""
     input_layout = _vision_activation_placement(tp=spmd.S(1))
     return ShardingConfig(
@@ -146,7 +146,7 @@ def vision_rowwise_config() -> ShardingConfig:
     )
 
 
-def vision_attention_config(
+def vision_attention_sharding_config(
     *,
     rope_cache_dp: spmd.PerMeshAxisSpmdType,
 ) -> ShardingConfig:
@@ -166,7 +166,7 @@ def vision_attention_config(
     )
 
 
-def vision_inner_attention_config() -> ShardingConfig:
+def vision_inner_attention_sharding_config() -> ShardingConfig:
     """Local-SPMD vision attention kernel with heads sharded across TP."""
     attention_layout = _vision_activation_placement(tp=spmd.S(1))
     return ShardingConfig(

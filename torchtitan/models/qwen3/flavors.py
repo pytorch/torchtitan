@@ -35,10 +35,10 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.decoder_sharding import (
-    lm_head_config,
-    norm_config,
-    pre_lm_head_norm_config,
-    token_embedding_config,
+    lm_head_sharding_config,
+    norm_sharding_config,
+    pre_lm_head_norm_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.param_init import skip_param_init
@@ -116,7 +116,7 @@ def _build_qwen3_layers(
 ) -> list[TransformerBlock.Config]:
     """Build sharded per-layer configs for dense Qwen3 models."""
     inner_attention = get_attention_config(attn_backend)
-    norm_sharding = norm_config(enable_sp=enable_sp)
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     layers = []
     for _ in range(n_layers):
         layers.append(
@@ -164,7 +164,7 @@ def _build_qwen3_moe_layers(
 ) -> list[TransformerBlock.Config]:
     """Build sharded per-layer configs for MoE Qwen3 models."""
     inner_attention = get_attention_config(attn_backend)
-    norm_sharding = norm_config(enable_sp=enable_sp)
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     output_init = _residual_output_init(n_layers)
     experts_init = _moe_experts_init(n_layers)
     layers = []
@@ -223,7 +223,7 @@ def _debugmodel(
         dim=dim,
         norm=_qwen3_norm(
             dim,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -232,7 +232,7 @@ def _debugmodel(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -240,7 +240,7 @@ def _debugmodel(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -273,7 +273,7 @@ def _0_6b(
         dim=dim,
         norm=_qwen3_norm(
             dim,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -282,7 +282,7 @@ def _0_6b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -290,7 +290,7 @@ def _0_6b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -323,7 +323,7 @@ def _1_7b(
         dim=dim,
         norm=_qwen3_norm(
             dim,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -332,7 +332,7 @@ def _1_7b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -340,7 +340,7 @@ def _1_7b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -373,7 +373,7 @@ def _4b(
         dim=dim,
         norm=_qwen3_norm(
             dim,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -382,7 +382,7 @@ def _4b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -390,7 +390,7 @@ def _4b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -423,7 +423,7 @@ def _8b(
         dim=dim,
         norm=_qwen3_norm(
             dim,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -431,7 +431,7 @@ def _8b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -439,7 +439,7 @@ def _8b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -472,7 +472,7 @@ def _14b(
         dim=dim,
         norm=_qwen3_norm(
             dim,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -480,7 +480,7 @@ def _14b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -488,7 +488,7 @@ def _14b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -521,7 +521,7 @@ def _32b(
         dim=dim,
         norm=_qwen3_norm(
             dim,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -529,7 +529,7 @@ def _32b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -537,7 +537,7 @@ def _32b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -576,7 +576,7 @@ def _debugmodel_moe(
         dim=dim,
         norm=_qwen3_norm(
             dim,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -584,7 +584,7 @@ def _debugmodel_moe(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -592,7 +592,7 @@ def _debugmodel_moe(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_moe_layers(
             n_layers=n_layers,
@@ -631,7 +631,7 @@ def _30b_a3b(
         dim=dim,
         norm=_qwen3_norm(
             dim,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -639,7 +639,7 @@ def _30b_a3b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -647,7 +647,7 @@ def _30b_a3b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_moe_layers(
             n_layers=n_layers,
@@ -686,7 +686,7 @@ def _235b_a22b(
         dim=dim,
         norm=_qwen3_norm(
             dim,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -694,7 +694,7 @@ def _235b_a22b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -702,7 +702,7 @@ def _235b_a22b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_moe_layers(
             n_layers=n_layers,

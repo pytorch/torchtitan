@@ -21,7 +21,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
-    norm_config,
+    norm_sharding_config,
     residual_activation_placement,
 )
 
@@ -30,28 +30,28 @@ DP = MeshAxisName.DP
 TP = MeshAxisName.TP
 
 
-def tp_unsharded_weight_config(*, token_sharded: bool) -> ShardingConfig:
+def tp_unsharded_weight_sharding_config(*, token_sharded: bool) -> ShardingConfig:
     """Keep the weight TP-unsharded: R when tokens are TP-sharded, for gradient reduction; otherwise I."""
     return ShardingConfig(
-        state_shardings=norm_config(enable_sp=token_sharded).state_shardings
+        state_shardings=norm_sharding_config(enable_sp=token_sharded).state_shardings
     )
 
 
-def mla_attention_config(*, enable_sp: bool) -> ShardingConfig:
+def mla_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """MLA input boundary in the residual layout."""
     return ShardingConfig(
         in_src_shardings={"x_TD": residual_activation_placement(enable_sp=enable_sp)},
     )
 
 
-def kda_conv_config() -> ShardingConfig:
+def kda_conv_sharding_config() -> ShardingConfig:
     """Depthwise KDA convolution weights, sharded on channels (heads)."""
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
     )
 
 
-def inner_kda_config() -> ShardingConfig:
+def inner_kda_sharding_config() -> ShardingConfig:
     """The KDA kernel runs on the rank-local heads in one local SPMD region."""
     projected_placement = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     head_placement = attention_activation_placement()
@@ -77,7 +77,7 @@ def inner_kda_config() -> ShardingConfig:
     )
 
 
-def kda_config(*, enable_sp: bool) -> ShardingConfig:
+def kda_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Head-sharded TP for KDA, as Qwen3.5's GatedDeltaNet.
 
     The low-rank ``forget_a`` and the output norm keep replicated weights.
@@ -92,7 +92,7 @@ def kda_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def latent_routed_down_config() -> ShardingConfig:
+def latent_routed_down_sharding_config() -> ShardingConfig:
     """Down-projection into the routed experts' token-sharded latent space."""
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
@@ -100,9 +100,9 @@ def latent_routed_down_config() -> ShardingConfig:
     )
 
 
-def latent_routed_up_config() -> ShardingConfig:
+def latent_routed_up_sharding_config() -> ShardingConfig:
     """Up-projection out of the token-sharded latent space."""
-    routed_up = tp_unsharded_weight_config(token_sharded=True)
+    routed_up = tp_unsharded_weight_sharding_config(token_sharded=True)
     routed_up.out_src_shardings = dense_sequence_parallel_placement()
     return routed_up
 
@@ -119,7 +119,7 @@ def _block_residual_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdType:
     )
 
 
-def multimodal_first_layer_config(*, enable_sp: bool) -> ShardingConfig:
+def multimodal_first_layer_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Layer 0 boundary after a TP-replicated multimodal token embedding.
 
     Restores the decoder's layout for the stream and the block-residual stack.

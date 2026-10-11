@@ -40,7 +40,7 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.moe_sharding import shared_experts_config
+from torchtitan.models.common.moe_sharding import shared_experts_sharding_config
 from torchtitan.models.deepseek_v3.flavors import make_deepseek_v3_router_config
 
 
@@ -516,8 +516,8 @@ def _build_moe_config(params: dict, *, enable_sp: bool, enable_ep: bool) -> MoE.
             # not load Qwen3.5's optional model dependencies.
             from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
             from torchtitan.models.qwen3_5.sharding import (
-                sigmoid_gate_config,
-                sigmoid_gated_w13_config,
+                sigmoid_gate_sharding_config,
+                sigmoid_gated_w13_sharding_config,
             )
 
             shared_experts = SigmoidGatedFeedForward.Config(
@@ -528,7 +528,7 @@ def _build_moe_config(params: dict, *, enable_sp: bool, enable_ep: bool) -> MoE.
                     out_features=shared_info["hidden_dim"],
                     num_linears=2,
                     param_init=fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT),
-                    sharding_config=sigmoid_gated_w13_config(),
+                    sharding_config=sigmoid_gated_w13_sharding_config(),
                 ),
                 w2=ffn_config.w2,
                 activation_fn=ffn_config.activation_fn,
@@ -537,9 +537,9 @@ def _build_moe_config(params: dict, *, enable_sp: bool, enable_ep: bool) -> MoE.
                     out_features=1,
                     bias=False,
                     param_init=_LINEAR_INIT,
-                    sharding_config=sigmoid_gate_config(),
+                    sharding_config=sigmoid_gate_sharding_config(),
                 ),
-                sharding_config=shared_experts_config(enable_sp=enable_sp),
+                sharding_config=shared_experts_sharding_config(enable_sp=enable_sp),
             )
         else:
             shared_experts = ffn_config

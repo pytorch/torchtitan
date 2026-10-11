@@ -29,9 +29,9 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.decoder_sharding import (
-    lm_head_config,
-    pre_lm_head_norm_config,
-    token_embedding_config,
+    lm_head_sharding_config,
+    pre_lm_head_norm_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std
@@ -42,21 +42,21 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
-    invariant_norm_config,
-    multimodal_token_embedding_config,
-    vision_attention_config,
-    vision_colwise_config,
-    vision_inner_attention_config,
-    vision_invariant_linear_config,
-    vision_rowwise_config,
+    invariant_norm_sharding_config,
+    multimodal_token_embedding_sharding_config,
+    vision_attention_sharding_config,
+    vision_colwise_sharding_config,
+    vision_inner_attention_sharding_config,
+    vision_invariant_linear_sharding_config,
+    vision_rowwise_sharding_config,
 )
 from torchtitan.models.deepseek_v3.flavors import build_mla_moe_layers
 from .model import KimiK25Model
 from .qk_clip import QKClipFlexInnerAttention
 from .sharding import (
-    moonvit_encoder_config,
-    moonvit_rotary_config,
-    sequence_parallel_first_layer_config,
+    moonvit_encoder_sharding_config,
+    moonvit_rotary_sharding_config,
+    sequence_parallel_first_layer_sharding_config,
 )
 
 from .vision_encoder import (
@@ -137,21 +137,21 @@ def _vision_row_parallel_linear(
         out_features=out_features,
         bias=True,
         param_init=_LINEAR_INIT,
-        sharding_config=vision_rowwise_config(),
+        sharding_config=vision_rowwise_sharding_config(),
     )
 
 
 def _vl_layernorm(dim: int, eps: float = 1e-5) -> LayerNorm.Config:
     return LayerNorm.Config(
-        normalized_shape=dim, eps=eps, sharding_config=invariant_norm_config()
+        normalized_shape=dim, eps=eps, sharding_config=invariant_norm_sharding_config()
     )
 
 
 def _token_embedding_sharding(*, enable_sp: bool, multimodal: bool) -> ShardingConfig:
     """Keep the embedding ``Replicate`` for the vision scatter under SP."""
     if multimodal and enable_sp:
-        return multimodal_token_embedding_config()
-    return token_embedding_config(enable_sp=enable_sp)
+        return multimodal_token_embedding_sharding_config()
+    return token_embedding_sharding_config(enable_sp=enable_sp)
 
 
 def _first_layer_sharding(
@@ -159,7 +159,7 @@ def _first_layer_sharding(
 ) -> ShardingConfig | None:
     """Resume SP at layer 0 after a ``Replicate`` multimodal embedding."""
     if multimodal and enable_sp:
-        return sequence_parallel_first_layer_config()
+        return sequence_parallel_first_layer_sharding_config()
     return None
 
 
@@ -191,22 +191,30 @@ def _vision_encoder_config(
             dim=dim,
             num_heads=num_heads,
             wq=_vl_linear(
-                dim, dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+                dim,
+                dim,
+                sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
             ),
             wk=_vl_linear(
-                dim, dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+                dim,
+                dim,
+                sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
             ),
             wv=_vl_linear(
-                dim, dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+                dim,
+                dim,
+                sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
             ),
             proj=_vision_row_parallel_linear(dim, dim),
             inner_attention=FlexInnerAttention.Config(
-                sharding_config=vision_inner_attention_config()
+                sharding_config=vision_inner_attention_sharding_config()
             ),
-            sharding_config=vision_attention_config(rope_cache_dp=spmd.V),
+            sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
         ),
         mlp=VisionMLP.Config(
-            fc1=_vl_linear(dim, ffn_dim, sharding_config=vision_colwise_config()),
+            fc1=_vl_linear(
+                dim, ffn_dim, sharding_config=vision_colwise_sharding_config()
+            ),
             fc2=_vision_row_parallel_linear(ffn_dim, dim),
         ),
     )
@@ -223,12 +231,12 @@ def _vision_encoder_config(
         init_pos_emb_width=init_pos_emb_width,
         param_init=_POS_EMB_INIT,
         patch_embed_proj=_vl_linear(
-            patch_dim, dim, sharding_config=vision_invariant_linear_config()
+            patch_dim, dim, sharding_config=vision_invariant_linear_sharding_config()
         ),
         rotary_pos_emb=VisionRotaryEmbedding2D.Config(
             head_dim=head_dim,
             theta=rope_theta,
-            sharding_config=moonvit_rotary_config(),
+            sharding_config=moonvit_rotary_sharding_config(),
         ),
         block=block,
         final_norm=_vl_layernorm(dim),
@@ -237,11 +245,11 @@ def _vision_encoder_config(
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
             linear_1=_vl_linear(
-                merged_dim, merged_dim, sharding_config=vision_colwise_config()
+                merged_dim, merged_dim, sharding_config=vision_colwise_sharding_config()
             ),
             linear_2=_vision_row_parallel_linear(merged_dim, text_hidden_size),
         ),
-        sharding_config=moonvit_encoder_config(),
+        sharding_config=moonvit_encoder_sharding_config(),
     )
 
 
@@ -330,13 +338,13 @@ def _debugmodel(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         vision_encoder=_vision_encoder_config(
@@ -417,13 +425,13 @@ def _moonlight_16b_a3b_config(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         vision_encoder=vision_encoder,
@@ -555,13 +563,13 @@ def _kimi_k2_5(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         vision_encoder=_vision_encoder_config(

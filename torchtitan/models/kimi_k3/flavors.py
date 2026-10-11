@@ -40,21 +40,21 @@ from torchtitan.models.common.config_utils import (
     make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.decoder_sharding import (
-    inner_attention_local_spmd_config,
-    lm_head_config,
-    norm_config,
-    pre_lm_head_norm_config,
-    replicated_input_colwise_config,
-    replicated_state_config,
+    inner_attention_local_spmd_sharding_config,
+    lm_head_sharding_config,
+    norm_sharding_config,
+    pre_lm_head_norm_sharding_config,
+    replicated_input_colwise_sharding_config,
+    replicated_state_sharding_config,
     residual_activation_placement,
-    rowwise_config,
-    token_embedding_config,
+    rowwise_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe import QuantileBalancedTopKRouter
 from torchtitan.models.common.moe_sharding import (
-    moe_config,
-    router_config,
-    router_gate_config,
+    moe_sharding_config,
+    router_gate_sharding_config,
+    router_sharding_config,
 )
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.vision_encoder import (
@@ -64,17 +64,17 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
-    invariant_norm_config,
-    multimodal_token_embedding_config,
-    vision_attention_config,
-    vision_colwise_config,
-    vision_inner_attention_config,
-    vision_invariant_linear_config,
-    vision_rowwise_config,
+    invariant_norm_sharding_config,
+    multimodal_token_embedding_sharding_config,
+    vision_attention_sharding_config,
+    vision_colwise_sharding_config,
+    vision_inner_attention_sharding_config,
+    vision_invariant_linear_sharding_config,
+    vision_rowwise_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.sharding import (
-    moonvit_encoder_config,
-    moonvit_rotary_config,
+    moonvit_encoder_sharding_config,
+    moonvit_rotary_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
 from .model import (
@@ -85,14 +85,14 @@ from .model import (
 )
 from .moe import KimiLatentMoE
 from .sharding import (
-    inner_kda_config,
-    kda_config,
-    kda_conv_config,
-    latent_routed_down_config,
-    latent_routed_up_config,
-    mla_attention_config,
-    multimodal_first_layer_config,
-    tp_unsharded_weight_config,
+    inner_kda_sharding_config,
+    kda_conv_sharding_config,
+    kda_sharding_config,
+    latent_routed_down_sharding_config,
+    latent_routed_up_sharding_config,
+    mla_attention_sharding_config,
+    multimodal_first_layer_sharding_config,
+    tp_unsharded_weight_sharding_config,
 )
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
@@ -182,7 +182,7 @@ def _vision_row_parallel_linear(
         out_features=out_features,
         bias=False,
         param_init=param_init or _LINEAR_INIT,
-        sharding_config=vision_rowwise_config(),
+        sharding_config=vision_rowwise_sharding_config(),
     )
 
 
@@ -231,7 +231,7 @@ def _mla_config(
     gate are column-parallel; ``wo`` is row-parallel to the residual layout."""
     inner_attention = replace(
         get_attention_config(attn_backend),
-        sharding_config=inner_attention_local_spmd_config(),
+        sharding_config=inner_attention_local_spmd_sharding_config(),
     )
 
     q_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -243,40 +243,44 @@ def _mla_config(
         qk_rope_head_dim=qk_rope_head_dim,
         v_head_dim=v_head_dim,
         wq_a=_linear(
-            dim, q_lora_rank, sharding_config=replicated_state_config("weight")
+            dim, q_lora_rank, sharding_config=replicated_state_sharding_config("weight")
         ),
-        q_norm=_norm(q_lora_rank, sharding_config=replicated_state_config("weight")),
+        q_norm=_norm(
+            q_lora_rank, sharding_config=replicated_state_sharding_config("weight")
+        ),
         wq_b=_linear(
             q_lora_rank,
             num_heads * q_head_dim,
-            sharding_config=replicated_input_colwise_config(),
+            sharding_config=replicated_input_colwise_sharding_config(),
         ),
         wkv_a=_linear(
             dim,
             kv_lora_rank + qk_rope_head_dim,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
-        kv_norm=_norm(kv_lora_rank, sharding_config=replicated_state_config("weight")),
+        kv_norm=_norm(
+            kv_lora_rank, sharding_config=replicated_state_sharding_config("weight")
+        ),
         wkv_b=_linear(
             kv_lora_rank,
             num_heads * (qk_nope_head_dim + v_head_dim),
-            sharding_config=replicated_input_colwise_config(),
+            sharding_config=replicated_input_colwise_sharding_config(),
         ),
         gate=_linear(
             dim,
             num_heads * v_head_dim,
-            sharding_config=replicated_input_colwise_config(),
+            sharding_config=replicated_input_colwise_sharding_config(),
         ),
         wo=RowParallelLinear.Config(
             in_features=num_heads * v_head_dim,
             out_features=dim,
             param_init=_LINEAR_INIT,
-            sharding_config=rowwise_config(
+            sharding_config=rowwise_sharding_config(
                 output_layout=residual_activation_placement(enable_sp=enable_sp)
             ),
         ),
         inner_attention=inner_attention,
-        sharding_config=mla_attention_config(enable_sp=enable_sp),
+        sharding_config=mla_attention_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -298,14 +302,14 @@ def _kda_config(
             groups=projection_dim,
             bias=False,
             param_init=_CONV_INIT,
-            sharding_config=kda_conv_config(),
+            sharding_config=kda_conv_sharding_config(),
         )
 
     def colwise_linear(in_features: int, out_features: int) -> Linear.Config:
         return _linear(
             in_features,
             out_features,
-            sharding_config=replicated_input_colwise_config(),
+            sharding_config=replicated_input_colwise_sharding_config(),
         )
 
     return KDA.Config(
@@ -319,7 +323,7 @@ def _kda_config(
         k_conv=conv(),
         v_conv=conv(),
         forget_a=_linear(
-            dim, head_dim, sharding_config=replicated_state_config("weight")
+            dim, head_dim, sharding_config=replicated_state_sharding_config("weight")
         ),
         forget_b=colwise_linear(head_dim, projection_dim),
         beta=colwise_linear(dim, num_heads),
@@ -328,20 +332,20 @@ def _kda_config(
             head_dim=head_dim,
             conv_kernel_size=conv_kernel_size,
             kernel=KDAKernel.Config(),
-            sharding_config=inner_kda_config(),
+            sharding_config=inner_kda_sharding_config(),
         ),
         output_norm=GatedRMSNorm.Config(
             dim=head_dim,
             eps=1e-5,
             activation_fn=Sigmoid.Config(),
             param_init=_NORM_INIT,
-            sharding_config=replicated_state_config("weight"),
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         output_proj=RowParallelLinear.Config(
             in_features=projection_dim,
             out_features=dim,
             param_init=_LINEAR_INIT,
-            sharding_config=rowwise_config(
+            sharding_config=rowwise_sharding_config(
                 output_layout=residual_activation_placement(enable_sp=enable_sp)
             ),
         ),
@@ -349,7 +353,7 @@ def _kda_config(
             "A_log": _a_log_init,
             "dt_bias": nn.init.zeros_,
         },
-        sharding_config=kda_config(enable_sp=enable_sp),
+        sharding_config=kda_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -377,16 +381,16 @@ def _latent_moe_config(
                 backward_mode="hi_mid_lo",
                 bias=False,
                 param_init=_LINEAR_INIT,
-                sharding_config=router_gate_config(),
+                sharding_config=router_gate_sharding_config(),
             ),
             score_func=Sigmoid.Config(),
             route_norm=True,
             route_scale=1.0,
             num_bins=1000,
-            sharding_config=router_config(),
+            sharding_config=router_sharding_config(),
         ),
         routed_down=_linear(
-            dim, latent_dim, sharding_config=latent_routed_down_config()
+            dim, latent_dim, sharding_config=latent_routed_down_sharding_config()
         ),
         routed_experts=replace(
             make_routed_experts_config(
@@ -403,8 +407,12 @@ def _latent_moe_config(
             ),
             activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
         ),
-        routed_norm=_norm(latent_dim, sharding_config=norm_config(enable_sp=True)),
-        routed_up=_linear(latent_dim, dim, sharding_config=latent_routed_up_config()),
+        routed_norm=_norm(
+            latent_dim, sharding_config=norm_sharding_config(enable_sp=True)
+        ),
+        routed_up=_linear(
+            latent_dim, dim, sharding_config=latent_routed_up_sharding_config()
+        ),
         shared_experts=replace(
             make_shared_expert_ffn_config(
                 dim=dim,
@@ -416,7 +424,7 @@ def _latent_moe_config(
             activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
         ),
         load_balance_coeff=None,
-        sharding_config=moe_config(enable_sp=enable_sp),
+        sharding_config=moe_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -442,7 +450,7 @@ def _vision_encoder_config(
         normalized_shape=dim,
         eps=1e-5,
         param_init=_NORM_INIT,
-        sharding_config=invariant_norm_config(),
+        sharding_config=invariant_norm_sharding_config(),
     )
     block = VisionTransformerBlock.Config(
         norm1=vision_norm,
@@ -451,26 +459,32 @@ def _vision_encoder_config(
             dim=qkv_dim,
             num_heads=num_heads,
             wq=_linear(
-                dim, qkv_dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+                dim,
+                qkv_dim,
+                sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
             ),
             wk=_linear(
-                dim, qkv_dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+                dim,
+                qkv_dim,
+                sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
             ),
             wv=_linear(
-                dim, qkv_dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+                dim,
+                qkv_dim,
+                sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
             ),
             proj=_vision_row_parallel_linear(qkv_dim, dim),
             inner_attention=FlexInnerAttention.Config(
-                sharding_config=vision_inner_attention_config()
+                sharding_config=vision_inner_attention_sharding_config()
             ),
-            sharding_config=vision_attention_config(rope_cache_dp=spmd.V),
+            sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
         ),
         mlp=VisionMLP.Config(
             fc1=_linear(
                 dim,
                 hidden_dim,
                 param_init=_fan_in_linear_init(dim),
-                sharding_config=vision_colwise_config(),
+                sharding_config=vision_colwise_sharding_config(),
             ),
             fc2=_vision_row_parallel_linear(
                 hidden_dim, dim, param_init=_fan_in_linear_init(hidden_dim)
@@ -489,10 +503,10 @@ def _vision_encoder_config(
         max_num_frames=max_num_frames,
         interpolation_mode="bilinear",
         patch_embed_proj=_linear(
-            patch_dim, dim, sharding_config=vision_invariant_linear_config()
+            patch_dim, dim, sharding_config=vision_invariant_linear_sharding_config()
         ),
         rotary_pos_emb=VisionRotaryEmbedding2D.Config(
-            head_dim=head_dim, sharding_config=moonvit_rotary_config()
+            head_dim=head_dim, sharding_config=moonvit_rotary_sharding_config()
         ),
         block=block,
         final_norm=vision_norm,
@@ -501,7 +515,7 @@ def _vision_encoder_config(
                 merged_dim,
                 merged_dim,
                 param_init=_fan_in_linear_init(merged_dim),
-                sharding_config=vision_colwise_config(),
+                sharding_config=vision_colwise_sharding_config(),
             ),
             linear_2=_vision_row_parallel_linear(
                 merged_dim,
@@ -512,12 +526,12 @@ def _vision_encoder_config(
                 normalized_shape=text_dim,
                 eps=1e-5,
                 param_init=_NORM_INIT,
-                sharding_config=invariant_norm_config(),
+                sharding_config=invariant_norm_sharding_config(),
             ),
             activation=GELU.Config(),
         ),
         param_init=_POS_EMBED_INIT,
-        sharding_config=moonvit_encoder_config(),
+        sharding_config=moonvit_encoder_sharding_config(),
     )
 
 
@@ -560,11 +574,14 @@ def _kimi_k3_config(
     enable_sp = parallelism.enable_sequence_parallel
     enable_ep = parallelism.expert_parallel_degree > 1
     multimodal = vision_encoder is not None
-    norm_sharding = norm_config(enable_sp=enable_sp)
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
 
     def residual_norm() -> RMSNorm.Config:
         return _norm(
-            dim, sharding_config=tp_unsharded_weight_config(token_sharded=enable_sp)
+            dim,
+            sharding_config=tp_unsharded_weight_sharding_config(
+                token_sharded=enable_sp
+            ),
         )
 
     def residual_proj() -> Linear.Config:
@@ -572,7 +589,9 @@ def _kimi_k3_config(
             dim,
             1,
             param_init=_RES_PROJ_INIT,
-            sharding_config=tp_unsharded_weight_config(token_sharded=enable_sp),
+            sharding_config=tp_unsharded_weight_sharding_config(
+                token_sharded=enable_sp
+            ),
         )
 
     layers = []
@@ -638,7 +657,7 @@ def _kimi_k3_config(
                 ffn_res_proj=residual_proj(),
                 attention_residual=AttentionResidual.Config(),
                 sharding_config=(
-                    multimodal_first_layer_config(enable_sp=enable_sp)
+                    multimodal_first_layer_sharding_config(enable_sp=enable_sp)
                     if multimodal and layer_idx == 0
                     else None
                 ),
@@ -654,18 +673,20 @@ def _kimi_k3_config(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
             sharding_config=(
-                multimodal_token_embedding_config()
+                multimodal_token_embedding_sharding_config()
                 if multimodal
-                else token_embedding_config(enable_sp=enable_sp)
+                else token_embedding_sharding_config(enable_sp=enable_sp)
             ),
         ),
         layers=layers,
-        norm=_norm(dim, sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp)),
+        norm=_norm(
+            dim, sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp)
+        ),
         lm_head=_linear(
             dim,
             vocab_size,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         output_res_norm=residual_norm(),
         output_res_proj=residual_proj(),

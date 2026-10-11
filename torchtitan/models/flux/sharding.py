@@ -35,7 +35,7 @@ def flux_input_sharding() -> dict[str, SpmdType]:
     }
 
 
-def flux_inner_attention_config() -> ShardingConfig:
+def flux_inner_attention_sharding_config() -> ShardingConfig:
     """Local-SPMD attention kernel that gathers keys and values across CP."""
     q_layout = flux_activation_placement(cp=spmd.S(1))
     kv_src_layout = flux_activation_placement(cp=spmd.S(1))

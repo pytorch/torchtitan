@@ -79,7 +79,7 @@ def _tokens_per_expert_placement() -> SpmdType:
     )
 
 
-def router_config() -> ShardingConfig:
+def router_sharding_config() -> ShardingConfig:
     """Router input contracts and expert-count buffer placement.
 
     The padding mask follows ``x_TD`` at the MoE and Router boundaries. Under
@@ -100,7 +100,7 @@ def router_config() -> ShardingConfig:
     )
 
 
-def router_gate_config() -> ShardingConfig:
+def router_gate_sharding_config() -> ShardingConfig:
     """Replicate the router gate parameters across TP."""
     return ShardingConfig(
         state_shardings={
@@ -110,7 +110,7 @@ def router_gate_config() -> ShardingConfig:
     )
 
 
-def shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
+def shared_expert_rowwise_sharding_config(*, output_layout: SpmdType) -> ShardingConfig:
     """Shard shared-expert w2 and declare its explicit output layout."""
     return ShardingConfig(
         state_shardings={
@@ -135,7 +135,7 @@ def shared_experts_output_placement(*, enable_sp: bool) -> SpmdType:
     return dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
 
 
-def shared_experts_config(*, enable_sp: bool) -> ShardingConfig:
+def shared_experts_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Shared FeedForward boundary inside an MoE."""
     return ShardingConfig(
         in_src_shardings={"x": residual_activation_placement(enable_sp=enable_sp)},
@@ -143,7 +143,7 @@ def shared_experts_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def routed_experts_config() -> ShardingConfig:
+def routed_experts_sharding_config() -> ShardingConfig:
     """Local-SPMD region of the routed experts.
 
     EP requires dense TP to shard routed tokens. Without EP, validation also
@@ -173,14 +173,14 @@ def routed_expert_weight_placement(*, enable_ep: bool) -> SpmdType:
     return dense_param_placement(tp=spmd.R)
 
 
-def routed_expert_linear_config(*, enable_ep: bool) -> ShardingConfig:
+def routed_expert_linear_sharding_config(*, enable_ep: bool) -> ShardingConfig:
     """Routed-expert ``GroupedLinear`` (``w13``/``w2``) weight sharding."""
     return ShardingConfig(
         state_shardings={"weight": routed_expert_weight_placement(enable_ep=enable_ep)}
     )
 
 
-def moe_config(*, enable_sp: bool) -> ShardingConfig:
+def moe_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Input/output contracts for the MoE TP boundary.
 
     Rules are populated regardless of whether TP is enabled; ``resolve_mesh``

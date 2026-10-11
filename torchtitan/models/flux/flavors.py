@@ -34,7 +34,7 @@ from .layers import (
     SingleStreamBlock,
 )
 from .model import FluxModel
-from .sharding import flux_inner_attention_config
+from .sharding import flux_inner_attention_sharding_config
 
 __all__ = [
     "FluxModel",
@@ -109,7 +109,7 @@ def _make_double_block_config(
                 ),
             ),
             inner_attention=ScaledDotProductInnerAttention.Config(
-                sharding_config=flux_inner_attention_config()
+                sharding_config=flux_inner_attention_sharding_config()
             ),
         ),
         txt_attn=SelfAttention.Config(
@@ -138,7 +138,7 @@ def _make_double_block_config(
                 ),
             ),
             inner_attention=ScaledDotProductInnerAttention.Config(
-                sharding_config=flux_inner_attention_config()
+                sharding_config=flux_inner_attention_sharding_config()
             ),
         ),
         img_mlp_in=Linear.Config(
@@ -166,7 +166,7 @@ def _make_double_block_config(
             param_init=_XAVIER_LINEAR,
         ),
         inner_attention=ScaledDotProductInnerAttention.Config(
-            sharding_config=flux_inner_attention_config()
+            sharding_config=flux_inner_attention_sharding_config()
         ),
     )
 
@@ -215,7 +215,7 @@ def _make_single_block_config(
             ),
         ),
         inner_attention=ScaledDotProductInnerAttention.Config(
-            sharding_config=flux_inner_attention_config()
+            sharding_config=flux_inner_attention_sharding_config()
         ),
     )
 

@@ -38,28 +38,28 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
-    inner_attention_local_spmd_config,
-    lm_head_config,
-    norm_config,
-    pre_lm_head_norm_config,
+    colwise_sharding_config,
+    inner_attention_local_spmd_sharding_config,
+    lm_head_sharding_config,
+    norm_sharding_config,
+    pre_lm_head_norm_sharding_config,
     residual_activation_placement,
-    rope_cache_config,
-    rowwise_config,
-    token_embedding_config,
+    rope_cache_sharding_config,
+    rowwise_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.moe_sharding import (
-    moe_config,
-    routed_experts_config,
-    router_config,
-    router_gate_config,
+    moe_sharding_config,
+    routed_experts_sharding_config,
+    router_gate_sharding_config,
+    router_sharding_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 from .moe import GptOssGroupedLinear
-from .sharding import attention_config, routed_expert_linear_config
+from .sharding import attention_sharding_config, routed_expert_linear_sharding_config
 
 __all__ = [
     "GptOssModel",
@@ -123,7 +123,7 @@ def _make_gptoss_attn_config(
             window_size=sliding_window_size,
         )
     inner_attention = dataclasses.replace(
-        inner_attention, sharding_config=inner_attention_local_spmd_config()
+        inner_attention, sharding_config=inner_attention_local_spmd_sharding_config()
     )
     x_layout = residual_activation_placement(enable_sp=enable_sp)
 
@@ -140,7 +140,7 @@ def _make_gptoss_attn_config(
             out_features=(n_heads + 2 * n_kv_heads) * head_dim,
             bias=True,
             param_init=_depth_init(layer_id),
-            sharding_config=colwise_config(input_layout=x_layout),
+            sharding_config=colwise_sharding_config(input_layout=x_layout),
         ),
     )
 
@@ -155,13 +155,13 @@ def _make_gptoss_attn_config(
             out_features=dim,
             bias=True,
             param_init=_depth_init(layer_id),
-            sharding_config=rowwise_config(output_layout=x_layout),
+            sharding_config=rowwise_sharding_config(output_layout=x_layout),
         ),
         sliding_window_size=sliding_window_size,
         inner_attention=inner_attention,
         param_init=sinks_init,
-        rope=dataclasses.replace(rope, sharding_config=rope_cache_config()),
-        sharding_config=attention_config(enable_sp=enable_sp),
+        rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
+        sharding_config=attention_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -188,21 +188,21 @@ def _make_gptoss_experts_config(
             out_features=hidden_dim,
             num_linears=2,
             param_init=experts_init,
-            sharding_config=routed_expert_linear_config(enable_ep=enable_ep),
+            sharding_config=routed_expert_linear_sharding_config(enable_ep=enable_ep),
         ),
         w2=GptOssGroupedLinear.Config(
             group_size=num_experts,
             in_features=hidden_dim,
             out_features=dim,
             param_init=experts_init,
-            sharding_config=routed_expert_linear_config(enable_ep=enable_ep),
+            sharding_config=routed_expert_linear_sharding_config(enable_ep=enable_ep),
         ),
         activation_fn=ClampedSwiGLU.Config(),
         token_dispatcher=AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
         ),
-        sharding_config=routed_experts_config(),
+        sharding_config=routed_experts_sharding_config(),
     )
 
 
@@ -224,7 +224,7 @@ def _build_gptoss_layers(
     Even-indexed layers (0, 2, 4, ...) use sliding window attention.
     All dimensional fields are set directly.
     """
-    norm_sharding = norm_config(enable_sp=enable_sp)
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     layers = []
     for layer_id in range(n_layers):
         attn_cfg = _make_gptoss_attn_config(
@@ -257,12 +257,12 @@ def _build_gptoss_layers(
                     backward_mode="hi_mid_lo",
                     bias=True,
                     param_init=_depth_init(layer_id),
-                    sharding_config=router_gate_config(),
+                    sharding_config=router_gate_sharding_config(),
                 ),
                 top_k=top_k,
-                sharding_config=router_config(),
+                sharding_config=router_sharding_config(),
             ),
-            sharding_config=moe_config(enable_sp=enable_sp),
+            sharding_config=moe_sharding_config(enable_sp=enable_sp),
         )
         layer_cfg = GptOssTransformerBlock.Config(
             attention=attn_cfg,
@@ -299,14 +299,14 @@ def _debugmodel(
             num_embeddings=2048,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -314,7 +314,7 @@ def _debugmodel(
             in_features=dim,
             out_features=2048,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_gptoss_layers(
             dim=dim,
@@ -358,14 +358,14 @@ def _20b(
             num_embeddings=201088,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -373,7 +373,7 @@ def _20b(
             in_features=dim,
             out_features=201088,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_gptoss_layers(
             dim=dim,
@@ -417,14 +417,14 @@ def _120b(
             num_embeddings=201088,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_config(
+            sharding_config=token_embedding_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_config(
+            sharding_config=pre_lm_head_norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -432,7 +432,7 @@ def _120b(
             in_features=dim,
             out_features=201088,
             param_init=_output_linear_init(dim),
-            sharding_config=lm_head_config(),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_gptoss_layers(
             dim=dim,

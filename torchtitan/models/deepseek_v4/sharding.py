@@ -20,7 +20,7 @@ from torchtitan.models.common.decoder_sharding import (
     residual_activation_placement,
     token_id_placement,
 )
-from torchtitan.models.common.moe_sharding import router_config
+from torchtitan.models.common.moe_sharding import router_sharding_config
 
 _dense_param_rep = dense_param_placement(tp=spmd.R)
 _attn_sink_placement = dense_param_placement(tp=spmd.S(0))
@@ -73,7 +73,7 @@ def _hc_state_shardings() -> dict[str, SpmdType]:
     }
 
 
-def dsa_inner_attention_config(*, compress_ratio: int) -> ShardingConfig:
+def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfig:
     """Local-SPMD sparse attention kernel with queries sharded on heads."""
     query_states = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
@@ -110,7 +110,7 @@ def dsa_inner_attention_config(*, compress_ratio: int) -> ShardingConfig:
     )
 
 
-def attention_config(*, enable_sp: bool) -> ShardingConfig:
+def attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Attention boundary: ``x`` enters in the residual layout."""
     return ShardingConfig(
         in_src_shardings={
@@ -119,7 +119,7 @@ def attention_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def wo_a_config() -> ShardingConfig:
+def wo_a_sharding_config() -> ShardingConfig:
     """``wo_a`` holds a grouped LoRA-A weight used via einsum (not a standard
     matmul). Colwise sharding distributes the weight along dim-0."""
     return ShardingConfig(
@@ -127,7 +127,7 @@ def wo_a_config() -> ShardingConfig:
     )
 
 
-def attn_sink_config() -> ShardingConfig:
+def attn_sink_sharding_config() -> ShardingConfig:
     """``attn_sink`` holds a ``(n_heads, 1)`` weight used as a head-wise
     vector in sparse attention, so shard it on the head dimension under TP."""
     return ShardingConfig(
@@ -135,14 +135,14 @@ def attn_sink_config() -> ShardingConfig:
     )
 
 
-def compressor_config() -> ShardingConfig:
+def compressor_sharding_config() -> ShardingConfig:
     """Replicate the compressor's absolute position embedding across TP."""
     return ShardingConfig(
         state_shardings={"ape": _dense_param_rep},
     )
 
 
-def indexer_config() -> ShardingConfig:
+def indexer_sharding_config() -> ShardingConfig:
     """Indexer boundary: gather ``x`` and ``qr`` across TP."""
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     return ShardingConfig(
@@ -157,7 +157,7 @@ def indexer_config() -> ShardingConfig:
     )
 
 
-def hc_pre_config(*, enable_sp: bool) -> ShardingConfig:
+def hc_pre_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Hyper-connection pre-mix: branches in, ``(x, post, comb)`` out."""
     hc_branch_layout = _hc_branch_placement(enable_sp=enable_sp)
     return ShardingConfig(
@@ -171,7 +171,7 @@ def hc_pre_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def hc_post_config(*, enable_sp: bool) -> ShardingConfig:
+def hc_post_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Hyper-connection post-mix back into the branches."""
     hc_branch_layout = _hc_branch_placement(enable_sp=enable_sp)
     return ShardingConfig(
@@ -185,7 +185,7 @@ def hc_post_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def hc_head_config(*, enable_sp: bool) -> ShardingConfig:
+def hc_head_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Root hyper-connection head: branches in, residual layout out."""
     return ShardingConfig(
         state_shardings=_hc_state_shardings(),
@@ -194,15 +194,17 @@ def hc_head_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def deepseek_v4_router_config(*, layer_id: int, n_hash_layers: int) -> ShardingConfig:
+def deepseek_v4_router_sharding_config(
+    *, layer_id: int, n_hash_layers: int
+) -> ShardingConfig:
     """Router sharding; hash-routed layers also replicate ``tid2eid``."""
-    config = router_config()
+    config = router_sharding_config()
     if layer_id < n_hash_layers:
         config.state_shardings["tid2eid"] = _dense_param_rep
     return config
 
 
-def mtp_hc_head_config() -> ShardingConfig:
+def mtp_hc_head_sharding_config() -> ShardingConfig:
     """MTP hyper-connection head over replicated activations."""
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     return ShardingConfig(
@@ -212,7 +214,7 @@ def mtp_hc_head_config() -> ShardingConfig:
     )
 
 
-def mtp_block_config() -> ShardingConfig:
+def mtp_block_sharding_config() -> ShardingConfig:
     """MTP block boundary over replicated activations and token IDs."""
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     return ShardingConfig(
