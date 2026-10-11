@@ -13,6 +13,7 @@ import heapq
 import logging
 import math
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -25,6 +26,9 @@ from torchtitan.rl.components.training_sample_builder import (
     TrainingSampleGroup,
 )
 from torchtitan.rl.observability import metrics as m
+
+if TYPE_CHECKING:
+    from torchtitan.rl.distributed.rdma_microbatch import RDMAMicrobatch
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +71,8 @@ class TrainerStepBatch:
         # global_routing_token_counts = per-depth non-padding token counts
     """
 
-    microbatches: list[list[TrainingMicrobatch]]  # [num_microbatches][dp_degree]
+    # [num_microbatches][dp_degree]; RDMAMicrobatches once BatcherActor registers them
+    microbatches: list[list[TrainingMicrobatch]] | list[list["RDMAMicrobatch"]]
     global_loss_token_counts: torch.Tensor
     global_routing_token_counts: torch.Tensor
     metrics: list[m.Metric]

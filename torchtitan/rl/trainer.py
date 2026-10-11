@@ -269,7 +269,7 @@ class Trainer(Configurable):
             * self.config.training.num_tokens_per_microbatch_per_dp_rank
         )
         # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
-        # and broadcast it, to cut the controller's reads by cp * tp. Needs a per-replica group.
+        # and broadcast it, to cut the batcher's reads by cp * tp. Needs a per-replica group.
         microbatch_groups = MicrobatchStream(
             [rank_batches[self.dp_rank] for rank_batches in training_data]
         )

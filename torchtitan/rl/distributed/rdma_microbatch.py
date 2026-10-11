@@ -39,12 +39,12 @@ _MIN_RDMA_BYTES = 1024
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class RDMAMicrobatch:
-    """A `TrainingMicrobatch` whose large tensors stay in the controller's memory, for trainer ranks to read over RDMA.
+    """A `TrainingMicrobatch` whose large tensors stay in the batcher's memory, for trainer ranks to read over RDMA.
 
     Example:
-        rdma_microbatch = RDMAMicrobatch.register(microbatch)  # controller
+        rdma_microbatch = RDMAMicrobatch.register(microbatch)  # batcher
         microbatch = await rdma_microbatch.read()  # trainer: one RDMA action reads every buffer
-        await rdma_microbatch.drop()               # controller, after every rank has read it
+        await rdma_microbatch.drop()               # batcher, after every rank has read it
     """
 
     fields: dict[str, Any]
@@ -92,7 +92,7 @@ class RDMAMicrobatch:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _TensorRef:
-    """A controller tensor as its RDMA buffer, plus the shape and dtype to rebuild it."""
+    """A batcher tensor as its RDMA buffer, plus the shape and dtype to rebuild it."""
 
     buffer: RDMABuffer
     shape: torch.Size
@@ -155,7 +155,7 @@ class MicrobatchStream:
             while reads:
                 yield [_wait_for_microbatch(reads.popleft())]
         finally:
-            # On an error, cancel queued reads: with the controller gone, each would wait out
+            # On an error, cancel queued reads: with the batcher gone, each would wait out
             # the 60 s RDMA timeout.
             pool.shutdown(cancel_futures=True)
 
