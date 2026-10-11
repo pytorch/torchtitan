@@ -725,15 +725,13 @@ class Batcher(Configurable):
                 "loss_mask": training_sample.loss_mask[1:],
                 "advantages": training_sample.advantage[1:],
             }
-            # A no-op for the builder's samples; casts a custom override's dtypes to the packed ones
-            sample = {key: values.to(_DTYPES[key]) for key, values in sample.items()}
-            unpadded_len = len(sample["input_ids"])
-            sample_len = unpadded_len
+            sample_len = len(sample["input_ids"])
+            unpadded_len = sample_len
 
             # pad to multiple
             if self._per_sample_pad_multiple:
                 align = self._per_sample_pad_multiple
-                sample_len = ((unpadded_len + align - 1) // align) * align
+                sample_len = ((sample_len + align - 1) // align) * align
 
             # extend row
             for key in keys:

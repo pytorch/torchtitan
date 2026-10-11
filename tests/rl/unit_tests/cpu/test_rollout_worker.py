@@ -282,6 +282,8 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
                 previous = prompt + completion
 
             samples = builder.rollout_to_training_samples(rollout)
-            assert [(s.rollout_id.turn_id, s.token_ids) for s in samples] == expected
+            assert [
+                (s.rollout_id.turn_id, s.token_ids.tolist()) for s in samples
+            ] == expected
 
     asyncio.run(run())

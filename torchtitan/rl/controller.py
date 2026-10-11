@@ -1018,7 +1018,7 @@ class Controller(Configurable):
             await group_buffer.finalize_work(group)
 
             # Drop both refs (work.rollout_group is the group too): held groups made every full GC slow.
-            # TODO: investigate a better type for the per-token lists in RolloutTurn and TrainingSample:
+            # TODO: investigate a better type for the per-token lists in RolloutTurn:
             # a full GC walks every entry of a Python list, which is slow. A torch tensor may be better.
             del group, work
 

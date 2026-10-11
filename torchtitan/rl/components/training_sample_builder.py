@@ -23,7 +23,7 @@ from torchtitan.rl.rollout.types import RolloutTurnID
 @dataclass(kw_only=True, slots=True)
 class TrainingSample:
     """A trainable token sequence from a rollout. Per-token fields are tensors in the dtypes the
-    batcher packs, so a batch of them costs the garbage collector nothing to walk.
+    batcher packs, so a full GC walks 4 objects per sample instead of 4 x L list entries.
 
     Example:
         # Turn 0: prompt P0 -> assistant A0 -> env reply E0
@@ -45,13 +45,13 @@ class TrainingSample:
     """Newest policy version among this branch's trained turns."""
     rollout_id: RolloutTurnID
     """This sample identifier."""
-    token_ids: torch.Tensor  # [L] long
+    token_ids: torch.Tensor  # long
     """[L] packed prompt + completions + env replies."""
-    loss_mask: torch.Tensor  # [L] bool
+    loss_mask: torch.Tensor  # bool
     """[L] True on assistant tokens to train."""
-    logprobs: torch.Tensor  # [L] float32
+    logprobs: torch.Tensor  # float32
     """[L] generator logprobs; 0.0 where loss_mask is False."""
-    advantage: torch.Tensor  # [L] float32
+    advantage: torch.Tensor  # float32
     """[L] advantage on assistant tokens, 0.0 elsewhere."""
 
 
