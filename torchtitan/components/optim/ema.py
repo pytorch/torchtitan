@@ -78,14 +78,25 @@ class _EMAParamOptimizer(Optimizer):
         self,
         named_tensors: Sequence[tuple[str, torch.Tensor]],
         ema_keys: Sequence[str],
+        *,
+        offload_to_cpu: bool,
     ) -> None:
         tensors = [t for _, t in named_tensors]
         names = [canonical_fqn(name) for name, _ in named_tensors]
         super().__init__([{"params": tensors, "param_names": names}], {})
         for t in tensors:
-            self.state[t][_EMA_STATE_KEY] = {
-                key: t.detach().clone() for key in ema_keys
-            }
+            if offload_to_cpu:
+                local = get_local_tensor(t.detach())
+                self.state[t][_EMA_STATE_KEY] = {
+                    key: torch.empty_like(local, device="cpu", pin_memory=True).copy_(
+                        local
+                    )
+                    for key in ema_keys
+                }
+            else:
+                self.state[t][_EMA_STATE_KEY] = {
+                    key: t.detach().clone() for key in ema_keys
+                }
 
     def step(self, closure=None) -> None:  # pyrefly: ignore[bad-override]
         raise RuntimeError(
@@ -216,7 +227,9 @@ class EMA(OptimizersContainer):
                 (name, p) for name, p in model.named_parameters() if p.requires_grad
             ]
             self._param_optimizers.append(
-                _EMAParamOptimizer(named_params, self.ema_keys)
+                _EMAParamOptimizer(
+                    named_params, self.ema_keys, offload_to_cpu=self.offload_to_cpu
+                )
             )
             all_params.extend(p for _, p in named_params)
         self._validate_params(all_params)
@@ -242,7 +255,9 @@ class EMA(OptimizersContainer):
                         )
                 total_matched += len(named_buffers)
                 self._buffer_optimizers.append(
-                    _EMAParamOptimizer(named_buffers, self.ema_keys)
+                    _EMAParamOptimizer(
+                        named_buffers, self.ema_keys, offload_to_cpu=self.offload_to_cpu
+                    )
                 )
             if total_matched == 0:
                 logger.warning(
@@ -286,7 +301,7 @@ class EMA(OptimizersContainer):
         self._offload_pool: torch.Tensor | None = None
         self._pending_event: torch.cuda.Event | None = None
         if self.offload_to_cpu:
-            self._init_cpu_offload()
+            self._offload_stream = torch.cuda.Stream()
 
     def zero_grad(self, *args, **kwargs) -> None:
         pass  # never called by the training loop; no-op for safety
@@ -396,30 +411,11 @@ class EMA(OptimizersContainer):
     # is exactly what offloading is meant to free.
     _SCRATCH_BYTES = 128 * 1024 * 1024
 
-    def _init_cpu_offload(self) -> None:
-        self._offload_stream = torch.cuda.Stream()
-        for ema_opt in self.optimizers:
-            for param_state in ema_opt.state.values():
-                copies = param_state[_EMA_STATE_KEY]
-                for key in copies:
-                    copies[key] = self._pin_local(copies[key])
-
-    # TODO: DTensor doesn't support pin_memory() (NYI: aten._pin_memory.default),
-    # so we pin the local shard only, then rewrap it as a DTensor around the
-    # param's live spec at save/load time (_materialize_dtensor). If DTensor
-    # gains native pin_memory() support this shard-unwrap/rewrap dance can be
-    # dropped. There may be additional complexity around process-group
-    # restore (PG membership can change across resumes/world-size changes)
-    # that a native implementation would need to account for.
-    def _pin_local(self, tensor: torch.Tensor) -> torch.Tensor:
-        return get_local_tensor(tensor).cpu().pin_memory()
-
     def _materialize_dtensor(
         self, p: torch.Tensor, local: torch.Tensor
     ) -> torch.Tensor:
-        """Inverse of ``_pin_local``: move the local shard back onto the
-        accelerator and rewrap it as a DTensor matching ``p``'s own
-        sharding, for the copy handed to DCP at checkpoint save/load -- this
+        """Move the local shard onto the accelerator and rewrap it as a
+        DTensor matching ``p``'s own sharding for DCP at checkpoint save/load -- this
         is what DCP needs to (re)shard EMA state correctly across world sizes.
         ``p`` is still the live DTensor param, so its spec is read directly
         rather than cached. ``run_check=False`` skips the collective that
