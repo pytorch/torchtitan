@@ -33,6 +33,7 @@ from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_fsdp2_gen_tp2_compile,
     rl_grpo_fsdp2_gen_tp2_no_compile,
     rl_grpo_kimi_k3_debug_batch_invariant,
+    rl_grpo_moe_debug_dist_moe_tp2_ep4,
     rl_grpo_moe_debug_tp4_ep4,
     rl_grpo_moe_debug_tp4_ep4_batch_invariant,
     rl_grpo_qwen3_5_debug_tp2_batch_invariant,
@@ -117,9 +118,25 @@ def build_rl_kda_test_list() -> list[IntegrationTestDefinition]:
     ]
 
 
+def build_b200_rl_test_list() -> list[IntegrationTestDefinition]:
+    """Build the B200 RL integration tests: KDA, plus Dist-MoE, which requires SM100+."""
+    return build_rl_kda_test_list() + [
+        IntegrationTestDefinition(
+            configs=[rl_grpo_moe_debug_dist_moe_tp2_ep4],
+            test_descr=(
+                "RL GRPO MoE Dist-MoE trainer FSDP=2 TP=2 EP=4 + generator "
+                "DP=2 TP=2 EP=4 with CUDA graphs"
+            ),
+            test_name="rl_grpo_moe_debug_dist_moe_tp2_ep4",
+            ngpu=8,
+        ),
+    ]
+
+
 _TEST_SUITES_FUNCTION = {
     "default": build_rl_test_list,
     "kda": build_rl_kda_test_list,
+    "b200": build_b200_rl_test_list,
 }
 
 

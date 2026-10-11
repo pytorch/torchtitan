@@ -35,6 +35,7 @@ from torchtitan.config import Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
@@ -775,6 +776,12 @@ class VLLMGenerator(Configurable):
         applied to this generator's model spec before model finalization and build.
         Separate from the trainer's override so the two can differ."""
 
+        dist_moe_runtime: DistMoeRuntime.Config | None = None
+        """Dist-MoE runtime policy, with ``inference=True``, required when the
+        model config carries Dist-MoE routed experts. Separate from the trainer's
+        ``Trainer.Config.dist_moe_runtime``: the generator plans scratch-only execution
+        over its own, smaller, expert-parallel mesh."""
+
         model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
 
@@ -892,6 +899,7 @@ class VLLMGenerator(Configurable):
             parallelism=config.parallelism,
             checkpointer_config=config.checkpointer,
             override=config.override,
+            dist_moe_runtime=config.dist_moe_runtime,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
@@ -1558,10 +1566,8 @@ class VLLMGenerator(Configurable):
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
         model_sd = self._prefetched_model_state_dict
-        model.prepare_for_state_dict_load()
         # Perform the local CPU-to-GPU copy
-        model.model.load_state_dict(model_sd, strict=True)
-        model.prepare_for_forward()
+        model.load_state_dict(model_sd)
         self.policy_version = version
         if self.config.reset_kv_cache_on_weight_sync:
             # Always reset running requests too: the only reason to reset is a strict

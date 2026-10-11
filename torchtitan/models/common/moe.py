@@ -108,12 +108,21 @@ class RoutedExperts(Module):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
         When parallelized, ``local_spmd`` (from ``sharding_config``) establishes
         the local SPMD types for the forward body.
+
+        ``padding_mask_T`` is unused: padding rows are dispatched and computed
+        like real tokens, and the router already leaves them out of the
+        load-balancing statistics.
         """
+        # TODO(acisseJZhong): skip padding rows' dispatch, expert compute and
+        # combine in the stock token dispatchers too, as Dist-MoE does.
+        del padding_mask_T
         (
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
@@ -732,6 +741,7 @@ class MoE(Module):
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
+            padding_mask_T=routed_padding_mask_T,
         )
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:

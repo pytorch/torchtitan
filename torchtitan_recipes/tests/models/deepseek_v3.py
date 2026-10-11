@@ -219,7 +219,7 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
     )
     config.dataloader.max_num_documents = 512
     config.training.mixed_precision_reduce = "bfloat16"
-    config.dist_moe = _dist_moe_runtime_config(
+    config.dist_moe_runtime = _dist_moe_runtime_config(
         scratch_capacity_factor=scratch_capacity_factor
     )
     return apply_transforms(config, [DistMoeTransform()])
@@ -245,7 +245,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
     )
     config.dataloader.max_num_documents = 512
     config.training.mixed_precision_reduce = "bfloat16"
-    config.dist_moe = _dist_moe_runtime_config(
+    config.dist_moe_runtime = _dist_moe_runtime_config(
         scratch_capacity_factor=scratch_capacity_factor
     )
     return apply_transforms(
@@ -272,7 +272,7 @@ def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
     )
     config.dataloader.max_num_documents = 512
     config.training.mixed_precision_reduce = "bfloat16"
-    config.dist_moe = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(config, [DistMoeTransform()])
 
 
@@ -292,7 +292,7 @@ def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config
     )
     config.dataloader.max_num_documents = 512
     config.training.mixed_precision_reduce = "bfloat16"
-    config.dist_moe = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(
         config,
         [

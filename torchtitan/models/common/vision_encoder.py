@@ -58,7 +58,7 @@ class InvariantRowParallelLinear(Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        weight, bias = self._flatten_weight_and_bias()
+        weight, bias = self.weight, self.bias
         linear_fn = remat.region(
             self._linear,
             self.remat_region_name("linear"),
@@ -77,7 +77,7 @@ class InvariantRowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = self._unflatten_output(linear_fn(input, weight, bias))
+                output = self._unflatten_output(linear_fn(input, weight, bias), weight)
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -85,7 +85,7 @@ class InvariantRowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = self._unflatten_output(linear_fn(input, weight, bias))
+            output = self._unflatten_output(linear_fn(input, weight, bias), weight)
         if tp_group is None:
             return output
         # A recomputed reduction after a saved projection keeps the TP-times

@@ -107,17 +107,21 @@ def _make_compressor_config(
         head_dim=head_dim,
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
+        # The compressor runs these under fp32 autocast, which the in-place
+        # WGRAD accumulation path does not support.
         wkv=Linear.Config(
             in_features=dim,
             out_features=coff * head_dim,
             bias=False,
             param_init=_LINEAR_INIT,
+            inplace_wgrad_accum=False,
         ),
         wgate=Linear.Config(
             in_features=dim,
             out_features=coff * head_dim,
             bias=False,
             param_init=_LINEAR_INIT,
+            inplace_wgrad_accum=False,
         ),
         norm=RMSNorm.Config(
             normalized_shape=head_dim,

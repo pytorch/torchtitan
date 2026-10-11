@@ -564,7 +564,7 @@ class TestRematRegions(unittest.TestCase):
             side_effect=silu_and_mul,
         ):
             async_config = AsyncTensorParallelTransform(
-                enable_sequence_parallel=True
+                enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
             ).transform(deepcopy(feed_forward_config))
             fused_config = deepcopy(feed_forward_config)
             fused_config.activation_fn = fused_swiglu(fused_config.activation_fn)

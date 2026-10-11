@@ -85,7 +85,7 @@ class OffsetRMSNorm(Module):
         self.eps = config.eps
         self.weight = nn.Parameter(torch.empty(config.dim))
 
-    @local_compile("offset_rmsnorm", batch_invariant=False)
+    @local_compile("offset_rmsnorm", batch_invariant=False, recompile_limit=16)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Upcast to float32 for numerical stability in pow/rsqrt
         input_dtype = x.dtype

@@ -12,6 +12,9 @@ from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
+from torchtitan.experiments.graph_trainer.common_utils import (
+    disable_inplace_wgrad_accum,
+)
 from torchtitan.protocols.model import BaseModel
 from torchtitan.trainer import Trainer
 
@@ -336,8 +339,8 @@ def to_graph_trainer_config(
     """Convert a base Trainer.Config to a GraphTrainer.Config.
 
     Copies all fields from the base config and converts its model config to the
-    GraphTrainer model config class, without local compile regions because
-    GraphTrainer traces the whole step. The ``compile`` field keeps the
+    GraphTrainer model config class, without local compile regions or in-place
+    WGRAD accumulation because GraphTrainer traces the whole step. The ``compile`` field keeps the
     GraphTrainer.Config default; callers should explicitly set it.
     """
     from .trainer import GraphTrainer
@@ -351,6 +354,7 @@ def to_graph_trainer_config(
     )
     # GraphTrainer compiles the whole step (config.compile), so it drops the model's local compile regions.
     graph_model.local_compile_regions = []
+    disable_inplace_wgrad_accum(graph_model)
     d["model"] = graph_model
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any

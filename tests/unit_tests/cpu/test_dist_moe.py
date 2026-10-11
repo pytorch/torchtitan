@@ -129,6 +129,7 @@ def _runtime() -> DistMoeRuntime:
     runtime = object.__new__(DistMoeRuntime)
     runtime.config = DistMoeRuntime.Config()
     runtime.context = Mock()
+    runtime._num_local_input_tokens_per_call = None
     runtime._modules = ()
     runtime._closed = False
     runtime._forward_context_handles = []
@@ -237,7 +238,7 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
 
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
-        dist_moe=runtime_config,
+        dist_moe_runtime=runtime_config,
         sdc_replayer=None,
         training=SimpleNamespace(
             cuda_graph_per_accumulation_group=False,
@@ -611,6 +612,27 @@ def test_runtime_passes_per_slot_capacity_to_annex() -> None:
     assert factor_config.activation_slot_capacity_factor == 1.5
     assert factor_config.num_activation_slots == 2
     assert factor_config.wgrad_dtype is None
+    assert not factor_config.inference
+
+
+def test_runtime_passes_inference_to_annex() -> None:
+    """An inference runtime plans a scratch-only annex context."""
+    module = cast(
+        DistMoeRoutedExperts,
+        DistMoeTransform().transform(_stock_config(dim=64)).build(),
+    )
+    runtime = _runtime()
+    runtime.config = DistMoeRuntime.Config(scratch_capacity_factor=4.0, inference=True)
+
+    context_config = runtime._resolve_context_config(
+        module,
+        max_num_local_input_tokens=128,
+        max_live_activation_slots=1,
+        max_moe_layers_per_activation_slot=3,
+    )
+
+    assert context_config.inference
+    assert context_config.device_scratch_capacity_factor == 4.0
 
 
 def test_mxfp8_transform_is_independent_and_uses_prepared_weights() -> None:
@@ -712,6 +734,169 @@ def test_eager_postprocess_callback_preserves_module_hooks_and_gradients() -> No
         module._output_postprocess()
 
 
+def _run_forward_with_padding(
+    module: DistMoeRoutedExperts,
+    *,
+    num_tokens: int,
+    padding_mask_T: torch.Tensor | None,
+) -> tuple[torch.Tensor, Mock]:
+    """Run ``forward`` with the annex mocked and return its output and call."""
+    num_call_tokens = module._runtime.num_local_input_tokens_for_call(num_tokens)
+    with (
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.dist_moe.routed_experts",
+            return_value=torch.zeros(num_call_tokens, 32),
+        ) as execute,
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.remat.region",
+            side_effect=lambda fn, *_args, **_kwargs: fn,
+        ),
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.remat.recompute_needs_tensor"
+        ),
+    ):
+        out_TD = module(
+            torch.ones(num_tokens, 32),
+            torch.full((num_tokens, 2), 0.5),
+            torch.arange(num_tokens * 2, dtype=torch.int64).view(num_tokens, 2),
+            torch.empty(4, dtype=torch.int64),
+            padding_mask_T=padding_mask_T,
+        )
+    return out_TD, execute
+
+
+def test_inference_routes_padding_to_minus_one_at_the_call_size() -> None:
+    """Masked rows and the per-call pad get expert -1 and score 0."""
+    module = cast(
+        DistMoeRoutedExperts, DistMoeTransform().transform(_stock_config()).build()
+    )
+    module._runtime = _runtime()
+    module._runtime.config = DistMoeRuntime.Config(inference=True)
+    module._runtime.context = cast(Any, SimpleNamespace(max_num_local_input_tokens=512))
+    module._runtime.set_num_local_input_tokens_per_call(200)
+
+    out_TD, execute = _run_forward_with_padding(
+        module,
+        num_tokens=3,
+        padding_mask_T=torch.tensor([False, True, False]),
+    )
+
+    x_TD, topk_expert_ids_TK, topk_scores_TK = execute.call_args.args[:3]
+    assert x_TD.shape == (200, 32)
+    assert torch.equal(x_TD[3:], torch.zeros(197, 32))
+    assert torch.equal(topk_expert_ids_TK[:3], torch.tensor([[0, 1], [-1, -1], [4, 5]]))
+    assert torch.equal(topk_expert_ids_TK[3:], torch.full((197, 2), -1))
+    assert torch.equal(
+        topk_scores_TK[:3], torch.tensor([[0.5, 0.5], [0.0, 0.0], [0.5, 0.5]])
+    )
+    assert torch.equal(topk_scores_TK[3:], torch.zeros(197, 2))
+    assert out_TD.shape == (3, 32)
+    assert not execute.call_args.kwargs["options"].zero_out_padded_callback_inputs
+
+
+def test_training_drops_masked_routes_without_padding_the_call() -> None:
+    """Training masks padded rows to -1 and keeps its microbatch row count."""
+    module = cast(
+        DistMoeRoutedExperts, DistMoeTransform().transform(_stock_config()).build()
+    )
+    module._runtime = _runtime()
+
+    out_TD, execute = _run_forward_with_padding(
+        module, num_tokens=2, padding_mask_T=torch.tensor([True, False])
+    )
+
+    x_TD, topk_expert_ids_TK, topk_scores_TK = execute.call_args.args[:3]
+    assert x_TD.shape == (2, 32)
+    assert torch.equal(topk_expert_ids_TK, torch.tensor([[-1, -1], [2, 3]]))
+    assert torch.equal(topk_scores_TK, torch.tensor([[0.0, 0.0], [0.5, 0.5]]))
+    assert out_TD.shape == (2, 32)
+
+
+def test_callback_postprocess_zeroes_inputs_only_with_minus_one_routes() -> None:
+    """A Python callback reads zeroed -1 rows; unpadded calls skip the zeroing."""
+    stock = _stock_config()
+    stock.output_postprocess = _CallbackPostprocess.Config(dim=32)
+    module = cast(DistMoeRoutedExperts, DistMoeTransform().transform(stock).build())
+    module._runtime = _runtime()
+
+    _, execute = _run_forward_with_padding(
+        module, num_tokens=2, padding_mask_T=torch.tensor([False, True])
+    )
+    assert execute.call_args.kwargs["options"].zero_out_padded_callback_inputs
+
+    _, execute = _run_forward_with_padding(module, num_tokens=2, padding_mask_T=None)
+    assert not execute.call_args.kwargs["options"].zero_out_padded_callback_inputs
+
+
+def test_per_call_token_count_is_inference_only_and_bounded() -> None:
+    """The per-call count starts at the context maximum and stays in range."""
+    runtime = _runtime()
+    runtime.context = cast(Any, SimpleNamespace(max_num_local_input_tokens=512))
+    assert runtime.num_local_input_tokens_for_call(7) == 7
+    with pytest.raises(RuntimeError, match="inference"):
+        runtime.set_num_local_input_tokens_per_call(2)
+
+    runtime.config = DistMoeRuntime.Config(inference=True)
+    assert runtime.num_local_input_tokens_for_call(7) == 512
+    runtime.set_num_local_input_tokens_per_call(300)
+    assert runtime.num_local_input_tokens_for_call(7) == 300
+    for invalid in (0, 513):
+        with pytest.raises(ValueError, match="must be in"):
+            runtime.set_num_local_input_tokens_per_call(invalid)
+
+
+def test_batch_invariant_inference_pins_the_bf16_grouped_gemm_schedule() -> None:
+    """Batch-invariant inference fixes the expert-GEMM schedule unless one is set."""
+    module = cast(
+        DistMoeRoutedExperts,
+        DistMoeTransform().transform(_stock_config(dim=64)).build(),
+    )
+    runtime = _runtime()
+
+    def preset(*, inference: bool, batch_invariant: bool) -> str | None:
+        runtime.config = DistMoeRuntime.Config(inference=inference)
+        with patch(
+            "torchtitan.models.common.dist_moe.runtime.is_in_batch_invariant_mode",
+            return_value=batch_invariant,
+        ):
+            return runtime._resolve_context_config(
+                module,
+                max_num_local_input_tokens=128,
+                max_live_activation_slots=1,
+                max_moe_layers_per_activation_slot=3,
+            ).bf16_grouped_gemm_preset
+
+    assert preset(inference=True, batch_invariant=True) == "2cta2mma_bm512_bn256"
+    assert preset(inference=True, batch_invariant=False) is None
+    assert preset(inference=False, batch_invariant=True) is None
+    module.bf16_grouped_gemm_preset = "1cta1mma_bm128_bn128"
+    assert preset(inference=True, batch_invariant=True) == "1cta1mma_bm128_bn128"
+
+
+def test_small_calls_stay_above_the_tiled_reduction_only_when_batch_invariant() -> None:
+    """Batch-invariant mode keeps small calls on the full-size reduction order."""
+    runtime = _runtime()
+    runtime.config = DistMoeRuntime.Config(inference=True)
+    runtime.context = cast(Any, SimpleNamespace(max_num_local_input_tokens=512))
+    with patch(
+        "torchtitan.models.common.dist_moe.runtime.is_in_batch_invariant_mode",
+        return_value=False,
+    ):
+        runtime.set_num_local_input_tokens_per_call(1)
+        assert runtime.num_local_input_tokens_for_call(1) == 1
+    with patch(
+        "torchtitan.models.common.dist_moe.runtime.is_in_batch_invariant_mode",
+        return_value=True,
+    ):
+        runtime.set_num_local_input_tokens_per_call(1)
+        assert runtime.num_local_input_tokens_for_call(1) == 129
+        runtime.set_num_local_input_tokens_per_call(300)
+        assert runtime.num_local_input_tokens_for_call(1) == 300
+        runtime.context = cast(Any, SimpleNamespace(max_num_local_input_tokens=64))
+        runtime.set_num_local_input_tokens_per_call(1)
+        assert runtime.num_local_input_tokens_for_call(1) == 64
+
+
 @pytest.mark.parametrize(
     "kwargs,error_type,message",
     [
@@ -760,7 +945,7 @@ def test_runtime_config_requires_bfloat16_unsharded_parameters() -> None:
     """Dist-MoE rejects FSDP mixed-precision parameter dtypes it cannot consume."""
     with pytest.raises(ValueError, match="mixed_precision_param='bfloat16'"):
         TrainingEngine.Config(
-            dist_moe=DistMoeRuntime.Config(),
+            dist_moe_runtime=DistMoeRuntime.Config(),
             training=TrainingConfig(mixed_precision_param="float32"),
         )
 
@@ -782,7 +967,7 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     config = factory()
     model_config = config.model
     experts = list(model_config.traverse(DistMoeRoutedExperts.Config))
-    runtime = config.dist_moe
+    runtime = config.dist_moe_runtime
 
     assert len(experts) == num_experts_modules
     assert all(type(entry[1]) is DistMoeRoutedExperts.Config for entry in experts)
@@ -832,7 +1017,7 @@ def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
     config = factory()
     model_config = config.model
     experts = list(model_config.traverse(DistMoeRoutedExperts.Config))
-    runtime = config.dist_moe
+    runtime = config.dist_moe_runtime
     linears = {
         fqn
         for fqn, _linear, _parent, _attr in model_config.traverse(MXFP8Linear.Config)

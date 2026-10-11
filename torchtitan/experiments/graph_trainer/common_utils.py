@@ -28,6 +28,8 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
 )
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.linear import Linear
+from torchtitan.protocols.module import Module
 
 
 logger = logging.getLogger(__name__)
@@ -85,6 +87,16 @@ def log_timer(label: str):
     logger.info("%s took %.3fs", label, elapsed_s)
 
 
+def disable_inplace_wgrad_accum(model: Module.Config) -> None:
+    """Turn off ``inplace_wgrad_accum`` on every ``Linear`` config in ``model``.
+
+    GraphTrainer traces the backward, which cannot add a WGRAD into
+    ``weight.grad`` in place.
+    """
+    for _, linear_config, _, _ in model.traverse(Linear.Config):
+        linear_config.inplace_wgrad_accum = False
+
+
 def build_decoder_config_for_backend(
     config_builder: Callable, attn_backend: str, **builder_kwargs
 ):
@@ -108,13 +120,15 @@ def build_decoder_config_for_backend(
     registry can construct an SDPA language model outside these tests.
     """
     if attn_backend != "sdpa":
-        return config_builder(attn_backend=attn_backend, **builder_kwargs)
-
-    config = config_builder(attn_backend="flex", **builder_kwargs)
-    for layer in config.layers:
-        layer.attention.inner_attention = (
-            GraphTrainerScaledDotProductInnerAttention.Config()
-        )
+        config = config_builder(attn_backend=attn_backend, **builder_kwargs)
+    else:
+        config = config_builder(attn_backend="flex", **builder_kwargs)
+        for layer in config.layers:
+            layer.attention.inner_attention = (
+                GraphTrainerScaledDotProductInnerAttention.Config()
+            )
+    # GraphTrainer traces the backward.
+    disable_inplace_wgrad_accum(config)
     return config
 
 

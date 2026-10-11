@@ -29,6 +29,7 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     PagedStashManager,
     PagedStashRunner,
 )
+from torchtitan.models.common.linear import Linear
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
@@ -97,12 +98,12 @@ class GraphTrainingEngine(TrainingEngine):
                 "GraphTrainer does not support fsdp_defer_gradient_reduction."
             )
 
-        if self.config.dist_moe is not None:
+        if self.config.dist_moe_runtime is not None:
             graph_runtime = None
             if self.parallelism_context.pp_enabled:
                 graph_runtime = self.pp_schedule
                 assert isinstance(graph_runtime, GraphRuntime)
-            self._dist_moe_runtime = self.config.dist_moe.build(
+            self._dist_moe_runtime = self.config.dist_moe_runtime.build(
                 model_parts=self.model_parts,
                 parallelism_context=self.parallelism_context,
                 device=self.device,
@@ -347,6 +348,20 @@ class GraphTrainer(Trainer):
             if self.training.cuda_graph_per_accumulation_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."
+                )
+            # to_graph_trainer_config and the flavor builders turn these off;
+            # this catches a transform applied afterwards that builds them with
+            # the eager default.
+            enabled = [
+                fqn
+                for fqn, linear_config, _, _ in self.model.traverse(Linear.Config)
+                if linear_config.inplace_wgrad_accum
+            ]
+            if enabled:
+                raise ValueError(
+                    "GraphTrainer traces the backward, which cannot add a WGRAD "
+                    "into weight.grad in place. Set inplace_wgrad_accum=False on "
+                    f"{enabled}."
                 )
 
     engine_cls = GraphTrainingEngine

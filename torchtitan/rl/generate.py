@@ -99,6 +99,7 @@ def generate() -> None:
             initial_load_path=model_path,
         ),
         override=config.generator.override,
+        dist_moe_runtime=gen_config.dist_moe_runtime,
     )
     logger.info("Registered TorchTitan model with vLLM")
 

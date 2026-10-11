@@ -21,6 +21,7 @@ from torchtitan.experiments.graph_trainer.chunked_loss import (
 from torchtitan.experiments.graph_trainer.common_utils import (
     _maybe_materialize_grad_for_param_layout,
     accumulate_param_grads_,
+    disable_inplace_wgrad_accum,
     get_simple_fsdp_mesh,
     maybe_register_blockmask_pytree_node,
 )
@@ -60,6 +61,8 @@ def make_train_step(model, loss_fn, *, fwd_kwargs=None):
 
 
 def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
+    # make_fx traces the backward, which cannot add into weight.grad in place.
+    disable_inplace_wgrad_accum(model_config)
     model = config_cls(model_config)
     model.to(device=device, dtype=dtype)
     with torch.no_grad():
@@ -180,7 +183,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
             compile=SimpleNamespace(memory_policy="none"),
-            dist_moe=None,
+            dist_moe_runtime=None,
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             sdc_replayer=None,
             training=SimpleNamespace(
@@ -1829,41 +1832,42 @@ class TestTraceModels(unittest.TestCase):
                 qk_nope_head_dim = 16
                 v_head_dim = 16
                 qk_head_dim = qk_nope_head_dim + rope_dim
-                self.attn = DSAttention(
-                    DSAttention.Config(
-                        n_heads=n_heads,
-                        dim=dim,
-                        q_lora_rank=0,
-                        kv_lora_rank=kv_lora_rank,
-                        qk_nope_head_dim=qk_nope_head_dim,
-                        qk_rope_head_dim=rope_dim,
-                        v_head_dim=v_head_dim,
-                        rope=ComplexRoPE.Config(
-                            dim=rope_dim,
-                            max_context_length=seq_len,
-                            scaling="none",
-                        ),
-                        q_norm=RMSNorm.Config(normalized_shape=1),
-                        kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
-                        inner_attention=FlexInnerAttention.Config(),
-                        wq=Linear.Config(
-                            in_features=dim,
-                            out_features=n_heads * qk_head_dim,
-                        ),
-                        wkv_a=Linear.Config(
-                            in_features=dim,
-                            out_features=kv_lora_rank + rope_dim,
-                        ),
-                        wkv_b=Linear.Config(
-                            in_features=kv_lora_rank,
-                            out_features=n_heads * (qk_nope_head_dim + v_head_dim),
-                        ),
-                        wo=Linear.Config(
-                            in_features=n_heads * v_head_dim,
-                            out_features=dim,
-                        ),
+                attn_config = DSAttention.Config(
+                    n_heads=n_heads,
+                    dim=dim,
+                    q_lora_rank=0,
+                    kv_lora_rank=kv_lora_rank,
+                    qk_nope_head_dim=qk_nope_head_dim,
+                    qk_rope_head_dim=rope_dim,
+                    v_head_dim=v_head_dim,
+                    rope=ComplexRoPE.Config(
+                        dim=rope_dim,
+                        max_context_length=seq_len,
+                        scaling="none",
+                    ),
+                    q_norm=RMSNorm.Config(normalized_shape=1),
+                    kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
+                    inner_attention=FlexInnerAttention.Config(),
+                    wq=Linear.Config(
+                        in_features=dim,
+                        out_features=n_heads * qk_head_dim,
+                    ),
+                    wkv_a=Linear.Config(
+                        in_features=dim,
+                        out_features=kv_lora_rank + rope_dim,
+                    ),
+                    wkv_b=Linear.Config(
+                        in_features=kv_lora_rank,
+                        out_features=n_heads * (qk_nope_head_dim + v_head_dim),
+                    ),
+                    wo=Linear.Config(
+                        in_features=n_heads * v_head_dim,
+                        out_features=dim,
                     ),
                 )
+                # make_fx traces the backward, which cannot add into weight.grad in place.
+                disable_inplace_wgrad_accum(attn_config)
+                self.attn = DSAttention(attn_config)
                 self.proj = nn.Linear(dim, vocab_size)
 
             def init_states(self, buffer_device=None):

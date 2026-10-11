@@ -203,6 +203,7 @@ class MXFP8LinearConverter(QuantizationConverter):
                 input_activation_format_for_backward=(
                     "mxfp8" if fqn in mxfp8_fqns else "bf16"
                 ),
+                inplace_wgrad_accum=config.inplace_wgrad_accum,
             )
             if parent is None:
                 model_config = new_config

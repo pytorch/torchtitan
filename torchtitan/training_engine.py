@@ -123,12 +123,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
-        dist_moe: Configurable.Config | None = None
+        dist_moe_runtime: Configurable.Config | None = None
         """Optional rank-wide Dist-MoE memory and pipeline-slot policy."""
 
         def __post_init__(self) -> None:
             if (
-                self.dist_moe is not None
+                self.dist_moe_runtime is not None
                 and self.training.mixed_precision_param != "bfloat16"
             ):
                 raise ValueError("Dist-MoE requires mixed_precision_param='bfloat16'")
@@ -455,8 +455,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
     def _initialize_forward_backward(self) -> None:
         """Build SDC replay and the gradient accumulation execution path."""
-        if self.config.dist_moe is not None:
-            self._dist_moe_runtime = self.config.dist_moe.build(
+        if self.config.dist_moe_runtime is not None:
+            self._dist_moe_runtime = self.config.dist_moe_runtime.build(
                 model_parts=self.model_parts,
                 parallelism_context=self.parallelism_context,
                 device=self.device,

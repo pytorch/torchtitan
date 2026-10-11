@@ -76,7 +76,11 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         stock_layer = self._model_config().layers[0]
         async_model = transform_model_config_(
             self._model_config(),
-            [AsyncTensorParallelTransform(enable_sequence_parallel=True)],
+            [
+                AsyncTensorParallelTransform(
+                    enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
+                )
+            ],
             context=_CONTEXT,
         )
         async_layer = async_model.layers[0]
@@ -441,7 +445,7 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
             w2_param_init=init,
         )
         async_config = AsyncTensorParallelTransform(
-            enable_sequence_parallel=True
+            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
         ).transform(base_async_config)
         input_layout = dense_sequence_parallel_placement()
         set_dense_ffn_sharding(
@@ -540,7 +544,7 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
         torch.manual_seed(0)
         native = make().build().to(dev)
         async_config = AsyncTensorParallelTransform(
-            enable_sequence_parallel=True
+            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
         ).transform(make())
         async_config.activation_fn = fused_swiglu(async_config.activation_fn)
         fused = async_config.build().to(dev)

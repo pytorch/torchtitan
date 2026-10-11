@@ -369,5 +369,110 @@ class TestBiasedRowParallelLinearDistributed(DTensorTestBase):
                 torch.testing.assert_close(linear.bias.grad, expected_bias.grad)
 
 
+def _linear_pair(*, num_linears=1, bias=False, dtype=torch.float32):
+    """Two ``Linear`` modules with equal weights: in-place WGRAD accumulation on and off."""
+    modules = []
+    for inplace_wgrad_accum in (True, False):
+        torch.manual_seed(0)
+        module = Linear.Config(
+            in_features=8,
+            out_features=4,
+            num_linears=num_linears,
+            bias=bias,
+            inplace_wgrad_accum=inplace_wgrad_accum,
+        ).build()
+        torch.nn.init.normal_(module.weight)
+        if bias:
+            torch.nn.init.normal_(module.bias)
+        modules.append(module.to(dtype))
+    return modules
+
+
+class TestLinearInplaceWgradAccum(unittest.TestCase):
+    def test_first_backward_matches_f_linear_bitwise(self):
+        # Without a running gradient, the autograd Function computes the same
+        # GEMMs as F.linear's autograd formula.
+        for input_shape in ((6, 8), (2, 3, 8)):
+            for num_linears in (1, 2):
+                for bias in (False, True):
+                    with self.subTest(
+                        input_shape=input_shape, num_linears=num_linears, bias=bias
+                    ):
+                        inplace, reference = _linear_pair(
+                            num_linears=num_linears, bias=bias
+                        )
+                        x = torch.randn(input_shape)
+                        x_inplace = x.clone().requires_grad_()
+                        x_reference = x.clone().requires_grad_()
+                        out_inplace = inplace(x_inplace)
+                        out_reference = reference(x_reference)
+                        if num_linears == 1:  # a stacked output is unflattened
+                            self.assertIn(
+                                "LinearFunction", type(out_inplace.grad_fn).__name__
+                            )
+                        grad_out = torch.randn_like(out_reference)
+                        out_inplace.backward(grad_out)
+                        out_reference.backward(grad_out)
+                        self.assertTrue(torch.equal(out_inplace, out_reference))
+                        self.assertTrue(torch.equal(x_inplace.grad, x_reference.grad))
+                        self.assertTrue(
+                            torch.equal(inplace.weight.grad, reference.weight.grad)
+                        )
+                        if bias:
+                            self.assertTrue(
+                                torch.equal(inplace.bias.grad, reference.bias.grad)
+                            )
+
+    def test_later_backward_adds_into_running_grad(self):
+        for num_linears in (1, 2):
+            with self.subTest(num_linears=num_linears):
+                inplace, reference = _linear_pair(num_linears=num_linears)
+                inputs = [torch.randn(6, 8) for _ in range(2)]
+                for module in (inplace, reference):
+                    for x in inputs:
+                        module(x).sum().backward()
+                torch.testing.assert_close(inplace.weight.grad, reference.weight.grad)
+
+        inplace, _ = _linear_pair()
+        inplace(torch.randn(6, 8)).sum().backward()
+        # Keep only the address: an extra reference would make AccumulateGrad
+        # copy the returned buffer instead of reattaching it.
+        running_ptr = inplace.weight.grad.untyped_storage().data_ptr()
+        addmm_out_ptrs = []
+        original_addmm = torch.addmm
+
+        def addmm(*args, out, **kwargs):
+            # Record only the address, not the tensor, for the same reason.
+            addmm_out_ptrs.append(out.untyped_storage().data_ptr())
+            return original_addmm(*args, out=out, **kwargs)
+
+        with patch.object(torch, "addmm", addmm):
+            inplace(torch.randn(6, 8)).sum().backward()
+        self.assertEqual(addmm_out_ptrs, [running_ptr])
+        # AccumulateGrad reattaches the same storage, without a copy.
+        self.assertEqual(inplace.weight.grad.untyped_storage().data_ptr(), running_ptr)
+
+    def test_uses_f_linear_without_a_wgrad(self):
+        inplace, _ = _linear_pair()
+        with torch.no_grad():
+            self.assertIsNone(inplace(torch.randn(6, 8)).grad_fn)
+        inplace.weight.requires_grad_(False)
+        out = inplace(torch.randn(6, 8, requires_grad=True))
+        self.assertNotIn("LinearFunction", type(out.grad_fn).__name__)
+
+    def test_raises_under_autocast(self):
+        inplace, reference = _linear_pair()
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            with self.assertRaisesRegex(RuntimeError, "inplace_wgrad_accum=False"):
+                inplace(torch.randn(6, 8))
+            reference(torch.randn(6, 8))
+
+    def test_raises_when_traced(self):
+        inplace, reference = _linear_pair()
+        with self.assertRaisesRegex(RuntimeError, "inplace_wgrad_accum=False"):
+            torch.compile(inplace, backend="eager", fullgraph=True)(torch.randn(6, 8))
+        torch.compile(reference, backend="eager", fullgraph=True)(torch.randn(6, 8))
+
+
 if __name__ == "__main__":
     unittest.main()

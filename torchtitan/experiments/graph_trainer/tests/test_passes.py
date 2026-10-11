@@ -740,7 +740,13 @@ class ToyModel(Module):
         super().__init__()
 
         def _make_linear():
-            cfg = Linear.Config(in_features=dim, out_features=dim, bias=True)
+            # Traced under SimpleFSDP: no in-place WGRAD accumulation.
+            cfg = Linear.Config(
+                in_features=dim,
+                out_features=dim,
+                bias=True,
+                inplace_wgrad_accum=False,
+            )
             return cfg.build()
 
         self.layers = ModuleList([_make_linear() for _ in range(n_layers)])

@@ -125,9 +125,9 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.assertIsNotNone(attention_config.wo.sharding_config.out_src_shardings)
         self.assertIsNone(attention_config.wo.sharding_config.out_dst_shardings)
 
-        AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
-            attention_config
-        )
+        AsyncTensorParallelTransform(
+            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
+        ).transform(attention_config)
         self.assertIs(type(attention_config.wo), AsyncRowParallelLinear.Config)
 
 
