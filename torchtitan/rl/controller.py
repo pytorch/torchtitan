@@ -146,7 +146,8 @@ class ValidationConfig:
         step 7:   pass 0 ends and is logged at step 7; its slowest rollouts sampled up to policy 6.
         step 25:  pass 25 starts on policy 25 or later. Had pass 0 still been running, pass 25 would
                   start at the end of the step in which pass 0 ends.
-        step 100: a pass still running is awaited and logged at step 100; then the final pass runs.
+        step 100: a pass that ends in step 100, or is still running, is logged at step 100; the
+                  final pass then logs at step 101.
     """
 
     steps: int = 20
@@ -966,6 +967,7 @@ class Controller(Configurable):
                 *background_tasks, trainer_task, return_exceptions=True
             )
 
+        final_pass_step = num_training_steps
         # Await, not cancel, a pass still running: the generators would keep serving its requests,
         # and the final pass reuses their request ids.
         if self._validation_task is not None:
@@ -974,13 +976,15 @@ class Controller(Configurable):
             )
             await self._validation_task
             self._log_finished_validation(step=num_training_steps)
+            # At the same step, W&B would keep only the final pass's values for keys both passes log.
+            final_pass_step += 1
         if pre_validation_task is not None:
             pre_validation = m.MetricsProcessor._aggregate_metrics(
                 pre_validation_task.result()
             )
 
         # Post-training validation (held-out eval after the final step).
-        post_validation = await self._validate_and_log(step=num_training_steps)
+        post_validation = await self._validate_and_log(step=final_pass_step)
         # Push the last row now; close() would push it only after teardown.
         self.metrics_processor.commit()
         self._log_reward_delta(pre_validation, post_validation)
@@ -1330,7 +1334,9 @@ class Controller(Configurable):
                 and step < num_training_steps
             )
             if validation.overlap_training:
-                self._log_finished_validation(step=step)
+                # Leave a pass that ends in the last step to run(), which logs it before the final pass.
+                if step < num_training_steps:
+                    self._log_finished_validation(step=step)
                 if is_validation_step:
                     validation_requested = True
                     if self._validation_task is not None:

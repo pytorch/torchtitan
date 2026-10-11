@@ -1055,7 +1055,7 @@ def test_overlapped_validation_failure_stops_training() -> None:
 
 def test_overlapped_validation_starts_no_pass_at_the_last_step() -> None:
     """A pass asked for while another runs does not start at the last step; the final pass
-    after training covers it."""
+    after training covers it. The last step leaves a finished pass for run() to log."""
     controller, validation = _controller_for_trainer_loop(
         ValidationConfig(freq=1, overlap_training=True)
     )
@@ -1074,10 +1074,10 @@ def test_overlapped_validation_starts_no_pass_at_the_last_step() -> None:
         await asyncio.wait_for(trainer, timeout=5)
 
     asyncio.run(run())
-    # Step 2 asked for a pass while step 1's ran; step 3 logged step 1's and started none.
+    # Step 2 asked for a pass while step 1's ran; step 3 started none and left step 1's for run().
     assert validation.started_steps == [1]
-    assert _logged_steps(controller, is_validation=True) == [3]
-    assert controller._validation_task is None
+    assert _logged_steps(controller, is_validation=True) == []
+    assert controller._validation_task.done()
 
 
 def test_validation_pauses_training_by_default() -> None:
@@ -1105,9 +1105,14 @@ def test_validation_pauses_training_by_default() -> None:
     asyncio.run(run())
 
 
-def test_overlapped_validation_before_and_after_training() -> None:
+@pytest.mark.parametrize(
+    "pass_3_ends_in_training, logged_steps", [(True, [2, 3, 4]), (False, [2, 4, 5])]
+)
+def test_overlapped_validation_before_and_after_training(
+    pass_3_ends_in_training, logged_steps
+) -> None:
     """The pre-training pass runs while training starts. A pass still running when training
-    ends is awaited and logged at the last step, before the final pass starts."""
+    ends is awaited and logged at the last step; the final pass then logs one step later."""
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
         async_loop=AsyncLoopConfig(
@@ -1145,30 +1150,38 @@ def test_overlapped_validation_before_and_after_training() -> None:
         controller._log_finished_validation(step=2)
         controller._start_validation(step=3)
         await _run_until(lambda: validation.started_steps == [0, 3])
-        # Training ends with the step-3 pass still running.
-        asyncio.get_running_loop().call_later(0.05, validation.end, 3)
+        if pass_3_ends_in_training:
+            validation.end(3)
+            await _run_until(lambda: controller._validation_task.done())
+            controller._log_finished_validation(step=3)
+        else:
+            # Training ends with the step-3 pass still running.
+            asyncio.get_running_loop().call_later(0.05, validation.end, 3)
 
     controller._data_input_loop = idle
     controller._rollout_loop = idle
     controller._batcher_loop = idle
     controller._trainer_loop = trainer_loop
     validation.end(4)
+    validation.end(5)
 
     asyncio.run(asyncio.wait_for(controller.run(), timeout=5))
 
+    final_pass_step = logged_steps[-1]
     assert validation.events == [
         ("start", 0),
         ("end", 0),
         ("start", 3),
         ("end", 3),
-        ("start", 4),
-        ("end", 4),
+        ("start", final_pass_step),
+        ("end", final_pass_step),
     ]
-    assert _logged_steps(controller, is_validation=True) == [2, 4, 4]
+    assert _logged_steps(controller, is_validation=True) == logged_steps
     # Only the post-training pass blocks.
-    assert validation.overlapped == {0: True, 3: True, 4: False}
+    assert validation.overlapped == {0: True, 3: True, final_pass_step: False}
     controller._log_reward_delta.assert_called_once_with(
-        {"validation_reward/mean": 0.0}, {"validation_reward/mean": 4.0}
+        {"validation_reward/mean": 0.0},
+        {"validation_reward/mean": float(final_pass_step)},
     )
 
 
