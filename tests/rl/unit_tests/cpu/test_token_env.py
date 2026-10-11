@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
-from types import SimpleNamespace
 
 from renderers import ParsedResponse
 from torchtitan.rl.rollout import RolloutStatus
@@ -94,33 +93,20 @@ def test_env_passes_tools_to_render_parse_and_bridge() -> None:
     assert renderer.calls["bridge_to_next_turn"]["tools"] == _TOOLS
 
 
-class _BridgeThenRerenderRenderer(_RecordingRenderer):
-    """Renders [1, 2, 3], bridges the first step by appending the env reply [7], and re-renders the
-    second step as [1, 2, 9] (a rewritten history)."""
+class _ScriptedRenderer(_RecordingRenderer):
+    """Renders the given prompts in order and never bridges."""
 
-    def __init__(self) -> None:
+    def __init__(self, prompts: list[list[int]]) -> None:
         super().__init__()
-        self.rendered_prompts = [[1, 2, 3], [1, 2, 9]]
-        self.num_bridges = 0
+        self.prompts = prompts
 
     def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
-        return self.rendered_prompts.pop(0)
-
-    def bridge_to_next_turn(
-        self, previous_prompt_ids, previous_completion_ids, new_messages, *, tools=None
-    ):
-        self.num_bridges += 1
-        if self.num_bridges > 1:
-            return None
-        return SimpleNamespace(
-            token_ids=previous_prompt_ids + previous_completion_ids + [7]
-        )
+        return self.prompts.pop(0)
 
 
-def test_env_stores_each_next_prompt_as_a_delta() -> None:
-    env = TokenEnv.Config().build(
-        message_env=_ToolMessageEnv(), renderer=_BridgeThenRerenderRenderer()
-    )
+def test_env_returns_each_next_prompt_as_a_delta() -> None:
+    renderer = _ScriptedRenderer(prompts=[[1, 2, 3], [1, 2, 3, 4, 7], [1, 2, 3, 4, 9]])
+    env = TokenEnv.Config().build(message_env=_ToolMessageEnv(), renderer=renderer)
 
     def completion(token_ids: list[int]) -> Completion:
         return Completion(
@@ -145,6 +131,9 @@ def test_env_stores_each_next_prompt_as_a_delta() -> None:
         for output in outputs
     ] == [
         (0, [1, 2, 3]),  # first prompt: nothing to reuse
-        (4, [7]),  # bridged: reuses [1, 2, 3] + completion [4]
-        (2, [9]),  # re-rendered [1, 2, 9]: reuses [1, 2] of [1, 2, 3, 4, 7, 5]
+        (4, [7]),  # extends [1, 2, 3] + completion [4]
+        (
+            4,
+            [9],
+        ),  # edited history: shares [1, 2, 3, 4] with [1, 2, 3, 4, 7] + completion [5]
     ]

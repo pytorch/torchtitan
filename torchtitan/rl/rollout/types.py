@@ -248,8 +248,8 @@ class Rollout:
 
     turns: list[RolloutTurn] = field(default_factory=list)  # [num_turns]
     """Ordered rollout turns; each stores its prompt as a delta on the previous turn (see `RolloutTurn`)."""
-    # TODO: let a turn be a delta on any earlier turn, not just the previous one. Verifiers traces
-    # already fork: a fork re-stores the tokens it shares only with an earlier branch.
+    # TODO: let a turn be a delta on any earlier turn, not just the previous one, so a turn that resumes
+    # an older turn (a retry, or a main agent after a subagent) stores only its new tokens.
 
     status: RolloutStatus
     """Rollout-level terminal status."""

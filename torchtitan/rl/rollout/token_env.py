@@ -30,8 +30,8 @@ class TokenEnvOutput:
     rendered (COMPLETED, or a completion-level error)."""
 
     next_prompt_prefix_len: int = 0
-    """How many leading tokens of `next_prompt_token_ids` repeat the previous prompt + completion;
-    0 on the first prompt. See `RolloutTurn` for how a turn stores its prompt."""
+    """Length of the longest prefix shared with the previous prompt + completion; 0 on the first prompt.
+    Set it with `split_prompt` on every later prompt, from the tokens in `next_prompt_token_ids`."""
 
     next_prompt_messages: list[Message] | None = None  # [num_prompt_messages] or None
     """Message form of `next_prompt_token_ids`; `None` whenever that is `None`."""
@@ -53,7 +53,7 @@ class TokenEnvOutput:
 
     @property
     def next_prompt_delta_token_ids(self) -> list[int]:
-        """The new tokens: `next_prompt_token_ids` after its first `next_prompt_prefix_len`."""
+        """The next prompt after its first `next_prompt_prefix_len` tokens."""
         return (self.next_prompt_token_ids or [])[self.next_prompt_prefix_len :]
 
 
@@ -292,9 +292,10 @@ class TokenEnv(Configurable):
                 env_rewards=step_output.env_rewards,
             )
 
-        # The rollout stores only what the next prompt adds to this prompt + completion
+        # RolloutTurn stores the next prompt as a delta on this prompt + completion
         next_prompt_prefix_len, _ = split_prompt(
-            next_prompt_token_ids, self._last_prompt_token_ids + completion.token_ids
+            prompt_token_ids=next_prompt_token_ids,
+            previous_token_ids=self._last_prompt_token_ids + completion.token_ids,
         )
         self._last_prompt_token_ids = next_prompt_token_ids
         return TokenEnvOutput(

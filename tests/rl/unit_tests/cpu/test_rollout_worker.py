@@ -169,17 +169,14 @@ def test_worker_executes_group_without_actor_mesh() -> None:
 
 
 class _RewritingRenderer:
-    """Each turn bridges (appends the completion + an env reply) or, at random, re-renders a
-    rewritten history: the completion's first token (thinking) stripped, a prefix, or only BOS."""
+    """Bridges each turn, or rewrites the history and makes TokenEnv re-render it, at random."""
 
     def __init__(self, rng: random.Random) -> None:
         self.rng = rng
-        self.prompts: list[list[int]] = []
-        self._rewritten_prompt = [1, 2, 3]
+        self.prompts: list[list[int]] = [[1, 2, 3]]
 
     def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
-        self.prompts.append(self._rewritten_prompt)
-        return self._rewritten_prompt
+        return list(self.prompts[-1])
 
     def bridge_to_next_turn(
         self, previous_prompt_ids, previous_completion_ids, new_messages, *, tools=None
@@ -187,19 +184,19 @@ class _RewritingRenderer:
         reply = [self.rng.randrange(100)]
         kind = self.rng.choice(["continue", "strip_thinking", "prefix", "reset"])
         if kind == "continue":
-            self.prompts.append(previous_prompt_ids + previous_completion_ids + reply)
-            return SimpleNamespace(token_ids=self.prompts[-1])
-
-        # A rewrite: return None so TokenEnv re-renders, as when a renderer can't bridge
-        if kind == "strip_thinking":
-            self._rewritten_prompt = (
-                previous_prompt_ids + previous_completion_ids[1:] + reply
-            )
+            next_prompt = previous_prompt_ids + previous_completion_ids + reply
+        elif kind == "strip_thinking":
+            next_prompt = previous_prompt_ids + previous_completion_ids[1:] + reply
         elif kind == "prefix":
             num_kept = self.rng.randint(0, len(previous_prompt_ids))
-            self._rewritten_prompt = previous_prompt_ids[:num_kept]
+            next_prompt = previous_prompt_ids[:num_kept]
         else:
-            self._rewritten_prompt = [1] + reply
+            next_prompt = [1] + reply
+        self.prompts.append(next_prompt)
+
+        # Only a continuation bridges; a rewrite returns None, as when a renderer can't bridge
+        if kind == "continue":
+            return SimpleNamespace(token_ids=list(next_prompt))
         return None
 
     def parse_response(self, token_ids, *, tools=None):
@@ -232,7 +229,7 @@ class _CountingMessageEnv:
 
 
 def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
-    # TokenEnv stores each prompt as a delta. Delta prompts must pack into the same samples as full
+    # TokenEnv returns each prompt as a delta. Delta prompts must pack into the same samples as full
     # prompts: a turn joins the last sample iff its prompt extends the previous turn's prompt + completion.
     rng = random.Random(0)
     worker = RolloutWorker(
