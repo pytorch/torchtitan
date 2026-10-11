@@ -76,7 +76,7 @@ def _has_valid_loss_token(training_sample: TrainingSample) -> bool:
 
 
 @dataclass(kw_only=True, slots=True)
-class _OpenSample:
+class _SampleInProgress:
     """A training_sample while turns are appended to it: per-token Python lists (cheap appends),
     converted to tensors once by `to_training_sample`."""
 
@@ -282,7 +282,7 @@ class TrainingSampleBuilder(Configurable):
                 f"rollout {rollout.group_id}/rollout={rollout.rollout_id} has no advantage; the Rollouter "
                 "must fill it (via its advantage estimator) before training_samples are built."
             )
-        training_samples: list[_OpenSample] = []
+        training_samples: list[_SampleInProgress] = []
 
         # Skip if no completion (nothing to train on). This happens when the prompt is too
         # long in the first turn, before any generation. We keep these rollouts for debugging.
@@ -337,7 +337,7 @@ class TrainingSampleBuilder(Configurable):
             if not training_samples or not extends_prev:
                 # Start a new training_sample; its RolloutTurnID marks the turn the segment begins at.
                 training_samples.append(
-                    _OpenSample(
+                    _SampleInProgress(
                         min_policy_version=rollout_turn.min_policy_version,
                         max_policy_version=rollout_turn.max_policy_version,
                         rollout_id=RolloutTurnID(
