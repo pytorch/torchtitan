@@ -452,11 +452,13 @@ def checkout_commit(commit: str, commit_name: str) -> None:
 def resolve_commit(commit: str) -> str:
     """Resolve a commit-ish to its SHA. "." is the currently checked-out commit."""
     result = subprocess.run(
-        ["git", "rev-parse", "HEAD" if commit == "." else commit],
+        ["git", "rev-parse", "--verify", "HEAD" if commit == "." else commit],
         capture_output=True,
         text=True,
-        check=True,
     )
+    if result.returncode != 0:
+        log_print(f"Error: cannot resolve commit '{commit}': {result.stderr.strip()}")
+        sys.exit(1)
     return result.stdout.strip()
 
 

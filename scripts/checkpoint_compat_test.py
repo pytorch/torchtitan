@@ -69,7 +69,15 @@ def get_current_ref() -> str:
 
 def resolve_commit(commit: str) -> str:
     """Resolve a commit-ish to its SHA. "." is the currently checked-out commit."""
-    return git_run("rev-parse", "HEAD" if commit == "." else commit)
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD" if commit == "." else commit],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log(f"Error: cannot resolve commit '{commit}': {result.stderr.strip()}")
+        sys.exit(1)
+    return result.stdout.strip()
 
 
 def checkout(commit: str, label: str) -> None:

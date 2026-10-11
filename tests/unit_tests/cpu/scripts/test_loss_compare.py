@@ -80,6 +80,11 @@ class TestLossCompareCommitResolution(unittest.TestCase):
         # The original branch is restored afterwards.
         self.assertEqual(_git(self.repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
 
+    def test_unknown_commit_exits_before_checkout(self):
+        with self.assertRaises(SystemExit):
+            self._run("does-not-exist", "HEAD")
+        self.assertEqual(_git(self.repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
+
 
 if __name__ == "__main__":
     unittest.main()
