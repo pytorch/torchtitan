@@ -20,6 +20,10 @@ RL_ENV_DEFAULTS: dict[str, str] = {
     "PYTORCH_ALLOC_CONF": "expandable_segments:True",
     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     "NCCL_DEBUG": "WARN",
+    # Trainer ranks read microbatches over Monarch RDMA, whose ibverbs path fails with
+    # no fallback on some RoCE hosts and on native InfiniBand. "1" moves all Monarch
+    # RDMA to TCP, TorchStore's cross-host weight sync too. Set "0" where ibverbs works.
+    "MONARCH_RDMA_DISABLE_IBVERBS": "1",
 }
 
 
@@ -31,6 +35,13 @@ def apply_env_defaults() -> None:
             "PYTORCH_CUDA_ALLOC_CONF may not have an effect. For best results, "
             "set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True before "
             "importing torch.",
+            stacklevel=2,
+        )
+    if "MONARCH_RDMA_DISABLE_IBVERBS" not in os.environ and "monarch" in sys.modules:
+        warnings.warn(
+            "The 'monarch' module has already been imported, so it may ignore "
+            "MONARCH_RDMA_DISABLE_IBVERBS=1 in this process. Launch with "
+            "`python -m torchtitan.rl.train`, or set it before importing monarch.",
             stacklevel=2,
         )
     for key, value in RL_ENV_DEFAULTS.items():

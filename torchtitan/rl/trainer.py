@@ -27,8 +27,8 @@ from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
-from torchtitan.rl.components.batcher import TrainingMicrobatch
 from torchtitan.rl.components.checkpointer import CONTROLLER_STATE_KEY, MirroredState
+from torchtitan.rl.distributed.microbatch_ref import MicrobatchRef
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
@@ -239,14 +239,14 @@ class Trainer(Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[list[TrainingMicrobatch]],
+        training_data: list[list[MicrobatchRef]],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
-            training_data: Microbatch-major grid with shape
+            training_data: Microbatch-major grid of `MicrobatchRef`s with shape
                 ``[num_microbatches][dp_degree]``.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
@@ -261,14 +261,23 @@ class Trainer(Configurable):
             f"policy_version={self.policy_version}"
         )
         engine = self.engine
+        # TODO: the cp * tp ranks of a DP replica read the same column. Reading it once per
+        # replica and broadcasting it would cut the controller's reads by cp * tp: over the TCP
+        # fallback, 16 readers get ~230 MB/s each, vs ~1 GB/s for one. Needs a per-replica
+        # process group, with the broadcast on the main thread to keep NCCL calls in order.
+        refs = [rank_refs[self.dp_rank] for rank_refs in training_data]
+        # TODO: read a few microbatches ahead, so reads overlap compute. Reads add ~0.15% to
+        # forward_backward at 38 B/token, ~2% at 614 B/token with routed ids and top-32 logprobs
+        # (GB300 estimate). Needs TrainingEngine to preprocess one microbatch group at a time.
+        with sl.log_trace_span("read_microbatches"):
+            # read() blocks until RDMA finishes, so it runs off the actor loop.
+            microbatches = [await asyncio.to_thread(ref.read) for ref in refs]
         self._step_compute_start = time.perf_counter()
         self._step_num_tokens_per_dp_rank = sum(
-            rank_batches[self.dp_rank].labels.numel() for rank_batches in training_data
+            microbatch.labels.numel() for microbatch in microbatches
         )
         result = engine.forward_backward(
-            microbatch_groups=[
-                [rank_batches[self.dp_rank]] for rank_batches in training_data
-            ],
+            microbatch_groups=[[microbatch] for microbatch in microbatches],
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )
