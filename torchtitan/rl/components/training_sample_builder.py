@@ -12,7 +12,7 @@ RolloutGroup -> group filters -> rollout_to_training_samples -> sample filters -
 import statistics
 from dataclasses import dataclass, field
 
-import torch
+import numpy as np
 
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
@@ -24,9 +24,10 @@ from torchtitan.rl.rollout.types import RolloutTurnID
 class TrainingSample:
     """A trainable token sequence from a rollout.
 
-    Per-token fields are tensors, not lists:
-    - a full GC visits 4 tensors per sample, not 4 x L list entries;
-    - their dtypes match the batcher's, so it packs them with `torch.cat`, no cast.
+    Per-token fields are numpy arrays:
+    - not lists: a full GC walks every entry of a list, but doesn't track numpy arrays;
+    - not tensors: `np.asarray` builds them from lists faster (`build_from_group`: 218 vs 321 ms, 1.6M tokens).
+    The batcher concatenates them into the trainer's tensors.
 
     Example:
         # Turn 0: prompt P0 -> assistant A0 -> env reply E0
@@ -35,10 +36,10 @@ class TrainingSample:
             rollout_id=RolloutTurnID(group_id=3, rollout_id=1, turn_id=1),
             min_policy_version=7,
             max_policy_version=9,            # weights updated during rollout
-            token_ids=torch.tensor(P0 + A0 + E0 + A1),
-            loss_mask=torch.tensor([False]*len(P0) + [True]*len(A0) + [False]*len(E0) + [True]*len(A1)),
-            logprobs=torch.tensor([0.0]*len(P0) + logprobs_A0 + [0.0]*len(E0) + logprobs_A1),
-            advantage=torch.tensor([0.0]*len(P0) + [adv]*len(A0) + [0.0]*len(E0) + [adv]*len(A1)),
+            token_ids=np.array(P0 + A0 + E0 + A1),
+            loss_mask=np.array([False]*len(P0) + [True]*len(A0) + [False]*len(E0) + [True]*len(A1)),
+            logprobs=np.array([0.0]*len(P0) + logprobs_A0 + [0.0]*len(E0) + logprobs_A1, dtype=np.float32),
+            advantage=np.array([0.0]*len(P0) + [adv]*len(A0) + [0.0]*len(E0) + [adv]*len(A1), dtype=np.float32),
         )
     """
 
@@ -48,13 +49,13 @@ class TrainingSample:
     """Newest policy version among this branch's trained turns."""
     rollout_id: RolloutTurnID
     """This sample identifier."""
-    token_ids: torch.Tensor  # long
+    token_ids: np.ndarray  # int64
     """[L] packed prompt + completions + env replies."""
-    loss_mask: torch.Tensor  # bool
+    loss_mask: np.ndarray  # bool
     """[L] True on assistant tokens to train."""
-    logprobs: torch.Tensor  # float32
+    logprobs: np.ndarray  # float32
     """[L] generator logprobs; 0.0 where loss_mask is False."""
-    advantage: torch.Tensor  # float32
+    advantage: np.ndarray  # float32
     """[L] advantage on assistant tokens, 0.0 elsewhere."""
 
 
@@ -75,12 +76,12 @@ class TrainingSampleGroup:
 def _has_valid_loss_token(training_sample: TrainingSample) -> bool:
     """Return whether the shifted sample has a token usable by the RL loss."""
     loss_mask, logprobs = training_sample.loss_mask[1:], training_sample.logprobs[1:]
-    return bool((loss_mask & logprobs.isfinite()).any())
+    return bool((loss_mask & np.isfinite(logprobs)).any())
 
 
 @dataclass(kw_only=True, slots=True)
 class _SampleInProgress:
-    """A training_sample being built: lists while turns are appended (cheap), converted to tensors once
+    """A training_sample being built: lists while turns are appended (cheap), converted to arrays once
     by `to_training_sample`."""
 
     rollout_id: RolloutTurnID
@@ -96,10 +97,10 @@ class _SampleInProgress:
             rollout_id=self.rollout_id,
             min_policy_version=self.min_policy_version,
             max_policy_version=self.max_policy_version,
-            token_ids=torch.tensor(self.token_ids, dtype=torch.long),
-            loss_mask=torch.tensor(self.loss_mask, dtype=torch.bool),
-            logprobs=torch.tensor(self.logprobs, dtype=torch.float32),
-            advantage=torch.tensor(self.advantage, dtype=torch.float32),
+            token_ids=np.asarray(self.token_ids, dtype=np.int64),
+            loss_mask=np.asarray(self.loss_mask, dtype=bool),
+            logprobs=np.asarray(self.logprobs, dtype=np.float32),
+            advantage=np.asarray(self.advantage, dtype=np.float32),
         )
 
 

@@ -8,6 +8,7 @@
 
 import random
 
+import numpy as np
 import torch
 
 from torchtitan.rl.components.batcher import Batcher
@@ -21,10 +22,10 @@ def _make_samples(lengths: list[int]) -> list[TrainingSample]:
             min_policy_version=0,
             max_policy_version=0,
             rollout_id=RolloutTurnID(group_id=0, rollout_id=index, turn_id=0),
-            token_ids=torch.arange(length + 1),
-            loss_mask=torch.tensor([False] + [True] * length),
-            logprobs=torch.zeros(length + 1),
-            advantage=torch.zeros(length + 1),
+            token_ids=np.arange(length + 1),
+            loss_mask=np.array([False] + [True] * length),
+            logprobs=np.zeros(length + 1, dtype=np.float32),
+            advantage=np.zeros(length + 1, dtype=np.float32),
         )
         for index, length in enumerate(lengths)
     ]

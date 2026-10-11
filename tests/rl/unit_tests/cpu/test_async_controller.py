@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 
+import numpy as np
 import pytest
 import torch
 
@@ -56,10 +57,10 @@ def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
         min_policy_version=0,
         max_policy_version=0,
         rollout_id=RolloutTurnID(group_id=group_id, rollout_id=rollout_id, turn_id=0),
-        token_ids=torch.tensor([1, 2, 3]),
-        loss_mask=torch.tensor([False, True, True]),
-        logprobs=torch.tensor([0.0, 0.1, 0.2]),
-        advantage=torch.tensor([0.0, 1.0, 1.0]),
+        token_ids=np.array([1, 2, 3]),
+        loss_mask=np.array([False, True, True]),
+        logprobs=np.array([0.0, 0.1, 0.2], dtype=np.float32),
+        advantage=np.array([0.0, 1.0, 1.0], dtype=np.float32),
     )
 
 
@@ -88,10 +89,12 @@ def _variable_length_group(
                     rollout_id=rollout_id,
                     turn_id=0,
                 ),
-                token_ids=torch.arange(token_length),
-                loss_mask=torch.tensor([False] + [True] * (token_length - 1)),
-                logprobs=torch.zeros(token_length),
-                advantage=torch.tensor([0.0] + [1.0] * (token_length - 1)),
+                token_ids=np.arange(token_length),
+                loss_mask=np.array([False] + [True] * (token_length - 1)),
+                logprobs=np.zeros(token_length, dtype=np.float32),
+                advantage=np.array(
+                    [0.0] + [1.0] * (token_length - 1), dtype=np.float32
+                ),
             )
         )
     return TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])
@@ -500,10 +503,10 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
         temperature=1.0,
     )
     sample = _training_sample(group_id=0, rollout_id=0)
-    sample.token_ids = torch.arange(6)
-    sample.loss_mask = torch.zeros(6, dtype=torch.bool)
-    sample.logprobs = torch.zeros(6)
-    sample.advantage = torch.zeros(6)
+    sample.token_ids = np.arange(6)
+    sample.loss_mask = np.zeros(6, dtype=bool)
+    sample.logprobs = np.zeros(6, dtype=np.float32)
+    sample.advantage = np.zeros(6, dtype=np.float32)
 
     pending, group_is_trainable = batcher.add_training_samples(
         training_sample_group=TrainingSampleGroup(

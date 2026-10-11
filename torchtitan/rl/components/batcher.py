@@ -14,6 +14,7 @@ import logging
 import math
 from dataclasses import dataclass, replace
 
+import numpy as np
 import torch
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
@@ -79,7 +80,7 @@ class TrainerStepBatch:
 
 _MAX_CONSECUTIVE_UNTRAINABLE_BATCHES = 10
 
-# Per-field pad values + tensor dtypes for a packed row.
+# Per-field pad values + dtypes for a packed row.
 _PAD_VALUES: dict[str, int | float | bool] = {
     "input_ids": 0,  # overwritten with pad_id in __init__-bound builds
     "labels": 0,
@@ -87,12 +88,12 @@ _PAD_VALUES: dict[str, int | float | bool] = {
     "loss_mask": False,
     "advantages": 0.0,
 }
-_DTYPES: dict[str, torch.dtype] = {
-    "input_ids": torch.long,
-    "labels": torch.long,
-    "generator_logprobs": torch.float,
-    "loss_mask": torch.bool,
-    "advantages": torch.float,
+_DTYPES: dict[str, type[np.generic]] = {
+    "input_ids": np.int64,
+    "labels": np.int64,
+    "generator_logprobs": np.float32,
+    "loss_mask": np.bool_,
+    "advantages": np.float32,
 }
 
 
@@ -709,12 +710,12 @@ class Batcher(Configurable):
         """
         pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
         keys = list(pad_values)
-        packed_fields: dict[str, list[torch.Tensor]] = {key: [] for key in keys}
-        positions: list[torch.Tensor] = []
-        padding_mask: list[torch.Tensor] = []
+        packed_fields: dict[str, list[np.ndarray]] = {key: [] for key in keys}
+        positions: list[np.ndarray] = []
+        padding_mask: list[np.ndarray] = []
 
-        def pad(key: str, num_tokens: int) -> torch.Tensor:
-            return torch.full((num_tokens,), pad_values[key], dtype=_DTYPES[key])
+        def pad(key: str, num_tokens: int) -> np.ndarray:
+            return np.full(num_tokens, pad_values[key], dtype=_DTYPES[key])
 
         # Shift labels/logits and pad to per_sample_pad_multiple.
         for training_sample in training_samples:
@@ -736,8 +737,8 @@ class Batcher(Configurable):
             # extend row
             for key in keys:
                 packed_fields[key] += [sample[key], pad(key, sample_len - unpadded_len)]
-            positions.append(torch.arange(sample_len))
-            padding_mask.append(torch.arange(sample_len) >= unpadded_len)
+            positions.append(np.arange(sample_len, dtype=np.int64))
+            padding_mask.append(np.arange(sample_len) >= unpadded_len)
 
         num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
         pad_len = num_tokens_per_rank - sum(map(len, positions))
@@ -745,15 +746,19 @@ class Batcher(Configurable):
         if pad_len > 0:
             for key in keys:
                 packed_fields[key].append(pad(key, pad_len))
-            positions.append(torch.arange(pad_len) % self.seq_len)
-            padding_mask.append(torch.ones(pad_len, dtype=torch.bool))
+            positions.append(np.arange(pad_len, dtype=np.int64) % self.seq_len)
+            padding_mask.append(np.ones(pad_len, dtype=bool))
 
-        packed = {key: torch.cat(packed_fields[key]) for key in keys}
+        # Concatenate into the packed dtype (e.g. float64 logprobs -> float32); torch.from_numpy doesn't copy
+        packed = {
+            key: torch.from_numpy(np.concatenate(arrays, dtype=_DTYPES[key]))
+            for key, arrays in packed_fields.items()
+        }
         generator_logprobs = packed["generator_logprobs"]
         loss_mask = packed["loss_mask"]
         target_mask = loss_mask & torch.isfinite(generator_logprobs)
-        positions_tensor = torch.cat(positions)
-        padding_mask_tensor = torch.cat(padding_mask)
+        positions_tensor = torch.from_numpy(np.concatenate(positions))
+        padding_mask_tensor = torch.from_numpy(np.concatenate(padding_mask))
         loss_token_counts, routing_token_counts = get_mtp_token_counts(
             target_mask=target_mask,
             positions=positions_tensor,
