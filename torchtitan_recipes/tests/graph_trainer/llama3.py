@@ -59,21 +59,14 @@ def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
-    """Debug model on the test-only SDPA backend.
-
-    Used by graph machinery tests (precompile artifact serialization, context
-    parallel) that can't run on the default FlexInnerAttention backend: its BlockMask
-    is unpicklable (mask_mod code objects) and is not a tensor. SDPA exercises
-    the same machinery without those obstacles. See
-    ``build_decoder_config_for_backend``.
-    """
+def graph_trainer_llama3_debugmodel_varlen() -> GraphTrainer.Config:
+    """Debug model using Varlen attention for graph machinery tests."""
     base = llama3_debugmodel()
     base.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
     base.model = build_graph_llama3_model_config(
         "debugmodel",
         seq_len=base.training.max_context_length,
-        attn_backend="sdpa",
+        attn_backend="varlen",
         parallelism=base.parallelism,
     )
     config = to_graph_trainer_config(base, GraphTrainerLlama3Model.Config)
@@ -81,9 +74,9 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss() -> GraphTrainer.Config:
-    """SDPA debug model with standard cross-entropy loss."""
-    config = graph_trainer_llama3_debugmodel_sdpa()
+def graph_trainer_llama3_debugmodel_varlen_cross_entropy_loss() -> GraphTrainer.Config:
+    """Varlen debug model with standard cross-entropy loss."""
+    config = graph_trainer_llama3_debugmodel_varlen()
     config.loss = CrossEntropyLoss.Config(
         global_vocab_size=decoder_vocab_size(config.model),
     )

@@ -22,7 +22,7 @@ from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
 )
 from torchtitan_recipes.tests.graph_trainer.llama3 import (
     graph_trainer_llama3_debugmodel,
-    graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss,
+    graph_trainer_llama3_debugmodel_varlen_cross_entropy_loss,
 )
 from torchtitan_recipes.tests.graph_trainer.qwen3 import (
     graph_trainer_qwen3_debugmodel,
@@ -289,15 +289,15 @@ def qwen3_moe_graph_numerics():
     return config
 
 
-def llama3_sdpa_manual_numerics():
-    config = graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss()
+def llama3_varlen_manual_numerics():
+    config = graph_trainer_llama3_debugmodel_varlen_cross_entropy_loss()
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     return config
 
 
-def llama3_sdpa_autoparallel_numerics():
-    config = llama3_sdpa_manual_numerics()
+def llama3_varlen_autoparallel_numerics():
+    config = llama3_varlen_manual_numerics()
     config.compile.enable_autoparallel = True
     return config
 

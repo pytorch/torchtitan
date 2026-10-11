@@ -33,6 +33,7 @@ from PIL import Image
 
 torch._dynamo.config.disable = True
 
+from scripts.checkpoint_conversion.attention_reference import SDPAReferenceAttention
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
 from torchtitan.components.data.multimodal.utils.image import (
@@ -40,9 +41,6 @@ from torchtitan.components.data.multimodal.utils.image import (
     vision_to_patches,
 )
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.experiments.graph_trainer.attention import (
-    ScaledDotProductInnerAttention,
-)
 from torchtitan.models.qwen3_5 import build_model_config, QWEN3_5_SPECIAL_TOKENS
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
@@ -289,7 +287,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
     # (unfused FlexInnerAttention without torch.compile has poor fp16 numerics).
     for layer in model.layers.values():
         if layer.full_attn:
-            layer.attn.inner_attention = ScaledDotProductInnerAttention.Config().build()
+            layer.attn.inner_attention = SDPAReferenceAttention()
 
     class _BidirectionalSDPA(torch.nn.Module):
         def forward(self, q, k, v, **kwargs):

@@ -300,7 +300,7 @@ def llama3_fsdp_tp_async_tp():
 
 
 def llama3_autoparallel_fsdp_tp():
-    config = llama3_recipes.graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss()
+    config = llama3_recipes.graph_trainer_llama3_debugmodel_varlen_cross_entropy_loss()
     config.compile.enable_autoparallel = True
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -634,15 +634,8 @@ def _build_async_tp_tests() -> list[IntegrationTestDefinition]:
 def _build_autoparallel_tests() -> list[IntegrationTestDefinition]:
     """AutoParallel integration tests for default runners."""
     return [
-        # Uses the SDPA backend: AutoParallel's dynamo export
-        # (_dynamo_graph_capture_for_export) pytree-flattens the default
-        # FlexInnerAttention BlockMask to plain (Fake)Tensors, so flex_attention then
-        # fails with "'FakeTensor' object has no attribute 'BLOCK_SIZE'". SDPA is
-        # maskless (is_causal) and carries no BlockMask, and its input_fn
-        # (tokens, positions) binds correctly now that Decoder.forward lists
-        # positions before attention_metadata.
-        # TODO: re-test on FlexInnerAttention once BlockMask survives AutoParallel
-        # graph capture.
+        # TODO: Before re-enabling, wire Varlen metadata through AutoParallel
+        # input_fn and its input sharding constraints.
         # TODO: Disabled due to upstream AutoParallel/PyTorch API skew. PyTorch
         # #186754 (2026-06-24) removed propagate_single_input_strategy in favor
         # of propagate_single_input_single_dim_strategy, but AutoParallel's

@@ -38,6 +38,7 @@ import torch.distributed.checkpoint as dcp
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
+from scripts.checkpoint_conversion.attention_reference import SDPAReferenceAttention
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.components.data.multimodal.utils.image import (
     process_image,
@@ -46,9 +47,6 @@ from torchtitan.components.data.multimodal.utils.image import (
 )
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.experiments.graph_trainer.attention import (
-    ScaledDotProductInnerAttention,
-)
 from torchtitan.models.kimi_k2_7 import build_model_config
 from transformers import AutoModelForCausalLM, AutoProcessor
 
@@ -178,9 +176,7 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
 
     model.vision_encoder.to(vision_dtype)  # mixed precision: ViT in vision_dtype
     for layer in model.layers.values():
-        layer.attention.inner_attention = (
-            ScaledDotProductInnerAttention.Config().build()
-        )
+        layer.attention.inner_attention = SDPAReferenceAttention()
     for layer in model.vision_encoder.layers.values():
         layer.attn.flex_attention = _VisionSDPA()
     model.eval()

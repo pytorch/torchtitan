@@ -14,10 +14,8 @@ import torch.nn as nn
 
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.experiments.graph_trainer.attention import (
-    ScaledDotProductInnerAttention,
-)
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
+from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 
 
@@ -120,9 +118,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
         )
-        inner_attention = ScaledDotProductInnerAttention(
-            ScaledDotProductInnerAttention.Config()
-        )
+        inner_attention = VarlenInnerAttention(VarlenInnerAttention.Config())
 
         model = apply_simple_fsdp(
             inner_attention,
@@ -130,7 +126,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             training=training,
         )
 
-        self.assertIs(model.attention_metadata_key, ScaledDotProductInnerAttention)
+        self.assertIs(model.attention_metadata_key, VarlenInnerAttention)
 
 
 class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
