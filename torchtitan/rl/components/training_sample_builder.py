@@ -22,8 +22,11 @@ from torchtitan.rl.rollout.types import RolloutTurnID
 
 @dataclass(kw_only=True, slots=True)
 class TrainingSample:
-    """A trainable token sequence from a rollout. Per-token fields are tensors in the dtypes the
-    batcher packs, so a full GC walks 4 objects per sample instead of 4 x L list entries.
+    """A trainable token sequence from a rollout.
+
+    Per-token fields are tensors, not lists:
+    - a full GC visits 4 tensors per sample, not 4 x L list entries;
+    - their dtypes match the batcher's, so it packs them with `torch.cat`, no cast.
 
     Example:
         # Turn 0: prompt P0 -> assistant A0 -> env reply E0
@@ -77,8 +80,8 @@ def _has_valid_loss_token(training_sample: TrainingSample) -> bool:
 
 @dataclass(kw_only=True, slots=True)
 class _SampleInProgress:
-    """A training_sample while turns are appended to it: per-token Python lists (cheap appends),
-    converted to tensors once by `to_training_sample`."""
+    """A training_sample being built: lists while turns are appended (cheap), converted to tensors once
+    by `to_training_sample`."""
 
     rollout_id: RolloutTurnID
     min_policy_version: int
