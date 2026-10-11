@@ -26,6 +26,7 @@ class BlockAttentionGym(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, BlockAttentionGym())
 import torchtitan.config.transform
 import torchtitan.models.common
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import LinearAttentionMetadata
 from torchtitan.models.common.attention import (
     cp_gdn,
@@ -63,7 +64,9 @@ for model_name in (
     "muse_glimmer", "qwen3_5", "kimi_k3",
 ):
     model = importlib.import_module(f"torchtitan.models.{model_name}")
-    model.build_model_config("debugmodel", seq_len=128)
+    model.build_model_config(
+        "debugmodel", seq_len=128, parallelism=ParallelismConfig()
+    )
 """
     result = subprocess.run(
         [sys.executable, "-c", script],

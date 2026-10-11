@@ -302,7 +302,7 @@ def test_static_decoder_stage_metadata_is_complete(
     expected_decoder_tokens,
     expected_hidden_tokens,
 ):
-    model_config = build_model_config("debugmodel")
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     parallelism_context = SimpleNamespace(cp=cp, tp=tp, tp_enabled=tp_enabled)
     stage_io = _build_decoder_stage_io(
         parallelism_context=parallelism_context,
@@ -336,7 +336,7 @@ def test_static_decoder_stage_metadata_is_complete(
 
 
 def test_static_decoder_stage_metadata_describes_logits_output():
-    model_config = build_model_config("debugmodel")
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     stage_io = _build_decoder_stage_io(
         parallelism_context=SimpleNamespace(cp=1, tp=1, tp_enabled=False),
         parallelism=ParallelismConfig(),

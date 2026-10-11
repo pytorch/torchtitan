@@ -39,7 +39,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import ConfigLoader
+from torchtitan.config import apply_overrides, ConfigLoader
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.rl.generator import add_extra_vllm_engine_args
@@ -99,10 +99,10 @@ def _shutdown_engine(engine: LLMEngine) -> None:
 def generate() -> None:
     args, config_args = _parse_args()
     config = ConfigLoader().load(config_args)
+    if config.override.imports:
+        apply_overrides(config.override, config)
     gen_config = config.generator
-    model_config = config.model
-    if model_config is None:
-        raise ValueError("RL config must define a model.")
+    model_config = gen_config.model
     model_path = config.hf_assets_path
     # Recipes name local assets relative to the repo root, while
     # initial_load_path must be absolute or remote.
@@ -119,7 +119,6 @@ def generate() -> None:
             initial_load_in_hf=True,
             initial_load_path=model_path,
         ),
-        override=config.generator.override,
         dist_moe_runtime=gen_config.dist_moe_runtime,
     )
     logger.info("Registered TorchTitan model with vLLM")

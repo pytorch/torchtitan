@@ -9,6 +9,7 @@ import unittest
 import torch
 import torch.nn as nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     GraphTrainerScaledDotProductInnerAttention,
 )
@@ -62,7 +63,10 @@ class TestModelTDLayout(unittest.TestCase):
     def test_gpt_oss_attention_preserves_td_shape(self):
         _, max_context_length = GPT_OSS_MODEL_FLAVORS["debugmodel"]
         config = build_gpt_oss_model_config(
-            "debugmodel", attn_backend="varlen", seq_len=max_context_length
+            "debugmodel",
+            attn_backend="varlen",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
         )
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
@@ -79,6 +83,7 @@ class TestModelTDLayout(unittest.TestCase):
             "debugmodel",
             attn_backend="flex",
             seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
         )
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
@@ -91,7 +96,9 @@ class TestModelTDLayout(unittest.TestCase):
 
     def test_muse_attention_preserves_td_shape(self):
         build_config, max_context_length = MUSE_GLIMMER_MODEL_FLAVORS["debugmodel"]
-        config = build_config("varlen", seq_len=max_context_length)
+        config = build_config(
+            "varlen", seq_len=max_context_length, parallelism=ParallelismConfig()
+        )
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)
@@ -104,7 +111,9 @@ class TestModelTDLayout(unittest.TestCase):
 
     def test_qwen35_attention_preserves_td_shape(self):
         build_config, max_context_length = QWEN3_5_MODEL_FLAVORS["debugmodel"]
-        config = build_config("varlen", seq_len=max_context_length)
+        config = build_config(
+            "varlen", seq_len=max_context_length, parallelism=ParallelismConfig()
+        )
         attention_config = next(
             layer.attention for layer in config.layers if layer.attention is not None
         )

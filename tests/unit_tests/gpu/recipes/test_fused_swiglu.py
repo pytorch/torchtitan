@@ -17,6 +17,7 @@ import unittest
 from dataclasses import dataclass
 
 import torch
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import AsyncTensorParallelTransform
 
 from torchtitan.models.common.activation import SwiGLU
@@ -147,7 +148,12 @@ def _dist_gemm_ffn_config(**kwargs):
 
     init = {"weight": torch.nn.init.zeros_}
     return make_ffn_config(
-        dim=_DIM, hidden_dim=_HIDDEN, w13_param_init=init, w2_param_init=init, **kwargs
+        dim=_DIM,
+        hidden_dim=_HIDDEN,
+        w13_param_init=init,
+        w2_param_init=init,
+        **kwargs,
+        enable_sp=True,
     )
 
 
@@ -197,7 +203,11 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
         feed_forward.w13 parameter.
         """
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         # Apply the fused override factory directly, independent of the global
         # override registry (which other tests may clear).
         for layer in config.layers:

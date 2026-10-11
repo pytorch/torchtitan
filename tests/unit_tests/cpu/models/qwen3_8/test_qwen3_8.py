@@ -12,8 +12,8 @@ import torch
 
 pytest.importorskip("attn_gym")
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_5 import Qwen35Model
-from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 from torchtitan.models.qwen3_8 import build_model_config, MODEL_FLAVORS
 
@@ -35,11 +35,13 @@ def test_qwen38_registry_exposes_only_qwen38_flavors() -> None:
         "397B-A17B",
     ):
         with pytest.raises(KeyError):
-            build_model_config(legacy_flavor)
+            build_model_config(legacy_flavor, parallelism=ParallelismConfig())
 
 
 def test_qwen38_27b_reuses_qwen35_multimodal_architecture() -> None:
-    config = cast(Qwen35Model.Config, build_model_config("27B"))
+    config = cast(
+        Qwen35Model.Config, build_model_config("27B", parallelism=ParallelismConfig())
+    )
 
     assert config.dim == 5120
     assert len(config.layers) == 64
@@ -52,6 +54,7 @@ def test_qwen38_2_4t_a95b_matches_hugging_face_config() -> None:
     config = build_config(
         attn_backend="flex",
         seq_len=max_context_length,
+        parallelism=ParallelismConfig(),
     )
 
     assert config.dim == 8192
@@ -78,9 +81,8 @@ def test_text_only_qwen38_sharding_does_not_require_vision() -> None:
     config = build_config(
         attn_backend="flex",
         seq_len=max_context_length,
+        parallelism=ParallelismConfig(expert_parallel_degree=2),
     )
-
-    set_qwen35_sharding_config(config, enable_sp=True, enable_ep=True)
 
     assert config.tok_embeddings.sharding_config is not None
     assert config.layers[0].sharding_config is not None
@@ -88,7 +90,11 @@ def test_text_only_qwen38_sharding_does_not_require_vision() -> None:
 
 def test_shared_model_builds_without_vision_encoder() -> None:
     build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-    config = build_config(attn_backend="flex", seq_len=max_context_length)
+    config = build_config(
+        attn_backend="flex",
+        seq_len=max_context_length,
+        parallelism=ParallelismConfig(),
+    )
     config = replace(
         config,
         vocab_size=128,
@@ -107,6 +113,7 @@ def test_text_only_checkpoint_adapter_uses_model_prefix() -> None:
     config = build_config(
         attn_backend="flex",
         seq_len=max_context_length,
+        parallelism=ParallelismConfig(),
     )
     adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     embedding = torch.randn(2, 3)
@@ -130,7 +137,11 @@ def test_text_only_checkpoint_adapter_uses_model_prefix() -> None:
 
 def test_multimodal_checkpoint_adapter_keeps_language_model_prefix() -> None:
     build_config, max_context_length = MODEL_FLAVORS["27B"]
-    config = build_config(attn_backend="flex", seq_len=max_context_length)
+    config = build_config(
+        attn_backend="flex",
+        seq_len=max_context_length,
+        parallelism=ParallelismConfig(),
+    )
     adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     embedding = torch.randn(2, 3)
     lm_head = torch.randn(2, 3)
@@ -152,6 +163,7 @@ def test_text_only_checkpoint_adapter_converts_fused_deltanet_qkv() -> None:
     config = build_config(
         attn_backend="flex",
         seq_len=max_context_length,
+        parallelism=ParallelismConfig(),
     )
     adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     delta_net = config.layers[0].delta_net

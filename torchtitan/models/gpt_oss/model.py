@@ -239,15 +239,6 @@ class GptOssModel(Decoder):
                 )
             return nparams, 6 * active_nparams + attention_op_flops
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_gpt_oss_sharding_config
-
-            set_gpt_oss_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
     def __init__(self, config: Config):
         super().__init__(config)
 

@@ -38,7 +38,6 @@ def validate_model_training_config(
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
     from torchtitan.distributed.cuda_graph import cuda_graphs_supported
-    from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE
@@ -96,20 +95,6 @@ def validate_model_training_config(
                 raise ValueError(
                     f"{moe_fqn}.num_experts ({moe.num_experts}) must be "
                     f"divisible by expert_parallel_degree ({ep})."
-                )
-            routed_weight_sharding = moe.routed_experts.w13.sharding_config
-            routed_on_ep = (
-                routed_weight_sharding is not None
-                and MeshAxisName.EP
-                in routed_weight_sharding.state_shardings["weight"].local_type
-            )
-            if model.tok_embeddings.sharding_config is not None and (
-                routed_on_ep != (ep > 1)
-            ):
-                raise ValueError(
-                    f"{moe_fqn} routed-expert sharding does not match "
-                    f"expert_parallel_degree ({ep}). Resolve model sharding "
-                    "from the consumer's parallelism config before building it."
                 )
 
         for fqn, dispatcher, _, _ in model.traverse(LocalTokenDispatcher.Config):

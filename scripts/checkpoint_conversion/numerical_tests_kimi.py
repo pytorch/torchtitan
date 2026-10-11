@@ -38,13 +38,14 @@ import torch.distributed.checkpoint as dcp
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.components.data.multimodal.utils.image import (
     process_image,
     resize_to_navit_patch_grid,
     vision_to_patches,
 )
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.kimi_k2_7 import build_model_config
 from transformers import AutoModelForCausalLM, AutoProcessor
@@ -162,7 +163,7 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
     """torchtitan Kimi-VL: its own image processing + forward on the same image."""
     device = torch.device("cuda")
     print(f"Loading torchtitan Kimi-VL ({model_flavor}) on {device} ...")
-    model_config = build_model_config(model_flavor)
+    model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
     with torch.device("meta"):
         model = model_config.build()
     model.to_empty(device="cpu")

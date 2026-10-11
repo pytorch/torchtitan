@@ -59,7 +59,6 @@ class TestDSVPackedDocuments(unittest.TestCase):
         padding_mask = torch.tensor([False] * 8 + [True] * 2)
         with torch.device("meta"):
             config = config_registry.deepseek_v4_debugmodel(seq_len=128)
-            config.model.set_sharding_(config.parallelism)
             model = config.model.build()
         metadata = model._get_attention_metadata(positions, padding_mask=padding_mask)
         self.assertTrue(metadata)
@@ -70,7 +69,6 @@ class TestDSVPackedDocuments(unittest.TestCase):
     def test_preprocess_inputs_passes_document_offsets(self):
         with torch.device("meta"):
             config = config_registry.deepseek_v4_debugmodel(seq_len=128)
-            config.model.set_sharding_(config.parallelism)
             model = config.model.build()
         input_dict = {
             "input": torch.zeros(128, dtype=torch.long),
@@ -99,7 +97,6 @@ class TestDSVPackedDocuments(unittest.TestCase):
         the compressed KV pool, or the indexer."""
         torch.manual_seed(0)
         config = config_registry.deepseek_v4_debugmodel()
-        config.model.set_sharding_(config.parallelism)
         model_config = config.model
         # One layer per attention type (the debug model has two SWA layers).
         attention_configs = {

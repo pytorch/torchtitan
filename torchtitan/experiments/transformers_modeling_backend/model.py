@@ -584,11 +584,11 @@ class HFTransformerModel(BaseModel):
                             parameter_weights[id(param)] = Fraction(0)
 
             for layer in model.layers.values():
-                moe_config = getattr(layer, "_native_moe_config", None)
-                if moe_config is None:
+                moe_params = getattr(layer, "_native_moe_params", None)
+                if moe_params is None:
                     continue
                 active_expert_ratio = Fraction(
-                    moe_config.router.top_k, moe_config.num_experts
+                    moe_params["top_k"], moe_params["num_experts"]
                 )
                 if getattr(layer, "_layer_level_moe", False):
                     moe_block = layer
@@ -845,9 +845,9 @@ class HFTransformerModel(BaseModel):
                     layer._layer_level_moe = True
 
         if config.is_moe:
-            from .moe_replacement import prepare_native_moe_configs
+            from .moe_replacement import probe_native_moe_params
 
-            prepare_native_moe_configs(self, config)
+            probe_native_moe_params(self, config)
 
     def set_cp_mesh(self, mesh):
         self.cp_mesh = mesh
