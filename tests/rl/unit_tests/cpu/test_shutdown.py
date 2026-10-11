@@ -323,6 +323,11 @@ def test_shutdown_calls_actor_close_before_mesh_stop():
     events: list[str] = []
     rl_trainer = _make_stub_rl_trainer()
     rl_trainer.trainer = _StubActor("trainer.close", events)
+
+    async def close_rollouter():
+        events.append("rollouter.close")
+
+    rl_trainer._rollouter = SimpleNamespace(close=close_rollouter)
     _set_generator_router(rl_trainer, [_StubActor("generator.close", events)])
     rl_trainer._proc_meshes = [
         _StubMesh("mesh.stop[0]", events),
@@ -331,9 +336,11 @@ def test_shutdown_calls_actor_close_before_mesh_stop():
 
     asyncio.run(rl_trainer.close())
 
+    # Generators close before the rollouter, so their failed replies reach live workers.
     assert events == [
         "trainer.close",
         "generator.close",
+        "rollouter.close",
         "mesh.stop[0]",
         "mesh.stop[1]",
     ]
