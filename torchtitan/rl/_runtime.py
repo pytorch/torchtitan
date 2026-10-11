@@ -23,6 +23,8 @@ RL_ENV_DEFAULTS: dict[str, str] = {
     # Trainer ranks read microbatches over Monarch RDMA, whose ibverbs path fails with
     # no fallback on some RoCE hosts and on native InfiniBand. "1" moves all Monarch
     # RDMA to TCP, TorchStore's cross-host weight sync too. Set "0" where ibverbs works.
+    # Procs on other hosts don't inherit this process's env: their launcher must export it.
+    # TODO: drop once Monarch falls back to TCP when an ibverbs op fails.
     "MONARCH_RDMA_DISABLE_IBVERBS": "1",
 }
 

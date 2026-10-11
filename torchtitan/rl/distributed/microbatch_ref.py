@@ -18,19 +18,24 @@ from torch.utils import _pytree as pytree
 
 from torchtitan.rl.components.batcher import TrainingMicrobatch
 
+# Tensors under 1 KiB (the per-microbatch token counts, empty tensors) go in the message:
+# a buffer costs more than pickling them, and RDMABuffer rejects empty ones.
+_MIN_RDMA_BYTES = 1024
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class MicrobatchRef:
     """A `TrainingMicrobatch` left in the controller's memory, for trainer ranks to read over RDMA.
 
     Example:
-        ref = MicrobatchRef.register(microbatch)  # controller: one RDMABuffer per non-empty tensor
-        microbatch = ref.read()                   # trainer thread: one RDMA action reads them all
+        ref = MicrobatchRef.register(microbatch)  # controller: one RDMABuffer per tensor of 1 KiB or more
+        microbatch = await ref.read()             # trainer: one RDMA action reads them all
         await ref.drop()                          # controller, after every rank has read it
     """
 
     fields: dict[str, Any]
-    """The microbatch's fields, with every non-empty tensor (also inside `model_kwargs`) replaced by a `_TensorRef`."""
+    """The microbatch's fields: tensors of `_MIN_RDMA_BYTES` or more (also inside `model_kwargs`)
+    as `_TensorRef`s, the rest by value. Tensors inside containers pytree doesn't know go by value too."""
 
     @classmethod
     def register(cls, microbatch: TrainingMicrobatch) -> MicrobatchRef:
@@ -38,16 +43,17 @@ class MicrobatchRef:
             field.name: getattr(microbatch, field.name)
             for field in dataclasses.fields(microbatch)
         }
-        # RDMABuffer rejects empty tensors, so those stay in `fields` and go by value.
         return cls(
             fields=pytree.tree_map_only(
-                lambda leaf: isinstance(leaf, torch.Tensor) and leaf.numel() > 0,
+                lambda leaf: (
+                    isinstance(leaf, torch.Tensor) and leaf.nbytes >= _MIN_RDMA_BYTES
+                ),
                 _TensorRef.register,
                 fields,
             )
         )
 
-    def read(self) -> TrainingMicrobatch:
+    async def read(self) -> TrainingMicrobatch:
         action = RDMAAction()
 
         def queue_read(tensor_ref: _TensorRef) -> torch.Tensor:
@@ -56,7 +62,7 @@ class MicrobatchRef:
             return tensor
 
         microbatch_fields = pytree.tree_map_only(_TensorRef, queue_read, self.fields)
-        action.submit().get()
+        await action.submit()
         return TrainingMicrobatch(**microbatch_fields)
 
     async def drop(self) -> None:
@@ -78,7 +84,8 @@ class _TensorRef:
 
     @classmethod
     def register(cls, tensor: torch.Tensor) -> _TensorRef:
-        # A view, not a copy: the controller's tensor must stay the storage's owner until drop().
+        # A view, not a copy: the controller's tensor keeps owning the storage.
+        # view(-1) needs a contiguous tensor; the batcher builds only contiguous ones.
         return cls(
             buffer=RDMABuffer(tensor.view(-1).view(torch.uint8)),
             shape=tensor.shape,

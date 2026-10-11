@@ -8,9 +8,9 @@
 
 import asyncio
 import dataclasses
-from types import SimpleNamespace
 
 import torch
+from torch.utils import _pytree as pytree
 from torchtitan.rl.components.batcher import TrainingMicrobatch
 
 from torchtitan.rl.distributed import microbatch_ref
@@ -38,26 +38,28 @@ class _FakeRDMAAction:
         self._reads.append((dst, src))
         return self
 
-    def submit(self) -> SimpleNamespace:
+    async def submit(self) -> None:
         for dst, src in self._reads:
             dst.copy_(src.data)
-        return SimpleNamespace(get=lambda: None)
 
 
-def _microbatch() -> TrainingMicrobatch:
+def _microbatch(num_tokens: int) -> TrainingMicrobatch:
+    tokens = torch.arange(num_tokens)
     return TrainingMicrobatch(
-        input=torch.tensor([3, 5, 7]),
-        labels=torch.tensor([5, 7, 9]),
-        positions=torch.tensor([0, 1, 2]),
-        padding_mask=torch.tensor([False, False, True]),
+        input=tokens + 3,
+        labels=tokens + 5,
+        positions=tokens % 7,
+        padding_mask=tokens % 3 == 0,
         loss_token_counts=torch.tensor(2),
         routing_token_counts=torch.tensor([2, 2]),
-        generator_logprobs=torch.tensor([-0.5, -1.5, 0.0]),
-        temperature=torch.tensor([1.0, 1.0, 1.0]),
-        loss_mask=torch.tensor([True, True, False]),
-        advantages=torch.tensor([0.25, 0.25, 0.0]),
+        generator_logprobs=-tokens.float() / num_tokens,
+        temperature=torch.ones(num_tokens),
+        loss_mask=tokens % 2 == 0,
+        advantages=tokens.float() / num_tokens,
         model_kwargs={
-            "routed_expert_ids": torch.arange(12, dtype=torch.uint8).view(3, 2, 2),
+            "routed_expert_ids": torch.arange(num_tokens * 4, dtype=torch.uint8).view(
+                num_tokens, 2, 2
+            ),
             "topk_logprobs": torch.zeros(0, 4),
         },
     )
@@ -68,31 +70,24 @@ def test_microbatch_ref_round_trips_every_field_and_drops_its_buffers(
 ) -> None:
     monkeypatch.setattr(microbatch_ref, "RDMABuffer", _FakeRDMABuffer)
     monkeypatch.setattr(microbatch_ref, "RDMAAction", _FakeRDMAAction)
-    microbatch = _microbatch()
+    # At 512 tokens the int64 (4 KiB), float (2 KiB) and routed-id (2 KiB, in model_kwargs)
+    # tensors go by ref; the bool masks (512 B), token counts and empty tensor go by value.
+    microbatch = _microbatch(num_tokens=512)
 
     ref = MicrobatchRef.register(microbatch)
-    read_microbatch = ref.read()
+    read_microbatch = asyncio.run(ref.read())
 
-    # Tensors nested in model_kwargs become refs too; an empty tensor goes by value.
-    assert isinstance(ref.fields["input"], _TensorRef)
-    assert isinstance(ref.fields["model_kwargs"]["routed_expert_ids"], _TensorRef)
-    assert isinstance(ref.fields["model_kwargs"]["topk_logprobs"], torch.Tensor)
-    for field in dataclasses.fields(microbatch):
-        expected = getattr(microbatch, field.name)
-        actual = getattr(read_microbatch, field.name)
-        if field.name == "model_kwargs":
-            assert expected.keys() == actual.keys()
-            for key in expected:
-                assert torch.equal(expected[key], actual[key])
-        else:
-            assert torch.equal(expected, actual)
-            assert expected.dtype == actual.dtype
-            assert expected.data_ptr() != actual.data_ptr()
+    names = [field.name for field in dataclasses.fields(microbatch)]
+    leaves = pytree.tree_leaves({name: getattr(microbatch, name) for name in names})
+    ref_leaves = pytree.tree_leaves(ref.fields)
+    read_leaves = pytree.tree_leaves(
+        {name: getattr(read_microbatch, name) for name in names}
+    )
+    for leaf, ref_leaf, read_leaf in zip(leaves, ref_leaves, read_leaves, strict=True):
+        is_ref = leaf.nbytes >= microbatch_ref._MIN_RDMA_BYTES
+        assert isinstance(ref_leaf, _TensorRef) == is_ref
+        assert torch.equal(leaf, read_leaf) and leaf.dtype == read_leaf.dtype
 
     asyncio.run(ref.drop())
-    tensor_refs = [
-        value for value in ref.fields.values() if isinstance(value, _TensorRef)
-    ]
-    tensor_refs.append(ref.fields["model_kwargs"]["routed_expert_ids"])
-    assert len(tensor_refs) == 11
-    assert all(tensor_ref.buffer.dropped for tensor_ref in tensor_refs)
+    tensor_refs = [leaf for leaf in ref_leaves if isinstance(leaf, _TensorRef)]
+    assert tensor_refs and all(tensor_ref.buffer.dropped for tensor_ref in tensor_refs)

@@ -377,8 +377,8 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             advantages=torch.tensor([1.0]),
         )
 
-        other_rank_ref = SimpleNamespace(read=MagicMock())
-        ref = SimpleNamespace(read=lambda: batch)
+        other_rank_ref = SimpleNamespace(read=AsyncMock())
+        ref = SimpleNamespace(read=AsyncMock(return_value=batch))
 
         result = await Trainer.forward_backward(
             trainer,

@@ -1142,19 +1142,21 @@ class Controller(Configurable):
                         ],
                         packed.microbatches,
                     )
-                    fwd_bwd_metrics = self._get_rank_0_value(
-                        await self.trainer.forward_backward.call(
-                            microbatch_refs,
-                            packed.global_loss_token_counts,
-                            packed.global_routing_token_counts,
+                    try:
+                        fwd_bwd_metrics = self._get_rank_0_value(
+                            await self.trainer.forward_backward.call(
+                                microbatch_refs,
+                                packed.global_loss_token_counts,
+                                packed.global_routing_token_counts,
+                            )
                         )
-                    )
-                    # Every rank has read its column once the call returns. Drop while `packed`
-                    # still holds the tensors: Monarch 0.6 deadlocks in drop() when a buffer is
-                    # the last owner of its storage.
-                    await asyncio.gather(
-                        *(ref.drop() for row in microbatch_refs for ref in row)
-                    )
+                    finally:
+                        # Drop while `packed` holds the tensors, and don't free it right after:
+                        # drop() returns before Monarch 0.6 lets go of the storage, and a free
+                        # racing that release deadlocks. `packed` lives until the next step's batch.
+                        await asyncio.gather(
+                            *(ref.drop() for row in microbatch_refs for ref in row)
+                        )
 
                     if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                         logger.error("Loss is NaN/Inf; training diverged")

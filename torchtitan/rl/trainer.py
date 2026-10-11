@@ -261,17 +261,14 @@ class Trainer(Configurable):
             f"policy_version={self.policy_version}"
         )
         engine = self.engine
-        # TODO: the cp * tp ranks of a DP replica read the same column. Reading it once per
-        # replica and broadcasting it would cut the controller's reads by cp * tp: over the TCP
-        # fallback, 16 readers get ~230 MB/s each, vs ~1 GB/s for one. Needs a per-replica
-        # process group, with the broadcast on the main thread to keep NCCL calls in order.
+        # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
+        # and broadcast it, to cut the controller's reads by cp * tp. Needs a per-replica group.
         refs = [rank_refs[self.dp_rank] for rank_refs in training_data]
-        # TODO: read a few microbatches ahead, so reads overlap compute. Reads add ~0.15% to
-        # forward_backward at 38 B/token, ~2% at 614 B/token with routed ids and top-32 logprobs
-        # (GB300 estimate). Needs TrainingEngine to preprocess one microbatch group at a time.
+        # TODO: investigate prefetching
         with sl.log_trace_span("read_microbatches"):
-            # read() blocks until RDMA finishes, so it runs off the actor loop.
-            microbatches = [await asyncio.to_thread(ref.read) for ref in refs]
+            # One at a time, not asyncio.gather: gathered reads share the controller's bandwidth,
+            # so each takes as long as the whole column and can hit its 60 s RDMA timeout.
+            microbatches = [await ref.read() for ref in refs]
         self._step_compute_start = time.perf_counter()
         self._step_num_tokens_per_dp_rank = sum(
             microbatch.labels.numel() for microbatch in microbatches
