@@ -24,6 +24,10 @@ import torch.distributed as dist
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torch.distributed.tensor import DTensor, Replicate
+
+# Registers the "loss" local-compile region. The generator shares the trainer's
+# model config, whose local_compile_regions may name it, but never builds a loss.
+from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import apply_overrides, OverrideConfig, TrainingConfig
 from torchtitan.distributed import maybe_apply_numa_binding

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import importlib
 
 import logging
 import os
@@ -26,31 +27,30 @@ from tests.integration_tests import (
     SELF_LAUNCHING_ENTRYPOINTS,
     validate_fake_pg_compatibility,
 )
-from tests.integration_tests.b200 import build_b200_tests_list
-from tests.integration_tests.features import build_features_test_list
-from tests.integration_tests.flux import build_flux_test_list
-from tests.integration_tests.h100 import build_h100_tests_list
-from tests.integration_tests.models import build_model_tests_list
-from tests.integration_tests.rl import (
-    build_b200_rl_test_list,
-    build_rl_kda_test_list,
-    build_rl_test_list,
-)
 
 
 logger = logging.getLogger(__name__)
 
 
-_TEST_SUITES_FUNCTION = {
-    "features": build_features_test_list,
-    "models": build_model_tests_list,
-    "flux": build_flux_test_list,
-    "h100": build_h100_tests_list,
-    "b200": build_b200_tests_list,
-    "rl": build_rl_test_list,
-    "rl_kda": build_rl_kda_test_list,
-    "rl_b200": build_b200_rl_test_list,
+# Suites are imported only when selected: the flux and RL suites need optional
+# dependencies (transformers; vLLM and Monarch) that other CI jobs do not install.
+_TEST_SUITES = {
+    "features": ("tests.integration_tests.features", "build_features_test_list"),
+    "models": ("tests.integration_tests.models", "build_model_tests_list"),
+    "flux": ("tests.integration_tests.flux", "build_flux_test_list"),
+    "h100": ("tests.integration_tests.h100", "build_h100_tests_list"),
+    "b200": ("tests.integration_tests.b200", "build_b200_tests_list"),
+    "rl": ("tests.integration_tests.rl", "build_rl_test_list"),
+    "rl_kda": ("tests.integration_tests.rl", "build_rl_kda_test_list"),
+    "rl_b200": ("tests.integration_tests.rl", "build_b200_rl_test_list"),
 }
+
+
+def _build_test_list(test_suite: str) -> list[IntegrationTestDefinition]:
+    module_name, builder_name = _TEST_SUITES[test_suite]
+    return getattr(importlib.import_module(module_name), builder_name)()
+
+
 # Suites that need hardware-specific kernels or a real multi-process runtime.
 _REAL_PG_ONLY_SUITES = frozenset({"h100", "b200", "rl", "rl_kda", "rl_b200"})
 
@@ -63,9 +63,9 @@ def _parse_test_suites(value: str) -> tuple[str, ...]:
     suites = tuple(part.strip() for part in value.split(",") if part.strip())
     if not suites:
         raise ValueError("--test_suite must contain at least one suite")
-    unknown = tuple(suite for suite in suites if suite not in _TEST_SUITES_FUNCTION)
+    unknown = tuple(suite for suite in suites if suite not in _TEST_SUITES)
     if unknown:
-        available = ", ".join(_TEST_SUITES_FUNCTION)
+        available = ", ".join(_TEST_SUITES)
         raise ValueError(
             f"Unknown test suite(s): {', '.join(unknown)}. Available: {available}"
         )
@@ -549,10 +549,7 @@ def main():
     parser.add_argument(
         "--test_suite",
         default="features",
-        help=(
-            "Comma-separated test suites to run: "
-            f"{', '.join(_TEST_SUITES_FUNCTION)}."
-        ),
+        help=("Comma-separated test suites to run: " f"{', '.join(_TEST_SUITES)}."),
     )
     parser.add_argument(
         "--execution_mode",
@@ -630,7 +627,7 @@ def main():
             suite_args.output_dir = os.path.join(args.output_dir, test_suite)
             os.makedirs(suite_args.output_dir)
 
-        test_list = _TEST_SUITES_FUNCTION[test_suite]()
+        test_list = _build_test_list(test_suite)
         run_tests(suite_args, test_list, parallel=suite_args.parallel)
 
 
