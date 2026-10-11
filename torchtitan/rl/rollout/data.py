@@ -28,8 +28,13 @@ class RLDataset(Configurable, ABC):
         pass
 
     def sample_key(self, sample: object) -> Hashable | None:
-        """Stable identity of the task a sample poses; samples of the same task share it.
-        None means the dataset has no task identity, so the loader can't track tasks."""
+        """Stable identity of the task a sample poses: every draw of the same task, in any epoch
+        or after a resume, returns the same key. None means the dataset has no task identity, so
+        the loader can't track tasks. Keys are taken from the sample as the dataset yielded it.
+
+        Example:
+            VerifiersTaskDataset().sample_key(sample)  # -> "3f2a9c..." for every draw of this task
+        """
         return None
 
 
@@ -57,19 +62,34 @@ class RLDataLoader(Stateful, ABC, Configurable):
     def acknowledge(self, indices: Iterable[int]) -> None:
         ...
 
-    def record_group_outcomes(self, outcomes: Mapping[int, float | None]) -> None:
+    def record_group_outcomes(self, outcomes: Mapping[int, GroupOutcome]) -> None:
         """Hear how yielded, not yet acknowledged samples went, right before they are
         acknowledged. Ignored by default.
 
         Args:
-            outcomes: Sample index -> the reward every rollout of its group got (zero
-                spread), or None when the rewards differed. Indices without a usable
-                outcome (errored or truncated rollouts, failed groups) are left out.
+            outcomes: Sample index -> its group's outcome. Indices without a usable outcome
+                (an errored rollout, a failed group) are left out.
+
+        Example:
+            loader.record_group_outcomes({
+                7: GroupOutcome(mean_reward=1.0, zero_spread=True),   # all 16 rollouts passed
+                8: GroupOutcome(mean_reward=0.25, zero_spread=False), # mixed: trains
+            })                                                        # 9 errored: absent
+            loader.acknowledge([7, 8, 9])
         """
 
     def metrics(self) -> list[m.Metric]:
         """Metrics since the last call; none by default."""
         return []
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class GroupOutcome:
+    """How a training group's rollouts scored, for loaders that track tasks."""
+
+    mean_reward: float
+    zero_spread: bool
+    """Every rollout got the same reward, so the group trained nothing."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -125,6 +145,7 @@ class IterableRLDataLoader(RLDataLoader):
         dataset = config.dataset.build()
         if not isinstance(dataset, Iterable) or not isinstance(dataset, Stateful):
             raise ValueError("RL dataset must be a stateful iterable")
+        # Fail at construction for a dataset without keys; `_sample_key` still catches a None key.
         if (
             config.zero_spread_skip is not None
             and type(dataset).sample_key is RLDataset.sample_key
@@ -194,17 +215,19 @@ class IterableRLDataLoader(RLDataLoader):
             )
         return key
 
-    def record_group_outcomes(self, outcomes: Mapping[int, float | None]) -> None:
+    def record_group_outcomes(self, outcomes: Mapping[int, GroupOutcome]) -> None:
         """Mark the tasks of zero-spread groups as skipped and unmark the tasks of mixed ones."""
         if self._zero_spread_skip is None:
             return
-        for index, zero_spread_reward in outcomes.items():
+        for index, outcome in outcomes.items():
+            if index not in self._pending:
+                raise RuntimeError(f"cannot record an outcome for an unyielded index {index}")
             key = self._sample_key(self._pending[index])
             self._skipped.pop(key, None)
-            if zero_spread_reward is None:
+            if not outcome.zero_spread:
                 continue
             self._skipped[key] = 0  # re-inserted last: the newest skip
-            direction = "all_pass" if zero_spread_reward > 0 else "all_fail"
+            direction = "all_pass" if outcome.mean_reward > 0 else "all_fail"
             self._step_counts[f"marked_{direction}"] += 1
         max_skipped = int(
             (1.0 - self._zero_spread_skip.min_active_frac) * len(self._seen_keys)
@@ -220,6 +243,8 @@ class IterableRLDataLoader(RLDataLoader):
             del self._pending[index]
 
     def metrics(self) -> list[m.Metric]:
+        """`data/zero_spread_skip/`: skipped_tasks (now), and per step skips, rechecks,
+        floor_admits, marked_all_pass, marked_all_fail."""
         if self._zero_spread_skip is None:
             return []
         metrics = [

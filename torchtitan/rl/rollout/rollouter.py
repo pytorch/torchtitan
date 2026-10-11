@@ -23,7 +23,7 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.data import RLDataLoader, RLDataset
+from torchtitan.rl.rollout.data import GroupOutcome, RLDataLoader, RLDataset
 from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
@@ -140,8 +140,10 @@ class Rollouter(Configurable):
         # One read, ack or save at a time: the controller runs them in different threads, and a
         # checkpoint saved in the middle of a read would skip that sample on resume.
         self._training_dataloader_lock = threading.Lock()
-        # Group id -> its zero-spread reward or None (see `record_group_outcome`), until acknowledged.
-        self._group_outcomes: dict[int, float | None] = {}
+        # Group id -> its outcome, until acknowledged. Written on the event loop, popped by
+        # acknowledge on a worker thread: they touch different keys (a group finishes before it
+        # is acknowledged), and single dict operations are atomic, so it needs no lock.
+        self._group_outcomes: dict[int, GroupOutcome] = {}
 
         # The worker pool's actor handle and the actor system that spawned it.
         self._worker_actors: Any | None = None
@@ -155,28 +157,32 @@ class Rollouter(Configurable):
             return next(self._training_dataloader)
 
     def record_group_outcome(self, group: RolloutGroup) -> None:
-        """Remember a finished training group's reward spread, for the loader at acknowledgement.
+        """Remember a finished training group's outcome, for the loader at acknowledgement.
 
-        The rule is the training sample builder's zero-spread drop. Only groups whose rollouts all
-        completed with tokens count: an errored or truncated rollout scores a fixed reward that
-        says nothing about the task, so such groups (and failed, empty ones) get no outcome.
+        Zero spread is the training sample builder's drop rule. Truncated rollouts count with
+        their rubric reward: their group is as wasted as any other zero-spread group. A group
+        gets no outcome if a rollout errored (an infrastructure failure scores a fixed reward that
+        says nothing about the task), produced no tokens, or the group has fewer than 2 rollouts.
+        A group later dropped as too old still delivers its outcome: it was scored on a real policy.
 
         Example:
-            rewards [1, 1, 1, 1] -> 1.0 (zero spread, all pass)
-            rewards [0, 1, 0, 0] -> None (mixed)
-            any rollout errored or truncated -> nothing recorded
+            rewards [1, 1, 1, 1]                 -> GroupOutcome(mean_reward=1.0, zero_spread=True)
+            rewards [0, 0, 0, 0], 2 truncated    -> GroupOutcome(mean_reward=0.0, zero_spread=True)
+            rewards [0, 1, 0, 0]                 -> GroupOutcome(mean_reward=0.25, zero_spread=False)
+            any rollout errored                  -> nothing recorded
         """
         rollouts = group.rollouts
         if len(rollouts) < 2 or any(
-            rollout.status is not RolloutStatus.COMPLETED
+            rollout.status.is_error()
             or rollout.reward is None
             or not any(turn.completion_token_ids for turn in rollout.turns)
             for rollout in rollouts
         ):
             return
         rewards = [rollout.reward for rollout in rollouts]
-        self._group_outcomes[group.group_id] = (
-            rewards[0] if statistics.pstdev(rewards) == 0.0 else None
+        self._group_outcomes[group.group_id] = GroupOutcome(
+            mean_reward=statistics.fmean(rewards),
+            zero_spread=statistics.pstdev(rewards) == 0.0,
         )
 
     def acknowledge_training_sample_ids(self, sample_ids: Iterable[int]) -> None:

@@ -179,11 +179,16 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
 
 
 def test_optimizer_step_waits_for_the_previous_push() -> None:
-    async def slow_push():
-        for _ in range(5):
-            await asyncio.sleep(0)
-
     events: list[str] = []
+
+    async def slow_push():
+        # Event-loop ticks alone can finish before forward/backward 2: the loop also awaits
+        # worker threads (asyncio.to_thread). Hold push 1 until forward/backward 2 starts.
+        for _ in range(1000):
+            if "fwd_bwd 2" in events:
+                return
+            await asyncio.sleep(0.001)
+
     _run(_controller(events, on_push=slow_push), num_training_steps=2)
 
     # Forward/backward 2 overlaps push 1; optimizer step 2 waits for it to finish.
