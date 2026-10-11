@@ -67,6 +67,9 @@ class _CyclingDataset(RLDataset):
         self._position += 1
         return self._samples[sample_index]
 
+    def sample_key(self, sample: DapoMathSample) -> str:
+        return sample.prompt
+
     def state_dict(self) -> dict:
         """Snapshot row order and position so resume continues the same stream."""
         return {

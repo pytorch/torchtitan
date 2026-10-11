@@ -14,6 +14,7 @@ from typing import Any
 
 import grain.python as grain
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
+from verifiers.v1.task import task_key
 from verifiers.v1.utils.loaders import load_taskset
 
 from torchtitan.rl.rollout.data import RLDataset
@@ -112,6 +113,10 @@ class VerifiersTaskDataset(RLDataset):
 
     def __next__(self) -> VerifiersTaskSample:
         return next(self._iterator)
+
+    def sample_key(self, sample: VerifiersTaskSample) -> str:
+        """Verifiers' content hash of the task data (its default `Task.key`)."""
+        return task_key(sample.verifiers_task_data)
 
     def state_dict(self) -> dict:
         return self._iterator.get_state()
