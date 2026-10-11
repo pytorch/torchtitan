@@ -143,13 +143,17 @@ class RolloutTurn:
     the env's reply, in both token and message space. Rubrics score it and
     `rollout_to_training_samples` packs the rollout into training tokens.
 
-    Prompt tokens are stored as a delta on the previous turn's prompt + completion
-    (`prompt_messages` stay in full):
+    A turn stores only the prompt tokens that are new since the previous turn, so token storage grows
+    linearly with turns (`prompt_messages` stay in full):
+
+        full prompt = (previous full prompt + previous completion)[:prompt_prefix_len] + prompt_delta_token_ids
+
+    Example (P = first prompt, Cn = turn n's completion, En = the env's reply to Cn):
 
         turn  full prompt            prompt_prefix_len  prompt_delta_token_ids
         0     [P]                    0                  [P]
         1     [P, C0, E0]            len(P+C0)          [E0]          # continues turn 0
-        2     [P, C0, E0, C1', E1]   len(P+C0+E0)       [C1', E1]     # thinking stripped from C1
+        2     [P, C0, E0, C1', E1]   len(P+C0+E0)       [C1', E1]     # history rewritten: C1 became C1'
     """
 
     # TODO: add a `logs` field (raw prompt/response text, finish_reason, timings)
@@ -160,7 +164,7 @@ class RolloutTurn:
 
     # Fields needed for training
     prompt_prefix_len: int
-    """How many leading prompt tokens match the previous turn's prompt + completion; set by `split_prompt`."""
+    """Length of the longest prefix shared with the previous turn's prompt + completion; set by `split_prompt`."""
 
     prompt_delta_token_ids: list[int]  # [num_prompt_tokens - prompt_prefix_len]
     """The prompt after its first `prompt_prefix_len` tokens."""
@@ -207,15 +211,22 @@ class RolloutTurn:
 def split_prompt(
     prompt_token_ids: list[int], previous_token_ids: list[int]
 ) -> tuple[int, list[int]]:
-    """Return `(prompt_prefix_len, prompt_delta_token_ids)`: how many leading tokens the prompt shares
-    with the previous turn's prompt + completion, and the rest.
+    """Split a prompt into the part shared with the previous turn and the new part.
+
+    Args:
+        prompt_token_ids: this turn's full prompt.
+        previous_token_ids: the previous turn's prompt + completion; [] on the first turn.
+
+    Returns:
+        `(prompt_prefix_len, prompt_delta_token_ids)`: the length of the longest shared prefix, and the
+        prompt after it.
 
     Example:
         split_prompt([1, 2, 4, 5, 9], previous_token_ids=[1, 2, 4, 5])  # -> (4, [9]): continues
         split_prompt([1, 2, 7], previous_token_ids=[1, 2, 4, 5])        # -> (2, [7]): history rewritten
         split_prompt([1, 2], previous_token_ids=[])                     # -> (0, [1, 2]): first turn
     """
-    # Fast path, one C-level list compare: the prompt continues the previous turn (the common case)
+    # Common case: the prompt extends the previous turn. One list compare, no Python loop.
     if prompt_token_ids[: len(previous_token_ids)] == previous_token_ids:
         return len(previous_token_ids), prompt_token_ids[len(previous_token_ids) :]
     prefix_len = 0
@@ -238,8 +249,8 @@ class Rollout:
 
     turns: list[RolloutTurn] = field(default_factory=list)  # [num_turns]
     """Ordered rollout turns; each stores its prompt as a delta on the previous turn (see `RolloutTurn`)."""
-    # TODO: a message graph, as in verifiers v1, would share the first prompt across siblings (under 1% of
-    # a 120-ply group) and let turns fork (subagents, tree search). Not needed while rollouts are chains.
+    # TODO: let a turn be a delta on any earlier turn, not just the previous one. Verifiers traces
+    # already fork: a fork re-stores the tokens it shares only with an earlier branch.
 
     status: RolloutStatus
     """Rollout-level terminal status."""

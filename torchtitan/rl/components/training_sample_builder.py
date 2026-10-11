@@ -230,9 +230,9 @@ class TrainingSampleBuilder(Configurable):
         newest version any of its turns reached.
 
         Example (5 turns; the env compacts history before turn 3, so the prefix breaks -> 2 training_samples).
-        P = prompt; C = completion; E = env reply. A turn stores its prompt as
-        (prompt_prefix_len, prompt_delta_token_ids), the delta on the previous turn's prompt + completion
-        (k = how many leading tokens P2 keeps from P1, e.g. BOS + system prompt):
+        P = prompt; C = completion; E = env reply
+        stored = (prompt_prefix_len, prompt_delta_token_ids), see `RolloutTurn`
+        k = how many leading tokens P2 shares with turn 2's prompt + completion (e.g. BOS + system prompt)
             turn0 (v5): prompt=[P1]              stored (0, [P1])                 completion=[C1]
             turn1 (v6): prompt=[P1,C1,E1]        stored (len(P1+C1), [E1])        completion=[C2]
             turn2 (v6): prompt=[P1,C1,E1,C2,E2]  stored (len(P1+C1+E1+C2), [E2])  completion=[C3]
@@ -266,13 +266,14 @@ class TrainingSampleBuilder(Configurable):
                     f"non-final turn {turn_idx} has no completion"
                 )
 
-            # The previous turn's prompt + completion is the last training_sample's token_ids: a
-            # training_sample opens at the turn whose prompt breaks that prefix, and later turns join it.
+            # A training_sample opens with a full prompt and each later turn appends to it, so the last
+            # training_sample's token_ids are exactly the previous turn's prompt + completion.
             prev_prompt_and_completion = (
                 training_samples[-1].token_ids if training_samples else []
             )
-            # `split_prompt` keeps the longest shared prefix: never past the previous turn's end, and
-            # never stopping where the next prompt token still matches.
+            # Reject a prefix that `split_prompt` would not produce:
+            # - longer than the previous turn's prompt + completion, or
+            # - too short: the token right after it is still shared (e.g. a full prompt stored as the delta).
             prompt_prefix_len = rollout_turn.prompt_prefix_len
             prompt_delta_token_ids = rollout_turn.prompt_delta_token_ids
             if prompt_prefix_len > len(prev_prompt_and_completion) or (
@@ -308,7 +309,7 @@ class TrainingSampleBuilder(Configurable):
                         advantage=[],
                     )
                 )
-                # New branch (first turn or a branch): append this turn's full prompt, not just its delta.
+                # A new training_sample needs the full prompt: the shared prefix + the delta.
                 prompt_delta = (
                     prev_prompt_and_completion[:prompt_prefix_len] + prompt_delta_token_ids
                 )

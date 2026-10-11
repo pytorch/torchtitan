@@ -380,7 +380,7 @@ class VerifiersRollouter(Rollouter):
         replied_nodes: set[int] = set()
         last_turn_by_node: dict[int, RolloutTurn] = {}
         turns: list[RolloutTurn] = []
-        # The last appended turn's prompt + completion, across branches
+        # The last appended turn's prompt + completion; not reset between branches
         previous_token_ids: list[int] = []
 
         for branch in trace.branches:

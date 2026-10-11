@@ -201,9 +201,8 @@ class _RewritingTokenEnv:
 
 
 def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
-    # The worker stores each turn's prompt as a delta; the builder must open and fill samples as
-    # the full-prompt rule does: a turn joins the last sample iff its prompt extends the
-    # previous turn's prompt + completion.
+    # Delta prompts must pack into the same samples as full prompts: a turn joins the last sample
+    # iff its prompt extends the previous turn's prompt + completion.
     rng = random.Random(0)
     worker = RolloutWorker(
         SimpleNamespace(

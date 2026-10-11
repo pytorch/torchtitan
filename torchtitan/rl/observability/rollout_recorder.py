@@ -103,8 +103,8 @@ class RolloutSampleRecorder(Configurable):
         filename: str = "rollout_samples.jsonl"
         """JSONL filename written under `dump_dir`."""
         log_tensors: bool = False
-        """Also record each turn's token ids: the prompt as `prompt_prefix_len` + `prompt_delta_token_ids`
-        (replay the turns to rebuild a full prompt) and the completion."""
+        """Also record each turn's `prompt_prefix_len`, `prompt_delta_token_ids` and `completion_token_ids`;
+        `RolloutTurn` shows how to rebuild the full prompt."""
         log_logprobs: bool = False
         """Also record the raw per-token completion logprob arrays per turn."""
 
