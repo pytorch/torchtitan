@@ -279,13 +279,16 @@ class ComputeLayout:
 class BucketConfig:
     """Ordered optimizer-work bucket selected by canonical FQN patterns.
 
-    Compute layouts determine communication topology. A bucket controls only
-    scheduling order and overlap; all redistributed parameters it selects must
-    currently resolve to one homogeneous transport group.
+    ``mesh`` may override the process groups used for redistribution. It must
+    have a named axis matching the storage-mesh axis that the bucket
+    redistributes along, with the same ranks in the same order. It may be a 1D
+    mesh or a storage-shaped mesh. DistMuon communicates on
+    ``mesh[axis].get_group()``. ``None`` uses the parameter storage mesh.
     """
 
     patterns: tuple[str, ...]
     name: str = ""
+    mesh: DeviceMesh | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "patterns", tuple(self.patterns))
