@@ -49,7 +49,7 @@ def multimodal_input_sharding() -> dict[str, SpmdType]:
     the full vision input; the encoder can use TP internally.
     Shared by every VLM decoder (Qwen3.5, Kimi K2.5, Kimi K3, Muse Glimmer).
     """
-    layout = SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I})
+    layout = _vision_activation_placement()
     return {
         "pixel_values": layout,
         "pixel_values_videos": layout,
@@ -101,13 +101,13 @@ def vision_invariant_linear_sharding_config() -> ShardingConfig:
             "bias": _vision_state_placement(tp=spmd.I, cp=spmd.I),
         },
         in_src_shardings={
-            "input": _vision_activation_placement(cp=spmd.I),
+            "input": _vision_activation_placement(),
         },
         in_dst_shardings={
-            "input": _vision_activation_placement(cp=spmd.I),
+            "input": _vision_activation_placement(),
         },
-        out_src_shardings=_vision_activation_placement(cp=spmd.I),
-        out_dst_shardings=_vision_activation_placement(cp=spmd.I),
+        out_src_shardings=_vision_activation_placement(),
+        out_dst_shardings=_vision_activation_placement(),
     )
 
 

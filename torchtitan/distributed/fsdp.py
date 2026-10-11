@@ -82,7 +82,7 @@ def linear_param_shard_placements(
 def resolve_fsdp_mesh(
     parallelism_context: ParallelismContext,
     *,
-    shard_cp: bool = True,
+    shard_on_cp_axis: bool = True,
 ) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
     """Select the dense storage mesh and DataParallelMeshDims.
 
@@ -90,7 +90,7 @@ def resolve_fsdp_mesh(
     even at size 1) so FSDP can pick the DP submesh out of the multi-axis
     storage mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
 
-    ``shard_cp=False`` leaves CP in the storage mesh but outside FSDP's
+    ``shard_on_cp_axis=False`` leaves CP in the storage mesh but outside FSDP's
     reduction axes. Parameters must then be CP-invariant, with their gradient
     contributions already reduced across CP before FSDP reduction.
     """
@@ -105,7 +105,7 @@ def resolve_fsdp_mesh(
         return storage_mesh, None
 
     shard_axes = ["dp_shard"]
-    if parallelism_context.cp_enabled and shard_cp:
+    if parallelism_context.cp_enabled and shard_on_cp_axis:
         shard_axes.append("cp")
     shard: str | tuple[str, ...] = (
         tuple(shard_axes) if len(shard_axes) > 1 else shard_axes[0]

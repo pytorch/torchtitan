@@ -78,7 +78,9 @@ class MultimodalModel(Decoder):
         # Encoders are CP-invariant, so FSDP shards them over dp_shard only.
         # That differs from the decoder, so they always get their own FSDP
         # wrapper, including under PP.
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context, shard_cp=False)
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
+            parallelism_context, shard_on_cp_axis=False
+        )
         for encoder_fqn in self.multimodal_encoder_fqns:
             encoder = getattr(self, encoder_fqn)
             if encoder is not None:
