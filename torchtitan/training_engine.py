@@ -36,6 +36,7 @@ from torchtitan.distributed.cuda_graph import (
     wrap_with_cuda_graph,
 )
 from torchtitan.models.base import BaseModel
+from torchtitan.models.base.state_dict_adapter import resolve_state_dict_adapter_cls
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -332,7 +333,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         ):
             model = self.model_config.build()
         self.model_cls = type(model)
-        adapter_cls = type(model).state_dict_adapter_cls
+        adapter_cls = resolve_state_dict_adapter_cls(self.model_config, type(model))
         self.state_dict_adapter = (
             adapter_cls(self.model_config, hf_assets_path)
             if adapter_cls is not None

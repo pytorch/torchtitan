@@ -35,6 +35,7 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
+from torchtitan.models.base.state_dict_adapter import resolve_state_dict_adapter_cls
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
@@ -686,7 +687,7 @@ class VLLMModelWrapper(Module):
         if cfg is None:
             return
 
-        adapter_cls = type(self.model).state_dict_adapter_cls
+        adapter_cls = resolve_state_dict_adapter_cls(self.config, type(self.model))
         sd_adapter = None
         if adapter_cls is not None:
             sd_adapter = adapter_cls(
