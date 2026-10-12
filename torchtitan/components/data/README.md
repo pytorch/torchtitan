@@ -538,6 +538,55 @@ External indexed providers can implement the existing `SourceConfig.build()`
 seam to supply a `RandomAccessDataSource`, without a storage-client dependency
 in TorchTitan. Frozen samples can use strided ownership without repacking.
 
+## Continuous causal rows without document masking
+
+Core `TextCollator` preserves source/document positions. The recipe-owned
+`ContinuousTextCollator` replaces source-document position resets with a
+continuous range within each `max_context_length` row. Labels remain
+next-token aligned by the source/processor; padding and loss masks are preserved.
+Positions are finalized before MTP counting, so RoPE, attention boundaries and
+MTP shifts agree on which tokens belong to the same causal sequence.
+
+The `unmasked_text_rows` override replaces native `GrainDataLoader.Config`
+with `ContinuousTextDataLoader.Config` and selects continuous collation for
+both training and validation. It removes the source-document packing cap on
+the derived config without modifying the caller's config; the token budget
+still bounds packing. Attention metadata capacity is derived
+from the number of context rows, independently of source-document packing, so
+its shape remains fixed for CUDA graphs. Setting the packing cap to one would instead pad
+short documents; it does not concatenate them into an unmasked sequence.
+The unchanged native collator owns padding, label copying and MTP counting;
+padding positions are not a new continuous-row policy. There is no core
+document-masking toggle.
+
+For one full, unpadded context row per microbatch, enable the dense attention and
+text-data overrides together (the data override covers training and validation):
+
+```bash
+--override torchtitan_recipes.overrides.dense_causal_sdpa.dense_causal_bf16_sdpa,torchtitan_recipes.overrides.dense_causal_sdpa.unmasked_text_rows
+```
+
+The dense kernel still rejects padding, position resets, CP and incomplete
+sequence-parallel layouts. Multiple flattened context rows retain resets between
+rows and need the normal varlen attention path. Frozen sources already supplying
+one continuous full row can use the attention override alone and skip repacking.
+Disabling document masking changes training semantics, not just performance.
+
+For DeepSeek with fused MLA, use the combined factory instead of separate
+parent/child overrides:
+
+```bash
+--override torchtitan_recipes.overrides.dense_causal_sdpa.dense_causal_fused_mla,torchtitan_recipes.overrides.dense_causal_sdpa.unmasked_text_rows
+```
+
+The combined factory reuses the existing fused MLA implementation and dense
+inner attention. The override framework still rejects independent parent/child
+claims; their order would otherwise decide which replacement survives.
+Both dense factories require a plain causal varlen-attention recipe; unsupported
+Flex/CP/window configurations fail instead of silently leaving another backend.
+Dense metadata has a fixed two-offset shape and does not need a document cap,
+including for already-continuous frozen rows with CUDA graphs enabled.
+
 With effective DP greater than one, `repeat=False` is rejected because ranks can exhaust at different steps and hang training collectives. Use `repeat=True` and let the trainer's step count stop training.
 
 `GrainDataLoader.state_dict()` records:

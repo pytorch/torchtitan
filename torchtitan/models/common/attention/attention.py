@@ -321,6 +321,8 @@ class VarlenAttentionMetadata(NamedTuple):
 class VarlenInnerAttention(InnerAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
+        _requires_document_capacity: ClassVar[bool] = True
+        """Dynamic document offsets need a capacity for fixed-shape graph inputs."""
         window_size: tuple[int, int] = (-1, 0)
         """ window_size=(left, right) controls the attention window relative to each
             query position. 'left' is how many tokens before the query to attend to,

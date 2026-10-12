@@ -89,7 +89,10 @@ class Trainer(Configurable):
                     training=self.training,
                     debug=self.debug,
                     activation_remat=self.activation_remat,
-                    max_num_documents=self.dataloader.max_num_documents,
+                    max_num_documents=self.dataloader._get_attention_document_capacity(
+                        max_context_length=self.training.max_context_length,
+                        num_tokens_per_microbatch=self.training.num_tokens_per_microbatch_per_dp_rank,
+                    ),
                 )
 
         def to_dict(self) -> dict[str, Any]:
@@ -144,19 +147,23 @@ class Trainer(Configurable):
         if config.override.imports:
             apply_overrides(config.override, config)
         model_config = config.model
+        max_num_documents = config.dataloader._get_attention_document_capacity(
+            max_context_length=config.training.max_context_length,
+            num_tokens_per_microbatch=config.training.num_tokens_per_microbatch_per_dp_rank,
+        )
         validate_model_training_config(
             model_config,
             parallelism=config.parallelism,
             training=config.training,
             debug=config.debug,
             activation_remat=config.activation_remat,
-            max_num_documents=config.dataloader.max_num_documents,
+            max_num_documents=max_num_documents,
         )
 
         self.engine = self.engine_cls(
             config,
             model_config=model_config,
-            max_num_documents=config.dataloader.max_num_documents,
+            max_num_documents=max_num_documents,
             output_dir=config.dump_folder,
         )
         engine = self.engine
