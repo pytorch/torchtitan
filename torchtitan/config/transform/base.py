@@ -7,30 +7,18 @@
 """Base class and helpers for model transforms."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, fields
+from dataclasses import fields
 from typing import TYPE_CHECKING
 
 from torchtitan.models.base.module import Module
 
 if TYPE_CHECKING:
-    from torchtitan.config.configs import TrainingConfig
-    from torchtitan.config.parallelism import ParallelismConfig
-
     from .relations import TransformRelations
 
 __all__ = [
     "ModelConfigTransform",
-    "ModelConfigTransformContext",
     "convert_config_type",
 ]
-
-
-@dataclass(frozen=True, kw_only=True)
-class ModelConfigTransformContext:
-    """Training settings available while rewriting a model config."""
-
-    training: "TrainingConfig"
-    parallelism: "ParallelismConfig"
 
 
 class ModelConfigTransform(ABC):
@@ -50,12 +38,7 @@ class ModelConfigTransform(ABC):
         """
 
     @abstractmethod
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
+    def transform(self, model: Module.Config) -> Module.Config:
         """Rewrite ``model`` and return its root.
 
         Rewrite configs in place. Return a different config to replace the root

@@ -13,7 +13,6 @@ from .flavors import (
     MuseGlimmerModel,
     MuseGlimmerVisionAdapter,
     MuseGlimmerVisionEncoder,
-    set_muse_glimmer_vision_sharding_config,
     VisionRopeFreq,
 )
 
@@ -27,5 +26,4 @@ __all__ = [
     "muse_glimmer_vision_adapter_config",
     "muse_glimmer_vision_configs",
     "muse_glimmer_vision_encoder_config",
-    "set_muse_glimmer_vision_sharding_config",
 ]

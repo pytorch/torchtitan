@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from torchtitan.config import OverrideConfig
 from torchtitan.rl import train
 from torchtitan.rl.controller import AsyncLoopConfig
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
@@ -144,10 +145,13 @@ def _make_stub_rl_trainer():
         renderer = SimpleNamespace(
             build=lambda *, tokenizer: SimpleNamespace(get_stop_token_ids=lambda: [])
         )
-        # __init__ reads generator.sampling (a dataclass, for replace) + generator.debug.seed.
+        # __init__ copies each role's model, reads generator.sampling (a dataclass,
+        # for replace) + generator.debug.seed, and applies the (empty) override.
+        trainer = SimpleNamespace(model=None)
         generator = SimpleNamespace(
-            sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
+            model=None, sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
         )
+        override = OverrideConfig()
         rollouter = SimpleNamespace(build=lambda: _StubRollouter())
 
         def to_dict(self):

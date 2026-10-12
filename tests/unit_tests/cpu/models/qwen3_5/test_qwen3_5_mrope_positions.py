@@ -74,7 +74,9 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         ) = _build_config_modules()
         # varlen backend keeps mask construction to pure tensor ops (no flex
         # compile) so the pipeline runs on CPU.
-        model = build_model_config("debugmodel", attn_backend="varlen").build()
+        model = build_model_config(
+            "debugmodel", attn_backend="varlen", parallelism=ParallelismConfig()
+        ).build()
         sink: dict = {}
         for key in list(model.layers.keys()):
             layer = model.layers[key]

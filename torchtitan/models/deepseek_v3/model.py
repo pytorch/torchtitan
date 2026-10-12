@@ -13,7 +13,6 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     BaseAttention,
@@ -286,15 +285,6 @@ class DeepSeekV3Model(MTPDecoder):
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
             return get_deepseek_v3_nparams_and_flops(self, model, seq_len)
-
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_deepseek_v3_sharding_config
-
-            set_deepseek_v3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
 
     def __init__(self, config: Config):
         super().__init__(config)

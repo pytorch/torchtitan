@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
-import copy
 import logging
 import os
 import time
@@ -19,7 +18,7 @@ from torch.distributed.tensor import DTensor
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.config import apply_overrides, Configurable, TORCH_DTYPE_MAP
+from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
 from torchtitan.distributed.utils import get_local_tensor
@@ -53,7 +52,6 @@ class Trainer(Configurable):
 
     Args:
         config: Trainer.Config with all model/optimizer/parallelism settings.
-        model_config: TorchTitan model configuration.
         max_num_documents: Fixed varlen metadata capacity configured by the batcher.
         hf_assets_path: Path to HF assets folder for checkpoint loading.
             Shared with the generator (both load from the same HF checkpoint).
@@ -63,7 +61,10 @@ class Trainer(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TrainingEngine.Config):
-        """Trainer configuration for optimizer, training, and parallelism."""
+        """Trainer configuration for model, optimizer, training, and parallelism."""
+
+        model: BaseModel.Config
+        """Trainer model config, built for ``parallelism``."""
 
         def __post_init__(self) -> None:
             TrainingEngine.Config.__post_init__(self)
@@ -78,7 +79,6 @@ class Trainer(Configurable):
         self,
         config: Config,
         *,
-        model_config: BaseModel.Config,
         max_num_documents: int | None,
         hf_assets_path: str = "",
         generator_dtype: str = "",
@@ -96,14 +96,8 @@ class Trainer(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
-        model_config = copy.deepcopy(model_config)
-        model_config.set_sharding_(config.parallelism)
-
-        if config.override.imports:
-            apply_overrides(config.override, model_config)
-
         validate_model_training_config(
-            model_config,
+            config.model,
             parallelism=config.parallelism,
             training=config.training,
             debug=config.debug,
@@ -113,7 +107,7 @@ class Trainer(Configurable):
 
         self.engine = TrainingEngine(
             config,
-            model_config=model_config,
+            model_config=config.model,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )

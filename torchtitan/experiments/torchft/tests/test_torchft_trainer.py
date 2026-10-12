@@ -16,6 +16,7 @@ import torch
 import torchtitan.experiments.torchft.trainer as ft
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import override
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LoRATransform
 from torchtitan.distributed import DistributedTopology, ParallelismContext
 from torchtitan.models.common.decoder import Decoder
@@ -73,7 +74,9 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         return LoRATransform(rank=1, alpha=1.0).transform(config)
 
     config = ft.FaultTolerantTrainer.Config(
-        model=build_model_config("debugmodel", seq_len=2048),
+        model=build_model_config(
+            "debugmodel", seq_len=2048, parallelism=ParallelismConfig()
+        ),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
     )
@@ -135,7 +138,9 @@ def test_ft_trainer_composes_specialized_training_engine() -> None:
 
 def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None:
     config = ft.FaultTolerantTrainer.Config(
-        model=build_model_config("debugmodel", seq_len=2048),
+        model=build_model_config(
+            "debugmodel", seq_len=2048, parallelism=ParallelismConfig()
+        ),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
     )

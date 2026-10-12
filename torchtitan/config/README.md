@@ -50,16 +50,24 @@ integration configurations live next to their test definitions in
 ```python
 # torchtitan_recipes/models/llama3.py
 def llama3_8b_fsdp8_tp2_h200() -> Trainer.Config:
-    model_config = build_model_config("8B", attn_backend="flex")
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=8,
+        tensor_parallel_degree=2,
+    )
+    model_config = build_model_config(
+        "8B", attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         model=model_config,
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=8,
-            tensor_parallel_degree=2,
-        ),
+        parallelism=parallelism,
         ...
     )
 ```
+
+A model config is built, and sharded, for one parallelism, so declare the
+parallelism first and pass it to `build_model_config`. A recipe derived from
+another one that changes sequence or expert parallelism must build the model for
+the new parallelism (e.g. through a `parallelism=` argument of the base recipe).
 
 `--module` takes any importable module, so a configuration kept outside this repository works the same way:
 

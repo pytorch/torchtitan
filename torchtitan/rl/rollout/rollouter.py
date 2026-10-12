@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+import numpy as np
 from monarch.actor import ProcMesh, this_host
 
 from torchtitan.components.renderer import RendererConfig
@@ -462,14 +463,19 @@ class RolloutWorker(Configurable):
                 # env call
                 next_env_step = await env.step(completion)
 
-                # full snapshot of this turn from a token and message perspective
+                # this turn from a token and message perspective
                 turns.append(
                     RolloutTurn(
                         rollout_id=turn_rollout_id,
-                        prompt_token_ids=env_step.next_prompt_token_ids or [],
+                        prompt_prefix_len=env_step.next_prompt_prefix_len,
+                        prompt_delta_token_ids=env_step.next_prompt_delta_token_ids,
                         prompt_messages=env_step.next_prompt_messages or [],
-                        completion_token_ids=completion.token_ids,
-                        completion_logprobs=completion.token_logprobs,
+                        completion_token_ids=np.asarray(
+                            completion.token_ids, dtype=np.int32
+                        ),
+                        completion_logprobs=np.asarray(
+                            completion.token_logprobs, dtype=np.float32
+                        ),
                         completion_message=next_env_step.completion_message,
                         env_messages=next_env_step.env_messages,
                         env_rewards=next_env_step.env_rewards,

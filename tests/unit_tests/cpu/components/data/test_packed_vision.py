@@ -41,11 +41,12 @@ from torchtitan.models.qwen3_5.vision_encoder import (
 
 class TestPackedVision(unittest.TestCase):
     def test_dummy_vision_inputs_have_encoder_input_type(self) -> None:
-        dp_axis = spmd.MeshAxis.of(2, 2)
+        dp_axis = spmd.MeshAxis.of(2, 4)
+        cp_axis = spmd.MeshAxis.of(2, 2)
         tp_axis = spmd.MeshAxis.of(2, 1)
 
         with spmd.set_current_mesh(
-            {"dp": dp_axis, "tp": tp_axis},
+            {"dp": dp_axis, "cp": cp_axis, "tp": tp_axis},
             local_axes=(dp_axis,),
         ):
             with typecheck(strict_mode="strict", local=False):
@@ -55,7 +56,7 @@ class TestPackedVision(unittest.TestCase):
                     device=torch.device("cpu"),
                 )
 
-        expected_type = {dp_axis: spmd.V, tp_axis: spmd.I}
+        expected_type = {dp_axis: spmd.V, cp_axis: spmd.I, tp_axis: spmd.I}
         self.assertEqual(spmd.get_local_type(pixel_values_TP), expected_type)
         self.assertEqual(spmd.get_local_type(grid_thw_N3), expected_type)
 

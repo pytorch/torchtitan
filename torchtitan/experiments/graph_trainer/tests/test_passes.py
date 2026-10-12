@@ -30,6 +30,8 @@ from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.config import TrainingConfig
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     _EP_TOKEN_COUNT_EXCHANGE,
@@ -2571,6 +2573,31 @@ class TestApplySACPass(TestCase):
             )
         )
 
+    def test_inplace_mutation_not_recomputed(self):
+        """An in-place buffer update consumed by backward is saved, not replayed."""
+        graph = torch.fx.Graph()
+        buf = graph.placeholder("buf")
+        x = graph.placeholder("x")
+        counts = graph.call_function(torch.ops.aten.mul.Tensor, args=(x, 2))
+        update = graph.call_function(torch.ops.aten.add_.Tensor, args=(buf, counts))
+        snapshot = graph.call_function(torch.ops.aten.clone.default, args=(update,))
+        scaled = graph.call_function(torch.ops.aten.div.Tensor, args=(snapshot, 4))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(scaled, x))
+        bwd.meta["autograd_backward"] = True
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        tag_sac_policy(gm)
+        selective_activation_remat_pass(gm)
+
+        self.assertEqual(update.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(snapshot.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(scaled.meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
+        mutations = [
+            n for n in gm.graph.nodes if n.target is torch.ops.aten.add_.Tensor
+        ]
+        self.assertEqual(mutations, [update])
+
     def test_non_save_ops_marked_recompute(self):
         """Ops not in the save list should be marked PREFER_RECOMPUTE."""
         gm = self._build_gm(
@@ -3339,7 +3366,9 @@ class TestBucketingPrefetchOrder(FSDPTest):
             enable_sequence_parallel=False,
         )
 
-        model_config = build_llama3_model_config("debugmodel")
+        model_config = build_llama3_model_config(
+            "debugmodel", parallelism=ParallelismConfig()
+        )
         vocab_size = model_config.vocab_size
 
         with torch.device("meta"):

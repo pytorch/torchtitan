@@ -37,12 +37,13 @@ import torch
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from PIL import Image
-
 from torchtitan.components.data.multimodal.utils.image import (
     process_image,
     resize_to_navit_patch_grid,
     vision_to_patches,
 )
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.attention.kda import InnerKDA
 from torchtitan.models.kimi_k3 import build_model_config
@@ -531,7 +532,7 @@ def main() -> None:
     )
 
     tt_config = _use_released_vocab(
-        build_model_config(args.model_flavor),
+        build_model_config(args.model_flavor, parallelism=ParallelismConfig()),
         hf_model_path,
     )
     torch.manual_seed(args.seed)
