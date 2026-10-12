@@ -42,6 +42,8 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 def muse_glimmer_30b(
     seq_len: int | None = None, *, attn_backend: str = "varlen"
@@ -60,7 +62,7 @@ def muse_glimmer_30b(
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(model_config.max_context_length),
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(

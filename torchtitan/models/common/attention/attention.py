@@ -250,7 +250,7 @@ class VarlenInnerAttention(InnerAttention):
 
         varlen_attn_fn = varlen_attn if out_transform is None else varlen_attn_with_lse
 
-        # Q/K normalization can upcast under AMP; V retains the projection dtype.
+        # Align Q/K with V while preserving its FP16/BF16 projection dtype.
         attn_dtype = v_THV.dtype
         if attn_dtype not in (torch.float16, torch.bfloat16):
             # Preserve the legacy BF16 conversion for full-precision callers.

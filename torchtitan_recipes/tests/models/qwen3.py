@@ -47,6 +47,8 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 def qwen3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -236,7 +238,7 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(4 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -268,7 +270,7 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(4 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -388,7 +390,7 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-14B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(4 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -427,7 +429,7 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-30B-A3B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(2 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -464,7 +466,7 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-32B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(2 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(

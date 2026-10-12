@@ -31,6 +31,8 @@ from torchtitan.models.muse_glimmer.model import MuseGlimmerModel
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 # Multimodal special tokens for the Muse Glimmer debug flavor. The debug tokenizer asset
 # (``./tests/assets/tokenizer``) already defines these (IDs 2004-2008, all <
@@ -241,7 +243,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(1 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(

@@ -38,6 +38,8 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
+
 from torchtitan_recipes.models.deepseek_v3 import (
     _dist_moe_runtime_config,
     _require_dist_moe,
@@ -192,7 +194,7 @@ def deepseek_v3_16b(
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(4 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -411,7 +413,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(4 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(

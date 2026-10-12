@@ -20,6 +20,8 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 def llama3_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
     """Build the MXFP8 policy shared by eager and GraphTrainer recipes."""
@@ -56,7 +58,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpointer=None,
@@ -89,7 +91,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(8 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         parallelism=parallelism,

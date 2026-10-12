@@ -46,6 +46,8 @@ from torchtitan.observability.profiler import Profiler
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
+
 from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_converter_config
 
 
@@ -253,7 +255,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(1 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpointer=None,
@@ -326,7 +328,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(8 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         parallelism=parallelism,

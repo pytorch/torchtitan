@@ -38,6 +38,8 @@ from torchtitan.models.qwen3_8 import build_model_config, QWEN3_8_SPECIAL_TOKENS
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 def _multimodal_collator_config(
     dataset_config: SingleDatasetConfig,
@@ -215,7 +217,7 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.8-2.4T-A95B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=1024,
+            max_num_documents=c4_document_capacity(model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
