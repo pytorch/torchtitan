@@ -155,13 +155,13 @@ as a CUDA-graph-compatible MoE dispatcher for the generator, are model config
 transforms applied to one role (`apply_transforms(config.generator, ...)`).
 `Controller.Config.override` applies registered overrides to both models.
 
-Then run it by module and config name. CLI arguments override fields from the registry:
+Then run it by module and config name. `--output-dir` sets the output directory:
 
 ```bash
 python -m torchtitan.rl.train \
   --module my_project.my_experiment \
   --config my_experiment \
-  --dump-folder outputs/rl/my_experiment
+  --output-dir outputs/rl/my_experiment
 ```
 
 ## Experiments
