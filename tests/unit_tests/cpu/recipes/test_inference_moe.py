@@ -55,7 +55,11 @@ def _moe_config():
         top_k=1,
     )
     return make_moe_config(
-        num_experts=_E, router=router, routed_experts=routed_experts, enable_sp=True
+        num_experts=_E,
+        router=router,
+        routed_experts=routed_experts,
+        load_balance_coeff=1e-3,
+        enable_sp=True,
     )
 
 

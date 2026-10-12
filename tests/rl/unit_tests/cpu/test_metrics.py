@@ -13,6 +13,7 @@ import math
 import os
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from torchtitan.observability.metrics import BaseLogger, TensorBoardLogger, WandBLogger
@@ -387,9 +388,10 @@ class TestFold:
         def turn(turn_id: int, ttft_ms: float) -> RolloutTurn:
             return RolloutTurn(
                 rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=turn_id),
-                prompt_token_ids=[1],
-                completion_token_ids=[2],
-                completion_logprobs=[-0.1],
+                prompt_prefix_len=0,
+                prompt_delta_token_ids=np.array([1], dtype=np.int32),
+                completion_token_ids=np.array([2], dtype=np.int32),
+                completion_logprobs=np.array([-0.1], dtype=np.float32),
                 metrics=[
                     m.Metric("generator/ttft_ms", m.Mean(ttft_ms)),
                     m.Metric("generator/ttft_ms", m.Max(ttft_ms)),

@@ -48,9 +48,10 @@ if TYPE_CHECKING:
     )
     from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
     from attn_gym.sparse import lightning_indexer
-    from attn_gym.sparse.gather_attn import gather_attn
+    from attn_gym.sparse.gather_attn import AuxRequest, gather_attn
 
 __all__ = [
+    "AuxRequest",
     "_ChunkGDN",
     "_ChunkKDA",
     "_ConfiguredShortConv",
@@ -85,6 +86,7 @@ __all__ = [
 ]
 
 _EXPORTS = {
+    "AuxRequest": "attn_gym.sparse.gather_attn",
     "_ChunkGDN": "attn_gym.linear.gdn.ops",
     "_ChunkKDA": "attn_gym.linear.kda.impl.fused",
     "_ConfiguredShortConv": "attn_gym.linear.short_conv.cute",
