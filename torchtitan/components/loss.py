@@ -7,7 +7,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, TypeAlias, TypeVar
+from typing import Any, cast, Generic, Literal, TypeAlias, TypeVar
 
 import spmd_types as spmd
 import torch
@@ -48,6 +48,26 @@ class Loss(Function[LossResult], Generic[LossInputT], ABC):
     ) -> LossResult:
         """Return the scaled loss and any metrics computed by the loss."""
         ...
+
+    def _compute_loss_with_lm_head(
+        self,
+        hidden_states: LossInputT,
+        labels: LossInputT,
+        lm_head: nn.Module,
+        global_loss_token_counts: torch.Tensor | None,
+        **loss_inputs: Any,
+    ) -> LossResult:
+        """Project one validation term and compute its existing objective."""
+        if not isinstance(hidden_states, torch.Tensor) or not isinstance(
+            labels, torch.Tensor
+        ):
+            raise ValueError("This loss requires one hidden-state/labels tensor pair")
+        return self(
+            cast(LossInputT, lm_head(hidden_states)),
+            cast(LossInputT, labels),
+            global_loss_token_counts,
+            **loss_inputs,
+        )
 
 
 @local_compile("loss", batch_invariant=False)
@@ -805,8 +825,12 @@ class ChunkedLossWrapper(Loss[LossInput]):
         loss_fn: Loss.Config = field(default_factory=CrossEntropyLoss.Config)
         """Loss applied to each chunk's logits."""
 
+        validation_only: bool = False
+        """Keep training logits unchanged and project hidden states only in eval."""
+
     def __init__(self, config: Config):
         self.num_chunks = config.num_chunks
+        self.validation_only = config.validation_only
         self.loss_fn: Callable[..., LossResult] = config.loss_fn.build()
         self.lm_head: nn.Module | None = None
 
@@ -842,6 +866,8 @@ class ChunkedLossWrapper(Loss[LossInput]):
         num_chunks = self.num_chunks
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
+        if self.validation_only and lm_head.training:
+            return self.loss_fn(pred, labels, global_loss_token_counts, **loss_inputs)
         if isinstance(pred, torch.Tensor) and isinstance(labels, torch.Tensor):
             is_multi_output = False
             pred = (pred,)
@@ -948,19 +974,32 @@ class ChunkedLossWrapper(Loss[LossInput]):
                     # Qwen3-8B chunk. Blocked: compiling HiMidLoLinear rounds grad_weight to bf16
                     # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
                     # fails at lm_head's hooks, which can't be traced.
-                    logits: LossInput = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
-                    logits = fsdp.after_forward(logits)
-                    if not is_multi_output:
-                        logits = logits[0]
-                        label_chunks = label_chunks[0]
-                    chunk_loss, chunk_metrics = self.loss_fn(
-                        logits,
-                        label_chunks,
-                        global_loss_token_counts,
-                        **loss_inputs,
-                    )
-                    # Free logits before backward.
-                    del logits
+                    if self.validation_only:
+                        chunk_loss, chunk_metrics = cast(
+                            Loss[LossInput], self.loss_fn
+                        )._compute_loss_with_lm_head(
+                            h_chunks if is_multi_output else h_chunks[0],
+                            label_chunks if is_multi_output else label_chunks[0],
+                            lm_head,
+                            global_loss_token_counts,
+                            **loss_inputs,
+                        )
+                    else:
+                        logits: LossInput = tuple(
+                            lm_head(h_chunk) for h_chunk in h_chunks
+                        )
+                        logits = fsdp.after_forward(logits)
+                        if not is_multi_output:
+                            logits = logits[0]
+                            label_chunks = label_chunks[0]
+                        chunk_loss, chunk_metrics = self.loss_fn(
+                            logits,
+                            label_chunks,
+                            global_loss_token_counts,
+                            **loss_inputs,
+                        )
+                        # Free logits before backward.
+                        del logits
                     chunk_metrics_list.append(chunk_metrics)
                     total_loss = total_loss + chunk_loss.detach()
 
