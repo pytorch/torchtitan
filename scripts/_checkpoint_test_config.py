@@ -72,7 +72,7 @@ def checkpoint_test_config():
         trainer_config.metrics.save_tb_folder = os.environ["TORCHTITAN_TEST_TB_FOLDER"]
     total_steps = os.environ.get("TORCHTITAN_TEST_LR_TOTAL_STEPS")
     if total_steps is not None:
-        trainer_config.lr_scheduler.total_steps = int(total_steps)
+        trainer_config.optim.lr_scheduler.total_steps = int(total_steps)
 
     mode = os.environ.get("TORCHTITAN_CHECKPOINT_MODE")
     if mode is None:

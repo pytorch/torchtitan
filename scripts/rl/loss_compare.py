@@ -230,6 +230,16 @@ def assert_losses_equal(
 # ---------------------------------------------------------------------------
 
 
+def _repo_root() -> str:
+    """Return the checkout root that contains ``scripts/loss_compare.py``.
+
+    This file is ``scripts/rl/loss_compare.py``, so the root is two parents up.
+    """
+    return os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compare RL training losses against a reference file.",
@@ -271,11 +281,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # scripts/loss_compare.py (repo root) isn't on the editable-install
-    # sys.path; add it, then reuse its reference-file I/O helpers.
-    repo_root = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), *([os.pardir] * 3))
-    )
+    # scripts/loss_compare.py is not on the editable-install sys.path.
+    # Add the checkout root, then reuse its reference-file I/O helpers.
+    repo_root = _repo_root()
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
     from scripts.loss_compare import export_metrics_to_file, read_metrics_from_file
