@@ -96,13 +96,13 @@ import os
 import time
 import warnings
 from dataclasses import dataclass, field, replace
-
-import monarch
+from typing import Literal
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
 import torch  # noqa: F401
 import torchstore as ts
+
 from monarch.actor import ProcMesh, this_host
 
 from torchtitan.components.renderer import RendererConfig
@@ -119,7 +119,7 @@ from torchtitan.rl.components.work_buffer import (
 from torchtitan.rl.distributed.monarch_actors.generator import VLLMGeneratorActor
 from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
 from torchtitan.rl.distributed.rdma_microbatch import (
-    create_cuda_context_to_silence_monarch_log,
+    init_rdma_microbatch_owner,
     RDMAMicrobatch,
 )
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
@@ -189,12 +189,12 @@ class AsyncLoopConfig(Configurable.Config):
     `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
     ``torchtitan/rl/components/WINDOWED_FIFO.md``."""
 
-    enable_rdma: bool = False
-    """How trainer ranks read their microbatches (weight sync has TorchStore's own switch):
-        False (default): over TCP.
-        True: over RDMA (ibverbs) where the host has it, else TCP; 25 vs 1.3 GB/s reading 256 MiB
-            on one host. A host that lists ibverbs devices it can't use fails instead of falling back.
-    MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP either way."""
+    microbatch_rdma_transport: Literal["tcp", "ibverbs"] = "tcp"
+    """How trainer ranks read their microbatches' Monarch RDMA buffers (weight sync has TorchStore's switch):
+        "tcp" (default): Monarch's TCP transport; 1.3 GB/s reading 256 MiB on one host.
+        "ibverbs": RDMA hardware; 25 GB/s on the same read. Falls back to TCP, with a warning, on hosts
+            without ibverbs. A host that lists ibverbs devices it can't use fails instead.
+    MONARCH_RDMA_DISABLE_IBVERBS=1 forces "tcp"."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -704,11 +704,10 @@ class Controller(Configurable):
             )
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
-        if not config.async_loop.enable_rdma:
-            # Trainer ranks read this process's buffers over TCP. After spawning, so trainer and
-            # generator processes keep ibverbs for weight sync; before the first buffer, or it's ignored.
-            monarch.configure(rdma_disable_ibverbs=True)
-        create_cuda_context_to_silence_monarch_log()
+        # After every spawn, before the first register(): see its docstring.
+        init_rdma_microbatch_owner(
+            transport=config.async_loop.microbatch_rdma_transport
+        )
 
         # Start each generator's engine loop on all ranks once, before any
         # rank-0-only generate / pull (rank 0 drives the followers through this

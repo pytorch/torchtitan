@@ -6,7 +6,7 @@
 
 """Trainer microbatches as Monarch RDMA buffers: the process that registers them keeps the large
 tensors, and each trainer rank reads its own column, over TCP or, with
-`AsyncLoopConfig.enable_rdma`, over RDMA (ibverbs).
+`AsyncLoopConfig.microbatch_rdma_transport="ibverbs"`, over ibverbs.
 """
 
 from __future__ import annotations
@@ -15,8 +15,9 @@ import asyncio
 import ctypes
 import dataclasses
 import logging
-from typing import Any
+from typing import Any, Literal
 
+import monarch
 import torch
 from monarch.rdma import RDMAAction, RDMABuffer
 from torch.utils import _pytree as pytree
@@ -24,6 +25,21 @@ from torch.utils import _pytree as pytree
 from torchtitan.rl.components.batcher import TrainingMicrobatch
 
 logger = logging.getLogger(__name__)
+
+
+def init_rdma_microbatch_owner(*, transport: Literal["tcp", "ibverbs"]) -> None:
+    """Prepare this process to own `RDMAMicrobatch` buffers: pick the transport, silence Monarch's per-buffer log.
+
+    Call it in this order:
+        1. spawn every mesh   (meshes spawned after step 2 would lose ibverbs too; weight sync uses it)
+        2. init_rdma_microbatch_owner(transport=...)   (see `AsyncLoopConfig.microbatch_rdma_transport`)
+        3. first register()   (after this, Monarch ignores a transport change)
+    """
+    if transport == "tcp":
+        # This process only: trainer ranks read its buffers over TCP.
+        monarch.configure(rdma_disable_ibverbs=True)
+    _create_cuda_context_to_silence_monarch_log()
+
 
 # Tensors under 1 KiB go inside the message instead of in a buffer:
 #   token counts (8 B):   registering a buffer (~0.15 ms) costs more than sending the bytes
@@ -34,17 +50,17 @@ _MIN_RDMA_BYTES = 1024
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class RDMAMicrobatch:
-    """A `TrainingMicrobatch` whose large tensors stay in the controller's memory, for trainer ranks to read over RDMA.
+    """A `TrainingMicrobatch` whose large tensors stay in its owner, the process that registered it.
 
     Example:
-        rdma_microbatch = RDMAMicrobatch.register(microbatch)  # controller
-        microbatch = await rdma_microbatch.read()  # trainer: one RDMA action reads every buffer
-        await rdma_microbatch.drop()               # controller, after every rank has read it
+        rdma_microbatch = RDMAMicrobatch.register(microbatch)  # owner
+        microbatch = await rdma_microbatch.read()  # trainer rank: one RDMA action reads every buffer
+        await rdma_microbatch.drop()               # owner, after every rank has read it
     """
 
     fields: dict[str, Any]
     """The microbatch's fields: tensors of at least 1 KiB (also inside `model_kwargs`) as
-    `_TensorRef`s, the rest by value. Tensors inside containers pytree doesn't know go by value too."""
+    `_TensorRef`s, the rest by value. Tensors inside a container that pytree can't flatten also go by value."""
 
     @classmethod
     def register(cls, microbatch: TrainingMicrobatch) -> RDMAMicrobatch:
@@ -85,7 +101,7 @@ class RDMAMicrobatch:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _TensorRef:
-    """A controller tensor as its RDMA buffer, plus the shape and dtype to rebuild it."""
+    """A tensor as its RDMA buffer, plus the shape and dtype to rebuild it."""
 
     buffer: RDMABuffer
     shape: torch.Size
@@ -106,7 +122,7 @@ class _TensorRef:
 _CU_LIMIT_STACK_SIZE = 0
 
 
-def create_cuda_context_to_silence_monarch_log() -> None:
+def _create_cuda_context_to_silence_monarch_log() -> None:
     """Make a CUDA context current on GPU 0, so Monarch stops logging one line per registered buffer.
 
     Monarch checks each registered pointer with a CUDA driver call, and prints

@@ -18,7 +18,7 @@ from torchtitan.rl.distributed.rdma_microbatch import _TensorRef, RDMAMicrobatch
 
 
 class _FakeRDMABuffer:
-    """Stands in for `monarch.rdma.RDMABuffer`: keeps the controller's byte view."""
+    """Stands in for `monarch.rdma.RDMABuffer`: keeps the owner's byte view."""
 
     def __init__(self, data: torch.Tensor) -> None:
         self.data = data

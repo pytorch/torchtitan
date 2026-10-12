@@ -264,6 +264,7 @@ class Trainer(Configurable):
         # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
         # and broadcast it, to cut the controller's reads by cp * tp. Needs a per-replica group.
         # TODO: investigate prefetching
+        read_start = time.perf_counter()
         with sl.log_trace_span("read_microbatches"):
             # One at a time, not asyncio.gather: gathered reads share the controller's bandwidth,
             # so each takes as long as the whole column and can hit its 60 s RDMA timeout.
@@ -297,7 +298,20 @@ class Trainer(Configurable):
                 )
             )
 
-        return combine_microbatch_metrics(microbatch_metrics)
+        metrics = combine_microbatch_metrics(microbatch_metrics)
+        # The slowest rank's read time this step (max over the loss mesh).
+        read_microbatches_s = torch.tensor(
+            self._step_compute_start - read_start, device=engine.device
+        )
+        metrics.update(
+            self._reduce_forward_backward_metrics(
+                sum_reduced_metrics={},
+                max_reduced_metrics={
+                    "timing/trainer/read_microbatches/max": read_microbatches_s
+                },
+            )
+        )
+        return metrics
 
     @sl.log_trace_span("optim_step")
     async def optim_step(

@@ -337,6 +337,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             ntokens_seen=10,
             sdc_replayer=None,
             model_config=SimpleNamespace(mtp_layers=None),
+            device=torch.device("cpu"),
         )
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
@@ -396,7 +397,8 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         )
         other_rank.read.assert_not_called()
         assert trainer._step_num_tokens_per_dp_rank == 2
-        assert trainer._reduce_forward_backward_metrics.call_count == 2
+        assert trainer._reduce_forward_backward_metrics.call_count == 3
+        assert result.pop("timing/trainer/read_microbatches/max") >= 0
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}
 
     asyncio.run(run())
