@@ -51,7 +51,11 @@ from torchtitan.rl.model.vllm_registry import (
     TORCHTITAN_WORKER_CLS,
 )
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
+from torchtitan.rl.observability.vllm import (
+    KVOffloadStoreBytesStatLogger,
+    StatLoggerContext,
+    VllmOtelStatLogger,
+)
 from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.session_kv_holder import SessionKVHolder
 from torchtitan.tools.utils import has_cuda_capability
@@ -1229,6 +1233,16 @@ class VLLMGenerator(Configurable):
 
                     stat_loggers = [build_stat_logger]
 
+            # Rank 0 adds up its engine's CPU KV store bytes for `get_session_kv_metrics`.
+            self._kv_offload_store_bytes: KVOffloadStoreBytesStatLogger | None = None
+            if config.kv_offload_gib > 0 and self._rank == 0:
+                store_bytes = KVOffloadStoreBytesStatLogger()
+                self._kv_offload_store_bytes = store_bytes
+                stat_loggers = [
+                    *(stat_loggers or []),
+                    lambda vllm_config, engine_index: store_bytes,
+                ]
+
             # Start the thread that runs vllm engine.
             self._engine_event_loop = asyncio.new_event_loop()
             threading.Thread(
@@ -1309,6 +1323,8 @@ class VLLMGenerator(Configurable):
 
         # Every rank holds the same blocks in its own scheduler; only the engine thread touches them.
         self._session_kv: SessionKVHolder | None = None
+        # The holder's running totals at the last `get_session_kv_metrics`.
+        self._session_kv_totals: dict[str, int] = {}
         if config.hold_session_kv or config.kv_offload_gib > 0:
             scheduler = self._engine.engine_core.engine_core.scheduler
             if config.hold_session_kv:
@@ -1383,17 +1399,6 @@ class VLLMGenerator(Configurable):
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
-        if (
-            self._session_kv is not None
-            and self.config.hold_session_kv
-            and self._rank == 0
-        ):
-            logger.info(
-                "Session KV at step %d: %d sessions held, %d evicted so far",
-                step,
-                self._session_kv.num_sessions,
-                self._session_kv.num_evicted,
-            )
 
     async def start_engine_loop(self) -> None:
         """Start the background engine loop on every rank (one-time, idempotent)."""
@@ -1815,6 +1820,46 @@ class VLLMGenerator(Configurable):
         """
         if self._session_kv is not None and self._rank == 0:
             self._engine_loop_queue.put(SessionReleaseMessage(session_ids=session_ids))
+
+    async def get_session_kv_metrics(self) -> list[m.Metric]:
+        """This rank's session-KV metrics: levels now, counts since the last call.
+
+        Empty without `hold_session_kv` and `kv_offload_gib`.
+
+        Example:
+
+            call 1: holder.num_evicted 3, num_sessions 80  ->  evicted_sessions 3, held_sessions 80
+            call 2: holder.num_evicted 5, num_sessions 78  ->  evicted_sessions 2, held_sessions 78
+        """
+        holder = self._session_kv
+        if holder is None:
+            return []
+        # TODO: with DP > 1 this is DP rank 0's engine only; gather every DP rank's holder.
+        scheduler = self._engine.engine_core.engine_core.scheduler
+        levels = {"gpu_used_fraction": scheduler.kv_cache_manager.usage}
+        totals = {
+            "gpu_hit_prefix_tokens": holder.gpu_hit_prefix_tokens,
+            "cpu_hit_prefix_tokens": holder.cpu_hit_prefix_tokens,
+            "recomputed_prefix_tokens": holder.recomputed_prefix_tokens,
+        }
+        if self.config.hold_session_kv:
+            levels["held_sessions"] = holder.num_sessions
+            levels["held_blocks"] = holder.num_held_blocks
+            totals["evicted_sessions"] = holder.num_evicted
+            totals["stall_evicted_sessions"] = holder.num_stall_evicted
+        if self._kv_offload_store_bytes is not None:
+            levels["cpu_used_fraction"] = holder.cpu_used_fraction()
+            totals["cpu_store_bytes"] = self._kv_offload_store_bytes.store_bytes
+        counts = {
+            key: total - self._session_kv_totals.get(key, 0)
+            for key, total in totals.items()
+        }
+        self._session_kv_totals = totals
+        return [
+            m.Metric(f"generator/session_kv/{key}", metric_type(value))
+            for key, value in (levels | counts).items()
+            for metric_type in (m.Mean, m.Max)
+        ]
 
     async def initialize_torchstore_client(self, requester_index: int) -> None:
         """Initialize this process as a TorchStore routing requester.

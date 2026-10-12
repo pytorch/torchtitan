@@ -14,8 +14,12 @@ import pytest
 
 from torchtitan.rl.observability.vllm import (
     _extract_step_stats,
+    KVOffloadStoreBytesStatLogger,
     StatLoggerContext,
     VllmOtelStatLogger,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
 )
 
 
@@ -417,3 +421,18 @@ def test_record_disables_on_extract_failure(
     log.record(None, SimpleNamespace())
 
     assert log._enabled is False
+
+
+def test_kv_offload_store_bytes_stat_logger_adds_each_steps_store_bytes():
+    def scheduler_stats(store_bytes: int) -> SimpleNamespace:
+        connector_stats = OffloadingConnectorStats()
+        connector_stats.increase_counter("vllm:kv_offload_store_bytes", store_bytes)
+        connector_stats.increase_counter("vllm:kv_offload_load_bytes", 7)
+        return SimpleNamespace(kv_connector_stats=connector_stats.to_dict())
+
+    stat_logger = KVOffloadStoreBytesStatLogger()
+    stat_logger.record(scheduler_stats(100), None)
+    stat_logger.record(SimpleNamespace(kv_connector_stats=None), None)
+    stat_logger.record(scheduler_stats(20), None)
+
+    assert stat_logger.store_bytes == 120

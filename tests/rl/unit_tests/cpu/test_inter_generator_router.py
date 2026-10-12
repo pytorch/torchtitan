@@ -15,6 +15,7 @@ from torchtitan.rl.distributed.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.rl.distributed.routing.types import RoutingContext
+from torchtitan.rl.observability import metrics as m
 
 
 class _Endpoint:
@@ -286,6 +287,7 @@ def test_sticky_session_repins_off_an_overloaded_generator():
             await router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
             == "gen1"
         )
+        assert router._strategy.num_repins == 1
 
     asyncio.run(_run())
 
@@ -416,6 +418,33 @@ def test_session_release_reaches_only_its_pinned_generator():
 def test_sticky_session_rejects_non_positive_max_sessions():
     with pytest.raises(ValueError, match="max_sessions must be positive"):
         StickySessionRoutingStrategy.Config(max_sessions=0).build()
+
+
+def test_session_kv_metrics_gather_every_generator_and_count_repins():
+    async def _run():
+        actors = [_Actor("gen0"), _Actor("gen1")]
+        for held_sessions, actor in zip([3, 5], actors):
+            actor.get_session_kv_metrics = _Endpoint(
+                [m.Metric("generator/session_kv/held_sessions", m.Mean(held_sessions))]
+            )
+        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
+        router._strategy.num_repins = 2
+        first = await router._get_session_kv_metrics()
+        second = await router._get_session_kv_metrics()
+        return first, second
+
+    first, second = asyncio.run(_run())
+
+    assert m.MetricsProcessor._aggregate_metrics(first) == {
+        "generator/session_kv/held_sessions/mean": 4.0,
+        "generator/session_kv/repinned_sessions/sum": 2.0,
+    }
+    assert (
+        m.MetricsProcessor._aggregate_metrics(second)[
+            "generator/session_kv/repinned_sessions/sum"
+        ]
+        == 0.0
+    )
 
 
 def test_sticky_session_rejects_repin_load_ratio_at_most_one():

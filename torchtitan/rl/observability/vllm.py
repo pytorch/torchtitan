@@ -390,3 +390,35 @@ class VllmOtelStatLogger(Configurable, StatLoggerBase):
                 type(self).__name__,
                 envs.VLLM_LOG_STATS_INTERVAL,
             )
+
+
+class KVOffloadStoreBytesStatLogger(StatLoggerBase):
+    """Adds up the bytes vLLM's CPU KV offload stored, one engine step at a time.
+
+    A plain int, so another thread can read it while the engine thread adds.
+    """
+
+    def __init__(self) -> None:
+        self.store_bytes = 0
+
+    def record(
+        self,
+        scheduler_stats: SchedulerStats | None,
+        iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_idx: int = 0,
+    ) -> None:
+        if scheduler_stats is None or scheduler_stats.kv_connector_stats is None:
+            return
+        # Imported here: runs without CPU offload never load vLLM's offload code.
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+            OffloadingConnectorStats,
+        )
+
+        counters = OffloadingConnectorStats(
+            data=scheduler_stats.kv_connector_stats
+        ).reduce()
+        self.store_bytes += counters.get("vllm:kv_offload_store_bytes", 0)
+
+    def log_engine_initialized(self) -> None:
+        pass

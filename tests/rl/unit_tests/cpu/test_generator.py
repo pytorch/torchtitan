@@ -154,6 +154,89 @@ def _generator():
     return generator
 
 
+def _session_kv_generator(*, hold: bool, offload: bool):
+    """A bare generator with a stub holder, as `get_session_kv_metrics` reads it."""
+    generator = _generator()
+    generator.config = SimpleNamespace(hold_session_kv=hold)
+    generator._session_kv = SimpleNamespace(
+        num_sessions=80,
+        num_held_blocks=900,
+        num_evicted=3,
+        num_stall_evicted=1,
+        gpu_hit_prefix_tokens=4000,
+        cpu_hit_prefix_tokens=1000,
+        recomputed_prefix_tokens=0,
+        cpu_used_fraction=lambda: 0.5,
+    )
+    generator._session_kv_totals = {}
+    generator._kv_offload_store_bytes = (
+        SimpleNamespace(store_bytes=10) if offload else None
+    )
+    kv_cache_manager = SimpleNamespace(usage=0.3)
+    generator._engine = SimpleNamespace(
+        engine_core=SimpleNamespace(
+            engine_core=SimpleNamespace(
+                scheduler=SimpleNamespace(kv_cache_manager=kv_cache_manager)
+            )
+        )
+    )
+    return generator
+
+
+def _session_kv_metrics(generator) -> dict[str, float]:
+    """Mean value per metric name (one generator, so mean == max)."""
+    metrics = asyncio.run(generator.get_session_kv_metrics())
+    return {
+        key.removeprefix("generator/session_kv/").removesuffix("/mean"): value
+        for key, value in m.MetricsProcessor._aggregate_metrics(metrics).items()
+        if key.endswith("/mean")
+    }
+
+
+def test_session_kv_metrics_are_levels_now_and_counts_since_the_last_call():
+    generator = _session_kv_generator(hold=True, offload=True)
+    first = _session_kv_metrics(generator)
+    holder = generator._session_kv
+    holder.num_sessions, holder.num_evicted = 78, 5
+    holder.recomputed_prefix_tokens = 528
+    generator._kv_offload_store_bytes.store_bytes = 25
+    second = _session_kv_metrics(generator)
+
+    assert first == {
+        "gpu_used_fraction": 0.3,
+        "held_sessions": 80,
+        "held_blocks": 900,
+        "cpu_used_fraction": 0.5,
+        "gpu_hit_prefix_tokens": 4000,
+        "cpu_hit_prefix_tokens": 1000,
+        "recomputed_prefix_tokens": 0,
+        "evicted_sessions": 3,
+        "stall_evicted_sessions": 1,
+        "cpu_store_bytes": 10,
+    }
+    assert second["held_sessions"] == 78
+    assert (second["evicted_sessions"], second["stall_evicted_sessions"]) == (2, 0)
+    assert (second["recomputed_prefix_tokens"], second["cpu_store_bytes"]) == (528, 15)
+    assert second["gpu_hit_prefix_tokens"] == 0
+
+
+def test_session_kv_metrics_follow_the_enabled_features():
+    without_offload = _session_kv_metrics(
+        _session_kv_generator(hold=True, offload=False)
+    )
+    without_hold = _session_kv_metrics(_session_kv_generator(hold=False, offload=True))
+    generator = _generator()
+
+    assert {"cpu_used_fraction", "cpu_store_bytes"}.isdisjoint(without_offload)
+    assert {
+        "held_sessions",
+        "held_blocks",
+        "evicted_sessions",
+        "stall_evicted_sessions",
+    }.isdisjoint(without_hold)
+    assert asyncio.run(generator.get_session_kv_metrics()) == []
+
+
 def test_initialize_torchstore_client_uses_requester_index():
     async def main():
         generator = VLLMGenerator.__new__(VLLMGenerator)
