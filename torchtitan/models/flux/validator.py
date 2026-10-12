@@ -6,13 +6,13 @@
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 import torch
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.data import GrainDataLoader
-from torchtitan.components.loss import LossFunction
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validator import iterate_and_close_dataloader, Validator
 from torchtitan.config.parallelism import ParallelismConfig
@@ -104,7 +104,7 @@ class FluxValidator(Validator):
         dp_rank: int,
         tokenizer: BaseTokenizer,
         parallelism_context: ParallelismContext,
-        loss_fn: LossFunction,
+        loss_fn: Callable[..., tuple[torch.Tensor, dict[str, torch.Tensor]]],
         seq_len: int,
         num_tokens_per_microbatch: int,
         metrics_processor: MetricsProcessor | None = None,
