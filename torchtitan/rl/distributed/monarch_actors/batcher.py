@@ -84,7 +84,8 @@ class BatcherActor(Actor):
             # Trainer ranks read this process's buffers over TCP; their own processes keep ibverbs.
             monarch.configure(rdma_disable_ibverbs=True)
         create_cuda_context_to_silence_monarch_log()
-        # Batches trainer ranks may still read, oldest first.
+        # Batches trainer ranks may still read, oldest first. Each keeps its batch so the tensors
+        # outlive drop(): Monarch 0.6 deadlocks when a buffer is the last owner of its storage.
         self._batches_being_read: deque[
             tuple[TrainerStepBatch, list[list[RDMAMicrobatch]]]
         ] = deque()

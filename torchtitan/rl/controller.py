@@ -599,6 +599,7 @@ class Controller(Configurable):
             # loop for the controller's GIL.
             router_mesh = this_host().spawn_procs(per_host={"cpus": 1})
             # Same for the batcher: build + pack would contend for the controller's GIL.
+            # It drops its own buffers (release_oldest_batch): Monarch's drop must run on the owner's host.
             batcher_mesh = this_host().spawn_procs(per_host={"cpus": 1})
             # Store proc meshes for cleanup
             self._proc_meshes = [

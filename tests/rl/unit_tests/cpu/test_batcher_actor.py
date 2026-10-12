@@ -62,8 +62,15 @@ def _group(group_id: int, rewards: list[float]) -> RolloutGroup:
 
 
 def test_batcher_actor_returns_the_in_process_batch(tmp_path) -> None:
-    # Group 1 has zero reward spread, so the builder drops it: it rides along but isn't trainable.
-    groups = [_group(0, [0.0, 1.0]), _group(1, [1.0, 1.0]), _group(2, [1.0, 0.0])]
+    # Batch A after group 2, batch B after group 4. Group 1 has zero reward spread, so the
+    # builder drops it: it rides along but isn't trainable.
+    groups = [
+        _group(0, [0.0, 1.0]),
+        _group(1, [1.0, 1.0]),
+        _group(2, [1.0, 0.0]),
+        _group(3, [0.0, 1.0]),
+        _group(4, [1.0, 0.0]),
+    ]
 
     builder = TrainingSampleBuilder.Config().build()
     batcher = Batcher.Config().build(**_BATCHER_KWARGS)
@@ -90,42 +97,45 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path) -> None:
             results = [
                 await actor.add_group.call_one(rollout_group=group) for group in groups
             ]
-            # Read the RDMAMicrobatches from this process, as a trainer rank would, then free them.
-            batch = results[-1][0]
-            microbatches = [
-                [await rdma_microbatch.read() for rdma_microbatch in row]
-                for row in batch.microbatches
-            ]
+            # Release A once: B, still held, must read back exactly, as a trainer rank reads it.
             await actor.release_oldest_batch.call_one()
+            microbatches_b = [
+                [await rdma_microbatch.read() for rdma_microbatch in row]
+                for row in results[4][0].microbatches
+            ]
             # A builder error surfaces at call_one.
-            no_advantage = _group(3, [0.0, 1.0])
+            no_advantage = _group(5, [0.0, 1.0])
             no_advantage.rollouts[0].advantage = None
             with pytest.raises(ActorError, match="has no advantage"):
                 await actor.add_group.call_one(rollout_group=no_advantage)
-            return results, microbatches
+            return results, microbatches_b
         finally:
             await mesh.stop()
 
-    results, microbatches = asyncio.run(run())
+    results, microbatches_b = asyncio.run(run())
 
     assert [(batch is None, trainable) for batch, trainable in results] == [
         (True, True),
         (True, False),
         (False, True),
+        (True, True),
+        (False, True),
     ]
-    batch, expected_batch = results[-1][0], expected[-1][0]
-    assert batch.group_ids == [0, 1, 2]
+    batch_b = results[4][0]
+    assert [results[2][0].group_ids, batch_b.group_ids] == [[0, 1, 2], [3, 4]]
     # int64 fields (2 KiB) cross processes by ref; the token counts go by value.
-    assert isinstance(batch.microbatches[0][0].fields["input"], _TensorRef)
+    assert isinstance(batch_b.microbatches[0][0].fields["input"], _TensorRef)
     assert isinstance(
-        batch.microbatches[0][0].fields["loss_token_counts"], torch.Tensor
+        batch_b.microbatches[0][0].fields["loss_token_counts"], torch.Tensor
     )
-    # assert_close can't compare metric objects; every other field must match exactly.
+
+    def comparable(batch) -> dict:
+        # assert_close can't compare metric objects; every other field must match exactly.
+        return dataclasses.asdict(dataclasses.replace(batch, metrics=[]))
+
     torch.testing.assert_close(
-        dataclasses.asdict(
-            dataclasses.replace(batch, metrics=[], microbatches=microbatches)
-        ),
-        dataclasses.asdict(dataclasses.replace(expected_batch, metrics=[])),
+        comparable(dataclasses.replace(batch_b, microbatches=microbatches_b)),
+        comparable(expected[4][0]),
         rtol=0,
         atol=0,
     )
