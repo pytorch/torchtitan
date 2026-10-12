@@ -84,13 +84,9 @@ class BatcherActor(Actor):
             # Trainer ranks read this process's buffers over TCP; their own processes keep ibverbs.
             monarch.configure(rdma_disable_ibverbs=True)
         create_cuda_context_to_silence_monarch_log()
-        # Batches trainer ranks may still read, oldest first. Each keeps its batch so the tensors
-        # outlive drop(): Monarch 0.6 deadlocks when a buffer is the last owner of its storage.
-        self._batches_being_read: deque[
-            tuple[TrainerStepBatch, list[list[RDMAMicrobatch]]]
-        ] = deque()
-        # The last released batch, already dropped; freed at the next release.
-        self._dropped_batch: TrainerStepBatch | None = None
+        # Batches trainer ranks may still read, oldest first. Each buffer keeps its tensor's
+        # storage alive until drop().
+        self._batches_being_read: deque[list[list[RDMAMicrobatch]]] = deque()
 
     @endpoint
     async def add_group(
@@ -118,7 +114,7 @@ class BatcherActor(Actor):
                 [RDMAMicrobatch.register(microbatch) for microbatch in row]
                 for row in batch.microbatches
             ]
-        self._batches_being_read.append((batch, rdma_microbatches))
+        self._batches_being_read.append(rdma_microbatches)
         return (
             dataclasses.replace(batch, microbatches=rdma_microbatches),
             group_is_trainable,
@@ -130,7 +126,7 @@ class BatcherActor(Actor):
 
         Call once per trained batch, in training order, after `forward_backward` returns or raises.
         """
-        batch, rdma_microbatches = self._batches_being_read.popleft()
+        rdma_microbatches = self._batches_being_read.popleft()
         await asyncio.gather(
             *(
                 rdma_microbatch.drop()
@@ -138,9 +134,6 @@ class BatcherActor(Actor):
                 for rdma_microbatch in row
             )
         )
-        # Keep the tensors until the next release: drop() returns before Monarch 0.6 lets go of
-        # their storage, and a free racing that release deadlocks its RDMA cache lock.
-        self._dropped_batch = batch
 
     @endpoint
     async def sync_log_step(self, step: int) -> None:
