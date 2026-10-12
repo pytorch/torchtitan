@@ -150,6 +150,7 @@ class VLLMEngine(GenerationEngine):
             checkpointer=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             batch_invariant=debug.batch_invariant,
+            return_routed_experts=config.return_routed_experts,
         )
         engine_args = self._build_engine_args(
             model,
@@ -193,6 +194,7 @@ class VLLMEngine(GenerationEngine):
         checkpointer: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         batch_invariant: bool,
+        return_routed_experts: bool,
     ) -> None:
         """Process-wide vLLM setup before the engine build: register the TorchTitan model
         and config parser with vLLM, and select vLLM's model runner."""
@@ -201,6 +203,7 @@ class VLLMEngine(GenerationEngine):
             parallelism=parallelism,
             checkpointer_config=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
+            return_routed_experts=return_routed_experts,
         )
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         if batch_invariant:
@@ -280,6 +283,10 @@ class VLLMEngine(GenerationEngine):
         engine_kwargs["max_num_seqs"] = max_num_seqs
         if max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+        if self.config.return_routed_experts:
+            # TODO: vLLM after 0b7f11a1ee (2026-09-21) captures routed experts only under Model
+            # Runner V2 (forced off in `_setup`); the router hook works unchanged there.
+            engine_kwargs["enable_return_routed_experts"] = True
         # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
         # (-1 for all validation), so older groups have higher priority (see its docstring).
         # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.
@@ -489,6 +496,7 @@ def _build_sampling_params(sampling: SamplingConfig) -> SamplingParams:
         # stop_token_ids even with skip_tokenizer_init.
         ignore_eos=True,
         seed=sampling.seed,
+        routed_experts_prompt_start=sampling.routed_experts_prompt_start,
         logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
         # Token ids in, token ids and logprob floats out: stops are token ids and nothing reads
         # text, so skip vLLM's per-token detokenization and per-token logprob dicts.
@@ -521,6 +529,7 @@ def _finished_request(request_output: RequestOutput) -> FinishedRequest:
         token_logprobs=list(completion_output.logprobs.logprobs),
         finish_reason=completion_output.finish_reason,
         metrics_inputs=_extract_request_metrics_inputs(request_output),
+        routed_expert_ids=completion_output.routed_experts,
     )
 
 

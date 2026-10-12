@@ -314,6 +314,7 @@ class RequestDispatcher:
                     token_ids=finished.token_ids,
                     token_logprobs=finished.token_logprobs,
                     finish_reason=finished.finish_reason,
+                    routed_expert_ids=finished.routed_expert_ids,
                     metrics=metrics,
                 )
             )

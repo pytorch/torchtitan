@@ -10,6 +10,7 @@ import asyncio
 import random
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from renderers import ParsedResponse, Qwen3RendererConfig
 
@@ -344,6 +345,8 @@ def test_cancelled_group_waits_for_every_sibling_release() -> None:
 def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
     # TokenEnv returns each prompt as a delta. Delta prompts must pack into the same samples as full
     # prompts: a turn joins the last sample iff its prompt extends the previous turn's prompt + completion.
+    # Router replay: each turn asks only for the expert rows its sample lacks; a fake row holds its
+    # input token, so every sample's rows must equal its trainer inputs.
     rng = random.Random(0)
     worker = RolloutWorker(
         SimpleNamespace(
@@ -354,10 +357,15 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             rollout_timeout_s=None,
         )
     )
-    builder = TrainingSampleBuilder.Config().build()
+    builder = TrainingSampleBuilder.Config().build(replay_routed_experts=True)
 
     async def generate_fn(prompt_token_ids, **kwargs) -> Completion:
         token_ids = [rng.randrange(100) for _ in range(rng.randint(1, 3))]
+        start = kwargs["sampling_config"].routed_experts_prompt_start
+        # Inside the prompt (the fake renderer may rewrite it to an empty one).
+        assert 0 <= start < max(len(prompt_token_ids), 1)
+        # Rows of positions start .. P + N - 2: the last token never ran forward.
+        inputs = (list(prompt_token_ids) + token_ids)[start:-1]
         return Completion(
             min_policy_version=1,
             max_policy_version=1,
@@ -365,6 +373,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             token_ids=token_ids,
             token_logprobs=[-0.5] * len(token_ids),
             finish_reason="stop",
+            routed_expert_ids=np.asarray(inputs, dtype=np.uint8).reshape(-1, 1, 1),
         )
 
     async def release_session_fn(**kwargs) -> None:
@@ -403,6 +412,11 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             assert [
                 (s.rollout_id.turn_id, s.token_ids.tolist()) for s in samples
             ] == expected
+            for sample in samples:
+                assert (
+                    sample.routed_expert_ids.flatten().tolist()
+                    == sample.token_ids[:-1].tolist()
+                )
 
     asyncio.run(run())
 

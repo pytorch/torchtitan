@@ -518,13 +518,19 @@ class RolloutWorker(Configurable):
                         turn_id=len(turns),
                     )
 
-                    # generator call
+                    # generator call; with router replay, only the expert rows this turn adds
+                    # (see `RolloutTurn.routed_expert_ids`)
                     completion = await generate_fn(
                         prompt_token_ids=env_step.next_prompt_token_ids,
                         request_id=turn_rollout_id.to_string(),
                         group_id=group_id,
                         routing_session_id=routing_session_id,
-                        sampling_config=sampling,
+                        sampling_config=replace(
+                            sampling,
+                            routed_experts_prompt_start=max(
+                                env_step.next_prompt_prefix_len - 1, 0
+                            ),
+                        ),
                     )
 
                     # env call
@@ -543,6 +549,7 @@ class RolloutWorker(Configurable):
                             completion_logprobs=np.asarray(
                                 completion.token_logprobs, dtype=np.float32
                             ),
+                            routed_expert_ids=completion.routed_expert_ids,
                             completion_message=next_env_step.completion_message,
                             env_messages=next_env_step.env_messages,
                             env_rewards=next_env_step.env_rewards,

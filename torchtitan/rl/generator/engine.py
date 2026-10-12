@@ -52,7 +52,9 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        return_routed_experts: bool = False
+        """MoE router replay: return each token's experts with its completion
+        (`Completion.routed_expert_ids`), and the trainer routes those tokens to them."""
 
     @property
     @abc.abstractmethod

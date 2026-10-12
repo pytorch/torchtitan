@@ -235,3 +235,26 @@ def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
     temperature = microbatch.loss_kwargs()["temperature"]
     assert temperature.dtype == torch.float32
     assert temperature.tolist() == [0.5] * 8
+
+
+def test_routed_expert_ids_follow_input_ids_with_zero_padding() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=8,
+        max_context_length=8,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+        temperature=1.0,
+    )
+    samples = _make_samples([2, 3])
+    for sample, first_id in zip(samples, (10, 20), strict=True):
+        # One row per input token; uint16, as vLLM returns above 256 experts.
+        rows = first_id + np.arange(len(sample.token_ids) - 1, dtype=np.uint16)
+        sample.routed_expert_ids = rows.reshape(-1, 1, 1)
+
+    microbatch = batcher._pack_training_samples(samples)
+
+    routed_expert_ids = microbatch.model_kwargs["routed_expert_ids"]
+    # Torch can't unpickle uint16 tensors, so the batcher ships int16.
+    assert routed_expert_ids.dtype == torch.int16
+    assert routed_expert_ids.flatten().tolist() == [10, 11, 20, 21, 22, 0, 0, 0]

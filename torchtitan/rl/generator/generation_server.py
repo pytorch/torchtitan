@@ -30,6 +30,8 @@ SESSION_ID_HEADER = "X-Session-ID"
 
 # Stands in for the logprobs content list; the handler splices the real list in.
 _LOGPROBS_CONTENT_PLACEHOLDER = "<logprobs content>"
+# Stands in for the routed-experts base64; the handler splices the bytes in.
+_ROUTED_EXPERTS_PLACEHOLDER = "<routed experts data>"
 
 GROUP_ID_SAMPLING_PARAM = "torchtitan_group_id"
 """Sampling parameter carrying a request's rollout group id.
@@ -219,7 +221,22 @@ class GenerationServer:
                 raise ValueError(
                     f"sampling_params.{METRICS_PREFIX_SAMPLING_PARAM} must be a string"
                 )
+            # Router replay: return expert rows from this prompt position on; earlier rows came
+            # with the previous turn. vLLM asserts the range inside engine.step, where a failure
+            # stops the engine for every request.
+            routed_experts_prompt_start = sampling_params.pop(
+                "routed_experts_prompt_start", 0
+            )
+            if isinstance(routed_experts_prompt_start, bool) or not (
+                isinstance(routed_experts_prompt_start, int)
+                and 0 <= routed_experts_prompt_start < len(prompt_token_ids)
+            ):
+                raise ValueError(
+                    "sampling_params.routed_experts_prompt_start must be an integer in "
+                    f"[0, {len(prompt_token_ids)})"
+                )
             sampling = _parse_sampling_config(sampling_params)
+            sampling.routed_experts_prompt_start = routed_experts_prompt_start
             if body.get("features") is not None:
                 raise ValueError("multimodal features are not supported")
             client_request_id = body.get("request_id")
@@ -307,18 +324,47 @@ class GenerationServer:
                         "token_ids": completion.token_ids,
                         "logprobs": {"content": _LOGPROBS_CONTENT_PLACEHOLDER},
                         "finish_reason": completion.finish_reason,
+                        **(
+                            {}
+                            if completion.routed_expert_ids is None
+                            else {
+                                "routed_experts": {
+                                    "data": _ROUTED_EXPERTS_PLACEHOLDER,
+                                    "shape": list(completion.routed_expert_ids.shape),
+                                    "start": routed_experts_prompt_start,
+                                    "dtype": str(completion.routed_expert_ids.dtype),
+                                }
+                            }
+                        ),
                     }
                 ],
                 "prompt_logprobs": None,
                 "kv_transfer_params": None,
-            }
+            },
+            # Compact, so the client's fast path finds `"routed_experts":{"data":"`.
+            separators=(",", ":"),
         )
         head, _, tail = response_text.rpartition(
             json.dumps(_LOGPROBS_CONTENT_PLACEHOLDER)
         )
-        return web.Response(
-            text=f"{head}[{logprobs_content}]{tail}", content_type="application/json"
+        response_text = f"{head}[{logprobs_content}]{tail}"
+        if completion.routed_expert_ids is None:
+            return web.Response(text=response_text, content_type="application/json")
+        # Base64 needs no JSON escaping: splice it in as bytes instead of json.dumps scanning
+        # and copying it (~33 MB at a 64k-token context; 112 -> 27 ms per response).
+        head, _, tail = response_text.rpartition(
+            json.dumps(_ROUTED_EXPERTS_PLACEHOLDER)
         )
+        body = b"".join(
+            (
+                head.encode(),
+                b'"',
+                base64.b64encode(np.ascontiguousarray(completion.routed_expert_ids)),
+                b'"',
+                tail.encode(),
+            )
+        )
+        return web.Response(body=body, content_type="application/json", charset="utf-8")
 
 
 def _encode_metrics(metrics: list[m.Metric]) -> list[list]:
@@ -352,6 +398,15 @@ def completion_to_response(completion: Completion) -> dict:
             "min_policy_version": completion.min_policy_version,
             "max_policy_version": completion.max_policy_version,
             "metrics": _encode_metrics(completion.metrics),
+            "routed_expert_ids": (
+                None
+                if completion.routed_expert_ids is None
+                else {
+                    "data": _base64(completion.routed_expert_ids),
+                    "shape": list(completion.routed_expert_ids.shape),
+                    "dtype": str(completion.routed_expert_ids.dtype),
+                }
+            ),
         },
     }
 
@@ -370,12 +425,19 @@ def response_to_completion(payload: dict) -> Completion:
             base64.b64decode(block["logprobs"]), dtype=np.float64
         ).tolist(),
         finish_reason=block["finish_reason"],
+        routed_expert_ids=(
+            None
+            if (routed := block["routed_expert_ids"]) is None
+            else np.frombuffer(
+                base64.b64decode(routed["data"]), dtype=routed["dtype"]
+            ).reshape(routed["shape"])
+        ),
         metrics=_decode_metrics(block["metrics"]),
     )
 
 
 def _base64(array: np.ndarray) -> str:
-    return base64.b64encode(array.tobytes()).decode("ascii")
+    return base64.b64encode(np.ascontiguousarray(array)).decode("ascii")
 
 
 def _listening_socket() -> socket.socket:
@@ -412,7 +474,6 @@ def _parse_sampling_config(value: object):
     protocol_fields = {
         "logprobs",
         "skip_special_tokens",
-        "routed_experts_prompt_start",
     }
     unsupported = set(value) - supported - protocol_fields
     if unsupported:

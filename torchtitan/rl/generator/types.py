@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 
 @dataclass(kw_only=True, slots=True)
 class SamplingConfig:
@@ -34,6 +36,10 @@ class SamplingConfig:
     """Renderer role-boundary stop tokens; filled by the controller. Required at
     generation time: these are the only ids that end a request (the engine's EOS stops
     are off)."""
+
+    routed_experts_prompt_start: int = 0
+    """With router replay, return expert ids from this prompt position on. The rollouter sets it
+    per turn to skip the rows earlier turns already returned; leave it at 0 in configs."""
 
     def __post_init__(self) -> None:
         # TODO(mask-replay): to allow top_p < 1, turn on vLLM's `return_sampling_mask` (needs a vLLM
@@ -99,3 +105,5 @@ class FinishedRequest:
     token_logprobs: list[float]  # [generated_tokens], of each sampled token
     finish_reason: str | None
     metrics_inputs: RequestMetricsInputs
+    routed_expert_ids: np.ndarray | None = None
+    """Router replay rows; see `Completion.routed_expert_ids`."""
