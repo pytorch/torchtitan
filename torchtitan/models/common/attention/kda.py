@@ -319,7 +319,7 @@ class KDA(Module):
         forget_b: Linear.Config
         beta: Linear.Config
         output_gate: Linear.Config
-        inner_kda: Module.Config
+        inner_attention: Module.Config
         output_norm: GatedRMSNorm.Config
         output_proj: Linear.Config
 
@@ -350,7 +350,7 @@ class KDA(Module):
         self.forget_b = config.forget_b.build()
         self.beta = config.beta.build()
         self.output_gate = config.output_gate.build()
-        self.inner_kda = config.inner_kda.build()
+        self.inner_attention = config.inner_attention.build()
         self.output_norm = config.output_norm.build()
         self.output_proj = config.output_proj.build()
 
@@ -380,7 +380,7 @@ class KDA(Module):
         )
         raw_beta_TH = self.beta(x_TD)
         out_THV = remat.region(
-            self.inner_kda,
+            self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(

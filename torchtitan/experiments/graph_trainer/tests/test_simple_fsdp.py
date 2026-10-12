@@ -103,7 +103,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         )
 
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
-    def test_preserves_inner_attention_metadata_key(self):
+    def test_preserves_parameterless_inner_attention_type(self):
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
@@ -126,7 +126,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             training=training,
         )
 
-        self.assertIs(model.attention_metadata_key, VarlenInnerAttention)
+        self.assertIs(type(model), VarlenInnerAttention)
 
 
 class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):

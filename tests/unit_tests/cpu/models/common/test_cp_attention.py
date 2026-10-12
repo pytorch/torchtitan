@@ -38,6 +38,7 @@ from torchtitan.models.common.attention.cp_attention import (
     KVAllGatherCPSlidingWindowFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
     UlyssesCPInnerAttention,
+    UlyssesCPSlidingWindowFlexInnerAttention,
     UlyssesCPVarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import get_attention_config
@@ -117,13 +118,26 @@ class TestDecoderCpSharding(unittest.TestCase):
         *,
         attention_metadata,
         expected_metadata,
+        sliding_type=KVAllGatherCPSlidingWindowFlexInnerAttention,
+        full_type=KVAllGatherCPFlexInnerAttention,
     ):
-        sliding_config = KVAllGatherCPSlidingWindowFlexInnerAttention.Config(
-            window_size=128
+        sliding_attention = SimpleNamespace(
+            inner_attention=sliding_type.Config(window_size=128)
         )
+        layers = [
+            SimpleNamespace(attention=None),
+            SimpleNamespace(attention=sliding_attention),
+        ]
+        if full_type in attention_metadata:
+            layers.append(
+                SimpleNamespace(
+                    attention=SimpleNamespace(inner_attention=full_type.Config())
+                )
+            )
         model = SimpleNamespace(
             config=SimpleNamespace(
-                first_base_attention=SimpleNamespace(inner_attention=sliding_config),
+                first_attention=sliding_attention,
+                layers=layers,
             )
         )
         load_balancer = mock.Mock()
@@ -191,6 +205,19 @@ class TestDecoderCpSharding(unittest.TestCase):
                 KVAllGatherCPSlidingWindowFlexInnerAttention: sliding_metadata,
             },
             expected_metadata=full_metadata,
+        )
+
+    def test_ptrr_prefers_ulysses_full_metadata(self):
+        full_metadata = object.__new__(BlockMask)
+        sliding_metadata = object.__new__(BlockMask)
+        self._assert_selected_ptrr_metadata(
+            attention_metadata={
+                UlyssesCPSlidingWindowFlexInnerAttention: sliding_metadata,
+                UlyssesCPFlexInnerAttention: full_metadata,
+            },
+            expected_metadata=full_metadata,
+            sliding_type=UlyssesCPSlidingWindowFlexInnerAttention,
+            full_type=UlyssesCPFlexInnerAttention,
         )
 
     def test_config_builds_selected_load_balancer(self):

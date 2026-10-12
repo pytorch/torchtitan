@@ -255,8 +255,8 @@ class GptOssModel(Decoder):
         dump_folder: str,
     ) -> GptOssModel:
         if parallelism_context.cp_enabled and any(
-            isinstance(backend, UlyssesCPInnerAttention.Config)
-            for backend in self.config.base_attention_backends
+            isinstance(layer.attention.inner_attention, UlyssesCPInnerAttention.Config)
+            for layer in self.config.layers
         ):
             raise NotImplementedError(
                 "GPT-OSS does not support Ulysses CP because its per-head "

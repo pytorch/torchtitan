@@ -274,13 +274,6 @@ class KimiK3TransformerBlock(Module):
         )
         self.moe = config.moe.build() if config.moe is not None else None
         self.moe_enabled = self.moe is not None
-        if self.attention is not None:
-            self.attention_metadata_key = self.attention.attention_metadata_key
-        else:
-            assert self.delta_attention is not None
-            self.attention_metadata_key = (
-                self.delta_attention.inner_kda.attention_metadata_key
-            )
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
         self.attention_res_norm = (
@@ -656,13 +649,18 @@ class KimiK3Model(MultimodalModel):
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
         for layer in self.layers.values():
+            block = cast(KimiK3TransformerBlock, layer)
+            attention = (
+                block.attention
+                if block.attention is not None
+                else block.delta_attention
+            )
+            assert attention is not None
             h_TD, block_residual_TND = layer(
                 h_TD,
                 block_residual_TND,
                 (
-                    attention_metadata[
-                        cast(KimiK3TransformerBlock, layer).attention_metadata_key
-                    ]
+                    attention_metadata[type(attention.inner_attention)]
                     if attention_metadata is not None
                     else None
                 ),

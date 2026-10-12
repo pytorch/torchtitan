@@ -141,6 +141,11 @@ class InnerAttention(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        @property
+        def is_full_attention(self) -> bool:
+            """Whether queries attend to their full document (possibly causally)."""
+            return False
+
         def build_attention_metadata(
             self,
             positions: torch.Tensor,
@@ -157,11 +162,6 @@ class InnerAttention(Module):
             del positions, padding_mask, max_num_documents, max_context_length
             return None
 
-    def __init__(self) -> None:
-        super().__init__()
-        # SimpleFSDP may replace the runtime class; preserve the backend key.
-        self.attention_metadata_key: type[InnerAttention] = type(self)
-
 
 class VarlenInnerAttention(InnerAttention):
     @dataclass(kw_only=True, slots=True)
@@ -177,6 +177,10 @@ class VarlenInnerAttention(InnerAttention):
                           is_causal=False.
               - (W, 0): Sliding window causal - attend to at most W previous tokens.
         """
+
+        @property
+        def is_full_attention(self) -> bool:
+            return self.window_size[0] == -1 and self.window_size[1] in (-1, 0)
 
         def build_attention_metadata(
             self,
@@ -297,6 +301,10 @@ class FlexInnerAttention(InnerAttention):
     class Config(InnerAttention.Config):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
+
+        @property
+        def is_full_attention(self) -> bool:
+            return True
 
         def build_attention_metadata(
             self,
@@ -470,6 +478,10 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(FlexInnerAttention.Config):
         window_size: int
+
+        @property
+        def is_full_attention(self) -> bool:
+            return False
 
         def build_attention_metadata(
             self,
@@ -755,10 +767,6 @@ def create_varlen_metadata_for_document(
 
 class BaseAttention(Module):
     inner_attention: InnerAttention
-
-    @property
-    def attention_metadata_key(self) -> type[InnerAttention]:
-        return self.inner_attention.attention_metadata_key
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):

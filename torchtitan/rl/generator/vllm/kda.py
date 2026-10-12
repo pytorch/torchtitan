@@ -23,7 +23,6 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import LinearAttentionMetadata
-from torchtitan.models.common.attention.kda import InnerKDA
 from torchtitan.models.common.attention.linear_attention import chunk_kernel_options
 from torchtitan.models.common.attn_gym import (
     bound_gate,
@@ -78,8 +77,6 @@ class VLLMInnerKDA(Module, MambaBase):
     cache shape. KDA uses ``K == V``, so Attention Gym can advance the same dense slot
     storage directly without changing vLLM's cache-manager contract.
     """
-
-    attention_metadata_key = InnerKDA
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):

@@ -41,7 +41,6 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -68,10 +67,6 @@ def _replace_vllm_layer_configs(model_config):
 
         attention_cfg = getattr(layer_cfg, "attention", None)
         if attention_cfg is not None:
-            attention_metadata_key = attention_cfg.inner_attention._owner
-            assert attention_metadata_key is not None and issubclass(
-                attention_metadata_key, InnerAttention
-            )
             (
                 num_heads,
                 num_kv_heads,
@@ -79,7 +74,6 @@ def _replace_vllm_layer_configs(model_config):
                 value_head_dim,
             ) = get_attention_dimensions(attention_cfg, model_config.dim)
             vllm_attention_cfg = VLLMAttentionWrapper.Config(
-                attention_metadata_key=attention_metadata_key,
                 hidden_size=model_config.dim,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
@@ -111,13 +105,13 @@ def _replace_vllm_layer_configs(model_config):
                 head_k_dim=delta_net_cfg.key_head_dim,
                 head_v_dim=delta_net_cfg.value_head_dim,
                 conv_kernel_size=delta_net_cfg.conv_kernel_size,
-                sharding_config=delta_net_cfg.inner_gated_delta_net.sharding_config,
+                sharding_config=delta_net_cfg.inner_attention.sharding_config,
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
                 delta_net=dataclasses.replace(
                     delta_net_cfg,
-                    inner_gated_delta_net=vllm_inner_gdn_cfg,
+                    inner_attention=vllm_inner_gdn_cfg,
                 ),
             )
 
@@ -129,15 +123,15 @@ def _replace_vllm_layer_configs(model_config):
                 num_heads=kda_cfg.num_heads,
                 head_dim=kda_cfg.head_dim,
                 conv_kernel_size=kda_cfg.conv_kernel_size,
-                lower_bound=kda_cfg.inner_kda.kernel.lower_bound,
+                lower_bound=kda_cfg.inner_attention.kernel.lower_bound,
                 layer_index=layer_idx,
-                sharding_config=kda_cfg.inner_kda.sharding_config,
+                sharding_config=kda_cfg.inner_attention.sharding_config,
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
                 delta_attention=dataclasses.replace(
                     kda_cfg,
-                    inner_kda=vllm_inner_kda_cfg,
+                    inner_attention=vllm_inner_kda_cfg,
                 ),
             )
 

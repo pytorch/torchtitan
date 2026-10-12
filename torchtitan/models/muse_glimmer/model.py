@@ -440,7 +440,7 @@ class MuseGlimmerModel(MultimodalModel):
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.pop("padding_mask", None)
         if positions is not None:
-            inner = getattr(self.config.first_base_attention, "inner_attention", None)
+            inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
@@ -574,7 +574,7 @@ class MuseGlimmerModel(MultimodalModel):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
+                    type(cast(TransformerBlock, layer).attention.inner_attention)
                 )
             )
             h_TD = layer(
