@@ -16,7 +16,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest.mock import patch
 
-import pytest
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
@@ -30,6 +29,7 @@ from torchtitan_recipes.tests.graph_trainer import numerics as graph_trainer_num
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.experiments.graph_trainer import simple_fsdp
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.models.common.linear import GroupedLinear, Linear
@@ -371,10 +371,7 @@ def _run_qwen3_loss_compare() -> bool:
 
 def _run_qwen3_moe_loss_compare() -> bool:
     """Run loss_compare for qwen3 MoE vs graph_trainer.qwen3 MoE."""
-    # Close, not bitwise: eager FSDP2 keeps the router's fp32 grad_weight, while SimpleFSDP's
-    # unsharded weight is a bf16 non-leaf, so autograd rounds it:
-    # https://github.com/pytorch/pytorch/issues/189633
-    return run_loss_compare_close(
+    return run_loss_compare(
         baseline_module=NUMERICS_CONFIG_MODULE,
         baseline_config="qwen3_moe_eager_numerics",
         test_module=NUMERICS_CONFIG_MODULE,
@@ -414,10 +411,6 @@ def _run_autoparallel_deepseek_v3_loss_compare() -> bool:
 class TestGraphTrainerNumerics(unittest.TestCase):
     """Test numerics equivalence between graph_trainer and FSDP2 eager."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Llama3 AOT FX trace and eager losses diverge on PyTorch nightly",
-    )
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_llama3_loss_compare())
 
@@ -449,21 +442,9 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             with self.subTest(schedule=schedule):
                 self.assertTrue(_run_graph_pp_deepseek_v3_loss_compare(schedule))
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Qwen3 AOT FX trace and eager losses diverge on PyTorch nightly",
-    )
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_loss_compare())
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Qwen3 MoE AOT FX trace and eager losses diverge on PyTorch nightly: "
-            "FSDP2 keeps TP-reduced norm grads and the router gate grad_weight "
-            "in fp32, SimpleFSDP rounds them to bf16"
-        ),
-    )
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_moe_loss_compare())
 
@@ -567,6 +548,37 @@ class _SharedProjection(nn.Module):
 
     def forward(self, inputs_BD):
         return sum(self.projection(inputs_BD * scale) for scale in (1, 2, 3, 4))
+
+
+class _WeightedSum(nn.Module):
+    """``sum(inputs * weight)``, so the weight gradient is the summed input."""
+
+    def __init__(self, num_features, *, device, wide_grad=False):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(num_features, device=device))
+        self.wide_grad = wide_grad
+
+    def forward(self, inputs_BD):
+        weight = (
+            _AddFp32GradResidual.apply(self.weight) if self.wide_grad else self.weight
+        )
+        return (inputs_BD * weight).sum()
+
+
+class _AddFp32GradResidual(torch.autograd.Function):
+    """Identity whose backward returns an fp32 gradient with a sub-bf16 term.
+
+    Stands in for a module like HiMidLoLinear that computes a bf16 weight's
+    gradient in fp32.
+    """
+
+    @staticmethod
+    def forward(ctx, weight):
+        return weight.clone()
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad.float() + 2**-9
 
 
 class TestSimpleFSDP(FSDPTest):
@@ -923,6 +935,66 @@ class TestSimpleFSDP(FSDPTest):
         optimizer.step()
         self.assertTrue(torch.equal(weight.to_local(), original_weight))
         self.assertFalse(torch.equal(bias.to_local(), original_bias))
+
+    def test_tp_reduced_grad_stays_in_reduce_dtype(self):
+        """The TP all-reduce of an R parameter's grad feeds the reduce-scatter
+        in reduce_dtype, as in FSDP2, without rounding to param_dtype."""
+        if self.world_size < 4 or self.world_size % 2:
+            self.skipTest("Requires an even number of devices, at least four")
+        device = torch.device("cuda", self.rank)
+        mesh = init_device_mesh(
+            "cuda", (self.world_size // 2, 2), mesh_dim_names=("fsdp", "tp")
+        )
+        dp_size, dp_rank = mesh["fsdp"].size(), mesh["fsdp"].get_local_rank()
+        tp_mesh = mesh["tp"]
+        model = _WeightedSum(dp_size, device=device)
+        # R on TP, like a sequence-parallel norm weight: each TP rank's grad is
+        # partial.
+        spmd.assert_type(model.weight, {tp_mesh.get_group(): spmd.R})
+        data_parallel(
+            model,
+            mesh["fsdp"],
+            "fully_shard",
+            mp_policy=simple_fsdp.MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+            ),
+            non_dp_mesh=tp_mesh,
+        )
+        # Per-TP-rank grads 1 and 2**-9 are exact in bf16, but their sum is not.
+        value = 1.0 if tp_mesh.get_local_rank() == 0 else 2**-9
+        inputs_BD = torch.full((1, dp_size), value, dtype=torch.bfloat16, device=device)
+        # Match the trainer: it disables autograd multithreading and sets the
+        # ambient mesh, so backward can resolve the TP axis.
+        with (
+            torch.autograd.set_multithreading_enabled(False),
+            set_current_spmd_mesh(mesh),
+        ):
+            model(inputs_BD).backward()
+        # Summed over TP in fp32 (1 + 2**-9), then over FSDP.
+        expected = torch.full((1,), dp_size * (1 + 2**-9), device=device)
+        grad = model._parameters["weight"].grad.to_local()
+        torch.testing.assert_close(grad, expected, rtol=0, atol=0)
+
+    def test_wide_grad_reaches_reduce_scatter(self):
+        """A gradient computed in fp32 for a bf16 weight keeps its fp32 value,
+        as with FSDP2's unsharded grad_dtype = reduce_dtype."""
+        device = torch.device("cuda", self.rank)
+        mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("fsdp",))
+        model = _WeightedSum(self.world_size, device=device, wide_grad=True)
+        data_parallel(
+            model,
+            mesh,
+            "fully_shard",
+            mp_policy=simple_fsdp.MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+            ),
+        )
+        inputs_BD = torch.ones(1, self.world_size, dtype=torch.bfloat16, device=device)
+        model(inputs_BD).backward()
+        # Each rank contributes 1 + 2**-9, which bf16 would round to 1.
+        expected = torch.full((1,), self.world_size * (1 + 2**-9), device=device)
+        grad = model._parameters["weight"].grad.to_local()
+        torch.testing.assert_close(grad, expected, rtol=0, atol=0)
 
     def init_test(self):
         self.optimizer = torch.optim.Adam
