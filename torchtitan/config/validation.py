@@ -45,6 +45,7 @@ def validate_model_training_config(
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,
+        MoriTokenDispatcher,
     )
 
     model_context_length = getattr(model, "max_context_length", None)
@@ -100,7 +101,11 @@ def validate_model_training_config(
         for fqn, dispatcher, _, _ in model.traverse(LocalTokenDispatcher.Config):
             if ep == 1 and isinstance(
                 dispatcher,
-                (DeepEPTokenDispatcher.Config, HybridEPTokenDispatcher.Config),
+                (
+                    DeepEPTokenDispatcher.Config,
+                    HybridEPTokenDispatcher.Config,
+                    MoriTokenDispatcher.Config,
+                ),
             ):
                 raise ValueError(
                     f"{fqn} uses {type(dispatcher).__qualname__}, which requires "

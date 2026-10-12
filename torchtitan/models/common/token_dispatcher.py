@@ -1080,3 +1080,146 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             pad_multiple=self.pad_multiple,
         )
         return combined_TD
+
+
+class MoriTokenDispatcher(BaseEPTokenDispatcher):
+    """Token dispatcher using MORI-EP dispatch/combine kernels (AMD GPUs).
+
+    MORI (https://github.com/ROCm/mori) sends each token once per destination
+    rank instead of once per routed expert, then the receiver gathers its
+    tokens into expert-major order (padded to ``pad_multiple`` when set, for
+    quantized grouped GEMMs). Combine sums each token's score-weighted local
+    expert outputs on the receiver, and MORI sums the per-rank partials on the
+    source rank. Within a node MORI uses its ``IntraNode`` kernel, across nodes
+    ``InterNodeV1`` over RDMA.
+
+    The ``ep_communication.dispatch`` and ``ep_communication.combine`` regions
+    are always retained by activation checkpointing: MORI assigns receive
+    slots with atomics and has no deterministic mode, so a replayed dispatch
+    could receive rows in another order than the forward's routing handle.
+    Retaining them also avoids replaying the EP communication under FullAC.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseEPTokenDispatcher.Config):
+        # Hard per-rank input-token bound used to preallocate MORI's symmetric
+        # buffers. Runtime configuration must fill it before dispatcher
+        # construction.
+        num_max_tokens_per_rank: int | None = None
+        # Model hidden dim, threaded by the builder for eager buffer initialization.
+        hidden_dim: int | None = None
+        # Pad each local expert's token group to a multiple of this (e.g. 32 for
+        # MXFP8 grouped GEMMs). None means no padding.
+        pad_multiple: int | None = None
+        # RDMA queue pairs per peer for the inter-node kernel. More queue pairs
+        # keep more transfers to each peer in flight.
+        num_qp_per_pe: int = 1
+        # Kernel launch geometry. None selects MORI's defaults for the kernel
+        # (80 blocks intra-node; 96 blocks with 64 RDMA blocks inter-node).
+        block_num: int | None = None
+        rdma_block_num: int | None = None
+        warp_num_per_block: int = 8
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        if config.num_max_tokens_per_rank is None:
+            raise ValueError(
+                "MORI requires num_max_tokens_per_rank for buffer initialization."
+            )
+        if config.num_max_tokens_per_rank <= 0:
+            raise ValueError(
+                "MORI num_max_tokens_per_rank must be positive, got "
+                f"{config.num_max_tokens_per_rank}."
+            )
+        self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
+        self.hidden_dim = config.hidden_dim
+        self.pad_multiple = config.pad_multiple
+        self.num_qp_per_pe = config.num_qp_per_pe
+        self.block_num = config.block_num
+        self.rdma_block_num = config.rdma_block_num
+        self.warp_num_per_block = config.warp_num_per_block
+
+        # Import to register the custom ops before apply_ac.
+        from torchtitan.distributed.mori import mori  # noqa: F401
+
+    def init_buffer(self) -> None:
+        """Eagerly create the MORI op and its symmetric buffers."""
+        assert self.ep_mesh is not None
+        assert self.hidden_dim is not None
+
+        from torchtitan.distributed.mori.mori import get_op, warn_retained_communication
+
+        if self._remat_module_fqn and self.remat_should_recompute("ep_communication"):
+            warn_retained_communication()
+
+        get_op(
+            self.ep_mesh.get_group(),
+            hidden_dim=self.hidden_dim,
+            num_experts=self.num_experts,
+            num_topk=self.top_k,
+            num_max_tokens_per_rank=self.num_max_tokens_per_rank,
+            dtype=torch.bfloat16,
+            num_qp_per_pe=self.num_qp_per_pe,
+            block_num=self.block_num,
+            rdma_block_num=self.rdma_block_num,
+            warp_num_per_block=self.warp_num_per_block,
+        )
+
+    def dispatch(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
+        """Dispatch through the preallocated MORI op."""
+        # Ignore input num_local_tokens_per_expert_E. The per-expert counts come
+        # from the received tokens' expert ids.
+        del num_local_tokens_per_expert_E
+        assert self.ep_mesh is not None, (
+            "ep_mesh must be set before dispatch. "
+            "ExpertParallel._partition_fn() should set it."
+        )
+        if x_TD.dtype != torch.bfloat16:
+            raise ValueError(
+                f"MORI dispatch buffers are bfloat16, got {x_TD.dtype} tokens."
+            )
+        if x_TD.shape[0] > self.num_max_tokens_per_rank:
+            raise ValueError(
+                f"MORI dispatch got {x_TD.shape[0]} tokens, more than "
+                f"num_max_tokens_per_rank={self.num_max_tokens_per_rank}."
+            )
+        ep_group = self.ep_mesh.get_group()
+
+        from torchtitan.distributed.mori.mori import dispatch_tokens
+
+        routed_input_RD, num_tokens_per_local_expert_e, state = dispatch_tokens(
+            x_TD,
+            topk_expert_ids_TK,
+            topk_scores_TK,
+            rank=ep_group.rank(),
+            num_local_experts=self.num_experts // ep_group.size(),
+            pad_multiple=self.pad_multiple,
+            remat_region_name=self.remat_region_name("ep_communication.dispatch"),
+        )
+        metadata = EPDispatchMetadata(state=state)
+        return routed_input_RD, num_tokens_per_local_expert_e, metadata
+
+    # pyrefly: ignore [bad-override]
+    def combine(
+        self,
+        routed_output_RD: torch.Tensor,
+        metadata: EPDispatchMetadata,
+        x_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        """Combine tokens via MORI."""
+        del x_TD
+        from torchtitan.distributed.mori.mori import combine_tokens
+
+        # combine_tokens applies routing scores and reduces with bare ops.
+        remat.recompute_needs_tensor(routed_output_RD)
+        return combine_tokens(
+            routed_output_RD,
+            metadata.state,  # pyrefly: ignore [bad-argument-type]
+            remat_region_name=self.remat_region_name("ep_communication.combine"),
+        )

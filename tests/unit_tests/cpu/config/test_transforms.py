@@ -46,6 +46,7 @@ from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
+    MoriTokenDispatcher,
 )
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 
@@ -376,9 +377,52 @@ class TestTransformModel(unittest.TestCase):
             self.assertIsInstance(dispatcher, DeepEPTokenDispatcher.Config)
             self.assertEqual(dispatcher.num_max_tokens_per_rank, 128)
 
+    def test_token_dispatcher_transform_builds_mori_dispatcher(self):
+        from torchtitan.quantization.utils import swap_token_dispatcher
+        from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
+
+        config = deepseek_v3_debugmodel(
+            parallelism=ParallelismConfig(expert_parallel_degree=2)
+        )
+        transformed = apply_transforms(
+            config,
+            [
+                TokenDispatcherTransform(
+                    dispatcher=MoriTokenDispatcher,
+                    num_max_tokens_per_rank=128,
+                    kwargs={"num_qp_per_pe": 4},
+                )
+            ],
+        )
+
+        routed_experts_configs = [
+            routed_experts
+            for _, routed_experts, _, _ in transformed.model.traverse(
+                RoutedExperts.Config
+            )
+        ]
+        self.assertTrue(routed_experts_configs)
+        for routed_experts in routed_experts_configs:
+            dispatcher = routed_experts.token_dispatcher
+            self.assertIsInstance(dispatcher, MoriTokenDispatcher.Config)
+            self.assertEqual(dispatcher.num_max_tokens_per_rank, 128)
+            self.assertEqual(dispatcher.hidden_dim, routed_experts.w13.in_features)
+            self.assertEqual(dispatcher.num_qp_per_pe, 4)
+            self.assertIsNone(dispatcher.pad_multiple)
+
+            # Quantized grouped GEMMs keep MORI and pad its expert groups.
+            swap_token_dispatcher(routed_experts, pad_multiple=32)
+            padded = routed_experts.token_dispatcher
+            self.assertIsInstance(padded, MoriTokenDispatcher.Config)
+            self.assertEqual(padded.pad_multiple, 32)
+            self.assertEqual(padded.num_max_tokens_per_rank, 128)
+            self.assertEqual(padded.num_qp_per_pe, 4)
+
     def test_token_dispatcher_transform_validates_ep_buffer_capacity(self):
         with self.assertRaisesRegex(ValueError, "num_max_tokens_per_rank"):
             TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)
+        with self.assertRaisesRegex(ValueError, "num_max_tokens_per_rank"):
+            TokenDispatcherTransform(dispatcher=MoriTokenDispatcher)
         with self.assertRaisesRegex(ValueError, "does not take"):
             TokenDispatcherTransform(
                 dispatcher=AllToAllTokenDispatcher, num_max_tokens_per_rank=128

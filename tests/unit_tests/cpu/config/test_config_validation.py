@@ -11,8 +11,12 @@ import pytest
 
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.transform import apply_transforms, TokenDispatcherTransform
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.token_dispatcher import (
+    HybridEPTokenDispatcher,
+    MoriTokenDispatcher,
+)
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.tests.models.deepseek_v3 import (
@@ -123,6 +127,24 @@ def test_cuda_graphs_reject_blocking_hybrid_ep() -> None:
     with _cuda_graphs_supported(True), pytest.raises(
         ValueError, match="non_blocking_capacity_factor"
     ):
+        config.__post_init__()
+
+
+def test_mori_requires_expert_parallel() -> None:
+    config = deepseek_v3_debugmodel()
+    config.training.disable_cuda_graphs = True
+    config.parallelism.expert_parallel_degree = 2
+    config = apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=MoriTokenDispatcher, num_max_tokens_per_rank=128
+            )
+        ],
+    )
+
+    config.parallelism.expert_parallel_degree = 1
+    with pytest.raises(ValueError, match="MoriTokenDispatcher"):
         config.__post_init__()
 
 
