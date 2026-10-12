@@ -30,9 +30,7 @@ from torchtitan.models.flux.layers import (
     EmbedND,
     LastLayer,
     local_concat_text_image,
-    local_pack,
     local_split_text_image,
-    local_unpack,
     MLPEmbedder,
     SingleStreamBlock,
     timestep_embedding,
@@ -395,22 +393,20 @@ class FluxModel(BaseModel):
         attention_metadata = create_flux_attention_metadata(
             batch_size, img.shape[1] + text_seq_len, device=img.device
         )
-        img = self.img_in(local_pack(img))
-        txt = self.txt_in(local_pack(txt))
+        img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
         vec = vec + self.vector_in(y)
-        ids = local_concat_text_image(
-            local_pack(txt_ids), local_pack(img_ids), batch_size
-        )
+        txt = self.txt_in(txt)
+        ids = local_concat_text_image(txt_ids, img_ids)
         pe = self.pe_embedder(ids)
 
         for block in self.double_blocks:
             img, txt = block(img, txt, vec, pe, attention_metadata=attention_metadata)
 
-        img = local_concat_text_image(txt, img, batch_size)
+        img = local_concat_text_image(txt, img)
         for block in self.single_blocks:
             img = block(img, vec, pe, attention_metadata=attention_metadata)
-        _, img = local_split_text_image(img, text_seq_len, batch_size)
+        _, img = local_split_text_image(img, text_seq_len)
 
         img = self.final_layer(img, vec)
-        return local_unpack(img, batch_size)
+        return img

@@ -25,58 +25,47 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 
-from .sharding import gather_flux_kv
-
-
-@spmd.local_map(
-    in_types=(spmd.PartitionSpec("dp", "cp", None),),
-    out_types=spmd.PartitionSpec(("dp", "cp"), None),
-)
-def local_pack(x_BLD: Tensor) -> Tensor:
-    return x_BLD.flatten(0, 1)
-
-
-@spmd.local_map(
-    in_types=(spmd.PartitionSpec(("dp", "cp"), None), None),
-    out_types=spmd.PartitionSpec("dp", "cp", None),
-)
-def local_unpack(x_TD: Tensor, batch_size: int) -> Tensor:
-    return x_TD.unflatten(0, (batch_size, -1))
+from .sharding import prepare_flux_attention_inputs, unpack_flux_attention_output
 
 
 @spmd.local_map(
     in_types=(
-        spmd.PartitionSpec(("dp", "cp"), None),
-        spmd.PartitionSpec(("dp", "cp"), None),
-        None,
+        spmd.PartitionSpec("dp", "cp", None),
+        spmd.PartitionSpec("dp", "cp", None),
     ),
-    out_types=spmd.PartitionSpec(("dp", "cp"), None),
+    out_types=spmd.PartitionSpec("dp", "cp", None),
 )
-def local_concat_text_image(
-    text_TD: Tensor, image_TD: Tensor, batch_size: int
-) -> Tensor:
-    text_BLD = text_TD.unflatten(0, (batch_size, -1))
-    image_BLD = image_TD.unflatten(0, (batch_size, -1))
-    return torch.cat((text_BLD, image_BLD), dim=1).flatten(0, 1)
+def local_concat_text_image(text: Tensor, image: Tensor) -> Tensor:
+    return torch.cat((text, image), dim=1)
 
 
 @spmd.local_map(
-    in_types=(spmd.PartitionSpec(("dp", "cp"), None), None, None),
+    in_types=(spmd.PartitionSpec("dp", "cp", None), None),
     out_types=(
-        spmd.PartitionSpec(("dp", "cp"), None),
-        spmd.PartitionSpec(("dp", "cp"), None),
+        spmd.PartitionSpec("dp", "cp", None),
+        spmd.PartitionSpec("dp", "cp", None),
     ),
 )
 def local_split_text_image(
-    combined_TD: torch.Tensor,
+    combined: torch.Tensor,
     text_seq_len: int,
-    batch_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    combined_BLD = combined_TD.unflatten(0, (batch_size, -1))
-    return (
-        combined_BLD[:, :text_seq_len].flatten(0, 1),
-        combined_BLD[:, text_seq_len:].flatten(0, 1),
+    return combined[:, :text_seq_len], combined[:, text_seq_len:]
+
+
+def varlen_attention(
+    inner_attention: VarlenInnerAttention,
+    q_BLHK: Tensor,
+    k_BLHK: Tensor,
+    v_BLHV: Tensor,
+    *,
+    attention_metadata: VarlenAttentionMetadata,
+) -> Tensor:
+    q_THK, k_THK, v_THV = prepare_flux_attention_inputs(q_BLHK, k_BLHK, v_BLHV)
+    out_THV = inner_attention(
+        q_THK, k_THK, v_THV, attention_metadata=attention_metadata
     )
+    return unpack_flux_attention_output(out_THV, q_BLHK.shape[0])
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -87,7 +76,7 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
     out = torch.stack(
         [torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1
     )
-    out = rearrange(out, "... d (i j) -> ... d i j", i=2, j=2)
+    out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
     return out.float()
 
 
@@ -119,7 +108,7 @@ class EmbedND(Module):
             dim=-3,
         )
 
-        return emb.unsqueeze(-4)
+        return emb.unsqueeze(2)
 
 
 def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 1000.0):
@@ -209,25 +198,18 @@ class SelfAttention(Module):
         self.inner_attention = config.inner_attention.build()
 
     def forward(
-        self,
-        x_TD: Tensor,
-        pe: Tensor,
-        *,
-        attention_metadata: VarlenAttentionMetadata,
+        self, x: Tensor, pe: Tensor, *, attention_metadata: VarlenAttentionMetadata
     ) -> Tensor:
-        qkv_TD = self.qkv(x_TD)
-        q_THK, k_THK, v_THV = rearrange(
-            qkv_TD, "T (Q H K) -> Q T H K", Q=3, H=self.num_heads
+        qkv = self.qkv(x)
+        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
+        q, k = self.norm(q, k, v)
+        q, k = apply_rope(q, k, pe)
+        x = varlen_attention(
+            self.inner_attention, q, k, v, attention_metadata=attention_metadata
         )
-        q_THK, k_THK = self.norm(q_THK, k_THK, v_THV)
-        q_THK, k_THK = apply_rope(q_THK, k_THK, pe)
-        k_THK, v_THV = gather_flux_kv(
-            k_THK, v_THV, batch_size=attention_metadata.cu_seq_q.shape[0] - 1
-        )
-        out_THV = self.inner_attention(
-            q_THK, k_THK, v_THV, attention_metadata=attention_metadata
-        )
-        return self.proj(out_THV.flatten(1))
+        x = rearrange(x, "B L H D -> B L (H D)")
+        x = self.proj(x)
+        return x
 
 
 @dataclass
@@ -317,84 +299,74 @@ class DoubleStreamBlock(Module):
 
     def forward(
         self,
-        img_TD: Tensor,
-        txt_TD: Tensor,
-        vec_BD: Tensor,
+        img: Tensor,
+        txt: Tensor,
+        vec: Tensor,
         pe: Tensor,
         *,
         attention_metadata: VarlenAttentionMetadata,
     ) -> tuple[Tensor, Tensor]:
-        batch_size = vec_BD.shape[0]
-        img_mod1, img_mod2 = self.img_mod(vec_BD)
-        txt_mod1, txt_mod2 = self.txt_mod(vec_BD)
+        @spmd.local_map(
+            in_types=(
+                spmd.PartitionSpec("dp", "cp", None, None),
+                spmd.PartitionSpec("dp", "cp", None, None),
+            ),
+            out_types=spmd.PartitionSpec("dp", "cp", None, None),
+        )
+        def _local_concat_text_image_attention_states(
+            text: torch.Tensor,
+            image: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.cat((text, image), dim=1)
+
+        img_mod1, img_mod2 = self.img_mod(vec)
+        txt_mod1, txt_mod2 = self.txt_mod(vec)
         assert txt_mod2 is not None
         assert img_mod2 is not None
 
-        img_modulated_BLD = local_unpack(self.img_norm1(img_TD), batch_size)
-        img_modulated_TD = local_pack(
-            (1 + img_mod1.scale) * img_modulated_BLD + img_mod1.shift
+        # prepare image for attention
+        img_modulated = self.img_norm1(img)
+        img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
+        img_qkv = self.img_attn.qkv(img_modulated)
+        img_q, img_k, img_v = rearrange(
+            img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads
         )
-        img_qkv_TD = self.img_attn.qkv(img_modulated_TD)
-        img_q_THK, img_k_THK, img_v_THV = rearrange(
-            img_qkv_TD, "T (Q H K) -> Q T H K", Q=3, H=self.num_heads
-        )
-        img_q_THK, img_k_THK = self.img_attn.norm(img_q_THK, img_k_THK, img_v_THV)
+        img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
-        txt_modulated_BLD = local_unpack(self.txt_norm1(txt_TD), batch_size)
-        txt_modulated_TD = local_pack(
-            (1 + txt_mod1.scale) * txt_modulated_BLD + txt_mod1.shift
+        # prepare txt for attention
+        txt_modulated = self.txt_norm1(txt)
+        txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
+        txt_qkv = self.txt_attn.qkv(txt_modulated)
+        txt_q, txt_k, txt_v = rearrange(
+            txt_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads
         )
-        txt_qkv_TD = self.txt_attn.qkv(txt_modulated_TD)
-        txt_q_THK, txt_k_THK, txt_v_THV = rearrange(
-            txt_qkv_TD, "T (Q H K) -> Q T H K", Q=3, H=self.num_heads
-        )
-        txt_q_THK, txt_k_THK = self.txt_attn.norm(txt_q_THK, txt_k_THK, txt_v_THV)
+        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
-        q_THK, k_THK, v_THV = (
-            local_concat_text_image(
-                text.flatten(1), image.flatten(1), batch_size
-            ).unflatten(1, (self.num_heads, -1))
-            for text, image in (
-                (txt_q_THK, img_q_THK),
-                (txt_k_THK, img_k_THK),
-                (txt_v_THV, img_v_THV),
-            )
+        # run actual attention
+        q = _local_concat_text_image_attention_states(txt_q, img_q)
+        k = _local_concat_text_image_attention_states(txt_k, img_k)
+        v = _local_concat_text_image_attention_states(txt_v, img_v)
+
+        q, k = apply_rope(q, k, pe)
+        attn = varlen_attention(
+            self.inner_attention, q, k, v, attention_metadata=attention_metadata
         )
-        q_THK, k_THK = apply_rope(q_THK, k_THK, pe)
-        k_THK, v_THV = gather_flux_kv(k_THK, v_THV, batch_size=batch_size)
-        attn_THV = self.inner_attention(
-            q_THK, k_THK, v_THV, attention_metadata=attention_metadata
-        )
-        txt_attn_TD, img_attn_TD = local_split_text_image(
-            attn_THV.flatten(1), txt_TD.shape[0] // batch_size, batch_size
+        attn = rearrange(attn, "B L H D -> B L (H D)")
+
+        txt_attn, img_attn = local_split_text_image(attn, txt.shape[1])
+
+        # calculate the img blocks
+        img = img + img_mod1.gate * self.img_attn.proj(img_attn)
+        img = img + img_mod2.gate * self.img_mlp(
+            (1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift
         )
 
-        img_TD = img_TD + local_pack(
-            img_mod1.gate * local_unpack(self.img_attn.proj(img_attn_TD), batch_size)
+        # calculate the txt blocks
+        txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
+        txt = txt + txt_mod2.gate * self.txt_mlp(
+            (1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift
         )
-        img_mlp_TD = self.img_mlp(
-            local_pack(
-                (1 + img_mod2.scale) * local_unpack(self.img_norm2(img_TD), batch_size)
-                + img_mod2.shift
-            )
-        )
-        img_TD = img_TD + local_pack(
-            img_mod2.gate * local_unpack(img_mlp_TD, batch_size)
-        )
-
-        txt_TD = txt_TD + local_pack(
-            txt_mod1.gate * local_unpack(self.txt_attn.proj(txt_attn_TD), batch_size)
-        )
-        txt_mlp_TD = self.txt_mlp(
-            local_pack(
-                (1 + txt_mod2.scale) * local_unpack(self.txt_norm2(txt_TD), batch_size)
-                + txt_mod2.shift
-            )
-        )
-        txt_TD = txt_TD + local_pack(
-            txt_mod2.gate * local_unpack(txt_mlp_TD, batch_size)
-        )
-        return img_TD, txt_TD
+        return img, txt
 
 
 class SingleStreamBlock(Module):
@@ -445,35 +417,31 @@ class SingleStreamBlock(Module):
 
     def forward(
         self,
-        x_TD: Tensor,
-        vec_BD: Tensor,
+        x: Tensor,
+        vec: Tensor,
         pe: Tensor,
         *,
         attention_metadata: VarlenAttentionMetadata,
     ) -> Tensor:
-        batch_size = vec_BD.shape[0]
-        mod, _ = self.modulation(vec_BD)
-        x_mod_TD = local_pack(
-            (1 + mod.scale) * local_unpack(self.pre_norm(x_TD), batch_size) + mod.shift
-        )
-        qkv_TD, mlp_TD = torch.split(
-            self.linear1(x_mod_TD), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
+        mod, _ = self.modulation(vec)
+        x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
+        qkv, mlp = torch.split(
+            self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
         )
 
-        q_THK, k_THK, v_THV = rearrange(
-            qkv_TD, "T (Q H K) -> Q T H K", Q=3, H=self.num_heads
-        )
-        q_THK, k_THK = self.norm(q_THK, k_THK, v_THV)
-        q_THK, k_THK = apply_rope(q_THK, k_THK, pe)
-        k_THK, v_THV = gather_flux_kv(k_THK, v_THV, batch_size=batch_size)
-        attn_THV = self.inner_attention(
-            q_THK, k_THK, v_THV, attention_metadata=attention_metadata
-        )
+        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
+        q, k = self.norm(q, k, v)
 
-        output_TD = self.linear2(
-            torch.cat((attn_THV.flatten(1), self.mlp_act(mlp_TD)), dim=-1)
+        # compute attention
+        q, k = apply_rope(q, k, pe)
+        attn = varlen_attention(
+            self.inner_attention, q, k, v, attention_metadata=attention_metadata
         )
-        return x_TD + local_pack(mod.gate * local_unpack(output_TD, batch_size))
+        attn = rearrange(attn, "B L H D -> B L (H D)")
+
+        # compute activation in mlp stream, cat again and run second linear layer
+        output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+        return x + mod.gate * output
 
 
 class LastLayer(Module):
@@ -498,8 +466,8 @@ class LastLayer(Module):
             config.adaln_linear.build(),
         )
 
-    def forward(self, x_TD: Tensor, vec_BD: Tensor) -> Tensor:
-        shift_BD, scale_BD = self.adaLN_modulation(vec_BD).chunk(2, dim=1)
-        x_BLD = local_unpack(self.norm_final(x_TD), vec_BD.shape[0])
-        x_TD = local_pack((1 + scale_BD[:, None, :]) * x_BLD + shift_BD[:, None, :])
-        return self.linear(x_TD)
+    def forward(self, x: Tensor, vec: Tensor) -> Tensor:
+        shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
+        x = (1 + scale[:, None, :]) * self.norm_final(x) + shift[:, None, :]
+        x = self.linear(x)
+        return x

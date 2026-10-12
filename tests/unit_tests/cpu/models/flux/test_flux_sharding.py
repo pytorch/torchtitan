@@ -14,13 +14,13 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.flux.layers import (
     local_concat_text_image,
-    local_pack,
     local_split_text_image,
-    local_unpack,
 )
 from torchtitan.models.flux.sharding import (
     create_flux_attention_metadata,
     flux_inner_attention_sharding_config,
+    prepare_flux_attention_inputs,
+    unpack_flux_attention_output,
 )
 
 
@@ -41,13 +41,16 @@ class TestFluxSharding(unittest.TestCase):
     def test_packed_layout_preserves_sample_boundaries(self):
         text = torch.arange(12).reshape(2, 3, 2)
         image = torch.arange(20).reshape(2, 5, 2) + 100
-        combined = local_concat_text_image(local_pack(text), local_pack(image), 2)
-        torch.testing.assert_close(
-            local_unpack(combined, 2), torch.cat((text, image), dim=1)
-        )
-        unpacked_text, unpacked_image = local_split_text_image(combined, 3, 2)
-        torch.testing.assert_close(unpacked_text, text.flatten(0, 1))
-        torch.testing.assert_close(unpacked_image, image.flatten(0, 1))
+        combined = local_concat_text_image(text, image)
+        torch.testing.assert_close(combined, torch.cat((text, image), dim=1))
+        unpacked_text, unpacked_image = local_split_text_image(combined, 3)
+        torch.testing.assert_close(unpacked_text, text)
+        torch.testing.assert_close(unpacked_image, image)
+        qkv = combined.unsqueeze(2)
+        packed = prepare_flux_attention_inputs(qkv, qkv, qkv)
+        for tensor in packed:
+            torch.testing.assert_close(tensor, qkv.flatten(0, 1))
+        torch.testing.assert_close(unpack_flux_attention_output(packed[0], 2), qkv)
         with patch("torchtitan.models.flux.sharding.spmd_mesh_group") as group:
             group.return_value.size.return_value = 2
             metadata = create_flux_attention_metadata(2, 8, device=torch.device("cpu"))
