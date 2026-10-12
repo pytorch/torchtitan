@@ -16,7 +16,7 @@ import grain.python as grain
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.utils.loaders import load_taskset
 
-from torchtitan.config import Configurable
+from torchtitan.rl.components.data import RLDataset
 
 
 def register_local_taskset_alias(taskset_id: str) -> str:
@@ -40,14 +40,14 @@ class VerifiersTaskSample:
     verifiers_task_data: dict[str, Any]
 
 
-class VerifiersTaskDataset(Configurable):
+class VerifiersTaskDataset(RLDataset):
     """Adapt one Verifiers taskset to a resumable Grain iterator."""
 
     # TODO: implement this as a SourceConfig and reuse SingleDatasetConfig once
     # Rollouter supplies the core data pipeline's build context and iteration policy.
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(RLDataset.Config):
         verifiers_taskset: VerifiersTasksetConfig
         """Typed configuration for the Verifiers taskset to load."""
 

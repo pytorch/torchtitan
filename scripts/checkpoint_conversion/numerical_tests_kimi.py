@@ -32,20 +32,22 @@ selections (diagnostic: removes the MoE routing-flip divergence).
 
 import argparse
 import os
+from contextlib import nullcontext
 
 import torch
 import torch.distributed.checkpoint as dcp
-import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-
+from torch.nn.attention import sdpa_kernel, SDPBackend
 from torchtitan.components.checkpointer import ModelWrapper
-from torchtitan.hf_datasets.multimodal.utils.image import (
+from torchtitan.components.data.multimodal.utils.image import (
     process_image,
     resize_to_navit_patch_grid,
     vision_to_patches,
 )
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.kimi_k2_7 import build_model_config
 from transformers import AutoModelForCausalLM, AutoProcessor
 
@@ -55,13 +57,40 @@ _MERGE_SIZE = 2
 _PROMPT = "<|media_pad|>\nWhat is shown in this image? Describe it briefly."
 
 
-class _VisionSDPA(nn.Module):
-    """Bidirectional SDPA for one image (no padding -> full attention is exact)."""
+class _SDPA(InnerAttention):
+    """SDPA for a single text document or an unpadded image."""
 
-    def forward(self, q, k, v, **kwargs):
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
-        return out.transpose(1, 2)
+    def __init__(self, *, is_causal):
+        super().__init__()
+        self.is_causal = is_causal
+
+    def forward(self, q_BLHK, k_BLHK, v_BLHV, **kwargs):
+        if self.is_causal and kwargs.get("attention_metadata") is not None:
+            raise ValueError(
+                "The checkpoint SDPA reference requires a single document."
+            )
+        backend_context = (
+            sdpa_kernel(
+                [
+                    SDPBackend.CUDNN_ATTENTION,
+                    SDPBackend.FLASH_ATTENTION,
+                    SDPBackend.MATH,
+                ],
+                set_priority=True,
+            )
+            if self.is_causal
+            else nullcontext()
+        )
+        with backend_context:
+            out_BHLV = F.scaled_dot_product_attention(
+                q_BLHK.transpose(1, 2),
+                k_BLHK.transpose(1, 2),
+                v_BLHV.transpose(1, 2),
+                is_causal=self.is_causal,
+                scale=kwargs.get("scale"),
+                enable_gqa=kwargs.get("enable_gqa", False),
+            )
+        return out_BHLV.transpose(1, 2)
 
 
 @torch.no_grad()
@@ -162,7 +191,7 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
     """torchtitan Kimi-VL: its own image processing + forward on the same image."""
     device = torch.device("cuda")
     print(f"Loading torchtitan Kimi-VL ({model_flavor}) on {device} ...")
-    model_config = build_model_config(model_flavor)
+    model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
     with torch.device("meta"):
         model = model_config.build()
     model.to_empty(device="cpu")
@@ -175,11 +204,9 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
 
     model.vision_encoder.to(vision_dtype)  # mixed precision: ViT in vision_dtype
     for layer in model.layers.values():
-        layer.attention.inner_attention = (
-            ScaledDotProductInnerAttention.Config().build()
-        )
+        layer.attention.inner_attention = _SDPA(is_causal=True)
     for layer in model.vision_encoder.layers.values():
-        layer.attn.flex_attention = _VisionSDPA()
+        layer.attn.flex_attention = _SDPA(is_causal=False)
     model.eval()
 
     if force_hf_routing:

@@ -14,8 +14,8 @@ from torch.distributed._functional_collectives import all_to_all_single
 from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_sparse_mesh
+from torchtitan.models.base.module import Module
 from torchtitan.ops.scatter_add import deterministic_scatter_add
-from torchtitan.protocols.module import Module
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -826,8 +826,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     the static expert-major layout. Combine is synchronized before returning its result.
 
     Dispatch and combine share one remat policy (``ep_communication``) because combine
-    consumes the handle produced by dispatch. FullAC always saves both (they are
-    effectful ops). RegionAC replays both unless ``ep_communication`` is saved; a replay
+    consumes the handle produced by dispatch. A remat policy replays both unless
+    ``ep_communication`` is saved (FullAC never saves it); a replay
     must receive rows in the forward's order, so ``init_buffer`` then makes the buffer
     deterministic (a sort per dispatch).
     """

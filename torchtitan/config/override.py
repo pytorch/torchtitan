@@ -71,13 +71,11 @@ class OverrideConfig:
     whole-module form). An entry is either:
 
     - a target string, e.g.
-      ``"torchtitan_recipes.overrides.moe_token_dispatcher.hybridep_override"``; or
+      ``"torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"``; or
     - a ``(target, kwargs)`` tuple, e.g.
       ``("my_pkg.triton_rope.triton_rope", {"block_size": 256})``. The ``kwargs``
       are passed to the override the target names, so two config trees can share
-      one override yet configure it differently (e.g. the RL trainer and
-      generator activate one HybridEP dispatch override with opposite capacity
-      factors).
+      one override yet configure it differently.
 
     Each target names exactly one override, so only the named overrides are
     applied (not the entire global registry) and no override is claimed twice. A
@@ -194,8 +192,8 @@ def override(
     The decorated function takes the matched config as its first positional
     argument and returns its replacement. It may also declare keyword parameters
     (or ``**kwargs``); those are filled from the ``(target, kwargs)`` entry
-    that activated the override, letting one override be configured per actor
-    (e.g. trainer vs. generator). A kwarg the factory does not accept raises
+    that activated the override, letting one override be configured per
+    config tree. A kwarg the factory does not accept raises
     ``TypeError`` at apply time (normal Python argument binding).
 
     Example — fuse MoE only on the later layers::

@@ -13,7 +13,7 @@ from typing import NamedTuple
 
 from datasets import load_dataset
 
-from torchtitan.config import Configurable
+from torchtitan.rl.components.data import RLDataset
 
 
 class _Author(NamedTuple):
@@ -44,7 +44,7 @@ class AlphabetSortSample:
     sort_by_first_name: bool
 
 
-class AlphabetSortDataset(Configurable):
+class AlphabetSortDataset(RLDataset):
     """Provides lists of researchers' names to sort alphabetically, over one or more turns.
 
     Each sample shows CamelCase arXiv author names (e.g. "MarcChardin", from a Hugging Face
@@ -57,7 +57,7 @@ class AlphabetSortDataset(Configurable):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(RLDataset.Config):
         seed: int = 1337420
 
         max_turns: int = 3

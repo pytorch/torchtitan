@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Overlap the trainer->generator weight handoff with the next training step."""
+"""Overlap the trainer->generator weight handoff with the next training step.
+
+See ``WEIGHT_SYNC.md`` for the end-to-end ordering and concurrency model.
+"""
 
 from __future__ import annotations
 
@@ -43,7 +46,7 @@ class WeightSyncManager:
         for step in training_steps:
             fwd_bwd(batch)
             push_metrics = await weight_sync.wait_prev_push()    # before optim mutates the weights
-            optimizer_result = await trainer.optimizer_step.call()
+            optimizer_result = await trainer.optim_step.call()
             pull_metrics = await weight_sync.wait_prev_pull()  # before the next push overwrites the key
             weight_sync.start_async_push_pull(version=optimizer_result.policy_version)
         await weight_sync.wait_inflight_push_pull()  # finish the last step's sync before validation

@@ -26,15 +26,17 @@ from torchstore import RankRole
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
+from vllm.exceptions import VLLMClientError
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import Configurable, DebugConfig, OverrideConfig
+from torchtitan.config import Configurable, DebugConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
@@ -47,7 +49,7 @@ from torchtitan.rl.model.vllm_registry import (
 )
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
-from torchtitan.rl.types import Completion
+from torchtitan.rl.rollout.types import Completion
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,40 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 # TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator.
+
+
+def add_extra_vllm_engine_args(
+    engine_kwargs: dict[str, Any], extra_vllm_engine_args: dict[str, Any]
+) -> None:
+    """Add ``VLLMGenerator.Config.extra_vllm_engine_args`` to ``engine_kwargs`` in place.
+
+    Raises ``ValueError`` for keys TorchTitan already set in ``engine_kwargs`` or
+    derives from a config field, so they cannot silently diverge from it.
+    """
+    # EngineArgs that TorchTitan sets only when the mapped VLLMGenerator.Config
+    # field is set (or derives from it), so they may be absent from engine_kwargs.
+    config_field_by_engine_arg = {
+        "max_num_batched_tokens": "max_num_batched_tokens",
+        "compilation_config": "cuda_graph",
+        "seed": "debug.seed",
+    }
+    owned_keys = sorted(
+        extra_vllm_engine_args.keys()
+        & (engine_kwargs.keys() | config_field_by_engine_arg.keys())
+    )
+    if owned_keys:
+        details = ", ".join(
+            (
+                f"{key} (use VLLMGenerator.Config.{config_field_by_engine_arg[key]})"
+                if key in config_field_by_engine_arg
+                else key
+            )
+            for key in owned_keys
+        )
+        raise ValueError(
+            f"extra_vllm_engine_args cannot set EngineArgs that TorchTitan controls: {details}"
+        )
+    engine_kwargs.update(extra_vllm_engine_args)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -71,6 +107,7 @@ class _RequestMetricsInputs:
     last_token_ts: float = 0.0
     first_token_latency: float = 0.0
     num_generation_tokens: int = 0
+    num_preemptions: int = 0
 
 
 def _extract_request_metrics_inputs(
@@ -91,6 +128,7 @@ def _extract_request_metrics_inputs(
         last_token_ts=stats.last_token_ts,
         first_token_latency=stats.first_token_latency,
         num_generation_tokens=stats.num_generation_tokens,
+        num_preemptions=stats.num_preemptions,
     )
 
 
@@ -106,17 +144,18 @@ def _prepare_generation_request_metrics(
     per child request; the parent output exposes the **last-finishing**
     child's timeline. `arrival_time` is shared across siblings, but
     [`queued_ts`, `scheduled_ts`, `first_token_ts`, `last_token_ts`,
-    `num_generation_tokens`] describe one specific child - not an aggregate,
-    not the first sibling's. The other `n-1` siblings' stats are dropped by
-    vLLM at ``output_processor._finish_request``.
+    `num_generation_tokens`, `num_preemptions`] describe one specific child -
+    not an aggregate, not the first sibling's. The other `n-1` siblings' stats
+    are dropped by vLLM at ``output_processor._finish_request``.
     """
 
     # TODO: Per-request fields here come from RequestOutput.metrics
     # (RequestStateStats). Engine-aggregate stats, such as KV-cache usage,
-    # prefix-cache hit rate, preemptions, and batch occupancy, live in
-    # SchedulerStats / IterationStats and require registering a
+    # prefix-cache hit rate, exact preemption counts, and batch occupancy, live
+    # in SchedulerStats / IterationStats and require registering a
     # vllm.v1.metrics.loggers.StatLoggerBase via
-    # LLMEngine.from_engine_args(..., stat_loggers=[...]).
+    # LLMEngine.from_engine_args(..., stat_loggers=[...]); VllmOtelStatLogger
+    # does this when vllm_stat_logger is set.
 
     metric_values: dict[str, float] = {}
     if inputs.num_cached_tokens is not None:
@@ -126,6 +165,7 @@ def _prepare_generation_request_metrics(
         metric_values[f"{prefix}/queue_time_ms"] = (
             inputs.scheduled_ts - inputs.queued_ts
         ) * 1000
+        metric_values[f"{prefix}/num_preemptions"] = inputs.num_preemptions
 
         if inputs.num_generation_tokens > 0:
             metric_values[f"{prefix}/time_to_first_token_ms"] = (
@@ -536,6 +576,24 @@ class RequestDispatcher:
         elif completions:
             self._result_port.send(completions)
 
+    def process_rejected_requests(
+        self, rejected_requests: list[tuple[str, ValueError | VLLMClientError]]
+    ) -> None:
+        """TP rank 0s report the requests their DP replica's engine rejected at admission:
+        - global rank 0 fails its own replica's replies locally;
+        - every other TP rank 0 sends them over the port to global rank 0's drain task;
+        - other ranks rejected the same requests and do nothing.
+        """
+        if self._tp_rank != 0:
+            return
+
+        for request_id, exc in rejected_requests:
+            logger.warning("vLLM rejected request %s: %s", request_id, exc)
+        if self._rank == 0:
+            self._rank0_fail_generations(rejected_requests)
+        else:
+            self._result_port.send(_RejectedRequests(requests=rejected_requests))
+
     def _build_completions(
         self, request_outputs: list[RequestOutput], policy_version: int
     ) -> list[tuple[str, Completion, _RequestMetricsInputs]]:
@@ -619,13 +677,28 @@ class RequestDispatcher:
             if self._rank0_dp_router is not None:
                 self._rank0_dp_router.release(request_id)
 
+    def _rank0_fail_generations(
+        self, rejected_requests: list[tuple[str, ValueError | VLLMClientError]]
+    ) -> None:
+        """RANK 0: fail the reply of each rejected request with its error."""
+        for request_id, exc in rejected_requests:
+            self._rank0_outstanding_generations.pop(request_id).reply.set_exception(exc)
+            if self._rank0_dp_router is not None:
+                self._rank0_dp_router.release(request_id)
+
     async def _rank0_drain_results(self) -> None:
-        """RANK 0 background task which receives and resolves completions pushed
+        """RANK 0 background task which receives and resolves completions (or rejections) pushed
         by peer TP rank 0s.
         """
+        # TODO: wait_engine_loop does not watch this task. If it raises (e.g. an unknown request
+        # id), later peer replies are never resolved and their generate() calls hang; make its
+        # failure fail the engine loop.
         while True:
-            completions = await self._rank0_result_receiver.recv()
-            self._rank0_resolve_generations(completions)
+            results = await self._rank0_result_receiver.recv()
+            if isinstance(results, _RejectedRequests):
+                self._rank0_fail_generations(results.requests)
+            else:
+                self._rank0_resolve_generations(results)
 
     def fail_outstanding_generations(self, exc: BaseException) -> None:
         """RANK 0: fail the reply of every outstanding generation after an exception or
@@ -698,8 +771,7 @@ class VLLMGenerator(Configurable):
     CPU-to-GPU copy.
 
     Args:
-        config: Generator-specific configuration.
-        model_config: TorchTitan model configuration.
+        config: Generator-specific configuration, including its model.
         model_path: Path to the HF model checkpoint.
         max_num_seqs: vLLM's upper bound on concurrently scheduled sequences (vLLM admits fewer if KV
             is tight); also sets the CUDA-graph capture sizes.
@@ -717,6 +789,13 @@ class VLLMGenerator(Configurable):
         """Generator actor configuration.
         TODO: Expose a EngineConfig field to passing config to vLLM Engine"""
 
+        model: Decoder.Config
+        """Generator model config, built for ``parallelism.to_training()``.
+
+        The RL controller requires the same model class as the trainer's model;
+        keeping the two aligned otherwise is the recipe's responsibility.
+        """
+
         parallelism: InferenceParallelismConfig = field(
             default_factory=InferenceParallelismConfig
         )
@@ -732,10 +811,11 @@ class VLLMGenerator(Configurable):
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Default sampling parameters for generation."""
 
-        override: OverrideConfig = field(default_factory=OverrideConfig)
-        """Config overrides (e.g. ``torchtitan_recipes.overrides.fused_swiglu.fused_swiglu``)
-        applied to this generator's model spec before model finalization and build.
-        Separate from the trainer's override so the two can differ."""
+        dist_moe_runtime: DistMoeRuntime.Config | None = None
+        """Dist-MoE runtime policy, with ``inference=True``, required when the
+        model config carries Dist-MoE routed experts. Separate from the trainer's
+        ``Trainer.Config.dist_moe_runtime``: the generator plans scratch-only execution
+        over its own, smaller, expert-parallel mesh."""
 
         model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
@@ -747,6 +827,13 @@ class VLLMGenerator(Configurable):
         """vLLM chunked-prefill chunk size: max tokens scheduled per engine step
         (prefill + decode, summed over the batch). ``None`` (default) leaves
         vLLM's own engine default in place."""
+
+        extra_vllm_engine_args: dict[str, Any] = field(default_factory=dict)
+        """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
+        options without a dedicated field here (e.g. ``{"watermark": 0.03}``). vLLM
+        validates them. Keys that TorchTitan sets itself, or derives from a field of
+        this config (e.g. ``max_num_batched_tokens``), raise a ``ValueError``; see
+        ``add_extra_vllm_engine_args``."""
 
         cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
@@ -810,7 +897,6 @@ class VLLMGenerator(Configurable):
         self,
         config: Config,
         *,
-        model_config: Decoder.Config,
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
@@ -830,6 +916,7 @@ class VLLMGenerator(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        model_config = config.model
         self.model_config = model_config
 
         self._max_num_seqs = max_num_seqs
@@ -846,7 +933,7 @@ class VLLMGenerator(Configurable):
             model_config,
             parallelism=config.parallelism,
             checkpointer_config=config.checkpointer,
-            override=config.override,
+            dist_moe_runtime=config.dist_moe_runtime,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
@@ -946,6 +1033,7 @@ class VLLMGenerator(Configurable):
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
             engine_kwargs["seed"] = config.debug.seed
+        add_extra_vllm_engine_args(engine_kwargs, config.extra_vllm_engine_args)
         engine_args = EngineArgs(**engine_kwargs)
 
         with sl.log_trace_span("vllm_init"):
@@ -1112,6 +1200,18 @@ class VLLMGenerator(Configurable):
                 self._engine_loop(), self._engine_event_loop
             )
 
+    async def wait_engine_loop(self) -> None:
+        """Wait until this rank's engine loop exits, raising whatever crashed it.
+
+        The controller watches this so a crashed loop fails the run, instead of leaving a closed
+        generator that fails every call routed to it.
+        """
+        if self._engine_loop_future is None:
+            raise RuntimeError(
+                "engine loop not started; call start_engine_loop before wait_engine_loop"
+            )
+        await asyncio.wrap_future(self._engine_loop_future)
+
     def _rank0_check_engine_loop_running(self, endpoint_name: str) -> None:
         """Guard for the rank-0-only endpoints"""
         assert self._rank == 0, f"{endpoint_name} must be routed to rank 0 only"
@@ -1139,7 +1239,10 @@ class VLLMGenerator(Configurable):
         Can be accepted by rank 0 only (rank 0 owns the queue + replies and
         drives the followers through the engine loop). Returns the `Completion`,
         which carries its own per-generation metrics (`Completion.metrics`) that
-        the controller attaches to the rollout turn.
+        the controller attaches to the rollout turn. If vLLM rejects the request
+        when the engine loop admits it (e.g. a prompt that leaves no room for an
+        output token), only this call raises vLLM's error (`VLLMValidationError` or
+        `ValueError`).
 
         Args:
             prompt_token_ids: One tokenized prompt `[token_ids]`.
@@ -1277,26 +1380,38 @@ class VLLMGenerator(Configurable):
                     local_requests = decision.requests_per_dp_rank[
                         self._request_dispatcher._dp_rank
                     ]
-                    if local_requests:
-                        # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized prompts);
-                        # the high-level entry stays resilient to vLLM internals vs vllm.inputs.tokens_input.
-                        prompts = []
-                        for request in local_requests:
-                            prompt = {"prompt_token_ids": request.prompt_token_ids}
-                            if not self.config.reset_kv_cache_on_weight_sync:
-                                # Salt by the pinned version so a request only reuses KV
-                                # computed under that version.
-                                prompt["cache_salt"] = str(request.min_policy_version)
-                            prompts.append(prompt)
-                        engine_inputs = self._engine.renderer.render_cmpl(prompts)
-                        for request, engine_input in zip(
-                            local_requests, engine_inputs, strict=True
-                        ):
+                    rejected_requests: list[
+                        tuple[str, ValueError | VLLMClientError]
+                    ] = []
+                    for request in local_requests:
+                        prompt = {"prompt_token_ids": request.prompt_token_ids}
+                        if not self.config.reset_kv_cache_on_weight_sync:
+                            # Salt by the pinned version so a request only reuses KV
+                            # computed under that version.
+                            prompt["cache_salt"] = str(request.min_policy_version)
+                        # vLLM validates a request (prompt length, sampling params, token ids) as it
+                        # admits it: render_cmpl and InputProcessor.process_inputs raise
+                        # VLLMClientError (e.g. VLLMValidationError, not a ValueError subclass) or
+                        # ValueError before LLMEngine.add_request registers the request with the
+                        # output processor and engine core, so a rejected request leaves no engine
+                        # state (recheck on a vLLM upgrade). The checks are deterministic, so every TP
+                        # rank of this replica rejects the same requests.
+                        try:
+                            # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized
+                            # prompts); the high-level entry stays resilient to vLLM internals vs
+                            # vllm.inputs.tokens_input.
+                            [engine_input] = self._engine.renderer.render_cmpl([prompt])
                             self._engine.add_request(
                                 request_id=request.request_id,
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
                             )
+                        except (ValueError, VLLMClientError) as exc:
+                            rejected_requests.append((request.request_id, exc))
+                    if rejected_requests:
+                        self._request_dispatcher.process_rejected_requests(
+                            rejected_requests
+                        )
 
                 # Barrier (NCCL): engine.step() runs SPMD in lockstep.
                 # The step burst `max_engine_steps_between_decisions` gives the generator time to buffer
@@ -1512,10 +1627,8 @@ class VLLMGenerator(Configurable):
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
         model_sd = self._prefetched_model_state_dict
-        model.prepare_for_state_dict_load()
         # Perform the local CPU-to-GPU copy
-        model.model.load_state_dict(model_sd, strict=True)
-        model.prepare_for_forward()
+        model.load_state_dict(model_sd)
         self.policy_version = version
         if self.config.reset_kv_cache_on_weight_sync:
             # Always reset running requests too: the only reason to reset is a strict
@@ -1701,6 +1814,13 @@ class OutstandingGeneration:
     """Namespaces this generation's metrics (e.g. `generator` vs `validation_generator`)."""
     min_policy_version: int = field(init=False)
     """Policy version the request was admitted (sampled) under; the max is read at finish (see `Completion`)."""
+
+
+@dataclass(frozen=True, slots=True)
+class _RejectedRequests:
+    """Requests a peer DP replica's engine rejected at admission, sent to rank 0 with each error."""
+
+    requests: list[tuple[str, ValueError | VLLMClientError]]
 
 
 class LoopAction(enum.Enum):

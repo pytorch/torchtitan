@@ -19,7 +19,7 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
-from torchtitan.tools.utils import Color, NoColor
+from torchtitan.observability.logging import Color, NoColor
 
 # Color cycle for the console output. Skip `black` (invisible on dark
 # terminals) and `white` (low-contrast on light terminals); `red` is
