@@ -19,6 +19,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
+from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.kimi_k3 import build_model_config
@@ -76,7 +77,9 @@ class TestKimiK3VisionDynamicCP(DTensorTestBase):
         )
         parallelism_context.build_mesh()
         config = replace(
-            build_model_config("debugmodel").vision_encoder,
+            build_model_config(
+                "debugmodel", parallelism=ParallelismConfig()
+            ).vision_encoder,
             dynamic_cp_min_patches=_MIN_PATCHES,
         )
         torch.manual_seed(0)
@@ -142,7 +145,9 @@ class TestKimiK3VisionDynamicCP(DTensorTestBase):
         )
         parallelism_context.build_mesh()
         config = replace(
-            build_model_config("debugmodel").vision_encoder,
+            build_model_config(
+                "debugmodel", parallelism=ParallelismConfig()
+            ).vision_encoder,
             dynamic_cp_min_patches=_MIN_PATCHES,
         )
         torch.manual_seed(0)
