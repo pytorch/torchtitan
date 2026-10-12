@@ -29,6 +29,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_size,
     spmd_sparse_mesh,
 )
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
     Sigmoid,
@@ -39,7 +40,6 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher
 

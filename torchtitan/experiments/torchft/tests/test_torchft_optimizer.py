@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from tests.unit_tests.cpu.test_optimizer_param_groups import (
+from tests.unit_tests.cpu.components.optim.test_optimizer_param_groups import (
     FakeMoEModel,
     FakeParallelismContext,
 )

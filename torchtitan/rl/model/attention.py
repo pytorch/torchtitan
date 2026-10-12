@@ -18,11 +18,11 @@ from torch.nn.attention import (
 )
 from torch.nn.attention.varlen import AuxRequest
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.base.module import Module
+from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.observability.logging import warn_once
-from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.utils import get_cuda_flash_attention_impl
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context

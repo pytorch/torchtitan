@@ -86,6 +86,11 @@ class _EMAParamOptimizer(Optimizer):
         super().__init__([{"params": tensors, "param_names": names}], {})
         for t in tensors:
             if offload_to_cpu:
+                # TODO: DTensor lacks pin_memory() (aten._pin_memory.default),
+                # so pin the local shard and rewrap it using the live param's
+                # spec at checkpoint save/load in EMA._materialize_dtensor.
+                # Native support must handle process-group membership changes
+                # across resumes and world-size changes before replacing this.
                 local = get_local_tensor(t.detach())
                 self.state[t][_EMA_STATE_KEY] = {
                     key: torch.empty_like(local, device="cpu", pin_memory=True).copy_(
@@ -414,9 +419,9 @@ class EMA(OptimizersContainer):
     def _materialize_dtensor(
         self, p: torch.Tensor, local: torch.Tensor
     ) -> torch.Tensor:
-        """Move the local shard onto the accelerator and rewrap it as a
-        DTensor matching ``p``'s own sharding for DCP at checkpoint save/load -- this
-        is what DCP needs to (re)shard EMA state correctly across world sizes.
+        """Move the local shard onto the accelerator and rewrap it as a DTensor
+        matching ``p``'s sharding for the copy handed to DCP at checkpoint
+        save/load. This lets DCP reshard EMA state across world sizes.
         ``p`` is still the live DTensor param, so its spec is read directly
         rather than cached. ``run_check=False`` skips the collective that
         would otherwise verify a ``Replicate()`` placement is consistent

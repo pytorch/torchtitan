@@ -30,6 +30,8 @@ from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.config import TrainingConfig
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     _EP_TOKEN_COUNT_EXCHANGE,
@@ -131,8 +133,8 @@ from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # 
 from torchtitan.experiments.graph_trainer.tests.test_performance_passes import (  # noqa: F401
     TestAnnotateRMSNormForRegionalInductorPass,
 )
+from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.module import Module, ModuleList
 
 
 @torch.library.custom_op(
@@ -3339,7 +3341,9 @@ class TestBucketingPrefetchOrder(FSDPTest):
             enable_sequence_parallel=False,
         )
 
-        model_config = build_llama3_model_config("debugmodel")
+        model_config = build_llama3_model_config(
+            "debugmodel", parallelism=ParallelismConfig()
+        )
         vocab_size = model_config.vocab_size
 
         with torch.device("meta"):

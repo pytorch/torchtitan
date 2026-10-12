@@ -20,10 +20,10 @@ from torchtitan.components.data.types import (
 from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
+from torchtitan.rl.components.batcher import TrainingMicrobatch
 from torchtitan.rl.components.checkpointer import MirroredState
-from torchtitan.rl.distributed.actors.trainer import TrainerActor
+from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
 from torchtitan.rl.trainer import Trainer
-from torchtitan.rl.types import TrainingMicrobatch
 from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
@@ -51,12 +51,15 @@ def test_mirrored_state_uses_a_fixed_opaque_template() -> None:
 
 
 def test_rl_trainer_uses_training_engine_config_defaults() -> None:
-    assert not Trainer.Config().training.disable_cuda_graphs
+    assert not Trainer.Config(model=MagicMock()).training.disable_cuda_graphs
 
 
 def test_pipeline_parallelism_is_rejected_until_weight_sync_supports_it() -> None:
     with pytest.raises(ValueError, match="TorchStore"):
-        Trainer.Config(parallelism=ParallelismConfig(pipeline_parallel_degree=2))
+        Trainer.Config(
+            model=MagicMock(),
+            parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+        )
 
 
 def test_initialize_torchstore_client_uses_publisher_role() -> None:
@@ -200,6 +203,7 @@ def test_push_staging_copies_parameters_already_in_transfer_dtype() -> None:
 
 def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
     config = Trainer.Config(
+        model=MagicMock(),
         debug=DebugConfig(deterministic=True),
         training=TrainingConfig(disable_cuda_graphs=True),
         sdc_replayer=SDCReplayer.Config(),
@@ -208,12 +212,16 @@ def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
     assert isinstance(config.sdc_replayer, SDCReplayer.Config)
 
 
-def test_rl_trainer_validates_model_training_config_before_initialization() -> None:
+def test_rl_trainer_validates_model_training_config_before_initialization(
+    tmp_path,
+) -> None:
     class ValidationReachedError(Exception):
         pass
 
-    config = Trainer.Config(training=TrainingConfig(disable_cuda_graphs=True))
     model_config = MagicMock()
+    config = Trainer.Config(
+        model=model_config, training=TrainingConfig(disable_cuda_graphs=True)
+    )
 
     with patch(
         "torchtitan.rl.trainer.validate_model_training_config",
@@ -222,9 +230,8 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
         with pytest.raises(ValidationReachedError):
             Trainer(
                 config,
-                model_config=model_config,
                 max_num_documents=None,
-                output_dir="",
+                output_dir=str(tmp_path),
             )
 
     validate.assert_called_once_with(
@@ -346,7 +353,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             )
         )
         trainer.engine = engine
-        trainer.config = Trainer.Config()
+        trainer.config = Trainer.Config(model=MagicMock())
         trainer.dp_rank = 0
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {

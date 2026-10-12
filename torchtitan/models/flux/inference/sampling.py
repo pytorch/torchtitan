@@ -13,9 +13,9 @@ import torch
 from einops import rearrange
 from PIL import ExifTags, Image
 from torch import Tensor
-from torchtitan.models.flux.model.autoencoder import AutoEncoder
-from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
-from torchtitan.models.flux.model.model import FluxModel
+from torchtitan.models.flux.autoencoder import AutoEncoder
+from torchtitan.models.flux.hf_embedder import FluxEmbedder
+from torchtitan.models.flux.model import FluxModel
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,

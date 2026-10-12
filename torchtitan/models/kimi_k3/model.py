@@ -26,6 +26,7 @@ from torchtitan.distributed.spmd_types import (
     annotate_replicated_parameters,
     spmd_local_context,
 )
+from torchtitan.models.base.module import Module
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
     AttentionMetadata,
@@ -43,6 +44,11 @@ from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
 )
+from torchtitan.models.common.flops import (
+    delta_rule_flops_per_token,
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -55,12 +61,6 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.utils import (
-    delta_rule_flops_per_token,
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
-from torchtitan.protocols.module import Module
 
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
@@ -429,15 +429,6 @@ class KimiK3Model(MultimodalModel):
                         v_head_dim=delta_attention.head_dim,
                     )
             return nparams, 6 * active_nparams + attention_op_flops
-
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_kimi_k3_sharding_config
-
-            set_kimi_k3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
 
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size

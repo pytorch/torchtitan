@@ -52,15 +52,8 @@ jobs:
           DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
           echo "CUDA driver version: ${DRIVER_VERSION}"
 
-          uv pip install -r requirements.txt
-          uv pip install -r torchtitan/rl/requirements.txt pytest
-          uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
-          uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
-          uv pip install torch torchvision vllm xformers --pre \
-            --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
-            --index-strategy unsafe-best-match
-          uv pip install "flash-attn-4[cu13]>=4.0.0b34"
-          uv pip uninstall tilelang
+          uv pip install pytest
+          bash scripts/install_rl_env.sh --flash-attn 4
 
           # Dist-MoE is optional; the B200 suite's Dist-MoE test needs it.
           uv pip install \
@@ -90,7 +83,7 @@ jobs:
           RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded/rl" \
             torchrun --nproc-per-node=1 -m pytest \
             tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen \
-            tests/unit_tests/cpu/test_rl_dist_moe_recipe.py \
+            tests/rl/unit_tests/cpu/test_rl_dist_moe_recipe.py \
             -v
 
       # Runs even if the unit tests failed, so one failure does not hide the other.
@@ -101,9 +94,9 @@ jobs:
           source .venv/bin/activate
           export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
-          python -m tests.rl.integration_tests.rl \
-            "$RUNNER_TEMP/artifacts-to-be-uploaded/rl" --ngpu 8 \
-            --test_suite b200
+          python -m tests.integration_tests.run_tests \
+            "$RUNNER_TEMP/artifacts-to-be-uploaded/rl/integration" --ngpu 8 \
+            --test_suite rl_b200
 
       - name: Upload artifacts
         if: always()

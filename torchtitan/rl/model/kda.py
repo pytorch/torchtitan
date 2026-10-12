@@ -9,8 +9,10 @@ from dataclasses import dataclass
 import torch
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import LinearAttentionMetadata
-from torchtitan.models.common.attention.kda import chunk_kernel_options, InnerKDA
+from torchtitan.models.common.attention.kda import InnerKDA
+from torchtitan.models.common.attention.linear_attention import chunk_kernel_options
 from torchtitan.models.common.attn_gym import (
     bound_gate,
     causal_conv1d_decode,
@@ -20,11 +22,12 @@ from torchtitan.models.common.attn_gym import (
     recurrent_kda_decode,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.protocols.module import Module
-from torchtitan.rl.model.linear_attention_backend import (
-    GDNExecutionPath,
-    TorchTitanGDNAttentionBackend,
-    TorchTitanGDNAttentionMetadata,
+from torchtitan.rl.model.linear_attention import (
+    configure_hybrid_state,
+    LinearAttentionExecutionPath,
+    TorchTitanLinearAttentionBackend,
+    TorchTitanLinearAttentionMetadata,
+    unique_state_shape,
 )
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
@@ -134,7 +137,7 @@ class VLLMInnerKDA(Module, MambaBase):
         compilation_config.static_forward_context[self.prefix] = self
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return TorchTitanGDNAttentionBackend
+        return TorchTitanLinearAttentionBackend
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
@@ -223,7 +226,7 @@ class VLLMInnerKDA(Module, MambaBase):
             return
         assert isinstance(attn_metadata, dict)
         metadata = attn_metadata[self.prefix]
-        assert isinstance(metadata, TorchTitanGDNAttentionMetadata)
+        assert isinstance(metadata, TorchTitanLinearAttentionMetadata)
 
         num_actual_tokens = metadata.num_actual_tokens
         if num_actual_tokens == 0:
@@ -239,7 +242,7 @@ class VLLMInnerKDA(Module, MambaBase):
         conv_state, recurrent_state, *replay_state = self.kv_cache
         gate_args = (A_log_H.float(), dt_bias_HK.float())
 
-        if metadata.execution_path is GDNExecutionPath.SINGLE_TOKEN:
+        if metadata.execution_path is LinearAttentionExecutionPath.SINGLE_TOKEN:
             num_decode_rows = state_indices.numel()
             convolved_BC = causal_conv1d_decode(
                 mixed_qkv_TC[:num_decode_rows],
@@ -321,31 +324,19 @@ def maybe_configure_kda_hybrid_model(
     model_cls: type, model_config: Decoder.Config
 ) -> None:
     """Attach vLLM's hybrid-state interface when the model contains KDA layers."""
-    kda_configs = [
-        layer.delta_attention
-        for layer in model_config.layers
-        if getattr(layer, "delta_attention", None) is not None
-    ]
-    if not kda_configs:
-        return
-
-    state_shapes = {
+    state_shape = unique_state_shape(
+        "KDA",
         (
-            kda_config.num_heads,
-            kda_config.head_dim,
-            kda_config.conv_kernel_size,
-        )
-        for kda_config in kda_configs
-    }
-    if len(state_shapes) != 1:
-        raise ValueError(
-            f"All KDA layers must use the same state shape, got {state_shapes}"
-        )
-    (state_shape,) = state_shapes
-
+            (kda_config.num_heads, kda_config.head_dim, kda_config.conv_kernel_size)
+            for layer in model_config.layers
+            if (kda_config := getattr(layer, "delta_attention", None)) is not None
+        ),
+    )
+    if state_shape is None:
+        return
     num_heads, head_dim, conv_kernel_size = state_shape
 
-    def get_state_shape(cls, vllm_config):
+    def get_state_shape(vllm_config):
         speculative_config = vllm_config.speculative_config
         num_speculative_tokens = (
             speculative_config.num_speculative_tokens if speculative_config else 0
@@ -362,7 +353,7 @@ def maybe_configure_kda_hybrid_model(
         local_num_heads = num_heads // vllm_config.parallel_config.tensor_parallel_size
         return (*shapes, *_replay_state_shapes(local_num_heads, head_dim))
 
-    def get_state_dtype(cls, vllm_config):
+    def get_state_dtype(vllm_config):
         dtypes = MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
@@ -371,18 +362,15 @@ def maybe_configure_kda_hybrid_model(
             return dtypes
         return (*dtypes, *_REPLAY_STATE_DTYPES)
 
-    def get_state_copy_func(cls):
+    def get_state_copy_func():
         copy_funcs = MambaStateCopyFuncCalculator.kda_state_copy_func()
         if not is_in_batch_invariant_mode():
             return copy_funcs
         return (*copy_funcs, *(copy_funcs[1] for _ in _REPLAY_STATE_DTYPES))
 
-    def get_state_copy_funcs(cls, mamba_types):
-        copy_funcs = cls.get_mamba_state_copy_func()
-        return {mamba_type: copy_funcs for mamba_type in mamba_types}
-
-    model_cls.is_hybrid = True
-    model_cls.get_mamba_state_shape_from_config = classmethod(get_state_shape)
-    model_cls.get_mamba_state_dtype_from_config = classmethod(get_state_dtype)
-    model_cls.get_mamba_state_copy_func = classmethod(get_state_copy_func)
-    model_cls.get_mamba_state_copy_funcs = classmethod(get_state_copy_funcs)
+    configure_hybrid_state(
+        model_cls,
+        get_state_shape=get_state_shape,
+        get_state_dtype=get_state_dtype,
+        get_state_copy_func=get_state_copy_func,
+    )

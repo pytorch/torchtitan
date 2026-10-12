@@ -278,14 +278,14 @@ class TestPrepareNativeMoeConfigs(unittest.TestCase):
 
         layer = model.model.layers["0"]
         params = _probe_hf_moe_block(layer.mlp, config)
-        moe_config = _build_moe_config(params, config)
+        moe_config = _build_moe_config(params, enable_sp=False, enable_ep=False)
 
         self.assertIsInstance(moe_config, MoE.Config)
         self.assertEqual(moe_config.num_experts, 4)
         self.assertIsNone(moe_config.shared_experts)
 
-    def test_prepare_stores_config_on_layers(self):
-        """prepare_native_moe_configs stores _native_moe_config on MoE layers."""
+    def test_probe_stores_params_on_layers(self):
+        """probe_native_moe_params stores _native_moe_params on MoE layers."""
         model, config = _create_tiny_qwen3moe_model(
             num_hidden_layers=2, decoder_sparse_step=1
         )
@@ -295,19 +295,19 @@ class TestPrepareNativeMoeConfigs(unittest.TestCase):
         config.load_balance_coeff = 1e-3
 
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
-            prepare_native_moe_configs,
+            probe_native_moe_params,
         )
 
-        # Mock the model interface expected by prepare_native_moe_configs
+        # Mock the model interface expected by probe_native_moe_params
         class _ModelProxy:
             layers = model.model.layers
 
-        prepare_native_moe_configs(_ModelProxy(), config)
+        probe_native_moe_params(_ModelProxy(), config)
 
         for layer in model.model.layers.values():
             if layer.moe_enabled:
-                self.assertTrue(hasattr(layer, "_native_moe_config"))
-                self.assertIsInstance(layer._native_moe_config, MoE.Config)
+                self.assertTrue(hasattr(layer, "_native_moe_params"))
+                self.assertEqual(layer._native_moe_params["num_experts"], 4)
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +349,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
 
         layer = model.model.layers["0"]
         params = _probe_hf_moe_block(layer.mlp, config)
-        moe_config = _build_moe_config(params, config)
+        moe_config = _build_moe_config(params, enable_sp=False, enable_ep=False)
 
         with torch.device("meta"):
             native_moe = moe_config.build()
@@ -375,7 +375,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
 
         layer = model.model.layers["0"]
         params = _probe_hf_moe_block(layer.mlp, config)
-        moe_config = _build_moe_config(params, config)
+        moe_config = _build_moe_config(params, enable_sp=False, enable_ep=False)
 
         with torch.device("meta"):
             native_moe = moe_config.build()
@@ -410,7 +410,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
 
         layer = model.model.layers["0"]
         params = _probe_hf_moe_block(layer.mlp, config)
-        moe_config = _build_moe_config(params, config)
+        moe_config = _build_moe_config(params, enable_sp=False, enable_ep=False)
 
         with torch.device("meta"):
             native_moe = moe_config.build()
@@ -438,7 +438,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
 
         layer = model.model.layers["0"]
         params = _probe_hf_moe_block(layer.mlp, config)
-        moe_config = _build_moe_config(params, config)
+        moe_config = _build_moe_config(params, enable_sp=False, enable_ep=False)
 
         with torch.device("meta"):
             native_moe = moe_config.build()
@@ -476,7 +476,7 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
 
         layer = model.model.layers["0"]
         params = _probe_hf_moe_block(layer.mlp, config)
-        moe_config = _build_moe_config(params, config)
+        moe_config = _build_moe_config(params, enable_sp=False, enable_ep=False)
 
         with torch.device("meta"):
             native_moe = moe_config.build()
@@ -502,7 +502,7 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
 
         layer = model.model.layers["0"]
         params = _probe_hf_moe_block(layer.mlp, config)
-        moe_config = _build_moe_config(params, config)
+        moe_config = _build_moe_config(params, enable_sp=False, enable_ep=False)
 
         with torch.device("meta"):
             native_moe = moe_config.build()
@@ -531,7 +531,7 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
 
         layer = model.model.layers["0"]
         params = _probe_hf_moe_block(layer.mlp, config)
-        moe_config = _build_moe_config(params, config)
+        moe_config = _build_moe_config(params, enable_sp=False, enable_ep=False)
 
         with torch.device("meta"):
             native_moe = moe_config.build()

@@ -32,9 +32,9 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.module import ModuleDict, ModuleList
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import ModuleDict, ModuleList
 
 # These are the public entrypoints for model-specific PP setup. Helpers in this
 # module are implementation details and stay private.

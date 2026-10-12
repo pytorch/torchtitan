@@ -9,12 +9,9 @@ import asyncio
 from renderers import ParsedResponse
 from torchtitan.rl.rollout import RolloutStatus
 
-from torchtitan.rl.rollout.environment.message import (
-    MessageEnvInitOutput,
-    MessageEnvStepOutput,
-)
-from torchtitan.rl.rollout.environment.token import TokenEnv
-from torchtitan.rl.types import Completion
+from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
+from torchtitan.rl.rollout.token_env import TokenEnv
+from torchtitan.rl.rollout.types import Completion
 
 _TOOLS = [
     {
@@ -94,3 +91,49 @@ def test_env_passes_tools_to_render_parse_and_bridge() -> None:
     assert renderer.calls["render_ids"]["tools"] == _TOOLS
     assert renderer.calls["parse_response"] == {"token_ids": [7, 8], "tools": _TOOLS}
     assert renderer.calls["bridge_to_next_turn"]["tools"] == _TOOLS
+
+
+class _ScriptedRenderer(_RecordingRenderer):
+    """Renders the given prompts in order and never bridges."""
+
+    def __init__(self, prompts: list[list[int]]) -> None:
+        super().__init__()
+        self.prompts = prompts
+
+    def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
+        return self.prompts.pop(0)
+
+
+def test_env_returns_each_next_prompt_as_a_delta() -> None:
+    renderer = _ScriptedRenderer(prompts=[[1, 2, 3], [1, 2, 3, 4, 7], [1, 2, 3, 4, 9]])
+    env = TokenEnv.Config().build(message_env=_ToolMessageEnv(), renderer=renderer)
+
+    def completion(token_ids: list[int]) -> Completion:
+        return Completion(
+            min_policy_version=0,
+            max_policy_version=0,
+            request_id="r0",
+            token_ids=token_ids,
+            token_logprobs=[-0.1] * len(token_ids),
+            finish_reason="stop",
+        )
+
+    async def run():
+        return [
+            await env.init(),
+            await env.step(completion([4])),
+            await env.step(completion([5])),
+        ]
+
+    outputs = asyncio.run(run())
+    assert [
+        (output.next_prompt_prefix_len, output.next_prompt_delta_token_ids.tolist())
+        for output in outputs
+    ] == [
+        (0, [1, 2, 3]),  # first prompt: nothing to reuse
+        (4, [7]),  # extends [1, 2, 3] + completion [4]
+        (
+            4,
+            [9],
+        ),  # edited history: shares [1, 2, 3, 4] with [1, 2, 3, 4, 7] + completion [5]
+    ]

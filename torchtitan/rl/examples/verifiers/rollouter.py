@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
 from verifiers.v1.configs.client import TrainClientConfig as VerifiersTrainClientConfig
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.dialects.chat import message_to_wire
@@ -35,15 +36,16 @@ from torchtitan.rl.examples.verifiers.generation_server import (
 )
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
     GenerateFn,
     Rollout,
     RolloutGroup,
     RolloutStatus,
     RolloutTurn,
+    RolloutTurnID,
+    split_prompt,
 )
-from torchtitan.rl.rubric import RewardFn, Rubric
-from torchtitan.rl.types import RolloutTurnID
 
 if TYPE_CHECKING:
     from torchtitan.rl.generator import SamplingConfig
@@ -379,6 +381,8 @@ class VerifiersRollouter(Rollouter):
         replied_nodes: set[int] = set()
         last_turn_by_node: dict[int, RolloutTurn] = {}
         turns: list[RolloutTurn] = []
+        # The last appended turn's prompt + completion; not reset between branches
+        previous_token_ids: list[int] = []
 
         for branch in trace.branches:
             token_ids = branch.token_ids
@@ -396,6 +400,10 @@ class VerifiersRollouter(Rollouter):
                 for start, end in _trainable_token_spans(mask):
                     absolute_start = branch_offset + start
                     absolute_end = branch_offset + end
+                    prompt_prefix_len, prompt_delta_token_ids = split_prompt(
+                        token_ids[:absolute_start], previous_token_ids
+                    )
+                    previous_token_ids = token_ids[:absolute_end]
                     turns.append(
                         RolloutTurn(
                             rollout_id=RolloutTurnID(
@@ -403,12 +411,13 @@ class VerifiersRollouter(Rollouter):
                                 rollout_id=rollout_id,
                                 turn_id=len(turns),
                             ),
-                            prompt_token_ids=list(token_ids[:absolute_start]),
-                            completion_token_ids=list(
-                                token_ids[absolute_start:absolute_end]
+                            prompt_prefix_len=prompt_prefix_len,
+                            prompt_delta_token_ids=prompt_delta_token_ids,
+                            completion_token_ids=np.asarray(
+                                token_ids[absolute_start:absolute_end], dtype=np.int32
                             ),
-                            completion_logprobs=list(
-                                logprobs[absolute_start:absolute_end]
+                            completion_logprobs=np.asarray(
+                                logprobs[absolute_start:absolute_end], dtype=np.float32
                             ),
                             min_policy_version=generation_metadata.min_policy_version,
                             max_policy_version=generation_metadata.max_policy_version,

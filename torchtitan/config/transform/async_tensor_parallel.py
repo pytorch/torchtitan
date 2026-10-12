@@ -9,6 +9,8 @@
 from dataclasses import dataclass, fields
 from typing import cast
 
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
@@ -17,11 +19,9 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
-from torchtitan.protocols.module import Module
 
-from .base import ModelConfigTransform, ModelConfigTransformContext
+from .base import ModelConfigTransform
 
 __all__ = ["AsyncTensorParallelTransform"]
 
@@ -32,9 +32,8 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
 
     Matching is by exact owner type. A projection subclass may change collective
     semantics, which would be lost if its config were replaced by an async base
-    type. ``SharedExpertRowParallelLinear`` is handled explicitly: async TP
-    requires sequence parallelism, where its reduction is identical to
-    ``RowParallelLinear`` and conversion to ``AsyncRowParallelLinear`` is safe.
+    type. The input config is already sharded; each replacement keeps the
+    projection's ``sharding_config``.
 
     The async projections compute WGRAD inside their fused collectives, so they
     cannot add it into ``weight.grad`` in place (``inplace_wgrad_accum``). The
@@ -48,13 +47,7 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
     """Turn off ``inplace_wgrad_accum`` on the converted projections instead of
     raising for them."""
 
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
-        del context
+    def transform(self, model: Module.Config) -> Module.Config:
         if not self.enable_sequence_parallel:
             raise ValueError("Async tensor parallelism requires sequence parallelism.")
 
@@ -66,7 +59,7 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
                 conversions.append(
                     (fqn, config, parent, attr, AsyncColumnParallelLinear)
                 )
-            elif owner in (RowParallelLinear, SharedExpertRowParallelLinear):
+            elif owner is RowParallelLinear:
                 conversions.append((fqn, config, parent, attr, AsyncRowParallelLinear))
         if not self.disable_inplace_wgrad_accum:
             enabled = [
@@ -83,10 +76,8 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
                 )
 
         for _fqn, config, parent, attr, replacement in conversions:
-            # Do not use convert_config_type() here. It requires the replacement
-            # config to inherit the source config, but the explicitly supported
-            # SharedExpertRowParallelLinear -> AsyncRowParallelLinear conversion
-            # intentionally drops the shared expert's unused non-SP behavior.
+            # Copy every field, including sharding_config, except
+            # inplace_wgrad_accum, which convert_config_type() cannot drop.
             converted = cast(
                 ColumnParallelLinear.Config | RowParallelLinear.Config,
                 replacement.Config(

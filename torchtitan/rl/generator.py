@@ -31,7 +31,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import Configurable, DebugConfig, OverrideConfig
+from torchtitan.config import Configurable, DebugConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
@@ -48,7 +48,7 @@ from torchtitan.rl.model.vllm_registry import (
 )
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
-from torchtitan.rl.types import Completion
+from torchtitan.rl.rollout.types import Completion
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
@@ -737,8 +737,7 @@ class VLLMGenerator(Configurable):
     CPU-to-GPU copy.
 
     Args:
-        config: Generator-specific configuration.
-        model_config: TorchTitan model configuration.
+        config: Generator-specific configuration, including its model.
         model_path: Path to the HF model checkpoint.
         max_num_seqs: vLLM's upper bound on concurrently scheduled sequences (vLLM admits fewer if KV
             is tight); also sets the CUDA-graph capture sizes.
@@ -756,6 +755,13 @@ class VLLMGenerator(Configurable):
         """Generator actor configuration.
         TODO: Expose a EngineConfig field to passing config to vLLM Engine"""
 
+        model: Decoder.Config
+        """Generator model config, built for ``parallelism.to_training()``.
+
+        The RL controller requires the same model class as the trainer's model;
+        keeping the two aligned otherwise is the recipe's responsibility.
+        """
+
         parallelism: InferenceParallelismConfig = field(
             default_factory=InferenceParallelismConfig
         )
@@ -770,11 +776,6 @@ class VLLMGenerator(Configurable):
 
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Default sampling parameters for generation."""
-
-        override: OverrideConfig = field(default_factory=OverrideConfig)
-        """Config overrides (e.g. ``torchtitan_recipes.overrides.fused_swiglu.fused_swiglu``)
-        applied to this generator's model spec before model finalization and build.
-        Separate from the trainer's override so the two can differ."""
 
         dist_moe_runtime: DistMoeRuntime.Config | None = None
         """Dist-MoE runtime policy, with ``inference=True``, required when the
@@ -862,7 +863,6 @@ class VLLMGenerator(Configurable):
         self,
         config: Config,
         *,
-        model_config: Decoder.Config,
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
@@ -882,6 +882,7 @@ class VLLMGenerator(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        model_config = config.model
         self.model_config = model_config
 
         self._max_num_seqs = max_num_seqs
@@ -898,7 +899,6 @@ class VLLMGenerator(Configurable):
             model_config,
             parallelism=config.parallelism,
             checkpointer_config=config.checkpointer,
-            override=config.override,
             dist_moe_runtime=config.dist_moe_runtime,
         )
 

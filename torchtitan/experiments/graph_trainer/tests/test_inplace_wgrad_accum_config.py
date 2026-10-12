@@ -8,6 +8,8 @@ import unittest
 
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 
+from torchtitan.config.parallelism import ParallelismConfig
+
 from torchtitan.experiments.graph_trainer.configs import to_graph_trainer_config
 from torchtitan.experiments.graph_trainer.deepseek_v3 import build_model_config
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
@@ -39,7 +41,9 @@ class TestInplaceWgradAccumConfig(unittest.TestCase):
             config.__post_init__()
 
     def test_flavor_builder_disables(self):
-        linears = _linear_configs(build_model_config("debugmodel"))
+        linears = _linear_configs(
+            build_model_config("debugmodel", parallelism=ParallelismConfig())
+        )
         self.assertTrue(linears)
         self.assertFalse(any(linear.inplace_wgrad_accum for linear in linears))
 

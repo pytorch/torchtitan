@@ -21,12 +21,13 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 
+from torchtitan.models.base.module import Module
+from torchtitan.models.base.sharding import ShardingConfig
+
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
-from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import ShardingConfig
 
 __all__ = [
     "get_lora_dist_moe_routed_experts",

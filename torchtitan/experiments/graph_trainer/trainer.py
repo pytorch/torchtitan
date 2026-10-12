@@ -29,9 +29,9 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     PagedStashManager,
     PagedStashRunner,
 )
+from torchtitan.models.base import BaseModel
 from torchtitan.models.common.linear import Linear
 from torchtitan.observability import structured_logger as sl
-from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 

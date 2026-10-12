@@ -28,12 +28,12 @@ from torchtitan.experiments.torchft.optimizer import (
     TorchFTOptim,
     TorchFTOptimizersContainer,
 )
+from torchtitan.models.base import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
     ensure_pp_loss_visible,
 )
-from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -151,9 +151,7 @@ class FaultTolerantTrainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        model_config = copy.deepcopy(config.model)
-        model_config.set_sharding_(config.parallelism)
-        config.model = model_config
+        config.model = copy.deepcopy(config.model)
         if config.override.imports:
             apply_overrides(config.override, config)
         model_config = config.model

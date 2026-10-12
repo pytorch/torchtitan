@@ -14,8 +14,8 @@ from torch.distributed._functional_collectives import all_to_all_single
 from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_sparse_mesh
+from torchtitan.models.base.module import Module
 from torchtitan.ops.scatter_add import deterministic_scatter_add
-from torchtitan.protocols.module import Module
 
 
 @dataclass(frozen=True, kw_only=True)

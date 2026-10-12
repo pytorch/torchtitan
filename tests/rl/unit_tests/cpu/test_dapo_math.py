@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 
+import numpy as np
 import pytest
 from datasets import Dataset
 
@@ -26,7 +27,7 @@ from torchtitan.rl.examples.dapo_math import (
     score_math_response,
 )
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
-from torchtitan.rl.types import RolloutTurnID
+from torchtitan.rl.rollout.types import RolloutTurnID
 
 
 def _dapo_rows() -> list[dict]:
@@ -107,9 +108,10 @@ def _rollout(response: str) -> Rollout:
         turns=[
             RolloutTurn(
                 rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
-                prompt_token_ids=[1],
-                completion_token_ids=[2],
-                completion_logprobs=[-0.1],
+                prompt_prefix_len=0,
+                prompt_delta_token_ids=np.array([1], dtype=np.int32),
+                completion_token_ids=np.array([2], dtype=np.int32),
+                completion_logprobs=np.array([-0.1], dtype=np.float32),
                 completion_message={"role": "assistant", "content": response},
             )
         ],
