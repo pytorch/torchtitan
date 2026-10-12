@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Any
 
+from vllm.utils.math_utils import cdiv
 from vllm.v1.request import RequestStatus
 
 
@@ -26,9 +27,19 @@ class SessionKVHolder:
     count as used in vLLM's ``kv_cache_usage``.
 
     It releases whole idle sessions, idle longest first:
-    - before each step, while fewer than ``free_floor_blocks`` are free: room for the step's growth,
-      because the holder can't act inside a step;
+    - before each step, while fewer than ``floor`` blocks are free (it can't act inside a step);
     - after a step where nothing runs and requests wait: vLLM refused the head for lack of blocks.
+
+    The floor is vLLM's watermark plus the most blocks the next step can add to running requests
+    (vLLM schedules them before it admits new ones):
+
+        free_floor_blocks = watermark_blocks
+            + per KV cache group: cdiv(max_num_scheduled_tokens, block_size)  # one prefill chunk
+        floor = free_floor_blocks
+            + num_kv_cache_groups x len(running)  # a block each at a block boundary
+
+    Too small, and vLLM preempts a running request (a recompute, not a hang); too big only holds
+    fewer sessions.
 
     A release only demotes: the blocks go to vLLM's LRU free queue and stay prefix hits until reused.
     Every mutating method must run on the engine thread of every rank, in the same order, so the
@@ -44,7 +55,7 @@ class SessionKVHolder:
 
     Example:
 
-        holder = SessionKVHolder(scheduler, free_floor_blocks=400)
+        holder = SessionKVHolder(scheduler)
         internal_id = engine.add_request(request_id="group=3/rollout=0/turn=2", ...)
         holder.track(internal_id, session_id="group=3/rollout=0", group_id=3)
         holder.evict_until_free()  # before each engine.step()
@@ -54,7 +65,6 @@ class SessionKVHolder:
 
     Args:
         scheduler: The vLLM v1 scheduler of this rank's in-process engine.
-        free_floor_blocks: Blocks to keep free before each step.
         hold: Hold sessions' GPU blocks. False: only ended sessions' CPU chunks are evicted first.
         offload_policy: vLLM's CPU offload `LRUCachePolicy`; None without CPU offload.
     """
@@ -62,7 +72,6 @@ class SessionKVHolder:
     def __init__(
         self,
         scheduler: Any,
-        free_floor_blocks: int,
         hold: bool = True,
         offload_policy: Any | None = None,
     ) -> None:
@@ -77,12 +86,16 @@ class SessionKVHolder:
                     f"{type(offload_policy).__name__}"
                 )
         self._scheduler = scheduler
-        self._coordinator = scheduler.kv_cache_manager.coordinator
-        self._block_pool = scheduler.kv_cache_manager.block_pool
-        self.free_floor_blocks = free_floor_blocks
+        kv_cache_manager = scheduler.kv_cache_manager
+        self._coordinator = kv_cache_manager.coordinator
+        self._block_pool = kv_cache_manager.block_pool
+        self._num_kv_cache_groups = kv_cache_manager.num_kv_cache_groups
+        self.free_floor_blocks = kv_cache_manager.watermark_blocks + sum(
+            cdiv(scheduler.max_num_scheduled_tokens, group.kv_cache_spec.block_size)
+            for group in kv_cache_manager.kv_cache_config.kv_cache_groups
+        )
         self._hold_enabled = hold
         self._offload_policy = offload_policy
-        self._num_kv_cache_groups = scheduler.kv_cache_manager.num_kv_cache_groups
         # Requests in vLLM: internal request id -> (session, group, prefill seen).
         self._live: dict[str, tuple[str, int, bool]] = {}
         # Held blocks per session, idle longest first.
@@ -150,15 +163,16 @@ class SessionKVHolder:
         released: its hold is all that keeps those blocks, and keeping it once memory is full stops
         every waiting request from starting.
         """
-        if (
-            not self._hold_enabled
-            or self._block_pool.get_num_free_blocks() >= self.free_floor_blocks
-        ):
+        if not self._hold_enabled:
             return
         running_ids = {request.request_id for request in self._scheduler.running}
+        # GRPO siblings decode in lockstep, so all running requests can cross a boundary together.
+        floor = self.free_floor_blocks + self._num_kv_cache_groups * len(running_ids)
+        if self._block_pool.get_num_free_blocks() >= floor:
+            return
         running = {self._live[i][0] for i in running_ids if i in self._live}
         for session_id in list(self._held):
-            if self._block_pool.get_num_free_blocks() >= self.free_floor_blocks:
+            if self._block_pool.get_num_free_blocks() >= floor:
                 return
             if session_id not in running:
                 self._release(session_id)

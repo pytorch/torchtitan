@@ -121,14 +121,15 @@ def _holder(
 ) -> SessionKVHolder:
     scheduler = SimpleNamespace(
         kv_cache_manager=manager,
+        max_num_scheduled_tokens=0,
         requests=requests,
         running=running,
         waiting=waiting,
         skipped_waiting=skipped_waiting,
     )
-    return SessionKVHolder(
-        scheduler, free_floor_blocks=floor, hold=hold, offload_policy=offload_policy
-    )
+    holder = SessionKVHolder(scheduler, hold=hold, offload_policy=offload_policy)
+    holder.free_floor_blocks = floor
+    return holder
 
 
 def test_held_prefix_survives_churn_and_the_next_turn_hits_it(manager):
@@ -425,6 +426,13 @@ def test_offload_needs_vllm_lru_policy(manager):
         RuntimeError, match="needs vLLM's LRUCachePolicy, got ARCCachePolicy"
     ):
         _holder(manager, {}, offload_policy=ARCCachePolicy(cache_capacity=8))
+
+
+def test_free_floor_is_the_watermark_plus_one_prefill_chunk(manager):
+    manager.watermark_blocks = 8  # vLLM's watermark=0.1 of the 80-block pool
+    scheduler = SimpleNamespace(kv_cache_manager=manager, max_num_scheduled_tokens=100)
+    # watermark 8 + 4 KV cache groups x cdiv(100, 16) = 7 chunk blocks
+    assert SessionKVHolder(scheduler).free_floor_blocks == 8 + 4 * 7
 
 
 @pytest.mark.parametrize("queue", ["waiting", "skipped_waiting"])

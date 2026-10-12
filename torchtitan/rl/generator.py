@@ -960,15 +960,6 @@ class VLLMGenerator(Configurable):
         blocks) from the end of a turn's prefill until its next turn or its end, so no other
         request evicts it (see `SessionKVHolder`). Held blocks count in vLLM's KV usage."""
 
-        session_kv_free_headroom: float = 0.05
-        """With ``hold_session_kv``, before each step the holder releases idle sessions while fewer
-        than (vLLM's ``watermark`` + this) fraction of KV blocks are free:
-        - watermark: while a batch runs, vLLM starts a new turn only if this much stays free after
-          it, so the holder never holds into it.
-        - headroom: room for one step's growth and for a new turn to start, since the holder can't
-          act inside a step.
-        """
-
         kv_offload_gib: float = 0.0
         """Host RAM (GiB) per generator for vLLM's native CPU KV offload, split across its DP x TP
         ranks; 0 disables it.
@@ -1295,14 +1286,8 @@ class VLLMGenerator(Configurable):
                     raise ValueError(
                         "hold_session_kv does not support speculative decoding"
                     )
-            kv_cache_manager = scheduler.kv_cache_manager
-            headroom_blocks = int(
-                config.session_kv_free_headroom
-                * kv_cache_manager.block_pool.num_gpu_blocks
-            )
             self._session_kv = SessionKVHolder(
                 scheduler,
-                free_floor_blocks=kv_cache_manager.watermark_blocks + headroom_blocks,
                 hold=config.hold_session_kv,
                 # Built by vLLM from kv_connector_extra_config above.
                 offload_policy=(
