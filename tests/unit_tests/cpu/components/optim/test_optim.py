@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from torchtitan.components.optim import Optim
+from torchtitan.distributed.utils import clip_grad_norm_
 
 
 @dataclass
@@ -28,6 +29,21 @@ class _OptimizersConfig:
 def test_optim_config_rejects_negative_max_norm() -> None:
     with pytest.raises(ValueError, match="max_norm"):
         Optim.Config(max_norm=-1)
+
+
+def test_logical_norm_counts_one_copy_but_clips_both() -> None:
+    canonical = torch.nn.Parameter(torch.zeros(2))
+    replica = torch.nn.Parameter(torch.zeros(2))
+    canonical.grad = torch.tensor([3.0, 4.0])
+    replica.grad = canonical.grad.clone()
+
+    norm = clip_grad_norm_(
+        [canonical, replica], 1.0, norm_parameters=[canonical], foreach=True
+    )
+
+    torch.testing.assert_close(norm, torch.tensor(5.0))
+    torch.testing.assert_close(canonical.grad, torch.tensor([0.6, 0.8]))
+    torch.testing.assert_close(replica.grad, canonical.grad)
 
 
 @pytest.mark.parametrize("enable_cuda_graph", [False, True])

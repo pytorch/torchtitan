@@ -22,6 +22,7 @@ from torchtitan.components.data.types import (
 from torchtitan.components.optim import Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
@@ -126,6 +127,8 @@ def _dict_microbatch(
 
 
 def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
+    if not hasattr(trainer, "model_cls"):
+        trainer.model_cls = BaseModel
     if not hasattr(trainer, "optim_step"):
         trainer.optim_step = lambda: TrainingEngine.optim_step(trainer)
     if not hasattr(trainer.config, "model"):
@@ -778,6 +781,7 @@ def test_optim_update_clips_before_parameter_update() -> None:
                 get_optional_mesh=lambda name: None,
             ),
             parameters=[],
+            norm_parameters=None,
             optimizers=optimizers,
         ),
     )
@@ -820,6 +824,7 @@ def test_initialize_optim_builds_component() -> None:
         parallelism_context=engine.parallelism_context,
         training_steps=10,
         pp_has_last_stage=True,
+        norm_parameters=[],
     )
     engine.model_cls._register_optimizer_hooks.assert_called_once_with(
         optim.optimizers,
@@ -847,13 +852,20 @@ def test_optim_step_waits_for_checkpoint() -> None:
                 maybe_wait_for_staging=lambda: events.append("checkpoint")
             ),
             optim=optim,
+            model_cls=SimpleNamespace(
+                _finalize_shared_gradients=lambda *args: events.append(
+                    "shared_gradients"
+                )
+            ),
+            model_parts=[],
+            parallelism_context=SimpleNamespace(),
         ),
     )
 
     grad_norm = TrainingEngine.optim_step(engine)
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
-    assert events == ["checkpoint", "optimization_3"]
+    assert events == ["checkpoint", "shared_gradients", "optimization_3"]
     assert engine.num_completed_steps == 3
 
 

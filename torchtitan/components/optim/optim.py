@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import torch
@@ -60,6 +61,7 @@ class Optim(Configurable):
         parallelism_context: ParallelismContext,
         training_steps: int,
         pp_has_last_stage: bool,
+        norm_parameters: Iterable[torch.Tensor] | None = None,
     ) -> None:
         self.config = config
         self.parallelism_context = parallelism_context
@@ -69,6 +71,20 @@ class Optim(Configurable):
             for model_part in model_parts
             for parameter in model_part.parameters()
         ]
+        self.norm_parameters = (
+            list(norm_parameters) if norm_parameters is not None else None
+        )
+        if (
+            self.norm_parameters is not None
+            and len(self.norm_parameters) == len(self.parameters)
+            and all(
+                parameter is norm_parameter
+                for parameter, norm_parameter in zip(
+                    self.parameters, self.norm_parameters, strict=True
+                )
+            )
+        ):
+            self.norm_parameters = None
         enable_cuda_graph = (
             config.enable_cuda_graph
             and cuda_graphs_supported()
@@ -119,6 +135,7 @@ class Optim(Configurable):
             self.config.max_norm,
             foreach=True,
             pp_mesh=self.parallelism_context.get_optional_mesh("pp"),
+            norm_parameters=self.norm_parameters,
         )
         loss_is_finite = torch.isfinite(loss).all().to(torch.int32)
         if not self.parallelism_context.pp_enabled or self.pp_has_last_stage:
