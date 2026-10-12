@@ -27,7 +27,7 @@ from .attention import (  # noqa: F401
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from .kda import LinearAttentionMetadata
+from .linear_attention import LinearAttentionMetadata
 
 AttentionMetadata = (
     FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata
