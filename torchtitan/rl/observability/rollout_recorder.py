@@ -150,12 +150,23 @@ class RolloutSampleRecorder(Configurable):
 
     def _encode_turn(self, turn: RolloutTurn) -> dict:
         """One JSON object per turn. The large token / logprob arrays are opt-in
-        (`log_tensors` / `log_logprobs`)."""
+        (`log_tensors` / `log_logprobs`).
+
+        A turn's prompt is a delta on its parent `p = turns[t.parent_turn_id]`. Rebuild turn t's full
+        prompt from p's, starting from [] for a turn without a parent:
+
+            prompt_messages(t) = (prompt_messages(p) + [p.completion_message] + p.env_messages)
+                                 [: t.prompt_message_prefix_len] + t.prompt_delta_messages
+            prompt_token_ids(t) = (prompt_token_ids(p) + p.completion_token_ids)
+                                  [: t.prompt_prefix_len] + t.prompt_delta_token_ids
+        """
         encoded = {
             "turn_id": turn.rollout_id.turn_id,
+            "parent_turn_id": turn.parent_turn_id,
             "min_policy_version": turn.min_policy_version,
             "max_policy_version": turn.max_policy_version,
-            "prompt_messages": turn.prompt_messages,
+            "prompt_message_prefix_len": turn.prompt_message_prefix_len,
+            "prompt_delta_messages": turn.prompt_delta_messages,
             "completion_message": turn.completion_message,
             "env_messages": turn.env_messages,
             "env_rewards": turn.env_rewards,

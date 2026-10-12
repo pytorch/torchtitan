@@ -18,6 +18,7 @@ pytest.importorskip("verifiers")
 
 from aiohttp import ClientSession
 
+from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.examples.verifiers.generation_server import (
     _parse_sampling_config,
     GenerationServer,
@@ -30,6 +31,7 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     VerifiersRollouter,
 )
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.rollout import Rollout, RolloutStatus
 from torchtitan.rl.rollout.types import Completion
 from verifiers.v1.errors import model_error, OverlongPromptError
 
@@ -72,6 +74,7 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
     )
 
     assert len(turns) == 1
+    assert turns[0].parent_turn_id is None
     assert turns[0].prompt_prefix_len == 0
     assert turns[0].prompt_delta_token_ids.tolist() == [10, 11]
     assert turns[0].completion_token_ids.tolist() == [12, 13]
@@ -124,9 +127,14 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
     assert [turn.max_policy_version for turn in turns] == [8, 8]
     # turn 1's prompt [10, 11, 12] continues turn 0's [10] + [11], so it stores only [12]
     stored = [
-        (turn.prompt_prefix_len, turn.prompt_delta_token_ids.tolist()) for turn in turns
+        (
+            turn.parent_turn_id,
+            turn.prompt_prefix_len,
+            turn.prompt_delta_token_ids.tolist(),
+        )
+        for turn in turns
     ]
-    assert stored == [(0, [10]), (2, [12])]
+    assert stored == [(None, 0, [10]), (0, 2, [12])]
     assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13]]
     assert [turn.completion_logprobs.tolist() for turn in turns] == [
         pytest.approx([-0.1]),
@@ -134,7 +142,7 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
     ]
 
 
-def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> None:
+def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_shared_turn() -> None:
     from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
 
     def node(token_ids: list[int], content: str) -> SimpleNamespace:
@@ -170,12 +178,17 @@ def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> 
         rollout_id=2,
     )
 
-    # The shared node trains once; the second branch's prompt [10, 11, 14] keeps [10, 11] of the
-    # previous turn's [10, 11, 12, 13], so it stores (2, [14]) and the builder opens a new sample.
+    # The shared node trains once; the second branch's prompt [10, 11, 14] is a delta on the shared
+    # turn 0, not on turn 1, so the builder opens a sample with [10, 11] as context.
     stored = [
-        (turn.prompt_prefix_len, turn.prompt_delta_token_ids.tolist()) for turn in turns
+        (
+            turn.parent_turn_id,
+            turn.prompt_prefix_len,
+            turn.prompt_delta_token_ids.tolist(),
+        )
+        for turn in turns
     ]
-    assert stored == [(0, [10]), (2, [12]), (2, [14])]
+    assert stored == [(None, 0, [10]), (0, 2, [12]), (0, 2, [14])]
     assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13], [15]]
 
 
@@ -240,6 +253,129 @@ def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
         [],
         [],
     ]
+
+
+def _node(
+    parent: int | None, token_ids: list[int], content: str, *, num_sampled: int = 0
+) -> SimpleNamespace:
+    """A Verifiers message node; its last `num_sampled` tokens are a sampled completion."""
+    from verifiers.v1.types import AssistantMessage, UserMessage
+
+    message = (AssistantMessage if num_sampled else UserMessage)(content=content)
+    mask = [False] * (len(token_ids) - num_sampled) + [True] * num_sampled
+    return SimpleNamespace(
+        parent=parent,
+        token_ids=token_ids,
+        mask=mask,
+        sampled=bool(num_sampled),
+        message=message,
+    )
+
+
+def _trace(nodes: list[SimpleNamespace]) -> SimpleNamespace:
+    """A Verifiers trace: one root-to-leaf branch per leaf, leaves in index order."""
+    has_child = {node.parent for node in nodes if node.parent is not None}
+    branches = []
+    for leaf in (index for index in range(len(nodes)) if index not in has_child):
+        path, index = [], leaf
+        while index is not None:
+            path.append(nodes[index])
+            index = nodes[index].parent
+        path.reverse()
+        branches.append(
+            SimpleNamespace(
+                nodes=path,
+                token_ids=[token for node in path for token in node.token_ids],
+                logprobs=[0.0 for node in path for _ in node.token_ids],
+            )
+        )
+    return SimpleNamespace(nodes=nodes, branches=branches)
+
+
+def _trace_to_turns(trace: SimpleNamespace):
+    return VerifiersRollouter.trace_to_rollout_turns(
+        trace=trace,
+        generation_metadata=VerifiersGenerationMetadata(
+            min_policy_version=0, max_policy_version=0, metrics=[]
+        ),
+        group_id=0,
+        rollout_id=0,
+    )
+
+
+def _training_samples(turns):
+    rollout = Rollout(
+        group_id=0,
+        rollout_id=0,
+        status=RolloutStatus.COMPLETED,
+        turns=turns,
+        advantage=1.0,
+    )
+    return TrainingSampleBuilder.Config().build().rollout_to_training_samples(rollout)
+
+
+def test_verifiers_fork_after_a_rerender_opens_a_new_root() -> None:
+    # Terminus-2 re-sends turn 0's answer without its thinking, so the history is re-rendered and
+    # branch 1 shares only [sys, task] with branch 0, no sampled node: its turn is a new root.
+    nodes = [
+        _node(None, [1, 2], "sys"),
+        _node(0, [3], "task"),
+        _node(1, [9, 10, 11], "think + ls", num_sampled=2),
+        _node(2, [4], "a.txt"),
+        _node(3, [9, 12], "cat a.txt", num_sampled=1),
+        _node(1, [9, 11], "ls, thinking dropped"),
+        _node(5, [4], "a.txt again"),
+        _node(6, [9, 12], "cat a.txt, as input"),
+        _node(7, [5], "error: truncated"),
+        _node(8, [9, 13], "retry", num_sampled=1),
+    ]
+    turns = _trace_to_turns(_trace(nodes))
+
+    stored = [
+        (
+            turn.parent_turn_id,
+            turn.prompt_prefix_len,
+            turn.prompt_delta_token_ids.tolist(),
+        )
+        for turn in turns
+    ]
+    assert stored == [
+        (None, 0, [1, 2, 3, 9]),
+        (0, 6, [4, 9]),
+        (None, 0, [1, 2, 3, 9, 11, 4, 9, 12, 5, 9]),
+    ]
+    # Two samples: the fork re-forwards its whole re-rendered prompt
+    samples = _training_samples(turns)
+    assert [sample.token_ids.tolist() for sample in samples] == [
+        [1, 2, 3, 9, 10, 11, 4, 9, 12],
+        [1, 2, 3, 9, 11, 4, 9, 12, 5, 9, 13],
+    ]
+
+
+def test_verifiers_resumed_turn_continues_its_sample() -> None:
+    # Branch 0 ends with a prompt-only leaf; branch 1 resamples the first turn; branch 2 resumes the
+    # first turn. Turn 2's parent is turn 0, still its sample's last turn, so it continues that sample.
+    nodes = [
+        _node(None, [1], "task"),
+        _node(0, [2], "a", num_sampled=1),
+        _node(1, [3], "leaf"),
+        _node(0, [4], "x", num_sampled=1),
+        _node(1, [5], "w"),
+        _node(4, [6], "c", num_sampled=1),
+    ]
+    turns = _trace_to_turns(_trace(nodes))
+    assert [(turn.parent_turn_id, turn.prompt_prefix_len) for turn in turns] == [
+        (None, 0),
+        (None, 0),
+        (0, 2),
+    ]
+    assert [turn.env_messages for turn in turns] == [
+        [{"role": "user", "content": "leaf"}, {"role": "user", "content": "w"}],
+        [],
+        [],
+    ]
+    samples = _training_samples(turns)
+    assert [sample.token_ids.tolist() for sample in samples] == [[1, 2, 5, 6], [1, 4]]
 
 
 def test_verifiers_rollout_logs_keep_the_failure_reason(caplog) -> None:

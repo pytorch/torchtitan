@@ -44,7 +44,6 @@ from torchtitan.rl.rollout.types import (
     RolloutStatus,
     RolloutTurn,
     RolloutTurnID,
-    split_prompt,
 )
 
 if TYPE_CHECKING:
@@ -311,7 +310,7 @@ class VerifiersRollouter(Rollouter):
                 f"{len(traces)}"
             )
 
-        # Convert Verifiers' graph trace to TitanRL's linear rollout turns.
+        # Convert Verifiers' graph trace to TitanRL's tree of rollout turns.
         trace = traces[0]
         generation_metadata = self._generation_server.pop_generation_metadata(trace.id)
         turns = self.trace_to_rollout_turns(
@@ -354,15 +353,20 @@ class VerifiersRollouter(Rollouter):
         group_id: int,
         rollout_id: int,
     ) -> list[RolloutTurn]:
-        """Flatten a Verifiers trace into TorchTitan's trainable rollout turns.
+        """Convert a Verifiers trace into TorchTitan rollout turns, one per sampled span, keeping its tree.
 
-        For example, a Verifiers branch containing user tokens ``[1, 2]``,
-        sampled assistant tokens ``[3, 4]``, tool-result tokens ``[5, 6]``, and
-        sampled assistant tokens ``[7, 8]`` becomes two TitanRL turns. Their
-        prompts are ``[1, 2]`` and ``[1, 2, 3, 4, 5, 6]``; their completions are
-        ``[3, 4]`` and ``[7, 8]``. Shared sampled graph nodes are emitted once.
-        Non-sampled nodes after a sampled one, e.g. the tool result ``[5, 6]``,
-        become that turn's ``env_messages``, also once per node.
+        A turn's parent is the last turn before it on its branch; a node shared by several branches
+        becomes one turn (trained once).
+
+        Example:
+            branch 0:  user [1, 2]  sampled [3, 4]  tool [5, 6]  sampled [7, 8]
+            branch 1:  user [1, 2]  sampled [3, 4]  tool [5, 9]  sampled [10]    (shares 2 nodes)
+            -> turn 0: parent None, prefix 0, delta [1, 2], completion [3, 4]
+               turn 1: parent 0,    prefix 4, delta [5, 6], completion [7, 8]
+               turn 2: parent 0,    prefix 4, delta [5, 9], completion [10]
+
+        Non-sampled nodes after a sampled one become that turn's ``env_messages``, once per node
+        (tool [5, 6] and tool [5, 9] on turn 0).
 
         Verifiers does not return TorchTitan policy metadata, so every emitted
         turn receives the conservative min/max policy-version span accumulated
@@ -376,34 +380,32 @@ class VerifiersRollouter(Rollouter):
                 )
             return []
 
+        # TODO: fill `prompt_message_prefix_len` + `prompt_delta_messages` from the parent's messages so the
+        # recorder can rebuild Verifiers conversations; turns record only env replies.
         node_index = {id(node): index for index, node in enumerate(trace.nodes)}
-        trained_nodes: set[int] = set()
         replied_nodes: set[int] = set()
-        last_turn_by_node: dict[int, RolloutTurn] = {}
+        # A sampled node already turned into a turn -> (that turn, where its completion ends in a branch)
+        emitted: dict[int, tuple[int, int]] = {}
         turns: list[RolloutTurn] = []
-        # The last appended turn's prompt + completion; not reset between branches
-        previous_token_ids: list[int] = []
 
         for branch in trace.branches:
             token_ids = branch.token_ids
             logprobs = branch.logprobs
             branch_offset = 0
             reply_to: RolloutTurn | None = None
+            # The last turn on this branch so far; its prompt + completion is token_ids[:parent_end]
+            parent_turn_id: int | None = None
+            parent_end = 0
             for node in branch.nodes:
                 index = node_index[id(node)]
-                mask = list(node.mask)
-                if node.sampled and any(mask):
-                    if index in trained_nodes:
-                        mask = [False] * len(mask)
-                    else:
-                        trained_nodes.add(index)
-                for start, end in _trainable_token_spans(mask):
+                spans = _trainable_token_spans(node.mask)
+                if index in emitted:
+                    # Trained on an earlier branch: later turns on this branch continue from it
+                    parent_turn_id, parent_end = emitted[index]
+                    spans = []
+                for start, end in spans:
                     absolute_start = branch_offset + start
                     absolute_end = branch_offset + end
-                    prompt_prefix_len, prompt_delta_token_ids = split_prompt(
-                        token_ids[:absolute_start], previous_token_ids
-                    )
-                    previous_token_ids = token_ids[:absolute_end]
                     turns.append(
                         RolloutTurn(
                             rollout_id=RolloutTurnID(
@@ -411,8 +413,11 @@ class VerifiersRollouter(Rollouter):
                                 rollout_id=rollout_id,
                                 turn_id=len(turns),
                             ),
-                            prompt_prefix_len=prompt_prefix_len,
-                            prompt_delta_token_ids=prompt_delta_token_ids,
+                            parent_turn_id=parent_turn_id,
+                            prompt_prefix_len=parent_end,
+                            prompt_delta_token_ids=np.asarray(
+                                token_ids[parent_end:absolute_start], dtype=np.int32
+                            ),
                             completion_token_ids=np.asarray(
                                 token_ids[absolute_start:absolute_end], dtype=np.int32
                             ),
@@ -427,9 +432,10 @@ class VerifiersRollouter(Rollouter):
                             ),
                         )
                     )
-                    last_turn_by_node[index] = turns[-1]
+                    parent_turn_id, parent_end = len(turns) - 1, absolute_end
+                    emitted[index] = (parent_turn_id, parent_end)
                 if node.sampled:
-                    reply_to = last_turn_by_node.get(index)
+                    reply_to = turns[emitted[index][0]] if index in emitted else None
                 elif reply_to is not None and index not in replied_nodes:
                     replied_nodes.add(index)
                     reply_to.env_messages.append(message_to_wire(node.message))

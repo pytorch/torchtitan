@@ -452,9 +452,11 @@ class RolloutWorker(Configurable):
                 turns.append(
                     RolloutTurn(
                         rollout_id=turn_rollout_id,
+                        parent_turn_id=len(turns) - 1 if turns else None,
                         prompt_prefix_len=env_step.next_prompt_prefix_len,
                         prompt_delta_token_ids=env_step.next_prompt_delta_token_ids,
-                        prompt_messages=env_step.next_prompt_messages or [],
+                        prompt_message_prefix_len=env_step.next_prompt_message_prefix_len,
+                        prompt_delta_messages=env_step.next_prompt_delta_messages,
                         completion_token_ids=np.asarray(
                             completion.token_ids, dtype=np.int32
                         ),

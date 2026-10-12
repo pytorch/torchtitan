@@ -37,6 +37,10 @@ class TokenEnvOutput:
     next_prompt_messages: list[Message] | None = None  # [num_prompt_messages] or None
     """Message form of `next_prompt_token_ids`; `None` whenever that is `None`."""
 
+    next_prompt_message_prefix_len: int = 0
+    """Like `next_prompt_prefix_len`, for `next_prompt_messages`: how many leading messages repeat the
+    previous prompt messages + completion + env reply."""
+
     status: RolloutStatus
     """`ONGOING` while the rollout runs; a terminal `RolloutStatus` otherwise."""
 
@@ -57,6 +61,11 @@ class TokenEnvOutput:
         """The next prompt after its first `next_prompt_prefix_len` tokens."""
         delta = (self.next_prompt_token_ids or [])[self.next_prompt_prefix_len :]
         return np.asarray(delta, dtype=np.int32)
+
+    @property
+    def next_prompt_delta_messages(self) -> list[Message]:
+        """The next prompt messages after the first `next_prompt_message_prefix_len`."""
+        return (self.next_prompt_messages or [])[self.next_prompt_message_prefix_len :]
 
 
 class TokenEnv(Configurable):
@@ -297,13 +306,15 @@ class TokenEnv(Configurable):
         # RolloutTurn stores the next prompt as a delta on this prompt + completion
         next_prompt_prefix_len, _ = split_prompt(
             prompt_token_ids=next_prompt_token_ids,
-            previous_token_ids=self._last_prompt_token_ids + completion.token_ids,
+            parent_token_ids=self._last_prompt_token_ids + completion.token_ids,
         )
         self._last_prompt_token_ids = next_prompt_token_ids
         return TokenEnvOutput(
             next_prompt_token_ids=next_prompt_token_ids,
             next_prompt_prefix_len=next_prompt_prefix_len,
             next_prompt_messages=self._messages,
+            # Messages are only appended (see TODO(history-edit)), so the message delta is empty
+            next_prompt_message_prefix_len=len(self._messages),
             status=RolloutStatus.ONGOING,
             completion_message=completion_message,
             env_messages=step_output.env_messages,

@@ -108,6 +108,7 @@ def _rollout(response: str) -> Rollout:
         turns=[
             RolloutTurn(
                 rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
+                parent_turn_id=None,
                 prompt_prefix_len=0,
                 prompt_delta_token_ids=np.array([1], dtype=np.int32),
                 completion_token_ids=np.array([2], dtype=np.int32),
