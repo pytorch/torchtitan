@@ -174,8 +174,7 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             inner_attention=VarlenInnerAttention.Config(),
             rope=ComplexRoPE.Config(dim=head_dim, max_context_length=num_tokens),
         ).build()
-        attention.bfloat16()
-        x_TD = torch.randn(num_tokens, dim, dtype=torch.bfloat16)
+        x_TD = torch.randn(num_tokens, dim)
         positions_T = torch.tensor([0, 1, 0, 1, 2, 3])
         metadata = create_varlen_metadata_for_document(positions_T)
 
@@ -243,7 +242,7 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             out_THV = inner_attention(
                 q_THK,
                 q_THK,
-                q_THK.bfloat16(),
+                q_THK,
                 attention_metadata=metadata,
                 out_transform=_check_shapes,
             )
