@@ -324,8 +324,20 @@ class HeadTailCPVarlenMetadata:
     ) -> VarlenAttentionMetadata:
         """Describe one fixed query chunk and its contiguous K/V range."""
         global_cu_seq = self.varlen_metadata.cu_seq_q
+        if spmd.is_type_checking():
+            # Document offsets vary across DP but are shared across CP and TP.
+            spmd.assert_type(
+                global_cu_seq,
+                spmd.R,
+                {MeshAxisName.DP: spmd.V},
+                partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
+            )
         cu_seq_q = global_cu_seq.clamp(min=start, max=end) - start
         cu_seq_k = global_cu_seq.clamp(min=kv_start, max=end) - kv_start
+        if spmd.is_type_checking():
+            # Python chunk bounds differ across CP ranks.
+            for cu_seq in (cu_seq_q, cu_seq_k):
+                spmd.mutate_type(cu_seq, MeshAxisName.CP, src=spmd.R, dst=spmd.V)
         chunk_len = end - start
         return VarlenAttentionMetadata(
             cu_seq_q=cu_seq_q,
@@ -384,15 +396,18 @@ class _KVAllGatherVarlenBase(
         cp_metadata = attention_metadata
         left = varlen_attention.window_size[0]
 
-        k_THK, v_THV = _all_gather_kv(
+        gathered_k_THK, gathered_v_THV = _all_gather_kv(
             k_THK,
             v_THV,
             reduce_dtype=self.reduce_dtype,
         )
         with spmd.no_typecheck():
             restore_indices = cp_metadata.kv_restore_indices
-            k_THK = k_THK.index_select(0, restore_indices)
-            v_THV = v_THV.index_select(0, restore_indices)
+            k_THK = gathered_k_THK.index_select(0, restore_indices)
+            v_THV = gathered_v_THV.index_select(0, restore_indices)
+        if spmd.is_type_checking():
+            spmd.assert_type_like(k_THK, gathered_k_THK)
+            spmd.assert_type_like(v_THV, gathered_v_THV)
 
         cp_group = spmd_mesh_group(MeshAxisName.CP)
         assert cp_group is not None

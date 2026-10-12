@@ -101,3 +101,38 @@ On a Transformer block those views mean:
   unchanged; only the sparse view regroups.
 
 Same eight GPUs in every case. Raising EP does not grow `world_size`.
+
+## Saving the layout
+
+Set `config.parallelism.save_parallelism_folder = "parallelism"` in the recipe
+to have `ParallelismContext.from_config` build the meshes and have every rank
+`r` write `<dump_folder>/parallelism/rank_<r>.json`. All ranks write the same
+fields and no collective is involved. For example, rank 5 with `pp=2`,
+`dp_shard=2`, `cp=2`, `ep=2` (indented here for reading):
+
+```json
+{
+  "host": "node-b",
+  "local_rank": 1,
+  "global_rank": 5,
+  "world_size": 8,
+  "degrees": {"pp": 2, "dp_replicate": 1, "dp_shard": 2, "cp": 2, "tp": 1, "ep": 2},
+  "meshes": {
+    "loss": {"axis_names": ["loss_mesh"], "mesh": [4, 5, 6, 7]},
+    "dense": {
+      "axis_names": ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
+      "mesh": [[[[[0], [1]], [[2], [3]]]], [[[[4], [5]], [[6], [7]]]]]
+    },
+    ...
+  }
+}
+```
+
+`meshes` holds this rank's view of every mesh in `_global_meshes`: the dense
+storage and sparse views above, and the `loss`, `spmd_dense_for_fwdbwd` and
+`spmd_sparse_for_fwdbwd` meshes sliced from them. A full mesh like `dense` is
+the same in every file. A sliced mesh only holds the submesh containing the
+rank, so `loss` above is `[4, 5, 6, 7]` on ranks 4-7 and `[0, 1, 2, 3]` on
+ranks 0-3; reading all files gives every submesh. A mesh is the nested list of
+global ranks; the ranks that share a group along an axis are the ones that
+differ only in that axis's coordinate.

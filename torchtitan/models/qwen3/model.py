@@ -12,13 +12,12 @@ import torch
 import torch.nn as nn
 import torch_remat as remat
 
-from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.utils import (
+from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
@@ -63,6 +62,7 @@ class Qwen3TransformerBlock(TransformerBlock):
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ):
         attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
@@ -70,13 +70,18 @@ class Qwen3TransformerBlock(TransformerBlock):
         x = x + attn_out
 
         if self.moe_enabled:
-            ffn_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+            ffn_out = self.moe(
+                self.ffn_norm(x),
+                padding_mask_T=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
+            )
         else:
             ffn_out = self.feed_forward(self.ffn_norm(x))
-        # The residual add reads the MoE / feed-forward output with bare ops.
-        remat.recompute_needs_tensor(ffn_out)
-        x = x + ffn_out
-        return x
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x, ffn_out)
 
 
 class Qwen3Model(Decoder):
@@ -86,9 +91,11 @@ class Qwen3Model(Decoder):
     def _register_optimizer_hooks(
         cls, optimizers, model_parts, parallelism_context
     ) -> None:
+        from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
         from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+        register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
     """
     Qwen3Model Module
@@ -102,7 +109,12 @@ class Qwen3Model(Decoder):
         dim: int = 1024
         vocab_size: int = 151936
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu", "cos_sin_rope"]
+            default_factory=lambda: [
+                "loss",
+                "fused_binary_activation",
+                "cos_sin_rope",
+                "fp32_to_bf16_split",
+            ]
         )
 
         def get_nparams_and_flops(
@@ -124,15 +136,6 @@ class Qwen3Model(Decoder):
                     seq_len=seq_len,
                 )
             return nparams, 6 * active_nparams + attention_op_flops
-
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_qwen3_sharding_config
-
-            set_qwen3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
 
     def __init__(self, config: Config):
         super().__init__(config)

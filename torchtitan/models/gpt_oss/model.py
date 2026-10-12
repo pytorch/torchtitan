@@ -18,6 +18,7 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttentionMetadata,
@@ -27,13 +28,12 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rope import RoPE
-from torchtitan.models.utils import (
+from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
-from torchtitan.protocols.module import Module
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.rope import RoPE
 
 from .state_dict_adapter import GptOssStateDictAdapter
 
@@ -164,6 +164,7 @@ class GptOssTransformerBlock(TransformerBlock):
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Transformer block.
@@ -182,11 +183,16 @@ class GptOssTransformerBlock(TransformerBlock):
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
-        moe_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
-        # The residual add reads the MoE output with bare ops.
-        remat.recompute_needs_tensor(moe_out)
-        x = x + moe_out
-        return x
+        moe_out = self.moe(
+            self.ffn_norm(x),
+            padding_mask_T=padding_mask,
+            aux_loss_denominator=aux_loss_denominator,
+        )
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x, moe_out)
 
 
 class GptOssModel(Decoder):
@@ -196,9 +202,11 @@ class GptOssModel(Decoder):
     def _register_optimizer_hooks(
         cls, optimizers, model_parts, parallelism_context
     ) -> None:
+        from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
         from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+        register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
     """
     GPT-OSS Transformer model with attention and feed-forward layers.
@@ -209,7 +217,12 @@ class GptOssModel(Decoder):
         dim: int = 2880
         vocab_size: int = 201088
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu", "cos_sin_rope"]
+            default_factory=lambda: [
+                "loss",
+                "fused_binary_activation",
+                "cos_sin_rope",
+                "fp32_to_bf16_split",
+            ]
         )
 
         def get_nparams_and_flops(
@@ -228,15 +241,6 @@ class GptOssModel(Decoder):
                 )
             return nparams, 6 * active_nparams + attention_op_flops
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_gpt_oss_sharding_config
-
-            set_gpt_oss_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
     def __init__(self, config: Config):
         super().__init__(config)
 
@@ -249,7 +253,6 @@ class GptOssModel(Decoder):
         local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> GptOssModel:
         if parallelism_context.cp_enabled and any(
             isinstance(backend, UlyssesInnerAttention.Config)
@@ -267,5 +270,4 @@ class GptOssModel(Decoder):
             local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
-            skip_dp=skip_dp,
         )

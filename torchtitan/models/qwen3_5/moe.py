@@ -69,8 +69,7 @@ class SigmoidGatedFeedForward(FeedForward):
         # w13, gate, and w2 declare their own remat regions.
         gate_up_T2F, gate_out_T1 = self._gather_shared_input_and_compute_projections(x)
         remat.recompute_needs_tensor(gate_up_T2F)
-        gate_TF, up_TF = gate_up_T2F.unbind(-2)
-        out_TD = self.w2(self.activation_fn(gate_TF, up_TF))
+        out_TD = self.w2(self.activation_fn(gate_up_T2F))
         remat.recompute_needs_tensor(out_TD, gate_out_T1)
         return sigmoid_gate(gate_out_T1, out_TD)
 

@@ -74,7 +74,6 @@ pip install -r torchtitan/rl/examples/dapo_math/requirements.txt
 
 python scripts/download_hf_assets.py \
   --repo_id Qwen/Qwen3-4B-Base \
-  --local_dir torchtitan/rl/example_checkpoint \
   --all
 ```
 
@@ -98,6 +97,6 @@ TODO: add eval results. Add 32k variant.
 
 The plots below were generated on July 20, 2026 from commit [`fec3e196`](https://github.com/felipemello1/torchtitan/commit/fec3e196a4ceb87bfc87fb4f1a36a538d7e98ee4).
 
-![Qwen3-4B DAPO Math-Verify reward](./assets/qwen3_4b_7k_reward.png)
+![Qwen3-4B DAPO Math-Verify reward](../../../../assets/images/rl_dapo_math_qwen3_4b_7k_reward.png)
 
-![Qwen3-4B DAPO mean response length](./assets/qwen3_4b_7k_response_length.png)
+![Qwen3-4B DAPO mean response length](../../../../assets/images/rl_dapo_math_qwen3_4b_7k_response_length.png)

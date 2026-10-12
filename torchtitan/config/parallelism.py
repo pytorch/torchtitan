@@ -158,7 +158,7 @@ class ParallelismConfig:
     reshard placement. ``"auto"`` uses ``min(pp_rank + 2,
     pp_max_unsharded_active_stages)``. ``"full"`` uses the complete residency
     window. A tuple supplies one positive value per pipeline rank for expert
-    tuning. See ``docs/composability.md`` for the detailed contract.
+    tuning. See ``torchtitan/distributed/PIPELINE_PARALLEL.md`` for the detailed contract.
     """
 
     context_parallel_degree: int = 1
@@ -181,6 +181,13 @@ class ParallelismConfig:
     dp_shard * cp * tp == edp_shard * ep. EP borrows ranks from FSDP and TP:
     edp_shard = dp_shard * cp * tp / ep.
     pp and dp_replicate are outer dimensions unaffected by this constraint.
+    """
+
+    save_parallelism_folder: str | None = None
+    """
+    Folder, relative to dump_folder, to save the device-mesh layout into while
+    the parallelism context is built: each rank writes its host, local rank
+    and view of every global mesh to ``rank_<r>.json``. None disables it.
     """
 
     def __post_init__(self):

@@ -18,7 +18,7 @@ from renderers.base import ParsedToolCall
 
 from torchtitan.rl.examples.search_r1.data import SearchR1Sample
 
-from torchtitan.rl.rollout.environment import (
+from torchtitan.rl.rollout.message_env import (
     MessageEnv,
     MessageEnvInitOutput,
     MessageEnvStepOutput,

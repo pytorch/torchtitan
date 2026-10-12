@@ -9,9 +9,10 @@ from dataclasses import dataclass, field
 import torch
 import torch_remat as remat
 
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.module import Module
 
 # Shape suffix legend:
 #   T = token dimensions, D = model dimension, F = feed-forward hidden dimension
@@ -62,6 +63,5 @@ class FeedForward(Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # w13 and w2 declare their own remat regions.
         gate_up_T2F = self.w13(x)
-        gate_TF, up_TF = gate_up_T2F.unbind(-2)
-        remat.recompute_needs_tensor(gate_TF, up_TF)
-        return self.w2(self.activation_fn(gate_TF, up_TF))
+        remat.recompute_needs_tensor(gate_up_T2F)
+        return self.w2(self.activation_fn(gate_up_T2F))

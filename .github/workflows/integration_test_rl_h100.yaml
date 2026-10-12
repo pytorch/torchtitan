@@ -58,26 +58,9 @@ jobs:
 
         python -m pip install uv
 
-        uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
-
-        uv pip install --upgrade torch torchvision vllm xformers --pre \
-          --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
-          --index-strategy unsafe-best-match \
-          --constraint .ci/docker/requirements.txt
-        python -c '
-        from importlib.metadata import version
-        wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
-        print(wheels)
-        assert all(".dev" in wheel and "+cu132" in wheel for wheel in wheels.values()), wheels
-        '
-
-        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
-        uv pip install "flash-attn-4[cu13]>=4.0.0b31"
-        uv pip install flash-attn-3 \
-          --extra-index-url https://download.pytorch.org/whl/test/cu130 \
-          --index-strategy unsafe-best-match
-        uv pip uninstall tilelang
-        uv pip install nvidia-cuda-nvcc
+        # Monarch and the shared RL deps are in the image; nvcc lets FlashInfer
+        # JIT-compile kernels.
+        bash scripts/install_rl_env.sh --skip-base --flash-attn 3,4 --nvcc
 
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
@@ -99,5 +82,5 @@ jobs:
         RL_TEST_DUMP_FOLDER="$OUTPUT_DIR" torchrun --nproc-per-node=1 -m pytest \
           tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen -v
 
-        python -m tests.rl.integration_tests.rl "$OUTPUT_DIR" --ngpu 8 \
-          --test_suite kda
+        python -m tests.integration_tests.run_tests "$OUTPUT_DIR/integration" \
+          --ngpu 8 --test_suite rl_kda

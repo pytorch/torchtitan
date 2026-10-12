@@ -25,26 +25,31 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import LMHeadCastConverter
+from torchtitan.config.transform import LMHeadFP32OutputConverter
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
+from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.examples.verifiers import (
-    GenerationServer,
-    RewardFromVerifiers,
-    VerifiersEnvServer,
-    VerifiersRollouter,
+from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
+from torchtitan.rl.examples.verifiers.data import (
+    register_local_taskset_alias,
     VerifiersTaskDataset,
 )
-from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
-from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
+from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
+from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
+from torchtitan.rl.examples.verifiers.rollouter import (
+    RewardFromVerifiers,
+    VerifiersRollouter,
+)
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.losses import DAPOLoss
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.rubric import Rubric
+from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
+
+from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
 # TODO: Enable CUDA graphs for RL trainers after eager/graph numerics parity is
 # verified.
@@ -61,14 +66,13 @@ def _verifiers_math_rollouter_config(
     *, max_rollout_tokens: int
 ) -> VerifiersRollouter.Config:
     return VerifiersRollouter.Config(
-        train_dataset=VerifiersTaskDataset.Config(
-            verifiers_taskset=_math_taskset_config("dapo_math"),
-            seed=42,
+        training_dataloader=IterableRLDataLoader.Config(
+            dataset=VerifiersTaskDataset.Config(
+                verifiers_taskset=_math_taskset_config("dapo_math")
+            ),
         ),
         validation_dataset=VerifiersTaskDataset.Config(
             verifiers_taskset=_math_taskset_config("aime2025"),
-            seed=99,
-            shuffle=False,
         ),
         verifiers_env_server=VerifiersEnvServer.Config(
             environment=vf.SingleAgentEnvConfig(
@@ -101,22 +105,33 @@ def _qwen3_4b_verifiers_config(
 ) -> Controller.Config:
     """Build the Qwen3-4B DAPO-Math configuration using Verifiers."""
     num_validation_samples = 30
-    model_config = build_model_config(
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=2,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=1,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_model_config,
         "4B",
         seq_len=max_total_tokens,
         attn_backend="varlen",
-        converters=[LMHeadCastConverter.Config()],
+        converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-4B-Base",
+        hf_assets_path="./assets/hf/Qwen3-4B-Base",
         dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
             num_training_steps=150,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=16,
             target_offpolicy_steps=4,
-            validation=ValidationConfig(num_samples=num_validation_samples),
+            validation=ValidationConfig(steps=num_validation_samples),
         ),
         rollouter=_verifiers_math_rollouter_config(max_rollout_tokens=max_total_tokens),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
@@ -131,6 +146,7 @@ def _qwen3_4b_verifiers_config(
             ],
         ),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[
@@ -152,11 +168,7 @@ def _qwen3_4b_verifiers_config(
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
                 max_context_length=max_total_tokens,
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_replicate_degree=1,
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=100,
@@ -168,16 +180,14 @@ def _qwen3_4b_verifiers_config(
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
-                    global_vocab_size=decoder_vocab_size(model_config),
+                    global_vocab_size=decoder_vocab_size(trainer_model),
                 ),
             ),
         ),
         generator=VLLMGenerator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=1,
-            ),
+            parallelism=generator_parallelism,
             cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
             checkpointer=None,
             sampling=SamplingConfig(

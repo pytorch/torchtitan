@@ -7,6 +7,7 @@
 from dataclasses import dataclass, field
 from typing import cast, TYPE_CHECKING
 
+import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
@@ -14,20 +15,20 @@ from torch import nn
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.base.module import ModuleList
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.flops import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
     roll_mtp_sequence,
 )
-from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
-from torchtitan.protocols.module import ModuleList
 
 from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
@@ -76,6 +77,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ):
         """Run one DeepSeek V4 decoder block.
 
@@ -91,7 +93,13 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         """
         residual = x
         x, post, comb = self.hc_attn_pre(x)
-        x = self.attention(self.attention_norm(x), attention_metadata, positions)
+        x = self.attention(
+            self.attention_norm(x),
+            attention_metadata,
+            positions,
+            aux_loss_denominator=aux_loss_denominator,
+            padding_mask=padding_mask,
+        )
         # hc_post reads the attention output (wo_b projection) with bare ops.
         remat.recompute_needs_tensor(x)
         x = self.hc_post(x, residual, post, comb)
@@ -104,10 +112,15 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
                 x = self.moe(
                     ffn_input,
                     padding_mask_T=padding_mask,
+                    aux_loss_denominator=aux_loss_denominator,
                     input_ids_T=input_ids_T,
                 )
             else:
-                x = self.moe(ffn_input, padding_mask_T=padding_mask)
+                x = self.moe(
+                    ffn_input,
+                    padding_mask_T=padding_mask,
+                    aux_loss_denominator=aux_loss_denominator,
+                )
         else:
             x = self.feed_forward(self.ffn_norm(x))
         # hc_post reads the MoE / feed-forward output with bare ops.
@@ -125,9 +138,11 @@ class DeepSeekV4Model(Decoder):
     def _register_optimizer_hooks(
         cls, optimizers, model_parts, parallelism_context
     ) -> None:
+        from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
         from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+        register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
     def _apply_fsdp(
         self,
@@ -165,7 +180,11 @@ class DeepSeekV4Model(Decoder):
         dim: int
         vocab_size: int
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu"]
+            default_factory=lambda: [
+                "loss",
+                "fused_binary_activation",
+                "fp32_to_bf16_split",
+            ]
         )
         hc_mult: int = 4
         n_mtp_layers: int = 0
@@ -225,15 +244,6 @@ class DeepSeekV4Model(Decoder):
 
             return nparams, 6 * active_nparams + attention_op_flops
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_deepseek_v4_sharding_config
-
-            set_deepseek_v4_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size
 
@@ -275,6 +285,7 @@ class DeepSeekV4Model(Decoder):
         positions: torch.Tensor | None = None,
         attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
@@ -289,6 +300,10 @@ class DeepSeekV4Model(Decoder):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         h = h.unsqueeze(1).repeat(1, self.hc_mult, 1)
 
+        with spmd.no_typecheck():
+            main_aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
         for i in range(self.n_main_layers):
             layer = self.layers[str(i)]
             layer_attention_metadata = (
@@ -304,6 +319,7 @@ class DeepSeekV4Model(Decoder):
                 layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
+                aux_loss_denominator=main_aux_loss_denominator,
             )
 
         prev_hc_hidden = h
@@ -321,10 +337,11 @@ class DeepSeekV4Model(Decoder):
             attention_metadata,
             positions,
             padding_mask,
+            aux_loss_denominators,
         )
-        return [
+        return tuple(
             self.lm_head(item) if self.lm_head is not None else item for item in outputs
-        ]
+        )
 
     def mtp_forward(
         self,
@@ -333,6 +350,7 @@ class DeepSeekV4Model(Decoder):
         attention_metadata: AttentionMetadataMap | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
         """Run auxiliary MTP depths and return prediction hidden states."""
         mtp_outputs = []
@@ -352,6 +370,12 @@ class DeepSeekV4Model(Decoder):
                     cast(TransformerBlock, mtp_block).attention.attention_metadata_key
                 )
             )
+            with spmd.no_typecheck():
+                aux_loss_denominator = (
+                    None
+                    if aux_loss_denominators is None
+                    else aux_loss_denominators[depth]
+                )
             prev_hc_hidden, prediction_hidden = mtp_block(
                 self.tok_embeddings(mtp_tokens),
                 prev_hc_hidden,
@@ -360,6 +384,7 @@ class DeepSeekV4Model(Decoder):
                 layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
             )
             mtp_outputs.append(prediction_hidden)
         return mtp_outputs

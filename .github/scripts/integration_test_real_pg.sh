@@ -76,11 +76,12 @@ python -m tests.integration_tests.run_tests \
   --test_suite "${TEST_SUITE}" --execution_mode real_pg --ngpu 8 \
   $EXPORT_ARG $TEST_NAME_ARG $TEST_SCOPE_ARG \
   "$RUNNER_ARTIFACT_DIR" || status=$?
-# FLUX is a separate runner only because it does not fit in run_tests.
-# Always run it on the models job, then fail if either suite failed.
+# Run the FLUX suite on the models job, then fail if either suite failed.
 if [[ "${TEST_SUITE}" == "models" ]]; then
-  python -m tests.integration_tests.flux \
-    --execution_mode real_pg --ngpu 8 \
+  python -m tests.integration_tests.run_tests \
+    --gpu_arch_type "${GPU_ARCH_TYPE}" \
+    --gpu_arch "$GPU_ARCH" \
+    --test_suite flux --execution_mode real_pg --ngpu 8 \
     $TEST_NAME_ARG $TEST_SCOPE_ARG \
     "$RUNNER_ARTIFACT_DIR/flux" || status=$?
 fi

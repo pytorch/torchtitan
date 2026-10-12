@@ -85,7 +85,7 @@ def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
     from .mxfp8 import MXFP8Linear
     from .mxfp8.experts import _mxfp8_grouped_linear_cache
-    from .nvfp4 import NVFP4Linear
+    from .nvfp4 import _nvfp4_grouped_linear_cache, NVFP4Linear
 
     quant_linear_types: list[type] = []
     if MXFP8Linear is not None:
@@ -99,7 +99,10 @@ def has_quantization(model_config) -> bool:
     )
     quant_grouped_linear_types = tuple(
         cls.Config  # type: ignore[attr-defined]
-        for cls in _mxfp8_grouped_linear_cache.values()
+        for cls in (
+            *_mxfp8_grouped_linear_cache.values(),
+            *_nvfp4_grouped_linear_cache.values(),
+        )
     )
     has_quant_moe = bool(quant_grouped_linear_types) and any(
         isinstance(config, quant_grouped_linear_types)

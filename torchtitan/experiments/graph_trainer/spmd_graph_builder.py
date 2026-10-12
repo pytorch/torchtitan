@@ -60,7 +60,7 @@ def make_fwd_bwd_step(model, loss_fn):
     """Return a function that computes loss and explicit parameter gradients.
 
     Calling convention:
-        ``(inputs, labels, global_valid_tokens, extra_kwargs)``
+        ``(inputs, labels, global_loss_token_counts, extra_kwargs)``
         ``-> (loss, *parameter_gradients)``
 
     ``model`` and ``loss_fn`` are captured in the closure so neither shows up
@@ -68,7 +68,7 @@ def make_fwd_bwd_step(model, loss_fn):
     to thread its parameters/buffers as static graph inputs.
     """
 
-    def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_kwargs):
+    def fwd_bwd_step(inputs, labels, global_loss_token_counts, extra_kwargs):
         pred = model(inputs, **extra_kwargs)
         # The loss function is not a submodule of the model, so
         # annotate_module_fqns won't tag it. Annotate it here so that
@@ -78,7 +78,7 @@ def make_fwd_bwd_step(model, loss_fn):
             loss_fn,
             pred,
             labels,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
         )
         named_params = [
             (name, parameter)
@@ -144,11 +144,11 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
         grad_accumulators: list[Any] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, list[Any]]:
-        global_valid_tokens = loss_kwargs["global_valid_tokens"]
+        global_loss_token_counts = loss_kwargs["global_loss_token_counts"]
         outputs = self._run(
             self._model_input(args),
             target,
-            global_valid_tokens,
+            global_loss_token_counts,
             kwargs,
         )
         if len(outputs) != self.num_param_grads + 1:
@@ -308,11 +308,11 @@ def _trace_spmd_stage_graph(
         )
 
     # Calling convention:
-    # (model_input, target, global_valid_tokens, model_kwargs)
+    # (model_input, target, global_loss_token_counts, model_kwargs)
     runtime_args: tuple[Any, Any, Any, dict[str, Any]] = (
         args[0],
         target,
-        loss_kwargs["global_valid_tokens"],
+        loss_kwargs["global_loss_token_counts"],
         kwargs,
     )
     traced: TracedResult

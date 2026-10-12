@@ -305,23 +305,23 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         _build_test_stage_graphs(stage, (x,), {}, target, {})
 
     def test_compute_annotated_loss_uses_loss_kwargs_and_unwraps_metrics(self) -> None:
-        def loss_fn(pred, target, *, global_valid_tokens):
-            return ((pred - target) ** 2).sum() / global_valid_tokens, {
+        def loss_fn(pred, target, *, global_loss_token_counts):
+            return ((pred - target) ** 2).sum() / global_loss_token_counts, {
                 "ignored": pred.sum()
             }
 
         pred = torch.randn(2, 4)
         target = torch.randn(2, 4)
-        global_valid_tokens = torch.tensor(2.0)
+        global_loss_token_counts = torch.tensor(2.0)
 
         loss = compute_annotated_loss(
             loss_fn,
             pred,
             target,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
         )
 
-        self.assertEqual(loss, ((pred - target) ** 2).sum() / global_valid_tokens)
+        self.assertEqual(loss, ((pred - target) ** 2).sum() / global_loss_token_counts)
 
     def test_prepare_fwd_user_args_allows_absent_args_and_kwargs(self) -> None:
         stage = types.SimpleNamespace(is_first=True, is_last=False)
@@ -769,7 +769,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         result = runner.eval(
             torch.ones(2),
             target=torch.ones(2),
-            loss_kwargs={"global_valid_tokens": torch.tensor(2.0)},
+            loss_kwargs={"global_loss_token_counts": torch.tensor(2.0)},
         )
 
         self.assertEqual(result, "eval-result")
@@ -1036,7 +1036,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 (x,),
                 {},
                 target,
-                {"global_valid_tokens": torch.tensor(8)},
+                {"global_loss_token_counts": torch.tensor(8)},
                 loss_fn=loss_fn,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
@@ -1078,7 +1078,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 (x,),
                 {},
                 target,
-                {"global_valid_tokens": torch.tensor(8)},
+                {"global_loss_token_counts": torch.tensor(8)},
                 loss_fn=loss_fn,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
@@ -1094,7 +1094,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (x,),
             {},
             target,
-            {"global_valid_tokens": torch.tensor(8)},
+            {"global_loss_token_counts": torch.tensor(8)},
             unsharded_param_values=unsharded_params,
             buffer_values=flat_buffers,
             runtime_validate=True,
@@ -1103,7 +1103,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (x,),
             {},
             target,
-            {"global_valid_tokens": torch.tensor(8)},
+            {"global_loss_token_counts": torch.tensor(8)},
             unsharded_param_values=unsharded_params,
             buffer_values=flat_buffers,
             grad_accumulators=accumulators,
@@ -2122,8 +2122,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         torch.manual_seed(0)
         model = nn.Linear(4, 3)
 
-        def loss_fn(pred, target, global_valid_tokens):
-            return ((pred - target) ** 2).sum() / global_valid_tokens
+        def loss_fn(pred, target, global_loss_token_counts):
+            return ((pred - target) ** 2).sum() / global_loss_token_counts
 
         stage = _make_test_stage(
             model,
@@ -2133,14 +2133,14 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
         x = torch.randn(2, 4, requires_grad=True)
         target = torch.randn(2, 3)
-        global_valid_tokens = torch.tensor(2.0)
+        global_loss_token_counts = torch.tensor(2.0)
 
         _build_test_stage_graphs(
             stage,
             (x,),
             {},
             target,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
         )
         self.assertEqual(stage.graphs.meta.partition.backward_grad_input_names, ())
         self.assertEqual(stage.graphs.meta.partition.backward_grad_input_indices, ())
@@ -2150,11 +2150,11 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (x,),
             {},
             target,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
             unsharded_param_values=state,
             buffer_values=[],
         )
-        expected_loss = loss_fn(model(x), target, global_valid_tokens)
+        expected_loss = loss_fn(model(x), target, global_loss_token_counts)
         self.assertTrue(torch.allclose(loss, expected_loss))
 
         input_grads, param_grads = stage.graphs.full_backward(
@@ -2202,14 +2202,14 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
         x = torch.randn(16, 16, requires_grad=True)
         labels = torch.randint(0, 33, (16,))
-        global_valid_tokens = torch.tensor(float(labels.numel()))
+        global_loss_token_counts = torch.tensor(float(labels.numel()))
 
         _build_test_stage_graphs(
             stage,
             (x,),
             {},
             labels,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
         )
 
         state = list(model.parameters())
@@ -2217,7 +2217,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (x,),
             {},
             labels,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
             unsharded_param_values=state,
             buffer_values=[],
         )
@@ -2226,7 +2226,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (),
         )
 
-        expected_loss, _ = loss_fn(model(x), labels, global_valid_tokens)
+        expected_loss, _ = loss_fn(model(x), labels, global_loss_token_counts)
         expected_grads = torch.autograd.grad(
             expected_loss,
             [*model.parameters(), x],

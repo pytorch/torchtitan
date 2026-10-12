@@ -25,8 +25,8 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import Configurable, Function
+from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.observability import structured_logger as sl
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
 from torchtitan.tools.garbage_collector import GarbageCollector
 
@@ -224,6 +224,16 @@ class BaseCheckpointManager(Configurable, ABC):
     _storage: CheckpointStorage
 
     _STEP_DIR_PATTERN = r"step-(0|[1-9]\d*)"
+
+    @staticmethod
+    def _validate_extra_state_keys(extra_states: dict[str, Any]) -> None:
+        """Reject workflow state keys owned by the checkpoint manager."""
+        collisions = extra_states.keys() & {MODEL, OPTIMIZER, LR_SCHEDULER, EMA}
+        if collisions:
+            raise ValueError(
+                "extra_states contains checkpoint-manager-owned keys: "
+                f"{sorted(collisions)}"
+            )
 
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:

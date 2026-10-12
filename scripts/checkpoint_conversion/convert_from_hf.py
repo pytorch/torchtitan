@@ -9,7 +9,6 @@ from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torchtitan.components.checkpointer import ModelWrapper
 
 if __package__:
@@ -41,7 +40,7 @@ def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
     hf_state_dict = sd_adapter.to_hf(state_dict)
     dcp.load(
         hf_state_dict,
-        storage_reader=HuggingFaceStorageReader(path=input_dir),
+        storage_reader=sd_adapter.get_hf_storage_reader(str(input_dir)),
     )
     # convert state dict format back hf->tt and save
     state_dict = sd_adapter.from_hf(hf_state_dict)

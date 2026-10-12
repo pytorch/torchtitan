@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from collections import defaultdict
 from collections.abc import Iterable
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -32,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallelism_context import ParallelismContext
+
+
+def get_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Return a DTensor's local shard without adding an autograd operation."""
+    return tensor._local_tensor if isinstance(tensor, DTensor) else tensor
 
 
 def _dist_reduce(
@@ -244,28 +250,6 @@ def set_determinism(
         )
 
 
-def enable_fp32_matmul_emulation_with_bf16x9() -> None:
-    """Enable BF16x9 emulation for FP32 CUDA matmuls where supported."""
-    if (
-        device_type != "cuda"
-        or not torch.cuda.is_available()
-        or torch.version.hip is not None
-        or torch.cuda.get_device_capability() < (10, 0)
-    ):
-        return
-
-    try:
-        torch.backends.cuda.matmul.fp32_precision = "bfx9"
-    except (AttributeError, RuntimeError, ValueError) as exc:
-        raise ValueError(
-            "TorchTitan on NVIDIA GPUs with compute capability 10.0 or later "
-            "requires PyTorch with CUDA BFX9 matmul support "
-            "(pytorch/pytorch#195301) and CUDA 12.9 or later."
-        ) from exc
-
-    logger.info("Enabled BF16x9 emulation for FP32 CUDA matmuls")
-
-
 def init_fake_mode(
     world_size: int,
     *,
@@ -393,8 +377,6 @@ def init_distributed(
     pipeline_parallel_degree: int = 1,
 ) -> DistributedTopology:
     """Initialize communication and return the logical distributed topology."""
-    enable_fp32_matmul_emulation_with_bf16x9()
-
     # Skip initialization if already initialized
     if torch.distributed.is_initialized():
         logger.warning(
@@ -524,7 +506,6 @@ def clip_grad_norm_(
     error_if_nonfinite: bool = False,
     foreach: bool | None = None,
     pp_mesh: DeviceMesh | None = None,
-    ep_enabled: bool = False,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.
@@ -533,6 +514,15 @@ def clip_grad_norm_(
     `torch.nn.utils.clip_grad_norm_` only computes gradient norm along DP/FSDP/TP dimensions.
     We need to manually reduce the gradient norm across PP stages.
     See https://github.com/pytorch/torchtitan/issues/596 for details.
+
+    Gradients are not always on the same DTensor mesh. For example:
+    - With EP, routed experts use the sparse mesh while all other parameters
+      use the dense mesh.
+    - With CP, the decoder is FSDP-sharded over dp_shard and cp. The vision
+      encoder is much smaller, so we deliberately do not apply CP to it and
+      shard it over dp_shard only. The two therefore use different meshes.
+    We compute the norm for each mesh separately, then combine them into
+    one total norm.
 
     Args:
         parameters: an iterable of Tensors or a single Tensor that will have gradients normalized
@@ -547,43 +537,54 @@ def clip_grad_norm_(
             fall back to the slow implementation for other device types.
             Default: ``None``
         pp_mesh: Pipeline Parallel device mesh. If not None, will reduce gradient norm across PP stages.
-        ep_dense_params_mesh_ndim: Mesh ndim of the dense params when EP is used. If EP is not used,
-            set it to ``None``.
 
     Returns:
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
-    if ep_enabled:
-        return _clip_grad_norm_with_ep(
-            parameters,
-            max_norm,
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+
+    # get_total_norm stacks per-parameter norms, so all gradients passed to it
+    # must be on the same mesh. Meshes can differ even over the same devices:
+    # FSDP over dp_shard and cp gives a (dp_shard_cp, tp) mesh, while FSDP
+    # over dp_shard alone keeps (dp_shard, cp, tp). So group gradients by mesh.
+    params_by_mesh: dict[DeviceMesh | None, list[torch.Tensor]] = defaultdict(list)
+    for p in parameters:
+        if p.grad is not None:
+            mesh = p.grad.device_mesh if isinstance(p.grad, DTensor) else None
+            params_by_mesh[mesh].append(p)
+
+    norms = []
+    # An empty list yields tensor(0.), e.g. on a PP rank without gradients.
+    for params in params_by_mesh.values() or [[]]:
+        norm = torch.nn.utils.get_total_norm(
+            [p.grad for p in params if p.grad is not None],
             norm_type,
             error_if_nonfinite,
             foreach,
-            pp_mesh,
         )
+        # If norm is a DTensor, the placements must be
+        # `torch.distributed._tensor.ops.math_ops._NormPartial`. We can simply
+        # reduce the DTensor to get the norm in this tensor's process group
+        # and then convert it to a local tensor.
+        # NOTE: It has two purposes:
+        #       1. to make sure the total norm is computed correctly when PP
+        #          is used (see below)
+        #       2. to return a reduced total_norm tensor whose .item() would
+        #          return the correct value
+        if isinstance(norm, DTensor):
+            # Will reach here if any non-PP parallelism is used.
+            # If only using PP, norm will be a local tensor.
+            norm = norm.full_tensor()
+        norms.append(norm)
 
-    if isinstance(parameters, torch.Tensor):
-        parameters = [parameters]
+    if len(norms) == 1:
+        total_norm = norms[0]
+    elif math.isinf(norm_type):
+        total_norm = torch.stack(norms).amax()
     else:
-        # prevent generators from being exhausted
-        parameters = list(parameters)
-    grads = [p.grad for p in parameters if p.grad is not None]
-    total_norm = torch.nn.utils.get_total_norm(
-        grads, norm_type, error_if_nonfinite, foreach
-    )
-
-    # If total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`.
-    # We can simply reduce the DTensor to get the total norm in this tensor's process group
-    # and then convert it to a local tensor.
-    # NOTE: It has two purposes:
-    #       1. to make sure the total norm is computed correctly when PP is used (see below)
-    #       2. to return a reduced total_norm tensor whose .item() would return the correct value
-    if isinstance(total_norm, DTensor):
-        # Will reach here if any non-PP parallelism is used.
-        # If only using PP, total_norm will be a local tensor.
-        total_norm = total_norm.full_tensor()
+        total_norm = sum(norm**norm_type for norm in norms) ** (1.0 / norm_type)
 
     if pp_mesh is not None:
         if math.isinf(norm_type):
@@ -593,73 +594,6 @@ def clip_grad_norm_(
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
             total_norm **= 1.0 / norm_type
 
-    torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
-    return total_norm
-
-
-@torch.no_grad()
-def _clip_grad_norm_with_ep(
-    parameters: torch.Tensor | Iterable[torch.Tensor],
-    max_norm: float,
-    norm_type: float,
-    error_if_nonfinite: bool,
-    foreach: bool | None,
-    pp_mesh: DeviceMesh | None,
-) -> torch.Tensor:
-    ep_params = []
-    non_ep_params = []
-    ep_grads = []
-    non_ep_grads = []
-
-    for p in parameters:
-        if p.grad is None:
-            continue
-        assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
-        mesh_dim_names = p.device_mesh.mesh_dim_names
-        assert mesh_dim_names is not None
-        if "ep" in mesh_dim_names:
-            ep_params.append(p)
-            ep_grads.append(p.grad)
-        else:
-            non_ep_params.append(p)
-            non_ep_grads.append(p.grad)
-
-    # Either list can be empty depending on the parallelization strategy:
-    # - In torchtitan with separate dense/sparse meshes, both lists are typically non-empty
-    # - In autoparallel, all params may live on a single sparse mesh with "ep" dimension,
-    #   so non_ep_grads would be empty
-    # - In PP + EP setups, certain PP ranks may only own EP or non-EP layers
-    ep_grads_total_norm = torch.nn.utils.get_total_norm(
-        ep_grads, norm_type, error_if_nonfinite, foreach
-    )
-    # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
-    if isinstance(ep_grads_total_norm, DTensor):
-        ep_grads_total_norm = ep_grads_total_norm.full_tensor()
-
-    non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
-        non_ep_grads, norm_type, error_if_nonfinite, foreach
-    )
-    # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
-    if isinstance(non_ep_grads_total_norm, DTensor):
-        non_ep_grads_total_norm = non_ep_grads_total_norm.full_tensor()
-
-    if math.isinf(norm_type):
-        total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
-    else:
-        total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-        )
-        total_norm **= 1.0 / norm_type
-
-    if pp_mesh is not None:
-        if math.isinf(norm_type):
-            dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
-        else:
-            total_norm **= norm_type
-            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
-            total_norm **= 1.0 / norm_type
-
-    torch.nn.utils.clip_grads_with_norm_(ep_params, max_norm, total_norm, foreach)
-    torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
-
+    for params in params_by_mesh.values():
+        torch.nn.utils.clip_grads_with_norm_(params, max_norm, total_norm, foreach)
     return total_norm
