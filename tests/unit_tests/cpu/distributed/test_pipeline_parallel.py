@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
+from torch.distributed._mesh_layout import _MeshLayout
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.context_parallel import (
@@ -18,6 +19,7 @@ from torchtitan.distributed.context_parallel import (
 )
 from torchtitan.distributed.pipeline_parallel import (
     _build_decoder_stage_io,
+    _build_get_mesh_callback,
     _build_pipeline_schedule,
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
@@ -26,6 +28,17 @@ from torchtitan.distributed.pipeline_parallel import (
     _unsupported_static_split,
 )
 from torchtitan_recipes.tests.models.llama3 import build_model_config
+
+
+def test_pipeline_mesh_callback_enforces_the_requested_layout():
+    layout = _MeshLayout.from_sizes_strides((2,))
+    mesh = SimpleNamespace(_layout=layout)
+    context = SimpleNamespace(get_mesh=lambda axes: mesh)
+    callback = _build_get_mesh_callback(context)
+    assert callback(("dp",), None) is mesh
+    assert callback(("dp",), layout) is mesh
+    with pytest.raises(ValueError, match="Pipeline mesh layout mismatch"):
+        callback(("dp",), _MeshLayout.from_sizes_strides((4,)))
 
 
 def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeypatch):
