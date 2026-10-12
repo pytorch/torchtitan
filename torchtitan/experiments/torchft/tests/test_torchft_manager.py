@@ -10,6 +10,7 @@ torchft is optional and is not installed in this test environment, so the
 torchft surface used by the manager is replaced with recording doubles.
 """
 
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest import mock
 
@@ -78,3 +79,9 @@ def test_semi_sync_training_always_uses_synchronous_quorum(
     assert ft_manager.use_async_quorum is False
     assert not hasattr(ft_manager, "replicate_pg")
     assert ft_manager.loss_sync_pg is None
+
+
+def test_timeout_is_passed_to_manager(torchft_doubles):
+    build_manager(timeout_ms=30000)
+
+    assert torchft_doubles.Manager.call_args.kwargs["timeout"] == timedelta(seconds=30)

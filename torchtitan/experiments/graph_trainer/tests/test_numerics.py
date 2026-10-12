@@ -383,16 +383,12 @@ def _run_qwen3_moe_loss_compare() -> bool:
 
 
 def _run_autoparallel_llama3_loss_compare() -> bool:
-    """Run loss_compare for manual SDPA llama3 vs AutoParallel.
-
-    AutoParallel is unsupported on the default FlexInnerAttention backend (dynamo
-    export flattens the BlockMask), so both sides use the test-only SDPA backend.
-    """
+    """Compare manual and AutoParallel Llama3 using Varlen attention."""
     return run_loss_compare_close(
         baseline_module=NUMERICS_CONFIG_MODULE,
-        baseline_config="llama3_sdpa_manual_numerics",
+        baseline_config="llama3_varlen_manual_numerics",
         test_module=NUMERICS_CONFIG_MODULE,
-        test_config="llama3_sdpa_autoparallel_numerics",
+        test_config="llama3_varlen_autoparallel_numerics",
         baseline_ngpus=4,
         test_ngpus=4,
     )
@@ -533,11 +529,8 @@ class TestDistMoePipelineNumerics(unittest.TestCase):
 class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     """Test graph_trainer AutoParallel numerics equivalence against eager."""
 
-    # AutoParallel runs on the test-only SDPA backend (Decoder.forward lists
-    # positions before attention_metadata so input_fn's (tokens, positions) binds
-    # correctly). It is unsupported on the default FlexInnerAttention backend (dynamo
-    # export flattens the BlockMask to (Fake)Tensors and flex_attention fails on
-    # missing BLOCK_SIZE), so both eager baseline and AutoParallel test use SDPA.
+    # TODO: Before re-enabling, wire Varlen metadata through AutoParallel
+    # input_fn and its input sharding constraints.
     # TODO: Disabled due to upstream AutoParallel/PyTorch API skew. PyTorch
     # #186754 (2026-06-24) removed propagate_single_input_strategy in favor of
     # propagate_single_input_single_dim_strategy, but AutoParallel's
