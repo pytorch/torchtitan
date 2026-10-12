@@ -351,6 +351,7 @@ class TestMoE(unittest.TestCase):
                 param_init={},
                 enable_ep=False,
             ),
+            load_balance_coeff=1e-3,
             enable_sp=True,
         ).build()
         with torch.no_grad():

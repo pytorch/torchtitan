@@ -250,10 +250,10 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         for rollout_turn in rollout.turns
     ]
     prompt_lens = [
-        len(rollout.turns[0].prompt_token_ids) for rollout in rollouts if rollout.turns
+        rollout.turns[0].num_prompt_tokens for rollout in rollouts if rollout.turns
     ]
     total_lens = [
-        len(rollout.turns[-1].prompt_token_ids)
+        rollout.turns[-1].num_prompt_tokens
         + len(rollout.turns[-1].completion_token_ids)
         for rollout in rollouts
         if rollout.turns
@@ -291,10 +291,14 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
 
     # Per-generation turn metrics (latencies, output tokens) measured by the generator.
     # They carry their own keys (e.g. "generator/..."), so they ride through unprefixed.
+    # Fold across turns: group metrics outlive the rollouts (until the step is logged),
+    # and every full GC walks them.
     out.extend(
-        metric
-        for rollout in rollouts
-        for rollout_turn in rollout.turns
-        for metric in rollout_turn.metrics
+        m.fold(
+            metric
+            for rollout in rollouts
+            for rollout_turn in rollout.turns
+            for metric in rollout_turn.metrics
+        )
     )
     return out

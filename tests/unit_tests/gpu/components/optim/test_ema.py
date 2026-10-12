@@ -31,8 +31,7 @@ class _ModelWithExpertBias(nn.Module):
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class TestEMACpuOffload(unittest.TestCase):
     """Exercises offload_to_cpu under real FSDP2 DTensor params -- the DTensor
-    pin_memory workaround (_pin_local/_materialize_dtensor in
-    torchtitan/components/optim/ema.py) can't be tested without real
+    local-shard allocation and checkpoint materialization require real
     DTensors.
     """
 
@@ -416,7 +415,7 @@ class TestEMACpuOffload(unittest.TestCase):
         """Regression test for offload+buffer parity: FSDP2's fully_shard only
         shards parameters, not buffers, so expert_bias_E-like buffers stay
         plain (non-DTensor) tensors even on a DTensor-param model --
-        _pin_local/_materialize_dtensor must handle that mixed case, not just
+        initialization and checkpointing must handle that mixed case, not just
         the all-DTensor or all-plain-tensor cases exercised above."""
         import torch.distributed.checkpoint as dcp
 

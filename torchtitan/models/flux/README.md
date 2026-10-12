@@ -6,7 +6,7 @@ This directory contains the implementation of the [FLUX](https://github.com/blac
 ## Prerequisites
 Install the required dependencies:
 ```bash
-pip install -r requirements-flux.txt
+pip install -r .ci/docker/requirements-flux.txt
 ```
 
 ## Usage
