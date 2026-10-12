@@ -62,8 +62,8 @@ class Rollouter(Configurable):
 
         index, sample = rollouter.get_training_sample()
         group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
-            generate_fn=generate_fn, sample=sample,
-            group_id=index,
+            generate_fn=generate_fn, release_session_fn=release_session_fn,
+            sample=sample, group_id=index,
             group_size=N, sampling=sampling)
 
     `MessageEnv` works in messages; `TokenEnv` (what `RolloutWorker.make_env_group` returns)
@@ -160,7 +160,6 @@ class Rollouter(Configurable):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
-        release_session_fn: ReleaseSessionFn | None = None,
     ) -> None:
         """Spawn and initialize the owned worker proc mesh and actor pool."""
         # Import lazily to avoid a circular dependency through Rollouter.Config.
@@ -184,7 +183,6 @@ class Rollouter(Configurable):
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
-            release_session_fn=release_session_fn,
         )
 
     async def close(self) -> None:
@@ -204,6 +202,7 @@ class Rollouter(Configurable):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
@@ -217,6 +216,8 @@ class Rollouter(Configurable):
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
+            release_session_fn: Async callable each rollout calls after its last turn, to
+                release its routing session.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -232,6 +233,7 @@ class Rollouter(Configurable):
         # send the message to its `run_group` endpoint.
         return await self._worker_actors.run_group.choose(
             generate_fn=generate_fn,
+            release_session_fn=release_session_fn,
             sample=sample,
             group_id=group_id,
             group_size=group_size,
@@ -273,7 +275,6 @@ class RolloutWorker(Configurable):
         self._token_env_config = config.token_env
         self.advantage_estimator: AdvantageEstimator = config.advantage.build()
         self._renderer: Renderer
-        self._release_session_fn: ReleaseSessionFn | None = None
 
     async def setup_async(
         self,
@@ -281,10 +282,8 @@ class RolloutWorker(Configurable):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
-        release_session_fn: ReleaseSessionFn | None = None,
     ) -> None:
         """Build runtime dependencies after the worker actor is spawned."""
-        self._release_session_fn = release_session_fn
         tokenizer = tokenizer_config.build(tokenizer_path=hf_assets_path)
         self._renderer = renderer_config.build(tokenizer=tokenizer)
 
@@ -335,6 +334,7 @@ class RolloutWorker(Configurable):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
@@ -350,6 +350,8 @@ class RolloutWorker(Configurable):
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
+            release_session_fn: Async callable each rollout calls after its last turn, to
+                release its routing session.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -372,6 +374,7 @@ class RolloutWorker(Configurable):
                 *(
                     self._run_single_rollout(
                         generate_fn=generate_fn,
+                        release_session_fn=release_session_fn,
                         env=env,
                         # Offset the base seed per sample so a group's n=1
                         # requests are diverse yet reproducible run-to-run.
@@ -407,6 +410,7 @@ class RolloutWorker(Configurable):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         env: TokenEnv,
         sampling: SamplingConfig,
         group_id: int,
@@ -420,6 +424,8 @@ class RolloutWorker(Configurable):
         Args:
             generate_fn: Async callable that runs one generation; keeps the worker
                 decoupled from the generator actor.
+            release_session_fn: Async callable this rollout calls once after its last turn,
+                with its `routing_session_id`.
             env: The env for this rollout; `run_group` closes it.
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
@@ -486,16 +492,11 @@ class RolloutWorker(Configurable):
             )
             status = RolloutStatus.ERROR
 
-        if self._release_session_fn is not None:
-            try:
-                await self._release_session_fn(
-                    group_id=group_id, routing_session_id=routing_session_id
-                )
-            except Exception:
-                # Not fatal: the group's release frees the session too.
-                logger.exception(
-                    "releasing routing session %s failed", routing_session_id
-                )
+        try:
+            await release_session_fn(routing_session_id=routing_session_id)
+        except Exception:
+            # Not fatal: `max_sessions` evicts an unreleased session.
+            logger.exception("releasing routing session %s failed", routing_session_id)
         return Rollout(
             group_id=group_id,
             rollout_id=rollout_id,

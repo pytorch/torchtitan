@@ -135,10 +135,10 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             tokenizer_config=HuggingFaceTokenizer.Config(),
             renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
             hf_assets_path="tests/assets/tokenizer",
-            release_session_fn=release_session_fn,
         )
         group = await worker.run_group(
             generate_fn=generate_fn,
+            release_session_fn=release_session_fn,
             sample="sample",
             group_id=7,
             group_size=2,
@@ -169,8 +169,8 @@ def test_worker_executes_group_without_actor_mesh() -> None:
         ]
         # Each rollout releases its routing session after its last turn.
         assert released == [
-            {"group_id": 7, "routing_session_id": "group=7/rollout=0"},
-            {"group_id": 7, "routing_session_id": "group=7/rollout=1"},
+            {"routing_session_id": "group=7/rollout=0"},
+            {"routing_session_id": "group=7/rollout=1"},
         ]
 
     asyncio.run(run())
