@@ -45,7 +45,8 @@ from torchtitan.components.data.multimodal.utils.image import (
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.activation import SiTUGLU
-from torchtitan.models.common.attention.kda import InnerKDA
+from torchtitan.models.common.attention import BaseAttention
+from torchtitan.models.common.attention.kda import InnerKDA, KDA
 from torchtitan.models.kimi_k3 import build_model_config
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
@@ -72,16 +73,18 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
     hf_full_attention_layers = [
         layer_idx + 1
         for layer_idx, layer in enumerate(tt_config.layers)
-        if layer.attention is not None
+        if isinstance(layer.attention, BaseAttention.Config)
     ]
     hf_kda_layers = [
         layer_idx + 1
         for layer_idx, layer in enumerate(tt_config.layers)
-        if layer.delta_attention is not None
+        if isinstance(layer.attention, KDA.Config)
     ]
-    mla = next(layer.attention for layer in tt_config.layers if layer.attention)
+    mla = tt_config.first_attention
     kda = next(
-        layer.delta_attention for layer in tt_config.layers if layer.delta_attention
+        layer.attention
+        for layer in tt_config.layers
+        if isinstance(layer.attention, KDA.Config)
     )
     inner_attention = cast(InnerKDA.Config, kda.inner_attention)
     kda_kernel = inner_attention.kernel

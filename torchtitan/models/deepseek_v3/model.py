@@ -18,7 +18,6 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
-    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.flops import (
@@ -33,7 +32,7 @@ from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 
-class Attention(BaseAttention):
+class DeepSeekMLAAttention(BaseAttention):
     """
     Multi-head latent attention (MLA) module.
 
@@ -58,9 +57,7 @@ class Attention(BaseAttention):
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
         rope: RoPE.Config
-        inner_attention: Module.Config = field(
-            default_factory=VarlenInnerAttention.Config
-        )
+        inner_attention: Module.Config
         mscale: float = 1.0
 
     def __init__(self, config: Config):

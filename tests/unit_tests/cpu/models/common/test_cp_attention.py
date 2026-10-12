@@ -26,6 +26,7 @@ from torchtitan.distributed.context_parallel import (
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import (
+    BaseAttention,
     FlexInnerAttention,
     InnerAttention,
     SlidingWindowFlexInnerAttention,
@@ -121,8 +122,9 @@ class TestDecoderCpSharding(unittest.TestCase):
         sliding_type=KVAllGatherCPSlidingWindowFlexInnerAttention,
         full_type=KVAllGatherCPFlexInnerAttention,
     ):
-        sliding_attention = SimpleNamespace(
-            inner_attention=sliding_type.Config(window_size=128)
+        sliding_attention = mock.Mock(
+            spec=BaseAttention.Config,
+            inner_attention=sliding_type.Config(window_size=128),
         )
         layers = [
             SimpleNamespace(attention=None),
@@ -131,7 +133,9 @@ class TestDecoderCpSharding(unittest.TestCase):
         if full_type in attention_metadata:
             layers.append(
                 SimpleNamespace(
-                    attention=SimpleNamespace(inner_attention=full_type.Config())
+                    attention=mock.Mock(
+                        spec=BaseAttention.Config, inner_attention=full_type.Config()
+                    )
                 )
             )
         model = SimpleNamespace(

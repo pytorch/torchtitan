@@ -94,7 +94,7 @@ class Decoder(BaseModel):
                 (
                     layer.attention
                     for layer in self.layers
-                    if layer.attention is not None
+                    if isinstance(layer.attention, BaseAttention.Config)
                 ),
                 None,
             )
@@ -334,8 +334,10 @@ class Decoder(BaseModel):
                 (
                     layer.attention
                     for layer in self.config.layers
-                    if layer.attention is not None
-                    and layer.attention.inner_attention.is_full_attention
+                    if isinstance(layer.attention, BaseAttention.Config)
+                    and cast(
+                        InnerAttention.Config, layer.attention.inner_attention
+                    ).is_full_attention
                 ),
                 self.config.first_attention,
             )

@@ -616,11 +616,6 @@ def _kimi_k3_config(
                         enable_sp=enable_sp,
                     )
                     if is_full_attention
-                    else None
-                ),
-                delta_attention=(
-                    None
-                    if is_full_attention
                     else _kda_config(
                         dim=dim,
                         num_heads=num_heads,

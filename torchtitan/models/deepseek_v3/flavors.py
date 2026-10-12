@@ -60,7 +60,7 @@ from torchtitan.models.common.moe_sharding import (
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 
-from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
+from .model import DeepSeekMLAAttention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
 from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
 from .sharding import (
@@ -162,8 +162,8 @@ def make_mla_attention_config(
     rope: RoPE.Config,
     attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
     enable_sp: bool,
-) -> Attention.Config:
-    """Build a fully-specified, sharded DeepSeek V3 MLA ``Attention.Config``.
+) -> DeepSeekMLAAttention.Config:
+    """Build a fully-specified, sharded DeepSeek V3 MLA ``DeepSeekMLAAttention.Config``.
 
     All Linear and RMSNorm sub-configs have their dimensional fields set. When
     ``q_lora_rank == 0``, sets ``wq`` (not ``wq_a``/``wq_b``); when
@@ -189,7 +189,7 @@ def make_mla_attention_config(
         wq_a = None
         wq_b = None
         # q_norm is unused when q_lora_rank == 0 (never built), but the field is
-        # required on Attention.Config so we supply a placeholder.
+        # required on DeepSeekMLAAttention.Config so we supply a placeholder.
         q_norm = RMSNorm.Config(normalized_shape=1, eps=1e-6, param_init=norm_init)
     else:
         wq = None
@@ -212,7 +212,7 @@ def make_mla_attention_config(
             sharding_config=replicated_state_sharding_config("weight"),
         )
 
-    return Attention.Config(
+    return DeepSeekMLAAttention.Config(
         dim=dim,
         n_heads=n_heads,
         q_lora_rank=q_lora_rank,

@@ -4,11 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import pytest
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.kimi_k3 import build_model_config as build_kimi_config
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.generator.vllm import model_wrapper
 from torchtitan.rl.generator.vllm.model_wrapper import (
@@ -17,19 +19,18 @@ from torchtitan.rl.generator.vllm.model_wrapper import (
 )
 
 
-def test_vllm_replacement_preserves_attention_sharding() -> None:
+@pytest.mark.parametrize(
+    "build_config", [build_model_config, build_kimi_config], ids=["gdn", "kda"]
+)
+def test_vllm_replacement_preserves_attention_sharding(build_config) -> None:
     """Pass the trainer attention's sharding config through unchanged."""
-    model_config = build_model_config(
+    model_config = build_config(
         "debugmodel",
         attn_backend="flex",
         parallelism=ParallelismConfig(
             tensor_parallel_degree=2, enable_sequence_parallel=True
         ),
     )
-    model_config.layers = [
-        layer for layer in model_config.layers if layer.attention is not None
-    ]
-
     vllm_config = _replace_vllm_layer_configs(model_config)
 
     for model_layer, vllm_layer in zip(

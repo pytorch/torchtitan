@@ -36,7 +36,6 @@ from torchtitan.models.common.attention import (
     LinearAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
-    VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
@@ -96,9 +95,7 @@ class KimiMLAAttention(BaseAttention):
         wkv_b: Linear.Config
         gate: Linear.Config
         wo: Linear.Config
-        inner_attention: Module.Config = field(
-            default_factory=VarlenInnerAttention.Config
-        )
+        inner_attention: Module.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -237,8 +234,7 @@ class KimiK3TransformerBlock(Module):
     class Config(Module.Config):
         layer_id: int
         attn_res_block_size: int
-        attention: KimiMLAAttention.Config | None
-        delta_attention: KDA.Config | None
+        attention: KimiMLAAttention.Config | KDA.Config
         feed_forward: FeedForward.Config | None
         moe: KimiLatentMoE.Config | None
         attention_norm: RMSNorm.Config
@@ -251,22 +247,21 @@ class KimiK3TransformerBlock(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        if (config.attention is None) == (config.delta_attention is None):
-            raise ValueError(
-                "Exactly one of attention or delta_attention must be configured."
-            )
         if (config.feed_forward is None) == (config.moe is None):
             raise ValueError("Exactly one of feed_forward or moe must be configured.")
         self.layer_id = config.layer_id
         self.attn_res_block_size = config.attn_res_block_size
         # A block's first layer closes the previous block and joins the stack.
         self.first_layer_in_block = self.layer_id % self.attn_res_block_size == 0
+        # Preserve module paths used by checkpoints and optimizer parameter groups.
         self.attention = (
-            config.attention.build() if config.attention is not None else None
+            config.attention.build()
+            if isinstance(config.attention, KimiMLAAttention.Config)
+            else None
         )
         self.delta_attention = (
-            config.delta_attention.build()
-            if config.delta_attention is not None
+            config.attention.build()
+            if isinstance(config.attention, KDA.Config)
             else None
         )
         self.feed_forward = (
@@ -414,8 +409,8 @@ class KimiK3Model(MultimodalModel):
                         v_head_dim=attention.v_head_dim,
                         seq_len=seq_len,
                     )
-                elif isinstance(layer.delta_attention, KDA.Config):
-                    delta_attention = layer.delta_attention
+                elif isinstance(layer.attention, KDA.Config):
+                    delta_attention = layer.attention
                     attention_op_flops += delta_rule_flops_per_token(
                         num_heads=delta_attention.num_heads,
                         key_head_dim=delta_attention.head_dim,

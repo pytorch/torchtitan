@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("attn_gym")
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.attention.gdn import GatedDeltaNet
 from torchtitan.models.qwen3_5 import Qwen35Model
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 from torchtitan.models.qwen3_6 import build_model_config, MODEL_FLAVORS
@@ -44,9 +45,9 @@ def test_qwen36_27b_matches_hugging_face_config() -> None:
     assert config.vision_encoder.merger.fc2.out_features == 5120
 
     linear_layer = config.layers[0]
-    assert linear_layer.delta_net is not None
-    assert linear_layer.delta_net.in_proj_q.out_features == 16 * 128
-    assert linear_layer.delta_net.in_proj_v.out_features == 48 * 128
+    assert isinstance(linear_layer.attention, GatedDeltaNet.Config)
+    assert linear_layer.attention.in_proj_q.out_features == 16 * 128
+    assert linear_layer.attention.in_proj_v.out_features == 48 * 128
 
     full_attention_layer = config.layers[3]
     assert full_attention_layer.attention is not None
@@ -66,9 +67,9 @@ def test_qwen36_35b_a3b_matches_hugging_face_config() -> None:
     assert config.vision_encoder.merger.fc2.out_features == 2048
 
     linear_layer = config.layers[0]
-    assert linear_layer.delta_net is not None
-    assert linear_layer.delta_net.in_proj_q.out_features == 16 * 128
-    assert linear_layer.delta_net.in_proj_v.out_features == 32 * 128
+    assert isinstance(linear_layer.attention, GatedDeltaNet.Config)
+    assert linear_layer.attention.in_proj_q.out_features == 16 * 128
+    assert linear_layer.attention.in_proj_v.out_features == 32 * 128
     assert linear_layer.moe is not None
     assert linear_layer.moe.router.num_experts == 256
     assert linear_layer.moe.router.top_k == 8
