@@ -34,7 +34,9 @@ from torchtitan.distributed.spmd_types import (
 )
 
 if TYPE_CHECKING:
-    from torchtitan.models.common.attention.cp_attention import CPInnerAttention
+    from torchtitan.models.common.attention.cp_attention import (
+        ContextParallelInnerAttention,
+    )
 
 __all__ = [
     "ContextParallelLoadBalancer",
@@ -140,22 +142,26 @@ class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
 
 def supports_cp_inner_attention(
     load_balancer_config: ContextParallelLoadBalancer.Config,
-    cp_inner_attention: type[CPInnerAttention[Any, Any]],
+    cp_inner_attention: type[ContextParallelInnerAttention[Any, Any]],
 ) -> bool:
     """Return whether a load balancer supports a CP inner attention."""
     from torchtitan.models.common.attention.cp_attention import (
-        KVAllGatherCPFlexInnerAttention,
-        KVAllGatherCPSlidingWindowFlexInnerAttention,
+        KVAllGatherFlexInnerAttention,
+        KVAllGatherSlidingWindowFlexInnerAttention,
+        KVAllGatherSlidingWindowVarlenInnerAttention,
+        KVAllGatherVarlenInnerAttention,
     )
 
     supported_cp_inner_attentions: dict[type, tuple[type, ...]] = {
         HeadTailCPLoadBalancer: (
-            KVAllGatherCPFlexInnerAttention,
-            KVAllGatherCPSlidingWindowFlexInnerAttention,
+            KVAllGatherFlexInnerAttention,
+            KVAllGatherSlidingWindowFlexInnerAttention,
+            KVAllGatherSlidingWindowVarlenInnerAttention,
+            KVAllGatherVarlenInnerAttention,
         ),
         PTRRFlexAttentionCPLoadBalancer: (
-            KVAllGatherCPFlexInnerAttention,
-            KVAllGatherCPSlidingWindowFlexInnerAttention,
+            KVAllGatherFlexInnerAttention,
+            KVAllGatherSlidingWindowFlexInnerAttention,
         ),
     }
     load_balancer_type = load_balancer_config._owner

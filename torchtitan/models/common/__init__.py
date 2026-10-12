@@ -32,6 +32,7 @@ from .attention import (
     LinearAttentionMetadata,
     QKVLinear,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
@@ -87,6 +88,7 @@ __all__ = [
     "RoPE",
     "RowParallelLinear",
     "SlidingWindowFlexInnerAttention",
+    "SlidingWindowVarlenInnerAttention",
     "Sigmoid",
     "SiLU",
     "BinaryActivationFn",

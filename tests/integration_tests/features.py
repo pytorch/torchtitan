@@ -34,13 +34,22 @@ from torchtitan.components.validator import Validator
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.models.base import BaseModel
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
-from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
-    UlyssesCPFlexInnerAttention,
-    UlyssesCPVarlenInnerAttention,
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
+    VarlenInnerAttention,
 )
+from torchtitan.models.common.attention.cp_attention import (
+    KVAllGatherFlexInnerAttention,
+    KVAllGatherSlidingWindowVarlenInnerAttention,
+    KVAllGatherVarlenInnerAttention,
+    UlyssesFlexInnerAttention,
+    UlyssesSlidingWindowVarlenInnerAttention,
+    UlyssesVarlenInnerAttention,
+)
+from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -481,9 +490,7 @@ def llama3_debugmodel_cp4() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -500,7 +507,7 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: UlyssesCPFlexInnerAttention}
+                inner_attention_map={FlexInnerAttention: UlyssesFlexInnerAttention}
             )
         ],
     )
@@ -519,7 +526,10 @@ def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    VarlenInnerAttention: UlyssesCPVarlenInnerAttention
+                    VarlenInnerAttention: UlyssesVarlenInnerAttention,
+                    SlidingWindowVarlenInnerAttention: (
+                        UlyssesSlidingWindowVarlenInnerAttention
+                    ),
                 }
             )
         ],
@@ -541,9 +551,7 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -559,9 +567,7 @@ def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -575,9 +581,7 @@ def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -676,9 +680,7 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -711,6 +713,37 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 4
     config.activation_checkpoint = SelectiveAC.Config()
     return config
+
+
+def muse_glimmer_debugmodel_fsdp2_cp2_varlen() -> Trainer.Config:
+    """Muse Glimmer varlen attention under FSDP and context parallelism."""
+    seq_len = 2048
+    config = muse_glimmer_debugmodel(seq_len=seq_len)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
+    config.model = build_model_config(
+        "debugmodel",
+        seq_len=seq_len,
+        parallelism=config.parallelism,
+        attn_backend="varlen",
+    )
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = 64
+    _set_spmd_typechecking(config, typechecking=True)
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    VarlenInnerAttention: KVAllGatherVarlenInnerAttention,
+                    SlidingWindowVarlenInnerAttention: (
+                        KVAllGatherSlidingWindowVarlenInnerAttention
+                    ),
+                }
+            )
+        ],
+    )
 
 
 def llama3_debugmodel_lora_tp2_pp2() -> Trainer.Config:
@@ -981,6 +1014,13 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_descr="Ulysses CP with varlen attention",
             test_name="cp_ulysses_varlen",
             ngpu=2,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[muse_glimmer_debugmodel_fsdp2_cp2_varlen],
+            test_descr="Muse Glimmer FSDP+CP with varlen attention",
+            test_name="fsdp+cp+varlen_attn",
+            ngpu=4,
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
