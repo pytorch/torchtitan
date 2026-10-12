@@ -74,7 +74,8 @@ You should NEVER set `config.debug.deterministic_warn_only = True`.
 
 6. **Audit all callsites.** When changing shared code (common model components, config
    fields, distributed utilities), check and update every callsite. This includes all
-   model variants: llama3, llama4, qwen3, deepseek_v3, gpt_oss, flux, etc.
+   model variants: llama3, qwen3, qwen3_5, deepseek_v3, deepseek_v4, gpt_oss,
+   kimi_k2_7, kimi_k3, muse_glimmer, flux, etc.
 
 7. **No speculative defensive checks.** Don't add checks, casts, fallbacks, or
    conversions "just in case." Only validate explicit contracts, user-facing
@@ -123,7 +124,9 @@ this for the comments and docstrings you are adding or rewriting.
 ### Code Placement
 - Put code in the **most general applicable location**:
   - Model-agnostic parallelism helpers -> `torchtitan/distributed/`
-  - Shared model components (attention, MoE, embeddings) -> `torchtitan/models/common/`
+  - Model base classes every model implements or the engine consumes
+    (`BaseModel`, `Module`, `ShardingConfig`, `StateDictAdapter`) -> `torchtitan/models/base/`
+  - Shared, concrete model components (attention, MoE, embeddings, `Decoder`) -> `torchtitan/models/common/`
   - Model-specific code -> the specific model folder
 - Don't put model-agnostic functionality in model-specific files just because
   that's where you first needed it.

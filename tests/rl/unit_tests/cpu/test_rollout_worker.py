@@ -17,10 +17,10 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 from torchtitan.rl.generator import SamplingConfig
 from torchtitan.rl.rollout import RolloutStatus
-from torchtitan.rl.rollout.environment.token import TokenEnvOutput
 from torchtitan.rl.rollout.rollouter import RolloutWorker
-from torchtitan.rl.rubric import RubricOutput
-from torchtitan.rl.types import Completion
+from torchtitan.rl.rollout.rubric import RubricOutput
+from torchtitan.rl.rollout.token_env import TokenEnvOutput
+from torchtitan.rl.rollout.types import Completion
 
 
 class _Config:

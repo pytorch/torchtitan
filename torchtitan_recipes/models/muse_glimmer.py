@@ -9,6 +9,7 @@
 from collections.abc import Mapping
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -24,7 +25,6 @@ from torchtitan.distributed.context_parallel import (
     ContextParallelLoadBalancer,
     HeadTailCPLoadBalancer,
 )
-from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     InnerAttention,
@@ -44,7 +44,10 @@ from torchtitan.trainer import Trainer
 
 
 def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("30B", seq_len=seq_len, attn_backend="flex")
+    parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "30B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -67,7 +70,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
-        parallelism=ParallelismConfig(),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
@@ -136,11 +139,13 @@ def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
     The model has two KV heads, which limits Ulysses CP to degree 2.
     """
     config = muse_glimmer_30b()
-    config.model = build_model_config("30B", attn_backend="varlen")
-    assert isinstance(config.dataloader, GrainDataLoader.Config)
-    config.dataloader.max_num_documents = 64
     config.parallelism.context_parallel_degree = 2
     config.parallelism.context_parallel_load_balancer = None
+    config.model = build_model_config(
+        "30B", attn_backend="varlen", parallelism=config.parallelism
+    )
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = 64
     return apply_transforms(
         config,
         [

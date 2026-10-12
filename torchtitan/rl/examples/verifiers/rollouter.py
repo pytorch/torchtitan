@@ -35,15 +35,15 @@ from torchtitan.rl.examples.verifiers.generation_server import (
 )
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
     GenerateFn,
     Rollout,
     RolloutGroup,
     RolloutStatus,
     RolloutTurn,
+    RolloutTurnID,
 )
-from torchtitan.rl.rubric import RewardFn, Rubric
-from torchtitan.rl.types import RolloutTurnID
 
 if TYPE_CHECKING:
     from torchtitan.rl.generator import SamplingConfig

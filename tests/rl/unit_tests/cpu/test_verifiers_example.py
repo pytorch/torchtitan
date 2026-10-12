@@ -21,8 +21,9 @@ from torchtitan.components.renderer import RenderersConfigAdapter
 
 from torchtitan.config import ConfigLoader
 from torchtitan.rl.examples.dapo_math import DapoMathSample
-from torchtitan.rl.examples.verifiers import VerifiersRollouter, VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.dapo_math import data
+from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
+from torchtitan.rl.examples.verifiers.rollouter import VerifiersRollouter
 from torchtitan_recipes.rl.verifiers_dapo_math import _verifiers_math_rollouter_config
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 

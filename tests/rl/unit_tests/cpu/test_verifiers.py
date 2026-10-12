@@ -29,7 +29,8 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     verifiers_rollout_logs,
     VerifiersRollouter,
 )
-from torchtitan.rl.types import Completion
+from torchtitan.rl.rollout.types import Completion
+from verifiers.v1.errors import model_error, OverlongPromptError
 
 
 def test_trainable_token_spans() -> None:
@@ -405,6 +406,45 @@ def test_generation_server_requires_group_id() -> None:
             await server.close()
 
         assert "torchtitan_group_id" in payload["error"]
+
+    asyncio.run(run_test())
+
+
+def test_generation_server_rejects_prompt_without_room_for_output() -> None:
+    async def run_test() -> None:
+        prompt_lengths = []
+
+        async def generate_fn(prompt_token_ids, **kwargs):
+            prompt_lengths.append(len(prompt_token_ids))
+            raise RuntimeError("generator reached")
+
+        server = GenerationServer.Config(max_rollout_tokens=8).build()
+        server.set_generate_fn(generate_fn)
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                statuses, errors = [], []
+                for num_tokens in (7, 8, 9):
+                    response = await session.post(
+                        f"http://{server.host}:{server.port}/inference/v1/generate",
+                        headers={"X-Session-ID": "group=1/rollout=2"},
+                        json={
+                            "token_ids": [1] * num_tokens,
+                            "sampling_params": {
+                                "torchtitan_group_id": 1,
+                                "stop_token_ids": [99],
+                            },
+                        },
+                    )
+                    statuses.append(response.status)
+                    errors.append((await response.json())["error"])
+        finally:
+            await server.close()
+
+        assert prompt_lengths == [7]
+        assert statuses == [500, 400, 400]
+        # Verifiers ends the rollout as context_length on OverlongPromptError.
+        assert isinstance(model_error(errors[1]), OverlongPromptError)
 
     asyncio.run(run_test())
 

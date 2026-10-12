@@ -27,7 +27,7 @@ from torchtitan.rl.examples.alphabet_sort import (
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import score_sorted_list
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
-from torchtitan.rl.types import RolloutTurnID
+from torchtitan.rl.rollout.types import RolloutTurnID
 from torchtitan_recipes.rl.alphabet_sort import _alphabet_sort_rollouter_config
 
 from torchtitan_recipes.tests.rl.alphabet_sort import (
@@ -83,7 +83,7 @@ def test_ci_recipes_limit_prompt_length_to_model_context(config_fn) -> None:
 
     assert (
         config.rollouter.worker.token_env.max_rollout_tokens
-        == config.model.max_context_length
+        == config.trainer.model.max_context_length
     )
 
 

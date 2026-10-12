@@ -16,11 +16,55 @@ from dataclasses import dataclass
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutGroup
-from torchtitan.rl.types import (
-    RolloutTurnID,
-    TrainingSample,
-    TrainingSampleGroup,
-)
+from torchtitan.rl.rollout.types import RolloutTurnID
+
+
+@dataclass(kw_only=True, slots=True)
+class TrainingSample:
+    """A trainable token sequence from a rollout.
+
+    Example:
+        # Turn 0: prompt P0 -> assistant A0 -> env reply E0
+        # Turn 1: prompt [P0, A0, E0] -> assistant A1
+        TrainingSample(
+            rollout_id=RolloutTurnID(group_id=3, rollout_id=1, turn_id=1),
+            min_policy_version=7,
+            max_policy_version=9,            # weights updated during rollout
+            token_ids=P0 + A0 + E0 + A1,
+            loss_mask=[False]*len(P0) + [True]*len(A0) + [False]*len(E0) + [True]*len(A1),
+            logprobs=[0.0]*len(P0) + logprobs_A0 + [0.0]*len(E0) + logprobs_A1,
+            advantage=[0.0]*len(P0) + [adv]*len(A0) + [0.0]*len(E0) + [adv]*len(A1),
+        )
+    """
+
+    min_policy_version: int
+    """Oldest policy version among this branch's trained turns."""
+    max_policy_version: int
+    """Newest policy version among this branch's trained turns."""
+    rollout_id: RolloutTurnID
+    """This sample identifier."""
+    token_ids: list[int]
+    """[L] packed prompt + completions + env replies."""
+    loss_mask: list[bool]
+    """[L] True on assistant tokens to train."""
+    logprobs: list[float]
+    """[L] generator logprobs; 0.0 where loss_mask is False."""
+    advantage: list[float]
+    """[L] advantage on assistant tokens, 0.0 elsewhere."""
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingSampleGroup:
+    """The training samples + metrics built from one rollout group.
+
+    Example:
+        TrainingSampleGroup(group_id=3, training_samples=[], metrics=[failure_metric])
+        # -> failed / filtered / zero-std group; metrics still reach the trainer logger
+    """
+
+    group_id: int
+    training_samples: list[TrainingSample]
+    metrics: list[m.Metric]
 
 
 def _has_valid_loss_token(training_sample: TrainingSample) -> bool:

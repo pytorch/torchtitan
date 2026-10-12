@@ -20,7 +20,7 @@ from torchtitan.rl.examples.search_r1 import (
     SearchR1Sample,
 )
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
-from torchtitan.rl.types import RolloutTurnID
+from torchtitan.rl.rollout.types import RolloutTurnID
 
 
 def _build_env(monkeypatch, question="Who wrote Hamlet?"):

@@ -11,7 +11,8 @@ import random
 import torch
 
 from torchtitan.rl.components.batcher import Batcher
-from torchtitan.rl.types import RolloutTurnID, TrainingSample
+from torchtitan.rl.components.training_sample_builder import TrainingSample
+from torchtitan.rl.rollout.types import RolloutTurnID
 
 
 def _make_samples(lengths: list[int]) -> list[TrainingSample]:

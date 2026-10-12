@@ -14,16 +14,16 @@ from typing import Any
 import torchvision.transforms.v2.functional as TVF
 
 from torchtitan.components.data.dataset import SingleDatasetConfig
-from torchtitan.components.data.sources import IndexedJsonlSource
-from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.hf_datasets.multimodal.mm_datasets import (
+from torchtitan.components.data.multimodal.mm_datasets import (
     _process_audio_text_sample,
     _process_video_text_sample,
     AudioProcessor,
     VisionProcessor,
 )
-from torchtitan.hf_datasets.multimodal.utils.audio import load_pcm_waveform
-from torchtitan.hf_datasets.multimodal.utils.video import load_npy_video_frames
+from torchtitan.components.data.multimodal.utils.audio import load_pcm_waveform
+from torchtitan.components.data.multimodal.utils.video import load_npy_video_frames
+from torchtitan.components.data.sources import IndexedJsonlSource
+from torchtitan.components.tokenizer import MultiModalTokenizer
 
 
 _ASSET_ROOT = (

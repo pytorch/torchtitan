@@ -17,6 +17,7 @@ import torch
 from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.activation import UnaryActivationFn
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
@@ -25,13 +26,24 @@ from torchtitan.models.common.attention import (
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.decoder_sharding import (
+    colwise_sharding_config,
+    feed_forward_sharding_config,
+    gqa_attention_sharding_config,
+    head_norm_sharding_config,
+    inner_attention_local_spmd_sharding_config,
+    residual_activation_placement,
+    rope_cache_sharding_config,
+    rowwise_sharding_config,
+    stacked_colwise_sharding_config,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
+    Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import (
     MicrobatchWiseLoadBalanceLoss,
@@ -39,10 +51,19 @@ from torchtitan.models.common.moe import (
     RoutedExperts,
     TokenChoiceTopKRouter,
 )
+from torchtitan.models.common.moe_sharding import (
+    moe_sharding_config,
+    routed_expert_linear_sharding_config,
+    routed_experts_sharding_config,
+    router_gate_sharding_config,
+    router_sharding_config,
+    shared_expert_rowwise_sharding_config,
+    shared_experts_output_placement,
+    shared_experts_sharding_config,
+)
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
-from torchtitan.protocols.module import Module
 
 
 DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
@@ -214,18 +235,32 @@ def make_gqa_config(
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     qk_norm: RMSNorm.Config | None = None,
+    enable_sp: bool,
 ) -> GQAttention.Config:
-    """Build a fully-specified GQAttention.Config.
+    """Build a fully-specified, sharded GQAttention.Config.
 
     ``rope=None`` builds a NoPE layer (no positional encoding); see
     :class:`GQAttention`.
 
     The projection types make the standard synchronous TP collectives explicit.
-    Without a TP mesh, they execute as ordinary linear modules.
+    Without a TP mesh, they execute as ordinary linear modules. The input and
+    output use the residual layout selected by ``enable_sp``.
     """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
-    rope = dataclasses.replace(rope) if rope is not None else None
+    rope = (
+        dataclasses.replace(rope, sharding_config=rope_cache_sharding_config())
+        if rope is not None
+        else None
+    )
+    if qk_norm is not None:
+        qk_norm = dataclasses.replace(
+            qk_norm, sharding_config=head_norm_sharding_config()
+        )
+    inner_attention = dataclasses.replace(
+        inner_attention, sharding_config=inner_attention_local_spmd_sharding_config()
+    )
+    x_layout = residual_activation_placement(enable_sp=enable_sp)
 
     qkv = QKVLinear.Config(
         head_dim=per_head_dim,
@@ -240,6 +275,7 @@ def make_gqa_config(
                 n_kv_heads=n_kv,
                 head_dim=per_head_dim,
             ),
+            sharding_config=colwise_sharding_config(input_layout=x_layout),
         ),
     )
 
@@ -253,10 +289,12 @@ def make_gqa_config(
             in_features=n_heads * per_head_dim,
             out_features=dim,
             param_init=wo_param_init,
+            sharding_config=rowwise_sharding_config(output_layout=x_layout),
         ),
         qk_norm=qk_norm,
         inner_attention=inner_attention,
         rope=rope,
+        sharding_config=gqa_attention_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -266,23 +304,53 @@ def make_ffn_config(
     hidden_dim: int,
     w13_param_init: dict[str, Callable],
     w2_param_init: dict[str, Callable],
+    enable_sp: bool,
 ) -> FeedForward.Config:
-    """Build a fully-specified FeedForward.Config.
+    """Build a fully-specified, sharded dense FeedForward.Config.
 
     ``w1`` and ``w3`` are the gate/up projections and share
-    ``w13_param_init``; ``w2`` is the residual output projection.
+    ``w13_param_init``; ``w2`` is the residual output projection. The input
+    and output use the residual layout selected by ``enable_sp``.
     """
+    x_layout = residual_activation_placement(enable_sp=enable_sp)
     return FeedForward.Config(
         w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=hidden_dim,
             num_linears=2,
             param_init=fused_gate_up_param_init(w13_param_init, w13_param_init),
+            sharding_config=stacked_colwise_sharding_config(input_layout=x_layout),
         ),
         w2=RowParallelLinear.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=w2_param_init,
+            sharding_config=rowwise_sharding_config(output_layout=x_layout),
+        ),
+        sharding_config=feed_forward_sharding_config(enable_sp=enable_sp),
+    )
+
+
+def make_shared_expert_down_proj_config(
+    *,
+    in_features: int,
+    out_features: int,
+    param_init: dict[str, Callable],
+    enable_sp: bool,
+) -> Linear.Config:
+    """Build the down projection (``w2``) of an MoE's shared experts.
+
+    With SP, a ``RowParallelLinear`` reduce-scatters its output to the
+    sequence-parallel layout. Without SP, a plain ``Linear`` keeps its
+    TP-Partial output so the MoE reduces the routed and shared sum once.
+    """
+    projection = RowParallelLinear if enable_sp else Linear
+    return projection.Config(
+        in_features=in_features,
+        out_features=out_features,
+        param_init=param_init,
+        sharding_config=shared_expert_rowwise_sharding_config(
+            output_layout=shared_experts_output_placement(enable_sp=enable_sp)
         ),
     )
 
@@ -293,24 +361,30 @@ def make_shared_expert_ffn_config(
     hidden_dim: int,
     w13_param_init: dict[str, Callable],
     w2_param_init: dict[str, Callable],
+    enable_sp: bool,
 ) -> FeedForward.Config:
-    """Build a shared FFN whose output reduction is selected at runtime.
+    """Build a sharded shared-expert FFN for an MoE.
 
     ``w1`` and ``w3`` are the gate/up projections and share
-    ``w13_param_init``; ``w2`` is the residual output projection.
+    ``w13_param_init``; ``w2`` is the residual output projection (see
+    ``make_shared_expert_down_proj_config``).
     """
+    x_layout = residual_activation_placement(enable_sp=enable_sp)
     return FeedForward.Config(
         w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=hidden_dim,
             num_linears=2,
             param_init=fused_gate_up_param_init(w13_param_init, w13_param_init),
+            sharding_config=stacked_colwise_sharding_config(input_layout=x_layout),
         ),
-        w2=SharedExpertRowParallelLinear.Config(
+        w2=make_shared_expert_down_proj_config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=w2_param_init,
+            enable_sp=enable_sp,
         ),
+        sharding_config=shared_experts_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -322,8 +396,14 @@ def make_moe_config(
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
     aux_loss_coeff: float | None = None,
+    enable_sp: bool,
 ) -> MoE.Config:
-    """Build a fully-specified MoE.Config."""
+    """Build a fully-specified, sharded MoE.Config.
+
+    The MoE input and output use the residual layout selected by
+    ``enable_sp``. ``router``, ``routed_experts`` and ``shared_experts`` carry
+    their own sharding.
+    """
     if aux_loss_coeff is not None:
         router = dataclasses.replace(
             router,
@@ -335,6 +415,7 @@ def make_moe_config(
         router=router,
         routed_experts=routed_experts,
         shared_experts=shared_experts,
+        sharding_config=moe_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -350,7 +431,7 @@ def make_router_config(
     route_scale: float = 1.0,
     bias: bool = False,
 ) -> TokenChoiceTopKRouter.Config:
-    """Build a fully-specified TokenChoiceTopKRouter.Config."""
+    """Build a fully-specified, sharded TokenChoiceTopKRouter.Config."""
     return TokenChoiceTopKRouter.Config(
         num_experts=num_experts,
         gate=HiMidLoLinear.Config(
@@ -359,12 +440,14 @@ def make_router_config(
             backward_mode="hi_mid_lo",
             bias=bias,
             param_init=gate_param_init,
+            sharding_config=router_gate_sharding_config(),
         ),
         top_k=top_k,
         score_func=score_func,
         route_norm=route_norm,
         route_norm_epsilon=route_norm_epsilon,
         route_scale=route_scale,
+        sharding_config=router_sharding_config(),
     )
 
 
@@ -375,8 +458,13 @@ def make_routed_experts_config(
     num_experts: int,
     top_k: int,
     param_init: dict[str, Callable],
+    enable_ep: bool,
 ) -> RoutedExperts.Config:
-    """Build routed experts with structured gate/up and down projections."""
+    """Build sharded routed experts with gate/up and down projections.
+
+    Expert weights use sparse ``{EP}`` placements when ``enable_ep`` and
+    dense replicated placements otherwise.
+    """
     missing = {"w1_EFD", "w2_EDF", "w3_EFD"} - param_init.keys()
     if param_init and missing:
         raise ValueError(f"Missing routed-expert initializers: {sorted(missing)}")
@@ -390,15 +478,18 @@ def make_routed_experts_config(
             param_init=(
                 fused_grouped_gate_up_param_init(param_init) if param_init else None
             ),
+            sharding_config=routed_expert_linear_sharding_config(enable_ep=enable_ep),
         ),
         w2=GroupedLinear.Config(
             group_size=num_experts,
             in_features=hidden_dim,
             out_features=dim,
             param_init={"weight": param_init["w2_EDF"]} if param_init else None,
+            sharding_config=routed_expert_linear_sharding_config(enable_ep=enable_ep),
         ),
         token_dispatcher=AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
         ),
+        sharding_config=routed_experts_sharding_config(),
     )

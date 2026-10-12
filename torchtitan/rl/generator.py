@@ -31,10 +31,11 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import Configurable, DebugConfig, OverrideConfig
+from torchtitan.config import Configurable, DebugConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
@@ -47,7 +48,7 @@ from torchtitan.rl.model.vllm_registry import (
 )
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
-from torchtitan.rl.types import Completion
+from torchtitan.rl.rollout.types import Completion
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,40 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 # TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator.
+
+
+def add_extra_vllm_engine_args(
+    engine_kwargs: dict[str, Any], extra_vllm_engine_args: dict[str, Any]
+) -> None:
+    """Add ``VLLMGenerator.Config.extra_vllm_engine_args`` to ``engine_kwargs`` in place.
+
+    Raises ``ValueError`` for keys TorchTitan already set in ``engine_kwargs`` or
+    derives from a config field, so they cannot silently diverge from it.
+    """
+    # EngineArgs that TorchTitan sets only when the mapped VLLMGenerator.Config
+    # field is set (or derives from it), so they may be absent from engine_kwargs.
+    config_field_by_engine_arg = {
+        "max_num_batched_tokens": "max_num_batched_tokens",
+        "compilation_config": "cuda_graph",
+        "seed": "debug.seed",
+    }
+    owned_keys = sorted(
+        extra_vllm_engine_args.keys()
+        & (engine_kwargs.keys() | config_field_by_engine_arg.keys())
+    )
+    if owned_keys:
+        details = ", ".join(
+            (
+                f"{key} (use VLLMGenerator.Config.{config_field_by_engine_arg[key]})"
+                if key in config_field_by_engine_arg
+                else key
+            )
+            for key in owned_keys
+        )
+        raise ValueError(
+            f"extra_vllm_engine_args cannot set EngineArgs that TorchTitan controls: {details}"
+        )
+    engine_kwargs.update(extra_vllm_engine_args)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -71,6 +106,7 @@ class _RequestMetricsInputs:
     last_token_ts: float = 0.0
     first_token_latency: float = 0.0
     num_generation_tokens: int = 0
+    num_preemptions: int = 0
 
 
 def _extract_request_metrics_inputs(
@@ -91,6 +127,7 @@ def _extract_request_metrics_inputs(
         last_token_ts=stats.last_token_ts,
         first_token_latency=stats.first_token_latency,
         num_generation_tokens=stats.num_generation_tokens,
+        num_preemptions=stats.num_preemptions,
     )
 
 
@@ -106,17 +143,18 @@ def _prepare_generation_request_metrics(
     per child request; the parent output exposes the **last-finishing**
     child's timeline. `arrival_time` is shared across siblings, but
     [`queued_ts`, `scheduled_ts`, `first_token_ts`, `last_token_ts`,
-    `num_generation_tokens`] describe one specific child - not an aggregate,
-    not the first sibling's. The other `n-1` siblings' stats are dropped by
-    vLLM at ``output_processor._finish_request``.
+    `num_generation_tokens`, `num_preemptions`] describe one specific child -
+    not an aggregate, not the first sibling's. The other `n-1` siblings' stats
+    are dropped by vLLM at ``output_processor._finish_request``.
     """
 
     # TODO: Per-request fields here come from RequestOutput.metrics
     # (RequestStateStats). Engine-aggregate stats, such as KV-cache usage,
-    # prefix-cache hit rate, preemptions, and batch occupancy, live in
-    # SchedulerStats / IterationStats and require registering a
+    # prefix-cache hit rate, exact preemption counts, and batch occupancy, live
+    # in SchedulerStats / IterationStats and require registering a
     # vllm.v1.metrics.loggers.StatLoggerBase via
-    # LLMEngine.from_engine_args(..., stat_loggers=[...]).
+    # LLMEngine.from_engine_args(..., stat_loggers=[...]); VllmOtelStatLogger
+    # does this when vllm_stat_logger is set.
 
     metric_values: dict[str, float] = {}
     if inputs.num_cached_tokens is not None:
@@ -126,6 +164,7 @@ def _prepare_generation_request_metrics(
         metric_values[f"{prefix}/queue_time_ms"] = (
             inputs.scheduled_ts - inputs.queued_ts
         ) * 1000
+        metric_values[f"{prefix}/num_preemptions"] = inputs.num_preemptions
 
         if inputs.num_generation_tokens > 0:
             metric_values[f"{prefix}/time_to_first_token_ms"] = (
@@ -698,8 +737,7 @@ class VLLMGenerator(Configurable):
     CPU-to-GPU copy.
 
     Args:
-        config: Generator-specific configuration.
-        model_config: TorchTitan model configuration.
+        config: Generator-specific configuration, including its model.
         model_path: Path to the HF model checkpoint.
         max_num_seqs: vLLM's upper bound on concurrently scheduled sequences (vLLM admits fewer if KV
             is tight); also sets the CUDA-graph capture sizes.
@@ -717,6 +755,13 @@ class VLLMGenerator(Configurable):
         """Generator actor configuration.
         TODO: Expose a EngineConfig field to passing config to vLLM Engine"""
 
+        model: Decoder.Config
+        """Generator model config, built for ``parallelism.to_training()``.
+
+        The RL controller requires the same model class as the trainer's model;
+        keeping the two aligned otherwise is the recipe's responsibility.
+        """
+
         parallelism: InferenceParallelismConfig = field(
             default_factory=InferenceParallelismConfig
         )
@@ -732,10 +777,11 @@ class VLLMGenerator(Configurable):
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Default sampling parameters for generation."""
 
-        override: OverrideConfig = field(default_factory=OverrideConfig)
-        """Config overrides (e.g. ``torchtitan_recipes.overrides.fused_swiglu.fused_swiglu``)
-        applied to this generator's model spec before model finalization and build.
-        Separate from the trainer's override so the two can differ."""
+        dist_moe_runtime: DistMoeRuntime.Config | None = None
+        """Dist-MoE runtime policy, with ``inference=True``, required when the
+        model config carries Dist-MoE routed experts. Separate from the trainer's
+        ``Trainer.Config.dist_moe_runtime``: the generator plans scratch-only execution
+        over its own, smaller, expert-parallel mesh."""
 
         model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
@@ -747,6 +793,13 @@ class VLLMGenerator(Configurable):
         """vLLM chunked-prefill chunk size: max tokens scheduled per engine step
         (prefill + decode, summed over the batch). ``None`` (default) leaves
         vLLM's own engine default in place."""
+
+        extra_vllm_engine_args: dict[str, Any] = field(default_factory=dict)
+        """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
+        options without a dedicated field here (e.g. ``{"watermark": 0.03}``). vLLM
+        validates them. Keys that TorchTitan sets itself, or derives from a field of
+        this config (e.g. ``max_num_batched_tokens``), raise a ``ValueError``; see
+        ``add_extra_vllm_engine_args``."""
 
         cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
@@ -810,7 +863,6 @@ class VLLMGenerator(Configurable):
         self,
         config: Config,
         *,
-        model_config: Decoder.Config,
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
@@ -830,6 +882,7 @@ class VLLMGenerator(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        model_config = config.model
         self.model_config = model_config
 
         self._max_num_seqs = max_num_seqs
@@ -846,7 +899,7 @@ class VLLMGenerator(Configurable):
             model_config,
             parallelism=config.parallelism,
             checkpointer_config=config.checkpointer,
-            override=config.override,
+            dist_moe_runtime=config.dist_moe_runtime,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
@@ -946,6 +999,7 @@ class VLLMGenerator(Configurable):
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
             engine_kwargs["seed"] = config.debug.seed
+        add_extra_vllm_engine_args(engine_kwargs, config.extra_vllm_engine_args)
         engine_args = EngineArgs(**engine_kwargs)
 
         with sl.log_trace_span("vllm_init"):
@@ -1512,10 +1566,8 @@ class VLLMGenerator(Configurable):
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
         model_sd = self._prefetched_model_state_dict
-        model.prepare_for_state_dict_load()
         # Perform the local CPU-to-GPU copy
-        model.model.load_state_dict(model_sd, strict=True)
-        model.prepare_for_forward()
+        model.load_state_dict(model_sd)
         self.policy_version = version
         if self.config.reset_kv_cache_on_weight_sync:
             # Always reset running requests too: the only reason to reset is a strict
