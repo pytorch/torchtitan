@@ -53,6 +53,7 @@ class RolloutWorkerActor(Actor):
         self,
         *,
         generate_fn: Any,
+        release_session_fn: Any,
         sample: object,
         group_id: int,
         group_size: int,
@@ -60,6 +61,7 @@ class RolloutWorkerActor(Actor):
     ) -> RolloutGroup:
         return await self._worker.run_group(
             generate_fn=generate_fn,
+            release_session_fn=release_session_fn,
             sample=sample,
             group_id=group_id,
             group_size=group_size,

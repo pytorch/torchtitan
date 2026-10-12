@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,6 +19,7 @@ pytest.importorskip("verifiers")
 
 from aiohttp import ClientSession
 
+from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
 from torchtitan.rl.examples.verifiers.generation_server import (
     _parse_sampling_config,
     GenerationServer,
@@ -29,8 +31,9 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     verifiers_rollout_logs,
     VerifiersRollouter,
 )
+from torchtitan.rl.generator import SamplingConfig
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.rollout.types import Completion, RolloutStatus
 from verifiers.v1.errors import model_error, OverlongPromptError
 
 
@@ -511,6 +514,49 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
         assert isinstance(model_error(errors[1]), OverlongPromptError)
 
     asyncio.run(run_test())
+
+
+def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
+    # Verifiers stops a rollout for context length before its first model call.
+    span = SimpleNamespace(duration=0.0)
+    trace = SimpleNamespace(
+        id="trace",
+        task=SimpleNamespace(key="huge-task"),
+        agent=SimpleNamespace(trainable=True),
+        ok=True,
+        is_truncated=True,
+        stop_condition="context_length",
+        errors=[],
+        timing=SimpleNamespace(
+            setup=span,
+            agent=SimpleNamespace(duration=0.0, model=span, harness=span),
+            scoring=span,
+        ),
+        calls=[],
+        nodes=[],
+        branches=[],
+    )
+    rollouter = object.__new__(VerifiersRollouter)
+    rollouter._generation_server = SimpleNamespace(
+        model_id="model", pop_generation_metadata=lambda trace_id: None
+    )
+    rollouter._verifiers_env_client = SimpleNamespace(
+        run=AsyncMock(return_value=SimpleNamespace(ok=True, errors=[], traces=[trace]))
+    )
+    rollouter._verifiers_train_client_config = object()
+
+    with caplog.at_level(logging.WARNING):
+        rollout = asyncio.run(
+            rollouter._run_single_rollout(
+                sample=VerifiersTaskSample(verifiers_task_data={"name": "huge-task"}),
+                sampling=SamplingConfig(),
+                group_id=1,
+                rollout_id=2,
+            )
+        )
+
+    assert rollout.status is RolloutStatus.ERROR
+    assert "first prompt of task huge-task does not fit" in caplog.text
 
 
 def test_parse_sampling_config_requires_stop_token_ids() -> None:

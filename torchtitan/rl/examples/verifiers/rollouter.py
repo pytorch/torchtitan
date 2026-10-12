@@ -39,6 +39,7 @@ from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
     GenerateFn,
+    ReleaseSessionFn,
     Rollout,
     RolloutGroup,
     RolloutStatus,
@@ -235,12 +236,15 @@ class VerifiersRollouter(Rollouter):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
+        # TODO: release each rollout's session; until then `max_sessions` evicts them.
+        del release_session_fn
         if self._generation_server is None:
             raise RuntimeError("Verifiers rollouter is not initialized")
         self._generation_server.set_generate_fn(generate_fn)
@@ -322,6 +326,19 @@ class VerifiersRollouter(Rollouter):
         )
         status = self.rollout_status(verifiers_episode=verifiers_episode, trace=trace)
         if not turns:
+            if trace.stop_condition == "context_length":
+                # The harness builds the first prompt in the env server, so the dataset can't
+                # be filtered for it; flag it here as a data problem, not a policy one.
+                task = sample.verifiers_task_data.get(
+                    "name", sample.verifiers_task_data.get("idx")
+                )
+                logger.warning(
+                    "rollout group=%d/rollout=%d: the first prompt%s does not fit the "
+                    "context; marking ERROR",
+                    group_id,
+                    rollout_id,
+                    "" if task is None else f" of task {task}",
+                )
             status = RolloutStatus.ERROR
         logs = verifiers_rollout_logs(verifiers_episode, trace)
         if status == RolloutStatus.ERROR:

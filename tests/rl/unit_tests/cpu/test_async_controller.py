@@ -10,6 +10,8 @@ the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pytest
@@ -24,6 +26,7 @@ from torchtitan.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
+from torchtitan.rl.controller import Controller
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.controller import (
     compute_perf_ratio_metrics,
@@ -778,3 +781,72 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
         assert taker.result().group_id == 6
 
     asyncio.run(run())
+
+
+async def _block_forever(*args, **kwargs) -> None:
+    await asyncio.Event().wait()
+
+
+def _run_with_generator_watcher(watcher) -> None:
+    """Run Controller.run with every stage but the engine-loop watcher stubbed to block."""
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(
+            num_training_steps=1,
+            max_active_rollout_groups=1,
+            window_size=None,
+            target_offpolicy_steps=0,
+            windowed_fifo_batches=None,
+            max_offpolicy_steps=None,
+            num_prompts_per_train_step=1,
+            group_buffer=SimpleNamespace(
+                build=lambda **kwargs: SimpleNamespace(close=AsyncMock())
+            ),
+            training_sample_builder=SimpleNamespace(build=lambda: None),
+            batcher=SimpleNamespace(build=lambda **kwargs: None),
+        ),
+        trainer=SimpleNamespace(
+            training=SimpleNamespace(
+                num_tokens_per_microbatch_per_dp_rank=8, max_context_length=8
+            )
+        ),
+    )
+    controller.start_step = 0
+    controller.trainer = None
+    controller.trainer_dp_degree = 1
+    controller.tokenizer = SimpleNamespace(eos_id=0)
+    controller._sampling = SimpleNamespace(temperature=1.0)
+    controller.generator_router = SimpleNamespace(
+        wait_engine_loop=SimpleNamespace(call_one=watcher)
+    )
+    with (
+        patch.multiple(
+            Controller,
+            _validate_and_log=AsyncMock(return_value={}),
+            _make_generate_fn=lambda self, metrics_prefix: None,
+            _data_input_loop=_block_forever,
+            _rollout_loop=_block_forever,
+            _batcher_loop=_block_forever,
+            _trainer_loop=_block_forever,
+        ),
+        patch("torchtitan.rl.controller.WeightSyncManager"),
+    ):
+        asyncio.run(asyncio.wait_for(controller.run(), timeout=10))
+
+
+def test_run_fails_when_an_engine_loop_crashes() -> None:
+    async def crashed() -> None:
+        raise RuntimeError("engine loop crashed")
+
+    with pytest.raises(RuntimeError, match="engine loop crashed"):
+        _run_with_generator_watcher(crashed)
+
+
+def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
+    async def exited() -> None:
+        return None
+
+    with pytest.raises(
+        RuntimeError, match="generator_wait_engine_loop exited unexpectedly"
+    ):
+        _run_with_generator_watcher(exited)

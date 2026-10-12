@@ -131,7 +131,7 @@ from torchtitan.rl.observability.controller import (
 from torchtitan.rl.observability.rollout_recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.types import Completion, GenerateFn
+from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
 from torchtitan.rl.trainer import Trainer
 from torchtitan.tools.garbage_collector import GarbageCollector
 
@@ -522,6 +522,17 @@ class Controller(Configurable):
 
         return generate
 
+    def _make_release_session_fn(self) -> ReleaseSessionFn:
+        """Build the rollouter's `ReleaseSessionFn`: tell the generator router a rollout ended."""
+        generator_router = self.generator_router
+
+        async def release_session(*, routing_session_id: str) -> None:
+            await generator_router.release_session.call_one(
+                routing_session_id=routing_session_id
+            )
+
+        return release_session
+
     @sl.log_trace_span("setup_async")
     async def setup_async(
         self,
@@ -702,11 +713,13 @@ class Controller(Configurable):
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
         generate = self._make_generate_fn(metrics_prefix="validation_generator")
+        release_session_fn = self._make_release_session_fn()
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         group_results = await asyncio.gather(
             *(
                 self._rollouter.run_group_rollouts(
                     generate_fn=generate,
+                    release_session_fn=release_session_fn,
                     sample=sample,
                     # Negative ids keep validation disjoint from training group ids, so their
                     # request_ids can't collide in the shared engine (e.g. post-validation).
@@ -780,8 +793,11 @@ class Controller(Configurable):
     async def run(self) -> None:
         """Start every async loop and run until training completes or a stage crashes.
 
-        Producers (_data_input_loop, _rollout_loop[N], _batcher_loop) loop forever; _trainer_loop is the
-        only finite loop -- it runs num_training_steps, then returns, which drives shutdown.
+        Producers (_data_input_loop, _rollout_loop[N], _batcher_loop) loop forever, and
+        _generator_loop waits for the generators' engine loops, which run until close; _trainer_loop is
+        the only finite loop -- it runs num_training_steps, then returns, which drives shutdown.
+        _generator_loop watches the training loop only: an engine loop that dies during pre- or
+        post-training validation shows up as failed validation rollouts.
 
         Shutdown (healthy):  _trainer_loop finishes N steps -> run() finally ->
           group_buffer.close()  (wakes _data_input_loop / _rollout_loop / _batcher_loop blocked on the buffer)
@@ -853,6 +869,7 @@ class Controller(Configurable):
 
         # rollout_loop
         generate_fn = self._make_generate_fn(metrics_prefix="generator")
+        release_session_fn = self._make_release_session_fn()
 
         # One rollout worker per active buffer slot: lets generation fill every active slot,
         # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
@@ -862,6 +879,7 @@ class Controller(Configurable):
                 self._rollout_loop(
                     group_buffer=self._group_buffer,
                     generate_fn=generate_fn,
+                    release_session_fn=release_session_fn,
                 ),
                 name=f"rollout_worker_{group_worker_id}",
             )
@@ -892,12 +910,19 @@ class Controller(Configurable):
             name="trainer",
         )
 
+        # Engine loops run until the generators close, so this ends only if one stops mid-run.
+        # Otherwise a crashed generator would only show up as failed rollouts.
+        generator_task = asyncio.create_task(
+            self._generator_loop(), name="generator_wait_engine_loop"
+        )
+
         # run everything until trainer finishes its number of steps
         # or some other loop breaks
         background_tasks = [
             data_input_task,
             *rollout_tasks,
             batcher_task,
+            generator_task,
         ]
         try:
             done, _ = await asyncio.wait(
@@ -927,6 +952,10 @@ class Controller(Configurable):
         # Post-training validation (held-out eval after the final step).
         post_validation = await self._validate_and_log(step=num_training_steps)
         self._log_reward_delta(pre_validation, post_validation)
+
+    async def _generator_loop(self) -> None:
+        """Wait until every generator's engine loop exits; raise as soon as one crashes."""
+        await self.generator_router.wait_engine_loop.call_one()
 
     async def _validate_and_log(self, *, step: int) -> dict[str, float]:
         """Run one validation pass, log it, and return its aggregated values for the pre/post delta."""
@@ -977,6 +1006,7 @@ class Controller(Configurable):
         *,
         group_buffer: RolloutGroupWorkBuffer,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
     ) -> None:
         """Generate + score one group at a time; a failed group becomes an empty group + a failure metric.
 
@@ -999,6 +1029,7 @@ class Controller(Configurable):
                 with sl.log_trace_span("rollout_group"):
                     group = await self._rollouter.run_group_rollouts(
                         generate_fn=generate_fn,
+                        release_session_fn=release_session_fn,
                         sample=work.sample,
                         group_id=work.group_id,
                         group_size=self.config.async_loop.num_samples_per_prompt,

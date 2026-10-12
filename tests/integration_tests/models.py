@@ -25,6 +25,7 @@ from torchtitan.models.common.attention.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     KVAllGatherCPSlidingWindowFlexInnerAttention,
 )
+from torchtitan.models.common.moe import MoE
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests import _set_spmd_typechecking
 from torchtitan_recipes.tests.models.deepseek_v3 import (
@@ -363,10 +364,28 @@ def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
     return config
 
 
+def _use_expert_bias_load_balancing(config: Trainer.Config) -> None:
+    """Replace the batch-wise aux loss with aux-loss-free expert bias.
+
+    Keeps this test on the numerics its existing golden was recorded with.
+    """
+    assert config.model is not None
+    for _, moe, _, _ in config.model.traverse(MoE.Config):
+        moe.load_balance_coeff = 1e-3
+        moe.router.aux_loss = None
+
+
+def gpt_oss_debugmodel_flex_expert_bias_seed() -> Trainer.Config:
+    config = gpt_oss_debugmodel_flex()
+    _use_expert_bias_load_balancing(config)
+    return config
+
+
 def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     config = gpt_oss_debugmodel_flex(
         seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=4)
     )
+    _use_expert_bias_load_balancing(config)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -655,7 +674,7 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
         # Integration Test Cases for Qwen3.5
         IntegrationTestDefinition(
             configs=[qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4],
-            test_descr="Qwen3.5 MoE FSDP+TP+EP+PP",
+            test_descr="Qwen3.5 MoE FSDP+TP+EP+PP+batch-wise aux loss",
             test_name="qwen3_5_moe_fsdp+tp+ep+pp",
             ngpu=8,
             use_real_pg=True,
@@ -696,7 +715,7 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_name="gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
             golden_numerics_path="tests/assets/losses/real_pg/{gpu_arch}/gpt_oss_pp.txt",
-            loss_compare_seed_config=gpt_oss_debugmodel_flex,
+            loss_compare_seed_config=gpt_oss_debugmodel_flex_expert_bias_seed,
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
