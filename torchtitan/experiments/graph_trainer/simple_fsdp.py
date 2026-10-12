@@ -30,7 +30,7 @@ from torch.distributed.tensor._utils import (
     compute_local_stride,
 )
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
-from torch.fx.traceback import annotate
+from torch.fx.traceback import annotate, get_current_meta
 
 from torchtitan.distributed.fsdp import linear_param_shard_placements
 from torchtitan.models.base.module import Module
@@ -336,6 +336,11 @@ class _UnshardAndReduceGradFunction(torch.autograd.Function):
         ctx.reduce_dtype = reduce_dtype
         ctx.non_dp_replicate_axes = non_dp_replicate_axes
         ctx.sharded_dtype = sharded_local_tensor.dtype
+        # Graph passes find the backward collectives by their annotations
+        # (e.g. FSDP_PARAM_FQNS_META). Tracing copies them from forward nodes
+        # with the same seq_nr, which misses here: the nested DTensor Functions
+        # give the forward nodes their own seq_nr. Re-apply them in backward.
+        ctx.annotations = dict(get_current_meta().get("custom", {}))
         # TODO: Drop the guard once the nightly has Dynamo support for
         # set_output_grad_dtype. Until then, under torch.compile a gradient
         # computed in a wider dtype is rounded to param_dtype on entry.
@@ -357,19 +362,20 @@ class _UnshardAndReduceGradFunction(torch.autograd.Function):
     @staticmethod
     # pyrefly: ignore [bad-override]
     def backward(ctx, grad: torch.Tensor):
-        for axis in ctx.non_dp_replicate_axes:
-            grad = spmd.all_reduce(
-                grad, axis, src=spmd.P, dst=spmd.I, op_dtype=ctx.reduce_dtype
+        with annotate(ctx.annotations):
+            for axis in ctx.non_dp_replicate_axes:
+                grad = spmd.all_reduce(
+                    grad, axis, src=spmd.P, dst=spmd.I, op_dtype=ctx.reduce_dtype
+                )
+            partial_grad = DTensor.from_local(
+                grad,
+                ctx.dp_mesh,
+                [Partial(reduce_op="sum")] * ctx.dp_mesh.ndim,
+                run_check=False,
             )
-        partial_grad = DTensor.from_local(
-            grad,
-            ctx.dp_mesh,
-            [Partial(reduce_op="sum")] * ctx.dp_mesh.ndim,
-            run_check=False,
-        )
-        sharded_grad = partial_grad.redistribute(
-            placements=ctx.dp_placements, forward_dtype=ctx.reduce_dtype
-        )
+            sharded_grad = partial_grad.redistribute(
+                placements=ctx.dp_placements, forward_dtype=ctx.reduce_dtype
+            )
         return (
             sharded_grad.to_local().to(ctx.sharded_dtype),
             *([None] * 7),
