@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Refs to the controller's microbatches, which each trainer rank reads over RDMA."""
+"""The RDMA fast path for trainer microbatches: large tensors stay with the controller, each rank reads its own."""
 
 from __future__ import annotations
 
@@ -18,27 +18,23 @@ from torch.utils import _pytree as pytree
 
 from torchtitan.rl.components.batcher import TrainingMicrobatch
 
-# Tensors under 1 KiB (the per-microbatch token counts, empty tensors) go in the message:
-# a buffer costs more than pickling them, and RDMABuffer rejects empty ones.
-_MIN_RDMA_BYTES = 1024
-
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class MicrobatchRef:
-    """A `TrainingMicrobatch` left in the controller's memory, for trainer ranks to read over RDMA.
+class RDMAMicrobatch:
+    """A `TrainingMicrobatch` whose large tensors stay in the controller's memory, for trainer ranks to read over RDMA.
 
     Example:
-        ref = MicrobatchRef.register(microbatch)  # controller: one RDMABuffer per tensor of 1 KiB or more
-        microbatch = await ref.read()             # trainer: one RDMA action reads them all
-        await ref.drop()                          # controller, after every rank has read it
+        rdma_microbatch = RDMAMicrobatch.register(microbatch, min_bytes=1024)  # controller
+        microbatch = await rdma_microbatch.read()  # trainer: one RDMA action reads every buffer
+        await rdma_microbatch.drop()               # controller, after every rank has read it
     """
 
     fields: dict[str, Any]
-    """The microbatch's fields: tensors of `_MIN_RDMA_BYTES` or more (also inside `model_kwargs`)
-    as `_TensorRef`s, the rest by value. Tensors inside containers pytree doesn't know go by value too."""
+    """The microbatch's fields: tensors of at least `min_bytes` (also inside `model_kwargs`) as
+    `_TensorRef`s, the rest by value. Tensors inside containers pytree doesn't know go by value too."""
 
     @classmethod
-    def register(cls, microbatch: TrainingMicrobatch) -> MicrobatchRef:
+    def register(cls, microbatch: TrainingMicrobatch, min_bytes: int) -> RDMAMicrobatch:
         fields = {
             field.name: getattr(microbatch, field.name)
             for field in dataclasses.fields(microbatch)
@@ -46,7 +42,7 @@ class MicrobatchRef:
         return cls(
             fields=pytree.tree_map_only(
                 lambda leaf: (
-                    isinstance(leaf, torch.Tensor) and leaf.nbytes >= _MIN_RDMA_BYTES
+                    isinstance(leaf, torch.Tensor) and leaf.nbytes >= min_bytes
                 ),
                 _TensorRef.register,
                 fields,

@@ -115,9 +115,9 @@ from torchtitan.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
-from torchtitan.rl.distributed.microbatch_ref import MicrobatchRef
 from torchtitan.rl.distributed.monarch_actors.generator import VLLMGeneratorActor
 from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
+from torchtitan.rl.distributed.rdma_microbatch import RDMAMicrobatch
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.distributed.torch_elastic import setup_torch_elastic_env
 from torchtitan.rl.distributed.weight_sync import WeightSyncManager
@@ -184,6 +184,13 @@ class AsyncLoopConfig(Configurable.Config):
     `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
     ``torchtitan/rl/components/WINDOWED_FIFO.md``."""
 
+    rdma_fast_path_threshold: int | None = None
+    """How microbatches reach the trainer ranks:
+        None (default): by value; every rank receives the whole grid.
+        e.g. 1024: tensors of >= 1024 bytes as Monarch RDMA buffers; each rank reads only its DP column.
+    Where Monarch's ibverbs fails (some RoCE hosts, native InfiniBand), also set
+    MONARCH_RDMA_DISABLE_IBVERBS=1; it moves TorchStore's weight sync to TCP too."""
+
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
     )
@@ -206,6 +213,14 @@ class AsyncLoopConfig(Configurable.Config):
         if self.windowed_fifo_batches is not None and self.windowed_fifo_batches < 1:
             raise ValueError(
                 f"windowed_fifo_batches must be None or >= 1, got {self.windowed_fifo_batches}"
+            )
+        if (
+            self.rdma_fast_path_threshold is not None
+            and self.rdma_fast_path_threshold < 1
+        ):
+            raise ValueError(
+                "rdma_fast_path_threshold must be None or >= 1 (RDMABuffer rejects empty tensors), "
+                f"got {self.rdma_fast_path_threshold}"
             )
 
     @property
@@ -1132,31 +1147,44 @@ class Controller(Configurable):
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
-                    # The call carries refs; each rank reads its column from this process.
-                    # Register in a thread: at ~0.15 ms per tensor (0.3 s for 2,200), doing it
-                    # here would stall the rollouts on this loop.
-                    microbatch_refs = await asyncio.to_thread(
-                        lambda rows: [
-                            [MicrobatchRef.register(microbatch) for microbatch in row]
-                            for row in rows
-                        ],
-                        packed.microbatches,
-                    )
+                    microbatches = packed.microbatches
+                    min_bytes = self.config.async_loop.rdma_fast_path_threshold
+                    if min_bytes is not None:
+                        # Each rank reads its column from this process. Register in a thread: at
+                        # ~0.15 ms per tensor (0.3 s for 2,200), doing it here would stall the rollouts.
+                        microbatches = await asyncio.to_thread(
+                            lambda rows, threshold: [
+                                [
+                                    RDMAMicrobatch.register(
+                                        microbatch, min_bytes=threshold
+                                    )
+                                    for microbatch in row
+                                ]
+                                for row in rows
+                            ],
+                            packed.microbatches,
+                            min_bytes,
+                        )
                     try:
                         fwd_bwd_metrics = self._get_rank_0_value(
                             await self.trainer.forward_backward.call(
-                                microbatch_refs,
+                                microbatches,
                                 packed.global_loss_token_counts,
                                 packed.global_routing_token_counts,
                             )
                         )
                     finally:
-                        # Drop while `packed` holds the tensors, and don't free it right after:
-                        # drop() returns before Monarch 0.6 lets go of the storage, and a free
-                        # racing that release deadlocks. `packed` lives until the next step's batch.
-                        await asyncio.gather(
-                            *(ref.drop() for row in microbatch_refs for ref in row)
-                        )
+                        if min_bytes is not None:
+                            # Drop while `packed` holds the tensors, and don't free it right after:
+                            # drop() returns before Monarch 0.6 lets go of the storage, and a free
+                            # racing that release deadlocks. `packed` lives until the next step's batch.
+                            await asyncio.gather(
+                                *(
+                                    rdma_microbatch.drop()
+                                    for row in microbatches
+                                    for rdma_microbatch in row
+                                )
+                            )
 
                     if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                         logger.error("Loss is NaN/Inf; training diverged")

@@ -27,8 +27,9 @@ from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
+from torchtitan.rl.components.batcher import TrainingMicrobatch
 from torchtitan.rl.components.checkpointer import CONTROLLER_STATE_KEY, MirroredState
-from torchtitan.rl.distributed.microbatch_ref import MicrobatchRef
+from torchtitan.rl.distributed.rdma_microbatch import RDMAMicrobatch
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
@@ -239,15 +240,15 @@ class Trainer(Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[list[MicrobatchRef]],
+        training_data: list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
-            training_data: Microbatch-major grid of `MicrobatchRef`s with shape
-                ``[num_microbatches][dp_degree]``.
+            training_data: Microbatch-major grid with shape
+                ``[num_microbatches][dp_degree]``; `RDMAMicrobatch`es with the RDMA fast path.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -261,14 +262,15 @@ class Trainer(Configurable):
             f"policy_version={self.policy_version}"
         )
         engine = self.engine
-        # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
-        # and broadcast it, to cut the controller's reads by cp * tp. Needs a per-replica group.
-        refs = [rank_refs[self.dp_rank] for rank_refs in training_data]
-        # TODO: investigate prefetching
-        with sl.log_trace_span("read_microbatches"):
-            # One at a time, not asyncio.gather: gathered reads share the controller's bandwidth,
-            # so each takes as long as the whole column and can hit its 60 s RDMA timeout.
-            microbatches = [await ref.read() for ref in refs]
+        microbatches = [rank_batches[self.dp_rank] for rank_batches in training_data]
+        if isinstance(microbatches[0], RDMAMicrobatch):
+            # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
+            # and broadcast it, to cut the controller's reads by cp * tp. Needs a per-replica group.
+            # TODO: investigate prefetching
+            with sl.log_trace_span("read_microbatches"):
+                # One at a time, not asyncio.gather: gathered reads share the controller's bandwidth,
+                # so each takes as long as the whole column and can hit its 60 s RDMA timeout.
+                microbatches = [await microbatch.read() for microbatch in microbatches]
         self._step_compute_start = time.perf_counter()
         self._step_num_tokens_per_dp_rank = sum(
             microbatch.labels.numel() for microbatch in microbatches
