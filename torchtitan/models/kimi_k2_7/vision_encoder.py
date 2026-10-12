@@ -24,6 +24,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.models.base.module import Module, ModuleDict
+
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.rope import ComplexRoPE
@@ -31,7 +33,6 @@ from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     VisionTransformerBlock,
 )
-from torchtitan.protocols.module import Module, ModuleDict
 
 
 def _get_temporal_pos_embed(
@@ -168,6 +169,7 @@ def _compute_2d_rope_cache(
         flat = torch.arange(h * w, device=device)
         if spmd.is_type_checking():
             flat = spmd.mutate_type(flat, "tp", src=spmd.R, dst=spmd.I)
+            flat = spmd.mutate_type(flat, "cp", src=spmd.R, dst=spmd.I)
         x_ang = freq_table[flat % w]  # (h*w, head_dim/4) column
         y_ang = freq_table[flat // w]  # (h*w, head_dim/4) row
         # Interleave x/y so pair 2k uses x-position, pair 2k+1 uses y-position.
@@ -275,6 +277,7 @@ class VisionRotaryEmbedding2D(Module):
         )
         if spmd.is_type_checking():
             seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
+            seq = spmd.mutate_type(seq, "cp", src=spmd.R, dst=spmd.I)
         return torch.outer(seq, self.inv_freq)
 
 

@@ -20,6 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.models.base.module import Module, ModuleDict
+
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.rope import CosSinRoPE
@@ -27,7 +29,6 @@ from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     VisionTransformerBlock,
 )
-from torchtitan.protocols.module import Module, ModuleDict
 
 
 def _compute_learned_pos_embeds(
@@ -181,7 +182,9 @@ def _compute_2d_rope_cache(
         )
         if spmd.is_type_checking():
             row_idx = spmd.mutate_type(row_idx, "tp", src=spmd.R, dst=spmd.I)
+            row_idx = spmd.mutate_type(row_idx, "cp", src=spmd.R, dst=spmd.I)
             col_idx = spmd.mutate_type(col_idx, "tp", src=spmd.R, dst=spmd.I)
+            col_idx = spmd.mutate_type(col_idx, "cp", src=spmd.R, dst=spmd.I)
 
         # 2D RoPE: row and col each get separate frequency sets, concatenated
         # (not interleaved). freq_table shape: (max_hw, head_dim//4)
@@ -251,6 +254,7 @@ class VisionRotaryEmbedding(Module):
         )
         if spmd.is_type_checking():
             seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
+            seq = spmd.mutate_type(seq, "cp", src=spmd.R, dst=spmd.I)
         return torch.outer(seq, self.inv_freq)
 
 

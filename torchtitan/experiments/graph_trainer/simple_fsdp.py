@@ -33,7 +33,7 @@ from torch.distributed.tensor.placement_types import _StridedShard, Placement
 from torch.fx.traceback import annotate
 
 from torchtitan.distributed.fsdp import linear_param_shard_placements
-from torchtitan.protocols.module import Module
+from torchtitan.models.base.module import Module
 
 from torchtitan.quantization._fsdp_tensor import (
     _ShardedFSDPTensor,

@@ -7,6 +7,7 @@
 """Verified TorchFT Llama 3 recipes."""
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW, LRSchedulersContainer
 from torchtitan.config import CommConfig, TrainingConfig
@@ -19,14 +20,14 @@ from torchtitan.experiments.torchft.optimizer import (
     TorchFTOptimizersContainer,
 )
 from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
-from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
 
 
 def _llama3_torchft_config(*, replica_id: int) -> FaultTolerantTrainer.Config:
-    model_config = build_model_config("debugmodel")
+    parallelism = ParallelismConfig(data_parallel_shard_degree=4)
+    model_config = build_model_config("debugmodel", parallelism=parallelism)
     return FaultTolerantTrainer.Config(
         loss=CrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
@@ -61,7 +62,7 @@ def _llama3_torchft_config(*, replica_id: int) -> FaultTolerantTrainer.Config:
         ),
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
-        parallelism=ParallelismConfig(data_parallel_shard_degree=4),
+        parallelism=parallelism,
         comm=CommConfig(train_timeout_seconds=15),
         fault_tolerance=FaultTolerance(
             enable=True,

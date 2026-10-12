@@ -34,6 +34,7 @@ from torchtitan.rl.distributed.routing.strategies import (
 )
 
 from torchtitan.rl.generator import (
+    _RejectedRequests,
     CloseMessage,
     EngineLoopMessage,
     EngineLoopQueue,
@@ -72,10 +73,10 @@ def _bare_generator(
     generator = object.__new__(VLLMGenerator)
     generator.config = SimpleNamespace(
         reset_kv_cache_on_weight_sync=reset_kv_cache_on_weight_sync,
-        enable_cpu_weight_prefetch=False,
     )
     generator.policy_version = 0
     generator._group_min_policy_versions = {}
+    generator._prefetched_model_state_dict = {}
     # Engine-thread tests bind the queue once the engine thread's event loop exists.
     if event_loop is not None:
         generator._engine_loop_queue = EngineLoopQueue(event_loop)
@@ -496,6 +497,7 @@ def _finished_output(request_id: str) -> SimpleNamespace:
             first_token_ts=1.01,
             last_token_ts=1.02,
             num_generation_tokens=1,
+            num_preemptions=0,
         ),
         outputs=[
             SimpleNamespace(
@@ -531,6 +533,17 @@ class _FakeEngine:
         self.step_hook()
         finished, self.running = self.running, []
         return [_finished_output(request_id) for request_id in finished]
+
+
+class _RejectingEngine(_FakeEngine):
+    """Rejects prompts longer than `max_prompt_len` at admission, as vLLM does."""
+
+    max_prompt_len = 2
+
+    def add_request(self, *, request_id, prompt, params):
+        if len(prompt["prompt_token_ids"]) > self.max_prompt_len:
+            raise ValueError(f"prompt of {request_id} is too long")
+        super().add_request(request_id=request_id, prompt=prompt, params=params)
 
 
 class _StuckEngine(_FakeEngine):
@@ -606,7 +619,6 @@ def engine_thread(monkeypatch):
             sampling=SamplingConfig(stop_token_ids=[]),
             max_engine_steps_between_decisions=16,
             reset_kv_cache_on_weight_sync=False,
-            enable_cpu_weight_prefetch=False,
         )
         generator.policy_version = 0
         generator._rank = 0
@@ -623,18 +635,17 @@ def engine_thread(monkeypatch):
         _stop_engine_thread(generator)
 
 
-def _pulling_engine(monkeypatch, get_state_dict) -> _FakeEngine:
-    """A fake engine whose weight pull reads TorchStore through `get_state_dict`."""
-    monkeypatch.setattr(generator_module.ts, "get_state_dict", get_state_dict)
-    monkeypatch.setattr(
-        generator_module, "plain_tensor_to_dtensor_state_dict", lambda sd, **k: sd
-    )
-    monkeypatch.setattr(generator_module, "dtensor_to_plain_tensor_state_dict", dict)
-    model = SimpleNamespace(
-        model=SimpleNamespace(state_dict=dict, load_state_dict=lambda sd, strict: None),
-        get_state_dict_layouts=dict,
-        parallelism_context=None,
-    )
+def _pulling_engine(monkeypatch, pull_pre_hook=None) -> _FakeEngine:
+    """A fake engine whose weight pull first awaits `pull_pre_hook`."""
+    original_pull = VLLMGenerator._pull_model_state_dict
+
+    async def new_pull(self, version):
+        if pull_pre_hook is not None:
+            await pull_pre_hook()
+        await original_pull(self, version)
+
+    monkeypatch.setattr(VLLMGenerator, "_pull_model_state_dict", new_pull)
+    model = SimpleNamespace(load_state_dict=lambda state_dict: None)
     engine = _FakeEngine()
     engine.model_executor = SimpleNamespace(
         driver_worker=SimpleNamespace(get_model=lambda: model)
@@ -741,13 +752,13 @@ def test_actor_loop_takes_calls_while_the_engine_steps(engine_thread) -> None:
     asyncio.run(run())
 
 
-def test_pull_reads_torchstore_on_the_engine_thread(engine_thread, monkeypatch) -> None:
+def test_pull_runs_on_the_engine_thread(engine_thread, monkeypatch) -> None:
     # Monarch finds the calling actor through a ContextVar, so the engine loop's work must
     # see the context of the endpoint that started it.
     endpoint_context = contextvars.ContextVar("endpoint_context", default=None)
     reads: list[tuple] = []
 
-    async def get_state_dict(*args, **kwargs):
+    async def pull_pre_hook():
         reads.append(
             (
                 threading.current_thread(),
@@ -757,7 +768,7 @@ def test_pull_reads_torchstore_on_the_engine_thread(engine_thread, monkeypatch) 
         )
 
     async def run() -> None:
-        generator = engine_thread(_pulling_engine(monkeypatch, get_state_dict))
+        generator = engine_thread(_pulling_engine(monkeypatch, pull_pre_hook))
         # Set after the engine thread started, so only `start_engine_loop` can carry it there.
         endpoint_context.set("endpoint")
         await generator.start_engine_loop()
@@ -784,14 +795,13 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
     async def get_state_dict(*args, **kwargs):
         reads.append((threading.current_thread(), asyncio.get_running_loop()))
 
+    monkeypatch.setattr(generator_module.ts, "get_state_dict", get_state_dict)
     gate = _StepGate()
-    engine = _pulling_engine(monkeypatch, get_state_dict)
+    engine = _pulling_engine(monkeypatch)
     engine.step_hook = gate
 
     async def run() -> None:
         generator = engine_thread(engine)
-        generator.config.enable_cpu_weight_prefetch = True
-        generator._prefetched_model_state_dict = {}
         await generator.start_engine_loop()
         first = _generate(generator, "r0")
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
@@ -819,14 +829,14 @@ def test_pulls_queued_during_a_pull_are_applied_together_after_it(
     released = [threading.Event(), threading.Event()]
     reads: list[int] = []
 
-    async def get_state_dict(*args, **kwargs):
+    async def pull_pre_hook():
         read = len(reads)
         reads.append(read)
         reading[read].set()
         assert await asyncio.to_thread(released[read].wait, _TIMEOUT_S)
 
     async def run() -> None:
-        generator = engine_thread(_pulling_engine(monkeypatch, get_state_dict))
+        generator = engine_thread(_pulling_engine(monkeypatch, pull_pre_hook))
         await generator.start_engine_loop()
         first = asyncio.create_task(generator.pull_model_state_dict(3))
         assert await asyncio.to_thread(reading[0].wait, _TIMEOUT_S)
@@ -860,13 +870,13 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
 ) -> None:
     reading, released = threading.Event(), threading.Event()
 
-    async def get_state_dict(*args, **kwargs):
+    async def pull_pre_hook():
         reading.set()
         assert await asyncio.to_thread(released.wait, _TIMEOUT_S)
         raise RuntimeError("TorchStore is down")
 
     async def run() -> None:
-        generator = engine_thread(_pulling_engine(monkeypatch, get_state_dict))
+        generator = engine_thread(_pulling_engine(monkeypatch, pull_pre_hook))
         await generator.start_engine_loop()
         failing_pull = asyncio.create_task(generator.pull_model_state_dict(3))
         assert await asyncio.to_thread(reading.wait, _TIMEOUT_S)
@@ -889,6 +899,8 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
         exc = generator._engine_loop_future.exception(timeout=_TIMEOUT_S)
         assert isinstance(exc, RuntimeError) and str(exc) == "TorchStore is down"
         assert generator._engine is None  # released by the loop on its way out
+        with pytest.raises(RuntimeError, match="TorchStore is down"):
+            await asyncio.wait_for(generator.wait_engine_loop(), _TIMEOUT_S)
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
     asyncio.run(run())
@@ -956,6 +968,33 @@ def test_generate_cancelled_after_admission_leaves_the_loop_running(
     asyncio.run(run())
 
 
+def test_request_rejected_at_admission_fails_alone(engine_thread) -> None:
+    engine = _RejectingEngine()
+
+    async def run() -> None:
+        generator = engine_thread(engine)
+        await generator.start_engine_loop()
+        rejected = asyncio.create_task(
+            generator.generate(
+                [1, 2, 3], request_id="long", group_id=0, routing_session_id="long"
+            )
+        )
+        admitted = _generate(generator, "r0")
+
+        with pytest.raises(ValueError, match="prompt of long is too long"):
+            await asyncio.wait_for(rejected, _TIMEOUT_S)
+        assert (await asyncio.wait_for(admitted, _TIMEOUT_S)).request_id == "r0"
+        # The loop keeps serving.
+        assert (
+            await asyncio.wait_for(_generate(generator, "r1"), _TIMEOUT_S)
+        ).request_id == "r1"
+        assert generator._request_dispatcher._rank0_outstanding_generations == {}
+
+        await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
 def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None:
     gate = _StepGate()
 
@@ -963,6 +1002,7 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
         generator = engine_thread(_StuckEngine(gate))
         await generator.start_engine_loop()
         engine_loop_future = generator._engine_loop_future
+        waiting = asyncio.create_task(generator.wait_engine_loop())
         in_flight = _generate(generator, "r0")
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
         queued = _generate(generator, "r1")
@@ -981,6 +1021,9 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
         await asyncio.wait_for(closing, _TIMEOUT_S)
         assert engine_loop_future.done()
         assert generator._engine is None
+        await asyncio.wait_for(
+            waiting, _TIMEOUT_S
+        )  # a clean close ends the wait without error
         for request in (in_flight, queued):
             with pytest.raises(
                 RuntimeError, match="closed before the request finished"
@@ -1030,11 +1073,11 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
     )
     reads: list[threading.Thread] = []
 
-    async def get_state_dict(*args, **kwargs):
+    async def pull_pre_hook():
         reads.append(threading.current_thread())
 
     async def run() -> None:
-        engine = _pulling_engine(monkeypatch, get_state_dict)
+        engine = _pulling_engine(monkeypatch, pull_pre_hook)
         stepped: list[list[str]] = []
         engine.step_hook = lambda: stepped.append(list(engine.running))
         generator = engine_thread(engine)
@@ -1063,8 +1106,9 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
     asyncio.run(run())
 
 
-def test_drain_task_resolves_peer_completions_on_the_engine_thread(
-    engine_thread, monkeypatch
+@pytest.mark.parametrize("peer_rejects", [False, True])
+def test_drain_task_resolves_peer_results_on_the_engine_thread(
+    engine_thread, monkeypatch, peer_rejects
 ) -> None:
     peer_results: asyncio.Queue = asyncio.Queue()
     recv_threads: list[threading.Thread] = []
@@ -1095,15 +1139,24 @@ def test_drain_task_resolves_peer_completions_on_the_engine_thread(
 
         def broadcast_object_list(container, **kwargs):
             # Stand-in for DP rank 1, which meets rank 0 at every decision broadcast: it sends
-            # back the completions of the requests it admitted at the previous one, then admits
-            # its share of this one.
+            # back the completions (or rejections) of the requests it took at the previous one,
+            # then takes its share of this one.
             if peer_requests:
-                completions = dispatcher._build_completions(
-                    [_finished_output(request_id) for request_id in peer_requests], 0
-                )
+                if peer_rejects:
+                    results = _RejectedRequests(
+                        requests=[
+                            (request_id, ValueError(f"{request_id} rejected"))
+                            for request_id in peer_requests
+                        ]
+                    )
+                else:
+                    results = dispatcher._build_completions(
+                        [_finished_output(request_id) for request_id in peer_requests],
+                        0,
+                    )
                 peer_requests.clear()
                 generator._engine_event_loop.call_soon_threadsafe(
-                    peer_results.put_nowait, completions
+                    peer_results.put_nowait, results
                 )
             decision = container[0]
             if (
@@ -1119,8 +1172,14 @@ def test_drain_task_resolves_peer_completions_on_the_engine_thread(
         )
         await generator.start_engine_loop()
 
-        completion = await asyncio.wait_for(_generate(generator, "r0"), _TIMEOUT_S)
-        assert completion.request_id == "r0"
+        if peer_rejects:
+            with pytest.raises(ValueError, match="r0 rejected"):
+                await asyncio.wait_for(_generate(generator, "r0"), _TIMEOUT_S)
+        else:
+            completion = await asyncio.wait_for(_generate(generator, "r0"), _TIMEOUT_S)
+            assert completion.request_id == "r0"
+        # Either way the peer's result frees its DP rank: only the "busy" reservation is left.
+        assert dispatcher._rank0_dp_router._reservations == {"busy": 0}
         assert engine.threads == set()  # rank 0's own DP replica served nothing
         assert set(recv_threads) == {generator._engine_thread}
 

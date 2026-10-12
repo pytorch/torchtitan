@@ -23,6 +23,7 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
@@ -34,6 +35,10 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.flops import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -44,11 +49,6 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
-from torchtitan.protocols.module import Module
 from .state_dict_adapter import MuseGlimmerStateDictAdapter
 
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
@@ -293,7 +293,7 @@ class MuseGlimmerModel(MultimodalModel):
             default_factory=lambda: ["loss", "fused_binary_activation"]
         )
         # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
-        # bundled embedding+norm unit that sharding.py indexes via .embedding/.norm.
+        # bundled embedding+norm unit whose .embedding/.norm children carry the sharding.
         # Dataclass fields are invariant, so pyrefly flags the (intentional) override.
         # pyrefly: ignore [bad-override]
         tok_embeddings: EmbeddingWithNorm.Config
@@ -341,13 +341,6 @@ class MuseGlimmerModel(MultimodalModel):
                 )
             return nparams, 6 * active_nparams + attention_op_flops
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_muse_glimmer_sharding_config
-
-            set_muse_glimmer_sharding_config(
-                self, enable_sp=parallelism.enable_sequence_parallel
-            )
-
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)
         # LLM-side multimodal injection modules (None for the text-only model).
@@ -379,7 +372,6 @@ class MuseGlimmerModel(MultimodalModel):
         local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> MuseGlimmerModel:
         if self.vision_encoder is not None and parallelism_context.tp_enabled:
             assert self.vision_encoder.num_heads % parallelism_context.tp == 0, (
@@ -394,7 +386,6 @@ class MuseGlimmerModel(MultimodalModel):
             local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
-            skip_dp=skip_dp,
         )
 
     def preprocess_inputs(

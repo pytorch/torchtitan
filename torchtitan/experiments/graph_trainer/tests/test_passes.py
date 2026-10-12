@@ -30,6 +30,8 @@ from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.config import TrainingConfig
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     _EP_TOKEN_COUNT_EXCHANGE,
@@ -131,8 +133,8 @@ from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # 
 from torchtitan.experiments.graph_trainer.tests.test_performance_passes import (  # noqa: F401
     TestAnnotateRMSNormForRegionalInductorPass,
 )
+from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.module import Module, ModuleList
 
 
 @torch.library.custom_op(
@@ -162,7 +164,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             return SimpleNamespace(
                 compile=GraphTrainerCompileConfig(inductor_compilation="full"),
                 loss=loss,
-                model=SimpleNamespace(layers=[0, 1]),
+                model=SimpleNamespace(layers=[0, 1], mtp_layers=[object()]),
                 parallelism=SimpleNamespace(),
             )
 
@@ -184,6 +186,10 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 for call in mock_bucket_plan.call_args_list
             ],
             [False, True],
+        )
+        self.assertEqual(
+            [call.kwargs["num_mtp_layers"] for call in mock_bucket_plan.call_args_list],
+            [1, 1],
         )
 
     def test_hsdp_collective_reordering_precedes_bucketing(self) -> None:
@@ -736,7 +742,13 @@ class ToyModel(Module):
         super().__init__()
 
         def _make_linear():
-            cfg = Linear.Config(in_features=dim, out_features=dim, bias=True)
+            # Traced under SimpleFSDP: no in-place WGRAD accumulation.
+            cfg = Linear.Config(
+                in_features=dim,
+                out_features=dim,
+                bias=True,
+                inplace_wgrad_accum=False,
+            )
             return cfg.build()
 
         self.layers = ModuleList([_make_linear() for _ in range(n_layers)])
@@ -2561,6 +2573,31 @@ class TestApplySACPass(TestCase):
             )
         )
 
+    def test_inplace_mutation_not_recomputed(self):
+        """An in-place buffer update consumed by backward is saved, not replayed."""
+        graph = torch.fx.Graph()
+        buf = graph.placeholder("buf")
+        x = graph.placeholder("x")
+        counts = graph.call_function(torch.ops.aten.mul.Tensor, args=(x, 2))
+        update = graph.call_function(torch.ops.aten.add_.Tensor, args=(buf, counts))
+        snapshot = graph.call_function(torch.ops.aten.clone.default, args=(update,))
+        scaled = graph.call_function(torch.ops.aten.div.Tensor, args=(snapshot, 4))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(scaled, x))
+        bwd.meta["autograd_backward"] = True
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        tag_sac_policy(gm)
+        selective_activation_remat_pass(gm)
+
+        self.assertEqual(update.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(snapshot.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(scaled.meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
+        mutations = [
+            n for n in gm.graph.nodes if n.target is torch.ops.aten.add_.Tensor
+        ]
+        self.assertEqual(mutations, [update])
+
     def test_non_save_ops_marked_recompute(self):
         """Ops not in the save list should be marked PREFER_RECOMPUTE."""
         gm = self._build_gm(
@@ -3329,7 +3366,9 @@ class TestBucketingPrefetchOrder(FSDPTest):
             enable_sequence_parallel=False,
         )
 
-        model_config = build_llama3_model_config("debugmodel")
+        model_config = build_llama3_model_config(
+            "debugmodel", parallelism=ParallelismConfig()
+        )
         vocab_size = model_config.vocab_size
 
         with torch.device("meta"):
@@ -3955,6 +3994,24 @@ class TestChunkPasses(TestCase):
         )
         self.assertIn("layers.1.moe.routed_experts", buckets)
         self.assertNotIn("layers.1", buckets)
+
+    def test_mtp_layers_use_parent_scope_buckets(self):
+        buckets = get_default_transformer_block_buckets(
+            2,
+            num_mtp_layers=2,
+        )
+
+        self.assertEqual(
+            buckets,
+            [
+                "tok_embeddings",
+                "layers.0",
+                "layers.1",
+                "mtp_layers.0",
+                "mtp_layers.1",
+                ["norm", "lm_head"],
+            ],
+        )
 
     def test_moe_ep_annotations_cover_all_to_all_dispatcher(self):
         from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher

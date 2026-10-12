@@ -1,5 +1,6 @@
-# RL runtime dependencies copied into the Docker build context.
-torchmonarch
+# RL runtime dependencies. Canonical file: torchtitan/rl/requirements.txt and
+# the `rl` extra in pyproject.toml point here.
+torchmonarch>=0.7.0
 opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-http
 pygtrie
