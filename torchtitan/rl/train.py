@@ -140,16 +140,21 @@ class HostMeshes:
 
 
 def generator_launch_env(generator_config: VLLMGenerator.Config) -> dict[str, str]:
-    """Env that generator procs need on top of ``RL_ENV_DEFAULTS``.
+    """Allocator env for generator procs: vLLM refuses CPU KV offload (a KV connector) under
+    ``expandable_segments:True``, which ``RL_ENV_DEFAULTS`` sets. Other options are kept.
 
-    vLLM refuses a KV connector, which CPU KV offload is, under ``expandable_segments:True``.
+    Example:
+
+        this proc:        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
+        generator procs:  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False,max_split_size_mb:512
     """
-    if generator_config.session_kv_offload_gib == 0:
-        return {}
-    return {
-        "PYTORCH_ALLOC_CONF": "expandable_segments:False",
-        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
-    }
+    launch_env = {}
+    if generator_config.kv_offload_gib > 0:
+        for key in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"):
+            launch_env[key] = os.environ.get(key, "").replace(
+                "expandable_segments:True", "expandable_segments:False"
+            )
+    return launch_env
 
 
 def _compute_trainer_world_size(p: ParallelismConfig) -> int:

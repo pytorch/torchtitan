@@ -24,8 +24,8 @@ import shutil
 import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import cast
-from unittest.mock import AsyncMock, Mock, patch
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import torch
@@ -60,11 +60,9 @@ from torchtitan.rl.model.vllm_worker import (
     TorchTitanGPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.session_kv_holder import DemotableLRUCachePolicy
 from vllm import SamplingParams
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
-from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 
 
 class _FakeRenderer:
@@ -422,7 +420,12 @@ def test_weight_sync_reset_kv_cache_flag_controls_cache_reset(
         await generator._pull_model_state_dict(version=8)
 
         assert generator.policy_version == 8
-        expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
+        # reset_connector also clears the CPU offload tier, whose KV is from the old weights.
+        expected = (
+            [((), {"reset_running_requests": True, "reset_connector": True})]
+            if reset_kv_cache
+            else []
+        )
         assert engine.reset_prefix_cache_calls == expected
 
     asyncio.run(run())
@@ -509,13 +512,9 @@ def test_hold_session_kv_requires_free_floor_above_watermark():
         )
 
 
-def test_session_kv_offload_needs_tp1():
-    VLLMGenerator.Config(parallelism=_PARALLELISM, session_kv_offload_gib=16)
-    with pytest.raises(ValueError, match="needs tensor_parallel_degree=1, got 2"):
-        VLLMGenerator.Config(
-            parallelism=InferenceParallelismConfig(tensor_parallel_degree=2),
-            session_kv_offload_gib=16,
-        )
+def test_kv_offload_gib_rejects_negative_sizes():
+    with pytest.raises(ValueError, match="kv_offload_gib must be >= 0, got -1"):
+        VLLMGenerator.Config(parallelism=_PARALLELISM, kv_offload_gib=-1)
 
 
 def test_qwen36_27b_perf_config():
@@ -573,22 +572,58 @@ def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
     assert engine_kwargs["scheduling_policy"] == "fcfs"
 
 
-def test_session_kv_offload_sets_vllm_cpu_offload(monkeypatch, tmp_path):
+def test_kv_offload_sets_vllm_cpu_offload(monkeypatch, tmp_path):
     engine_kwargs = _build_engine_kwargs(
-        monkeypatch, tmp_path, VLLMGenerator.Config(session_kv_offload_gib=16)
+        monkeypatch, tmp_path, VLLMGenerator.Config(kv_offload_gib=16)
     )
     assert engine_kwargs["kv_offloading_size"] == 16
-    assert engine_kwargs["kv_offloading_backend"] == "native"
-    extra_config = engine_kwargs["kv_transfer_config"].kv_connector_extra_config
-    assert extra_config["offload_prompt_only"] is False
-    # vLLM builds the eviction policy from these two keys.
-    policy_cls = CachePolicyFactory.get_cache_policy_cls(
-        extra_config["eviction_policy"], extra_config["cache_policy_module_path"]
-    )
-    assert policy_cls is DemotableLRUCachePolicy
+    # vLLM adds cpu_bytes_to_use from kv_offloading_size when it builds its config.
+    assert engine_kwargs["kv_transfer_config"].kv_connector_extra_config == {
+        "offload_prompt_only": False,
+        "eviction_policy": "lru",
+    }
 
     engine_kwargs = _build_engine_kwargs(monkeypatch, tmp_path, VLLMGenerator.Config())
     assert not engine_kwargs.keys() & {"kv_offloading_size", "kv_transfer_config"}
+
+
+def test_kv_offload_needs_a_one_gpu_generator(monkeypatch, tmp_path):
+    """Each vLLM worker hears only its own finished CPU transfers, so with 2 none complete."""
+    # e.g. pipeline_parallel_size=2 through extra_vllm_engine_args
+    parallel_config = SimpleNamespace(
+        data_parallel_size=1, data_parallel_rank=0, world_size=2
+    )
+    engine = SimpleNamespace(
+        vllm_config=SimpleNamespace(parallel_config=parallel_config)
+    )
+    monkeypatch.setattr(generator_module, "EngineArgs", Mock())
+    monkeypatch.setattr(
+        generator_module,
+        "LLMEngine",
+        SimpleNamespace(from_engine_args=lambda engine_args, stat_loggers: engine),
+    )
+    monkeypatch.setattr(generator_module, "register_to_vllm", Mock())
+    monkeypatch.setattr(generator_module, "init_logger", Mock())
+    monkeypatch.setattr(generator_module, "sl", MagicMock())
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda device: None)
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    model_config: Any = SimpleNamespace(
+        first_base_attention_backend=VarlenInnerAttention.Config(),
+        max_context_length=1024,
+    )
+    with pytest.raises(
+        ValueError, match="needs a one-GPU generator, but vLLM has 2 workers"
+    ):
+        VLLMGenerator(
+            VLLMGenerator.Config(kv_offload_gib=16),
+            model_config=model_config,
+            model_path="unused",
+            max_num_seqs=8,
+            output_dir=str(tmp_path),
+            rank=0,
+        )
 
 
 @pytest.mark.parametrize(
@@ -602,7 +637,7 @@ def test_session_kv_offload_sets_vllm_cpu_offload(monkeypatch, tmp_path):
             r"use VLLMGenerator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use VLLMGenerator\.Config\.debug\.seed"),
-        ("kv_offloading_size", r"use VLLMGenerator\.Config\.session_kv_offload_gib"),
+        ("kv_offloading_size", r"use VLLMGenerator\.Config\.kv_offload_gib"),
     ],
 )
 def test_extra_vllm_engine_args_rejects_torchtitan_owned_keys(key, match):

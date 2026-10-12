@@ -8,11 +8,12 @@
 16-token blocks standing in for Qwen3.5's 1,152."""
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
 
-from torchtitan.rl.session_kv_holder import DemotableLRUCachePolicy, SessionKVHolder
+from torchtitan.rl.session_kv_holder import SessionKVHolder
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -23,8 +24,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
-from vllm.v1.kv_offload.base import make_offload_key, OffloadKey
-from vllm.v1.kv_offload.cpu.policies.base import ChunkStatus
+from vllm.v1.kv_offload.base import make_offload_key, OffloadKey, ReqContext
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
+from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.request import Request
 
 BLOCK = 16
@@ -287,62 +290,40 @@ def test_next_turn_moves_the_hold_and_release_frees_everything(manager):
 _CHURN = OffloadKey(b"churn")
 
 
-def _store(policy: DemotableLRUCachePolicy, keys) -> None:
-    """Add `keys` to the CPU tier the way vLLM does: insert while storing, then mark evictable."""
-    for key in keys:
-        policy.insert(key, ChunkStatus(chunk_id=len(policy.chunks)))
-        policy.chunks[key].ref_cnt = 0
-        policy.mark_evictable(key)
+def _cpu_tier() -> CPUOffloadingManager:
+    """vLLM's CPU offload manager with its default LRU; 1,000 chunks is more than any test stores."""
+    return CPUOffloadingManager(num_chunks=1000)
+
+
+def _store(cpu_tier: CPUOffloadingManager, keys) -> None:
+    """Store `keys` as vLLM's write-through does: prepare the store, then complete it."""
+    keys = list(keys)
+    context = ReqContext(req_id="store")
+    cpu_tier.prepare_store(keys, context)
+    cpu_tier.complete_store(keys, context)
 
 
 def _offload_keys(request: Request) -> list[OffloadKey]:
-    """The CPU chunks vLLM's write-through stores for `request`: every block, all 4 groups."""
+    """CPU chunk keys of every full block of `request`, in all 4 KV cache groups."""
     return [make_offload_key(h, g) for h in request.block_hashes for g in range(4)]
 
 
-def test_demote_moves_stored_chunks_to_the_eviction_front():
-    a, b, c, never_stored = (OffloadKey(key) for key in (b"a", b"b", b"c", b"x"))
-    policy = DemotableLRUCachePolicy(cache_capacity=8)
-    _store(policy, [a, b, c])
-
-    policy.demote([c, never_stored])
-
-    assert list(policy.evictable_chunks) == [c, a, b]
-    evicted = policy.evict(1, protected=set())
-    assert evicted is not None and [key for key, _ in evicted] == [c]
+def _eviction_order(cpu_tier: CPUOffloadingManager) -> list[OffloadKey]:
+    """Stored chunks, evicted first on the left."""
+    return list(cast(LRUCachePolicy, cpu_tier._policy).evictable_chunks)
 
 
-def test_demote_during_a_store_takes_effect_when_the_store_finishes():
-    a, d, e = (OffloadKey(key) for key in (b"a", b"d", b"e"))
-    policy = DemotableLRUCachePolicy(cache_capacity=8)
-    _store(policy, [a])
-    policy.insert(d, ChunkStatus(chunk_id=1))  # store in flight
-
-    policy.demote([d])
-    assert list(policy.evictable_chunks) == [a]
-    policy.chunks[d].ref_cnt = 0
-    policy.mark_evictable(d)
-    assert list(policy.evictable_chunks) == [d, a]
-
-    # A demoted store that fails is forgotten: storing the key again later keeps LRU order.
-    policy.insert(e, ChunkStatus(chunk_id=2))
-    policy.demote([e])
-    policy.remove(e)
-    _store(policy, [e])
-    assert list(policy.evictable_chunks) == [d, a, e]
-
-
-def test_release_demotes_an_ended_session_except_the_prefix_a_live_sibling_uses(
+def test_release_evicts_an_ended_session_first_except_the_prefix_a_live_sibling_uses(
     manager,
 ):
-    requests = {}
-    policy = DemotableLRUCachePolicy(cache_capacity=1000)
-    holder = _holder(manager, requests, offload_policy=policy)
+    requests, cpu_tier = {}, _cpu_tier()
+    holder = _holder(manager, requests, offload_policy=cpu_tier._policy)
     prompt = list(range(48))  # 3 blocks both siblings share
     s1 = _finished_turn(manager, holder, requests, "s1", prompt + list(range(100, 134)))
     s2 = _finished_turn(manager, holder, requests, "s2", prompt + list(range(200, 234)))
-    _store(policy, [_CHURN])
-    _store(policy, dict.fromkeys(_offload_keys(s1) + _offload_keys(s2)))
+    _store(cpu_tier, [_CHURN])
+    _store(cpu_tier, dict.fromkeys(_offload_keys(s1) + _offload_keys(s2)))
+    # 3 shared blocks x 4 groups, then each sibling's own 2 blocks x 4 groups.
     shared, s1_own, s2_own = (
         _offload_keys(s1)[:12],
         _offload_keys(s1)[12:],
@@ -350,44 +331,86 @@ def test_release_demotes_an_ended_session_except_the_prefix_a_live_sibling_uses(
     )
 
     holder.release(session_ids=["s1"])
-    evictable = list(policy.evictable_chunks)
-    assert set(evictable[: len(s1_own)]) == set(s1_own)
-    assert evictable[len(s1_own)] == _CHURN  # the shared prefix stays behind it
+    order = _eviction_order(cpu_tier)
+    assert set(order[: len(s1_own)]) == set(s1_own)
+    assert order[len(s1_own)] == _CHURN  # the shared prefix stays behind it
 
     holder.release(session_ids=["s2"])
-    evictable = list(policy.evictable_chunks)
-    assert set(evictable[: len(shared) + len(s2_own)]) == set(shared + s2_own)
+    order = _eviction_order(cpu_tier)
+    assert set(order[: len(shared) + len(s2_own)]) == set(shared + s2_own)
 
 
-def test_offload_without_hold_holds_nothing_and_demotes_a_finished_group(manager):
-    requests = {}
-    policy = DemotableLRUCachePolicy(cache_capacity=1000)
-    holder = _holder(manager, requests, hold=False, offload_policy=policy)
+def test_a_sibling_before_its_first_prefill_keeps_the_shared_prefix_in_place(manager):
+    requests, cpu_tier = {}, _cpu_tier()
+    holder = _holder(manager, requests, hold=False, offload_policy=cpu_tier._policy)
+    prompt = list(range(48))  # 3 blocks both siblings share
+    s1 = _finished_turn(manager, holder, requests, "s1", prompt + list(range(100, 134)))
+    # s2's first turn is in vLLM but not prefilled yet.
+    requests["s2"] = _request("s2", prompt + list(range(200, 234)))
+    holder.track("s2", session_id="s2", group_id=0)
+    _store(cpu_tier, [_CHURN] + _offload_keys(s1))
+
+    holder.release(session_ids=["s1"])
+
+    order = _eviction_order(cpu_tier)
+    assert set(order[:8]) == set(_offload_keys(s1)[12:])  # s1's own 2 blocks x 4 groups
+    assert order[8] == _CHURN
+
+
+def test_completion_blocks_of_an_ended_session_are_evicted_first(manager):
+    requests, cpu_tier = {}, _cpu_tier()
+    holder = _holder(manager, requests, hold=False, offload_policy=cpu_tier._policy)
+    turn = _request("t1", list(range(50)))
+    requests["t1"] = turn
+    holder.track("t1", session_id="s", group_id=0)
+    _prefill(manager, turn)
+    holder.after_step()
+    for t in range(20):  # decode fills a 4th block: 50 prompt + 21 sampled tokens
+        _schedule(manager, turn, 1, sample=100 + t)
+    manager.free(turn)
+    del requests["t1"]
+    holder.after_step()
+    assert len(turn.block_hashes) == 4
+    _store(cpu_tier, [_CHURN] + _offload_keys(turn))
+
+    holder.release(session_ids=["s"])
+
+    assert _eviction_order(cpu_tier)[-1] == _CHURN
+
+
+def test_offload_without_hold_holds_nothing_and_evicts_a_finished_group_first(manager):
+    requests, cpu_tier = {}, _cpu_tier()
+    holder = _holder(manager, requests, hold=False, offload_policy=cpu_tier._policy)
     free_before = manager.block_pool.get_num_free_blocks()
     s1 = _finished_turn(manager, holder, requests, "s1", list(range(50)), group_id=5)
     s2 = _finished_turn(manager, holder, requests, "s2", list(range(500, 550)), 5)
-    _store(policy, [_CHURN])
-    _store(policy, _offload_keys(s1) + _offload_keys(s2))
+    _store(cpu_tier, [_CHURN] + _offload_keys(s1) + _offload_keys(s2))
     assert holder.num_sessions == 0
     assert manager.block_pool.get_num_free_blocks() == free_before
 
     holder.release(group_ids=[5])
 
-    assert list(policy.evictable_chunks)[-1] == _CHURN
+    assert _eviction_order(cpu_tier)[-1] == _CHURN
 
 
 def test_free_floor_release_keeps_the_cpu_chunks_of_a_live_session(manager):
     """A session dropped from GPU for room is still alive: its CPU copy is what it reloads."""
-    requests = {}
-    policy = DemotableLRUCachePolicy(cache_capacity=1000)
-    holder = _holder(manager, requests, offload_policy=policy)
+    requests, cpu_tier = {}, _cpu_tier()
+    holder = _holder(manager, requests, offload_policy=cpu_tier._policy)
     old = _finished_turn(manager, holder, requests, "old", list(range(50)))
     _finished_turn(manager, holder, requests, "new", list(range(500, 550)))
-    _store(policy, _offload_keys(old) + [_CHURN])
-    order_before = list(policy.evictable_chunks)
+    _store(cpu_tier, _offload_keys(old) + [_CHURN])
+    order_before = _eviction_order(cpu_tier)
 
     holder.free_floor_blocks = manager.block_pool.get_num_free_blocks() + 1
     holder.evict_until_free()
 
     assert holder.num_evicted == 1
-    assert list(policy.evictable_chunks) == order_before
+    assert _eviction_order(cpu_tier) == order_before
+
+
+def test_offload_needs_vllm_lru_policy(manager):
+    with pytest.raises(
+        RuntimeError, match="needs vLLM's LRUCachePolicy, got ARCCachePolicy"
+    ):
+        _holder(manager, {}, offload_policy=ARCCachePolicy(cache_capacity=8))

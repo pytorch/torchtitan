@@ -121,7 +121,8 @@ class InterGeneratorRouter(Actor, Configurable):
         ), f"InterGeneratorRouter must be a singleton, but its mesh holds {num_actors} actors"
 
         self._config = config
-        # Tell generators when a session ends, so they release its held KV (`hold_session_kv`).
+        # Tell generators when a session ends, so they release its held KV (`hold_session_kv`)
+        # and its CPU-offloaded KV is evicted first (`kv_offload_gib`).
         self._forward_session_releases = forward_session_releases
         self._generators = [
             _GeneratorHandle(

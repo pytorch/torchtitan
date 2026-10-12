@@ -49,7 +49,7 @@ from torchtitan.rl.model.vllm_registry import (
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
 from torchtitan.rl.rollout.types import Completion
-from torchtitan.rl.session_kv_holder import DemotableLRUCachePolicy, SessionKVHolder
+from torchtitan.rl.session_kv_holder import SessionKVHolder
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ def add_extra_vllm_engine_args(
         "max_num_batched_tokens": "max_num_batched_tokens",
         "compilation_config": "cuda_graph",
         "seed": "debug.seed",
-        "kv_offloading_size": "session_kv_offload_gib",
+        "kv_offloading_size": "kv_offload_gib",
     }
     owned_keys = sorted(
         extra_vllm_engine_args.keys()
@@ -845,12 +845,12 @@ class VLLMGenerator(Configurable):
         ``extra_vllm_engine_args``): vLLM admits no waiting request (a later turn included) while
         fewer than ``watermark`` are free."""
 
-        session_kv_offload_gib: float = 0.0
-        """Host RAM (GiB) per generator GPU for vLLM's native CPU KV offload; 0 disables it.
+        kv_offload_gib: float = 0.0
+        """Host RAM (GiB) for vLLM's native CPU KV offload; 0 disables it.
         - vLLM copies every computed KV block to CPU; a turn whose history left the GPU reloads it.
         - Ended sessions' chunks are evicted first (see `SessionKVHolder`).
-        - Needs ``tensor_parallel_degree=1``, and generator procs without
-          ``expandable_segments:True`` (``train.py`` launches them so)."""
+        - Needs a one-GPU generator (TP=1, DP=1), launched without ``expandable_segments:True``
+          (``train.py`` does that)."""
 
         def __post_init__(self):
             if self.hold_session_kv and self.reset_kv_cache_on_weight_sync:
@@ -866,12 +866,9 @@ class VLLMGenerator(Configurable):
                     f"watermark ({watermark}, set in extra_vllm_engine_args), or held blocks can "
                     "stall every waiting turn"
                 )
-            tp_degree = self.parallelism.tensor_parallel_degree
-            if self.session_kv_offload_gib > 0 and tp_degree > 1:
+            if self.kv_offload_gib < 0:
                 raise ValueError(
-                    f"session_kv_offload_gib needs tensor_parallel_degree=1, got {tp_degree}: "
-                    "with external_launcher, each TP rank's scheduler counts only its own "
-                    "rank's finished CPU loads and stores, so they never complete"
+                    f"kv_offload_gib must be >= 0, got {self.kv_offload_gib}"
                 )
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -1039,16 +1036,15 @@ class VLLMGenerator(Configurable):
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
             engine_kwargs["seed"] = config.debug.seed
-        if config.session_kv_offload_gib > 0:
-            engine_kwargs["kv_offloading_size"] = config.session_kv_offload_gib
-            engine_kwargs["kv_offloading_backend"] = "native"
+        if config.kv_offload_gib > 0:
+            engine_kwargs["kv_offloading_size"] = config.kv_offload_gib
             engine_kwargs["kv_transfer_config"] = KVTransferConfig(
                 kv_connector_extra_config={
                     # vLLM's default stores prompt blocks only, but the next turn's prompt also
                     # holds this turn's completion.
                     "offload_prompt_only": False,
-                    "eviction_policy": DemotableLRUCachePolicy.__name__,
-                    "cache_policy_module_path": DemotableLRUCachePolicy.__module__,
+                    # SessionKVHolder reorders this LRU so ended sessions are evicted first.
+                    "eviction_policy": "lru",
                 }
             )
         add_extra_vllm_engine_args(engine_kwargs, config.extra_vllm_engine_args)
@@ -1128,6 +1124,17 @@ class VLLMGenerator(Configurable):
                 f"({self._dp_rank}) != vLLM data_parallel_rank "
                 f"({vllm_parallel_config.data_parallel_rank})"
             )
+        # vLLM marks a CPU offload load or store done once all of its workers report it, but under
+        # external_launcher each worker's scheduler hears only its own worker.
+        # TODO: all-gather the finished transfers across workers each step, as vLLM's
+        # multiprocess executor merges them; it also needs equal request ids on every worker
+        # (a prototype used a deprecated vLLM env for that).
+        if config.kv_offload_gib > 0 and vllm_parallel_config.world_size > 1:
+            raise ValueError(
+                "kv_offload_gib needs a one-GPU generator, but vLLM has "
+                f"{vllm_parallel_config.world_size} workers (TP x DP x PP x prefill CP): their "
+                "finished CPU transfers are never merged, so loads and stores never complete"
+            )
 
         self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the
@@ -1162,17 +1169,19 @@ class VLLMGenerator(Configurable):
 
         # Every rank holds the same blocks in its own scheduler; only the engine thread touches them.
         self._session_kv: SessionKVHolder | None = None
-        if config.hold_session_kv or config.session_kv_offload_gib > 0:
+        if config.hold_session_kv or config.kv_offload_gib > 0:
             scheduler = self._engine.engine_core.engine_core.scheduler
             if config.hold_session_kv:
                 # Partial-block prefix hits or speculative decoding move the replay point away from
                 # the prompt-end block that SessionKVHolder holds.
-                assert (
-                    not scheduler.kv_cache_manager.coordinator.enable_partial_hash_hits
-                ), "hold_session_kv does not support partial-block prefix hits"
-                assert (
-                    self._engine.vllm_config.speculative_config is None
-                ), "hold_session_kv does not support speculative decoding"
+                if scheduler.kv_cache_manager.coordinator.enable_partial_hash_hits:
+                    raise ValueError(
+                        "hold_session_kv does not support partial-block prefix hits"
+                    )
+                if self._engine.vllm_config.speculative_config is not None:
+                    raise ValueError(
+                        "hold_session_kv does not support speculative decoding"
+                    )
             self._session_kv = SessionKVHolder(
                 scheduler,
                 free_floor_blocks=int(
@@ -1183,7 +1192,7 @@ class VLLMGenerator(Configurable):
                 # Built by vLLM from kv_connector_extra_config above.
                 offload_policy=(
                     scheduler.connector.connector_scheduler.manager._policy
-                    if config.session_kv_offload_gib > 0
+                    if config.kv_offload_gib > 0
                     else None
                 ),
             )
@@ -1238,7 +1247,11 @@ class VLLMGenerator(Configurable):
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
-        if self._session_kv is not None and self._rank == 0:
+        if (
+            self._session_kv is not None
+            and self.config.hold_session_kv
+            and self._rank == 0
+        ):
             logger.info(
                 "Session KV at step %d: %d sessions held, %d evicted so far",
                 step,
@@ -1616,8 +1629,8 @@ class VLLMGenerator(Configurable):
         )
 
     async def release_groups(self, group_ids: list[int]) -> None:
-        """Drop the pinned cache salts and the held KV of finished rollout groups, and put their
-        CPU-offloaded KV first in line for eviction.
+        """Drop the pinned cache salts and the held KV of finished rollout groups; their
+        CPU-offloaded KV is evicted first.
 
         Args:
             group_ids: Groups with no more generation calls.
@@ -1631,9 +1644,8 @@ class VLLMGenerator(Configurable):
             self._engine_loop_queue.put(SessionReleaseMessage(group_ids=group_ids))
 
     async def release_sessions(self, session_ids: list[str]) -> None:
-        """Release the held KV of sessions whose rollout ended, and put their CPU-offloaded KV
-        first in line for eviction (rank 0; a no-op without ``hold_session_kv`` or
-        ``session_kv_offload_gib``).
+        """Release the held KV of sessions whose rollout ended; their CPU-offloaded KV is evicted
+        first (rank 0; a no-op without ``hold_session_kv`` or ``kv_offload_gib``).
 
         Args:
             session_ids: Routing session ids with no more generation calls.
@@ -1700,8 +1712,10 @@ class VLLMGenerator(Configurable):
             # Always reset running requests too: the only reason to reset is a strict
             # recompute under the new weights. Keeping running requests' KV while hiding
             # old KV from new requests is already what the default (no reset) does via the salt.
+            # reset_connector also clears the CPU offload tier (a no-op without one).
             self._engine.reset_prefix_cache(
                 reset_running_requests=True,
+                reset_connector=True,
             )
         gc.collect()
 
