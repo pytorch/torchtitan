@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
@@ -35,8 +36,8 @@ def _turn(
         # The full prompt for now; `_scored_rollout` stores it as a delta like the Rollouter does
         prompt_prefix_len=0,
         prompt_delta_token_ids=prompt_token_ids,
-        completion_token_ids=completion_token_ids,
-        completion_logprobs=[-0.1] * len(completion_token_ids),
+        completion_token_ids=np.array(completion_token_ids, dtype=np.int32),
+        completion_logprobs=np.full(len(completion_token_ids), -0.1, dtype=np.float32),
         min_policy_version=version,
         max_policy_version=version if max_version is None else max_version,
         completion_message={"role": "assistant", "content": content},
@@ -52,7 +53,9 @@ def _scored_rollout(
         prefix_len, delta = split_prompt(prompt_token_ids, previous_token_ids)
         rollout_turn.prompt_prefix_len = prefix_len
         rollout_turn.prompt_delta_token_ids = delta
-        previous_token_ids = prompt_token_ids + rollout_turn.completion_token_ids
+        previous_token_ids = (
+            prompt_token_ids + rollout_turn.completion_token_ids.tolist()
+        )
     return Rollout(
         group_id=_GROUP_ID,
         rollout_id=0,
@@ -187,7 +190,7 @@ def test_rewrite_that_keeps_a_prefix_branches_then_continues() -> None:
         advantage=0.1,
     )
     stored = [
-        (rollout_turn.prompt_prefix_len, rollout_turn.prompt_delta_token_ids)
+        (rollout_turn.prompt_prefix_len, rollout_turn.prompt_delta_token_ids.tolist())
         for rollout_turn in rollout.turns
     ]
     assert stored == [(0, [1, 2]), (2, [7]), (4, [9])]
@@ -220,9 +223,9 @@ def test_prefix_that_is_not_the_longest_raises(
         RolloutTurn(
             rollout_id=RolloutTurnID(group_id=_GROUP_ID, rollout_id=0, turn_id=1),
             prompt_prefix_len=prompt_prefix_len,
-            prompt_delta_token_ids=prompt_delta_token_ids,
-            completion_token_ids=[5],
-            completion_logprobs=[-0.1],
+            prompt_delta_token_ids=np.array(prompt_delta_token_ids, dtype=np.int32),
+            completion_token_ids=np.array([5], dtype=np.int32),
+            completion_logprobs=np.array([-0.1], dtype=np.float32),
             min_policy_version=1,
             max_policy_version=1,
         )
@@ -242,7 +245,10 @@ def test_prefix_that_is_not_the_longest_raises(
     ],
 )
 def test_split_prompt(prompt, previous, expected) -> None:
-    assert split_prompt(prompt, previous_token_ids=previous) == expected
+    prompt_prefix_len, prompt_delta_token_ids = split_prompt(
+        prompt, previous_token_ids=previous
+    )
+    assert (prompt_prefix_len, prompt_delta_token_ids.tolist()) == expected
 
 
 def test_empty_completion_on_a_later_turn_raises() -> None:
@@ -342,7 +348,7 @@ def test_group_filters_preserve_group_id_for_acknowledgement() -> None:
         advantage=1.0,
     )
     invalid_logprob.group_id = 10
-    invalid_logprob.turns[0].completion_logprobs = [float("nan")]
+    invalid_logprob.turns[0].completion_logprobs = np.array([np.nan], dtype=np.float32)
     no_valid_tokens = builder.build_from_group(
         rollout_group=RolloutGroup(group_id=10, rollouts=[invalid_logprob])
     )

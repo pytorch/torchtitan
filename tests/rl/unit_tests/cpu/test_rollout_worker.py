@@ -274,7 +274,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             for turn_id, (turn, prompt) in enumerate(
                 zip(rollout.turns, renderer.prompts, strict=True)
             ):
-                completion = turn.completion_token_ids
+                completion = turn.completion_token_ids.tolist()
                 if expected and prompt[: len(previous)] == previous:
                     expected[-1][1].extend(prompt[len(previous) :] + completion)
                 else:

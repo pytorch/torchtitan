@@ -127,7 +127,7 @@ def test_env_returns_each_next_prompt_as_a_delta() -> None:
 
     outputs = asyncio.run(run())
     assert [
-        (output.next_prompt_prefix_len, output.next_prompt_delta_token_ids)
+        (output.next_prompt_prefix_len, output.next_prompt_delta_token_ids.tolist())
         for output in outputs
     ] == [
         (0, [1, 2, 3]),  # first prompt: nothing to reuse

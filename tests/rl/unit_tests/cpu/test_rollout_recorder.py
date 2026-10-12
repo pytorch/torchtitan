@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 
+import numpy as np
 import pytest
 
 from torchtitan.rl.observability.rollout_recorder import (
@@ -30,9 +31,9 @@ def _turn(*, completion_logprobs: list[float], policy_version: int = 1) -> Rollo
     return RolloutTurn(
         rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
         prompt_prefix_len=0,
-        prompt_delta_token_ids=[1, 2, 3],
-        completion_token_ids=[4, 5],
-        completion_logprobs=completion_logprobs,
+        prompt_delta_token_ids=np.array([1, 2, 3], dtype=np.int32),
+        completion_token_ids=np.array([4, 5], dtype=np.int32),
+        completion_logprobs=np.array(completion_logprobs, dtype=np.float32),
         min_policy_version=policy_version,
         prompt_messages=[{"role": "user", "content": "sort: b a c"}],
         completion_message={"role": "assistant", "content": "a b c"},

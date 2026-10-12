@@ -1018,8 +1018,6 @@ class Controller(Configurable):
             await group_buffer.finalize_work(group)
 
             # Drop both refs (work.rollout_group is the group too): held groups made every full GC slow.
-            # TODO: store RolloutTurn's per-token lists as numpy arrays, as TrainingSample does:
-            # a full GC walks every entry of a Python list, which is slow.
             del group, work
 
     async def _batcher_loop(

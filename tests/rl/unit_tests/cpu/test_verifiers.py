@@ -72,9 +72,9 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
 
     assert len(turns) == 1
     assert turns[0].prompt_prefix_len == 0
-    assert turns[0].prompt_delta_token_ids == [10, 11]
-    assert turns[0].completion_token_ids == [12, 13]
-    assert turns[0].completion_logprobs == [-0.2, -0.3]
+    assert turns[0].prompt_delta_token_ids.tolist() == [10, 11]
+    assert turns[0].completion_token_ids.tolist() == [12, 13]
+    assert turns[0].completion_logprobs.tolist() == pytest.approx([-0.2, -0.3])
     assert turns[0].completion_message == {
         "role": "assistant",
         "content": "Answer: $42$",
@@ -122,10 +122,15 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
     assert [turn.min_policy_version for turn in turns] == [3, 3]
     assert [turn.max_policy_version for turn in turns] == [8, 8]
     # turn 1's prompt [10, 11, 12] continues turn 0's [10] + [11], so it stores only [12]
-    stored = [(turn.prompt_prefix_len, turn.prompt_delta_token_ids) for turn in turns]
+    stored = [
+        (turn.prompt_prefix_len, turn.prompt_delta_token_ids.tolist()) for turn in turns
+    ]
     assert stored == [(0, [10]), (2, [12])]
-    assert [turn.completion_token_ids for turn in turns] == [[11], [13]]
-    assert [turn.completion_logprobs for turn in turns] == [[-0.1], [-0.2]]
+    assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13]]
+    assert [turn.completion_logprobs.tolist() for turn in turns] == [
+        pytest.approx([-0.1]),
+        pytest.approx([-0.2]),
+    ]
 
 
 def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> None:
@@ -166,9 +171,11 @@ def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> 
 
     # The shared node trains once; the second branch's prompt [10, 11, 14] keeps [10, 11] of the
     # previous turn's [10, 11, 12, 13], so it stores (2, [14]) and the builder opens a new sample.
-    stored = [(turn.prompt_prefix_len, turn.prompt_delta_token_ids) for turn in turns]
+    stored = [
+        (turn.prompt_prefix_len, turn.prompt_delta_token_ids.tolist()) for turn in turns
+    ]
     assert stored == [(0, [10]), (2, [12]), (2, [14])]
-    assert [turn.completion_token_ids for turn in turns] == [[11], [13], [15]]
+    assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13], [15]]
 
 
 def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
