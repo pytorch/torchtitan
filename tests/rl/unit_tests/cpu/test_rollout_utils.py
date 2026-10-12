@@ -256,6 +256,40 @@ def test_empty_completion_on_a_later_turn_raises() -> None:
         rollout_to_training_samples(rollout)
 
 
+def test_build_from_group_drops_a_rollout_with_an_empty_later_completion() -> None:
+    # e.g. turn 1 aborted before its first token: drop that rollout and count it, keep the others
+    empty_later = _scored_rollout(
+        [
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1),
+            _turn(prompt_token_ids=[1, 2, 4, 8], completion_token_ids=[], version=1),
+        ],
+        reward=0.0,
+        advantage=1.0,
+    )
+    kept = _scored_rollout(
+        [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
+        reward=1.0,
+        advantage=1.0,
+    )
+    kept.rollout_id = 1
+
+    group = (
+        TrainingSampleBuilder.Config()
+        .build()
+        .build_from_group(
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[empty_later, kept])
+        )
+    )
+
+    assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [1]
+    [dropped] = [
+        metric
+        for metric in group.metrics
+        if metric.key == "training_sample_builder/num_rollouts_dropped_empty_completion"
+    ]
+    assert dropped.value.value == 1.0
+
+
 def test_empty_completion_on_first_turn_is_skipped() -> None:
     # First turn with no completion = initial prompt too long; expected, so the rollout yields no samples.
     rollout = _scored_rollout(

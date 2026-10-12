@@ -153,7 +153,14 @@ class TrainingSampleBuilder(Configurable):
         unfiltered_training_samples: list[TrainingSample] = []
         branches_per_rollout: list[float] = []
         num_samples_dropped_no_valid_tokens = 0
+        num_rollouts_dropped_empty_completion = 0
         for rollout in rollout_group.rollouts:
+            # A later turn with no completion (e.g. a request aborted before its first token): drop the
+            # rollout, so `rollout_to_training_samples` doesn't raise and stop the run.
+            if any(not rollout_turn.completion_token_ids for rollout_turn in rollout.turns[1:]):
+                num_rollouts_dropped_empty_completion += 1
+                continue
+
             rollout_training_samples = self.rollout_to_training_samples(rollout)
             unfiltered_training_samples.extend(rollout_training_samples)
             kept = [
@@ -167,6 +174,13 @@ class TrainingSampleBuilder(Configurable):
             training_samples.extend(kept)
             branches_per_rollout.append(float(len(rollout_training_samples)))
 
+        if num_rollouts_dropped_empty_completion:
+            metrics.append(
+                m.Metric(
+                    "training_sample_builder/num_rollouts_dropped_empty_completion",
+                    m.Sum(float(num_rollouts_dropped_empty_completion)),
+                )
+            )
         if num_samples_dropped_no_valid_tokens:
             metrics.append(
                 m.Metric(
