@@ -60,7 +60,7 @@ Example: DSv4 q norm + RoPE went from 1497 µs eager to 1044 µs in one region, 
 Before investing in an idea: negative-results.md. If compile itself fails: compile-limits.md.
 ```
 
-0. **Plan.** Set a time budget and a stop rule: stop when the remaining gap to ideal is under ~1% of the layer, or the next candidate's estimated gain is below that. Keep a devlog: one file per effort, a timestamped entry appended right after each measurement, decision and dead end (not in batches). Check how this tree declares regions (harness.md: where regions live) and what fused kernels already exist under `torchtitan_recipes/overrides/` (e.g. `fused_mla`); benchmark them as alternatives.
+0. **Plan.** Set a time budget and a stop rule: stop when the remaining gap to ideal is under ~1% of the layer, or the next candidate's estimated gain is below that. Keep a devlog: one file per effort, a timestamped entry appended right after each measurement, decision and dead end (not in batches). Check how this tree declares regions (harness.md: where regions live) and what fused kernels already exist under `torchtitan_recipes/overrides/` (e.g. `fused_mla`); benchmark them as alternatives. Also grep for regions the model doesn't enable or a sibling class doesn't call (Qwen3.5's batch-wise aux loss skipped the existing `moe_aux_loss` region: ~190 µs of `[T, E]` sums per layer).
 1. **Baselines** (harness.md):
    - 2 layers at real dims, covering each block type; packed tokens per rank from small to large (e.g. 2k, 4k, 16k, 32k+). Torchtitan has no batch dim, so long rows are normal.
    - fwd+bwd, with the recipe's activation checkpointing mode (none, full, selective).
@@ -94,6 +94,7 @@ Before investing in an idea: negative-results.md. If compile itself fails: compi
 - **A findings doc** (short): what was measured, the stack with deltas, rejected ideas, not tested, skill feedback. Its top block is the stack summary in every PR.
 - **PR text:** TLDR, Problem and Solution as numbered baby steps, a diagram, numbers in code blocks; no paragraphs or tables. Template, filled example and rules: pr-template.md.
 - **Code:** minimal diff; regions enabled per model config; a test that fails before and passes after; code rules in pr-template.md.
+- **Lint before pushing:** rebase on current main, then run CI's command (`pre-commit run --files <changed files>`) with CI's torch, from a checkout outside hidden directories (pyrefly skips `.worktrees/`). Pyrefly's `--remove-unused-ignores` fails CI on an ignore your torch needs and CI's doesn't. Run the tests next to the module (`tests/unit_tests/{cpu,gpu}/models/<model>/`) in that same CI venv: dev venvs can miss newer test deps.
 - **Compute:**
   - iterate on one GPU;
   - multi-GPU only for what one GPU can't show (comm overlap, EP/TP behavior, zero-token ranks): build-check the harness at the target world size (meta tensors or a fake process group), then submit one small, short job and keep working;
