@@ -48,10 +48,15 @@ def test_forward_backward_precision(dtype, upcast_qk, causal):
     ]
     reference_inputs = [x.detach().double().requires_grad_() for x in inputs]
     actual = attention(*inputs, attention_metadata=_metadata())
+    reference_q, reference_k, reference_v = (
+        x.reshape(2, 32, 4, 64).transpose(1, 2) for x in reference_inputs
+    )
     with sdpa_kernel(SDPBackend.MATH):
         expected = (
             F.scaled_dot_product_attention(
-                *(x.reshape(2, 32, 4, 64).transpose(1, 2) for x in reference_inputs),
+                reference_q,
+                reference_k,
+                reference_v,
                 is_causal=causal,
             )
             .transpose(1, 2)
@@ -70,7 +75,27 @@ def test_forward_backward_precision(dtype, upcast_qk, causal):
         assert relative_error.item() < tolerance
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fp32_fallback_matches_legacy_forward_backward():
+    torch.manual_seed(42)
+    attention = VarlenInnerAttention.Config().build()
+    inputs = [
+        torch.randn(64, 4, 64, device="cuda", requires_grad=True) for _ in range(3)
+    ]
+    reference_inputs = [x.detach().clone().requires_grad_() for x in inputs]
+    metadata = _metadata()
+    actual = attention(*inputs, attention_metadata=metadata)
+    expected = attention(
+        *(x.bfloat16() for x in reference_inputs), attention_metadata=metadata
+    ).float()
+    grad_output = torch.randn_like(actual)
+    actual_grads = torch.autograd.grad(actual, inputs, grad_output)
+    expected_grads = torch.autograd.grad(expected, reference_inputs, grad_output)
+    torch.testing.assert_close(
+        (actual, actual_grads), (expected, expected_grads), atol=0, rtol=0
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("mode", ["compile", "trace"])
 def test_compiled_and_traced_steps_match_eager(dtype, mode):
     torch.manual_seed(42)
@@ -81,15 +106,19 @@ def test_compiled_and_traced_steps_match_eager(dtype, mode):
     ]
     metadata = _metadata()
 
-    def step(q, k, v, attention_metadata):
+    def step(q, k, v, *, attention_metadata):
         output = attention(q, k, v, attention_metadata=attention_metadata)
         loss = output.float().square().mean()
         return output, loss, torch.autograd.grad(loss, (q, k, v))
 
-    expected = step(*inputs, metadata)
+    expected = step(*inputs, attention_metadata=metadata)
     if mode == "trace":
-        traced = minimal_fx_tracer(step, module=attention)(*inputs, metadata)
-        actual = run_traced(traced, module=attention)(*inputs, metadata)
+        traced = minimal_fx_tracer(step, module=attention)(
+            *inputs, attention_metadata=metadata
+        )
+        actual = run_traced(traced, module=attention)(
+            *inputs, attention_metadata=metadata
+        )
     else:
         compiled = torch.compile(attention, fullgraph=True)
         output = compiled(*inputs, attention_metadata=metadata)

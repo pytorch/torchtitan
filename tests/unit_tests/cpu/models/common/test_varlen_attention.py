@@ -142,16 +142,19 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
                 self.assertIs(actual_v, v_THV)
                 self.assertEqual(output.dtype, q_THK.dtype)
 
-    def test_fp32_values_are_rejected_before_dispatch(self):
+    def test_fp32_inputs_preserve_bfloat16_fallback(self):
         attention = VarlenInnerAttention.Config().build()
         metadata = create_varlen_metadata_for_document(torch.arange(4))
         inputs = [torch.randn(4, 2, 8) for _ in range(3)]
         with patch(
-            "torchtitan.models.common.attention.attention._varlen_attn"
+            "torchtitan.models.common.attention.attention._varlen_attn",
+            return_value=inputs[2].bfloat16(),
         ) as kernel:
-            with self.assertRaisesRegex(ValueError, "requires FP16 or BF16 values"):
-                attention(*inputs, attention_metadata=metadata)
-        kernel.assert_not_called()
+            output = attention(*inputs, attention_metadata=metadata)
+
+        for actual, expected in zip(kernel.call_args.args[:3], inputs):
+            torch.testing.assert_close(actual, expected.bfloat16())
+        torch.testing.assert_close(output, inputs[2].bfloat16().float())
 
     def test_gqa_preserves_td_shape(self):
         torch.manual_seed(42)
