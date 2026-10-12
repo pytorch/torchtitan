@@ -506,14 +506,18 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     )
 
 
-def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
+def llama3_debugmodel_ulysses_cp2_varlen(
+    *, parallelism: ParallelismConfig | None = None
+) -> Trainer.Config:
     """Llama 3 with varlen Ulysses CP."""
-    config = llama3_debugmodel_varlen_attn()
+    config = llama3_debugmodel(parallelism=parallelism)
     # Packed varlen metadata lacks SPMD annotations.
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.context_parallel_degree = 2
     # Ulysses does not support token reordering.
     config.parallelism.context_parallel_load_balancer = None
+    config.debug.seed = 42
+    config.debug.deterministic = True
     return apply_transforms(
         config,
         [
@@ -523,6 +527,20 @@ def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
                 }
             )
         ],
+    )
+
+
+def llama3_debugmodel_fsdp2_ulysses_cp2_varlen() -> Trainer.Config:
+    return llama3_debugmodel_ulysses_cp2_varlen(
+        parallelism=ParallelismConfig(data_parallel_shard_degree=2)
+    )
+
+
+def llama3_debugmodel_fsdp2_tp2_ulysses_cp2_varlen() -> Trainer.Config:
+    return llama3_debugmodel_ulysses_cp2_varlen(
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2, tensor_parallel_degree=2
+        )
     )
 
 
@@ -956,7 +974,7 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_cp4],
-            test_descr="CP",
+            test_descr="KV-all-gather CP with Flex attention",
             test_name="cp",
             ngpu=4,
         ),
@@ -974,7 +992,7 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_ulysses_cp2],
-            test_descr="Ulysses CP",
+            test_descr="Ulysses CP with Flex attention",
             test_name="cp_ulysses",
             ngpu=2,
         ),
@@ -983,6 +1001,22 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_descr="Ulysses CP with varlen attention",
             test_name="cp_ulysses_varlen",
             ngpu=2,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[llama3_debugmodel_fsdp2_ulysses_cp2_varlen],
+            test_descr="FSDP + Ulysses CP with varlen attention",
+            test_name="fsdp+cp_ulysses_varlen",
+            ngpu=4,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[llama3_debugmodel_fsdp2_tp2_ulysses_cp2_varlen],
+            test_descr="FSDP + TP + Ulysses CP with varlen attention",
+            test_name="fsdp+tp+cp_ulysses_varlen",
+            ngpu=8,
+            use_real_pg=True,
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(

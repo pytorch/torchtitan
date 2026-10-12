@@ -4,18 +4,32 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import unittest
+
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.distributed.device_mesh import init_device_mesh
 from torch.nn.attention import sdpa_kernel, SDPBackend
+from torch.testing._internal.common_utils import DeterministicGuard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
 )
 from torchtitan.models.common.attention import (
+    create_varlen_metadata_for_document,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
+)
+from torchtitan.models.common.attention.cp_attention import (
+    UlyssesCPVarlenInnerAttention,
 )
 
 
@@ -125,3 +139,84 @@ def test_compiled_and_traced_steps_match_eager(dtype, mode):
         loss = output.float().square().mean()
         actual = output, loss, torch.autograd.grad(loss, inputs)
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.multi_gpu
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+class TestVarlenUlyssesNumerics(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @with_comms
+    def test_packed_forward_backward_matches_unsharded(self):
+        mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("cp",))
+        device = torch.device("cuda", self.rank)
+        # The middle document crosses the CP boundary at token 64.
+        positions = torch.cat([torch.arange(n) for n in (17, 79, 24, 8)]).to(device)
+        padding_mask = torch.arange(128, device=device) >= 120
+        metadata = create_varlen_metadata_for_document(
+            positions,
+            padding_mask=padding_mask,
+            max_num_documents=6,
+            max_context_length=96,
+        )
+
+        for dtype in (torch.float16, torch.bfloat16):
+            for kv_heads in (8, 4):
+                with (
+                    self.subTest(dtype=dtype, kv_heads=kv_heads),
+                    DeterministicGuard(True),
+                ):
+                    torch.manual_seed(42)
+                    inputs = [
+                        torch.randn(
+                            128,
+                            heads,
+                            64,
+                            device=device,
+                            dtype=dtype,
+                            requires_grad=True,
+                        )
+                        for heads in (8, kv_heads, kv_heads)
+                    ]
+                    local_inputs = [
+                        x.detach()
+                        .chunk(self.world_size)[self.rank]
+                        .clone()
+                        .requires_grad_()
+                        for x in inputs
+                    ]
+                    expected = VarlenInnerAttention.Config().build()(
+                        *inputs, attention_metadata=metadata, enable_gqa=kv_heads != 8
+                    )
+                    expected_loss = expected[~padding_mask].float().square().sum()
+                    expected_loss.backward()
+
+                    with set_current_spmd_mesh(mesh):
+                        actual = UlyssesCPVarlenInnerAttention.Config().build()(
+                            *local_inputs,
+                            attention_metadata=metadata,
+                            enable_gqa=kv_heads != 8,
+                        )
+                        local_padding = padding_mask.chunk(self.world_size)[self.rank]
+                        actual_loss = actual[~local_padding].float().square().sum()
+                        actual_loss.backward()
+
+                    loss = actual_loss.detach().clone()
+                    dist.all_reduce(loss)
+                    torch.testing.assert_close(loss, expected_loss, atol=0, rtol=1e-5)
+                    tolerance = 0.001 if dtype == torch.float16 else 0.01
+                    for result, reference in zip(
+                        (actual, *(x.grad for x in local_inputs)),
+                        (expected, *(x.grad for x in inputs)),
+                    ):
+                        reference = reference.chunk(self.world_size)[self.rank]
+                        relative_error = (
+                            result.float() - reference.float()
+                        ).norm() / reference.float().norm()
+                        self.assertLess(relative_error.item(), tolerance)
+                    for x in local_inputs:
+                        self.assertEqual(
+                            torch.count_nonzero(x.grad[local_padding]).item(), 0
+                        )

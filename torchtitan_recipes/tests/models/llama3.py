@@ -46,7 +46,7 @@ from torchtitan.observability.profiler import Profiler
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
-from torchtitan_recipes.data import c4_document_capacity
+from torchtitan_recipes.data import c4_document_capacity, sft_document_capacity
 
 from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_converter_config
 
@@ -380,7 +380,9 @@ def sft_debugmodel(
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
-            max_num_documents=64,
+            max_num_documents=sft_document_capacity(
+                8 * model_config.max_context_length
+            ),
             dataset=FirstFitPackingConfig(
                 dataset=SingleDatasetConfig(
                     source=HuggingFaceRandomAccessSource.Config(
