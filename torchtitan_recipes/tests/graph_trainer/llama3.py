@@ -23,7 +23,10 @@ from torchtitan.models.llama3 import build_model_config as build_llama3_model_co
 from torchtitan.observability.sdc_replayer import SDCReplayer
 
 from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_converter_config
-from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
+from torchtitan_recipes.tests.models.llama3 import (
+    llama3_debugmodel,
+    llama3_debugmodel_varlen_attn,
+)
 
 
 def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
@@ -61,7 +64,7 @@ def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
 
 def graph_trainer_llama3_debugmodel_varlen() -> GraphTrainer.Config:
     """Debug model using Varlen attention for graph machinery tests."""
-    base = llama3_debugmodel()
+    base = llama3_debugmodel_varlen_attn()
     base.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
     base.model = build_graph_llama3_model_config(
         "debugmodel",

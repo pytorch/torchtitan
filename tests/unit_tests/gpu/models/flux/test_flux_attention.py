@@ -19,11 +19,9 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan.models.flux.layers import varlen_attention
-from torchtitan.models.flux.sharding import (
-    create_flux_attention_metadata,
-    flux_inner_attention_sharding_config,
-)
+from torchtitan.models.flux.layers import _varlen_attention
+from torchtitan.models.flux.model import _get_attention_metadata
+from torchtitan.models.flux.sharding import flux_inner_attention_sharding_config
 
 
 def _reference_attention(q, k, v):
@@ -75,10 +73,10 @@ class TestFluxVarlenContextParallel(DTensorTestBase):
         with parallelism_context.activate_spmd(), typecheck(local=False):
             for x in local_inputs:
                 spmd.assert_type(x, {"dp": spmd.S(0), "cp": spmd.S(1)})
-            metadata = create_flux_attention_metadata(
-                2, 16, device=local_inputs[0].device
+            metadata = _get_attention_metadata(
+                config, 2, 16, device=local_inputs[0].device
             )
-            actual = varlen_attention(
+            actual = _varlen_attention(
                 attention, *local_inputs, attention_metadata=metadata
             )
             actual[0].float().square().sum().backward()

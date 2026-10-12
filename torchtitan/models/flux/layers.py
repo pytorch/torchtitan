@@ -63,10 +63,11 @@ def _pack_attention_inputs(
     return q_BLHK.flatten(0, 1), k_BLHK.flatten(0, 1), v_BLHV.flatten(0, 1)
 
 
-def prepare_flux_attention_inputs(
+def _prepare_flux_attention_inputs(
     q_BLHK: torch.Tensor, k_BLHK: torch.Tensor, v_BLHV: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Gather K/V along sequence before packing to preserve sample boundaries."""
+    # TODO: Use ContextParallelTransform once Flux supports more CP variants.
     cp_group = spmd_mesh_group(CP)
     if cp_group is not None:
         k_BLHK, v_BLHV = (
@@ -92,7 +93,7 @@ def unpack_flux_attention_output(
     return out_THV.unflatten(0, (batch_size, -1))
 
 
-def varlen_attention(
+def _varlen_attention(
     inner_attention: VarlenInnerAttention,
     q_BLHK: Tensor,
     k_BLHK: Tensor,
@@ -100,7 +101,7 @@ def varlen_attention(
     *,
     attention_metadata: VarlenAttentionMetadata,
 ) -> Tensor:
-    q_THK, k_THK, v_THV = prepare_flux_attention_inputs(q_BLHK, k_BLHK, v_BLHV)
+    q_THK, k_THK, v_THV = _prepare_flux_attention_inputs(q_BLHK, k_BLHK, v_BLHV)
     out_THV = inner_attention(
         q_THK, k_THK, v_THV, attention_metadata=attention_metadata
     )
@@ -243,7 +244,7 @@ class SelfAttention(Module):
         q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
         q, k = apply_rope(q, k, pe)
-        x = varlen_attention(
+        x = _varlen_attention(
             self.inner_attention, q, k, v, attention_metadata=attention_metadata
         )
         x = rearrange(x, "B L H D -> B L (H D)")
@@ -387,7 +388,7 @@ class DoubleStreamBlock(Module):
         v = _local_concat_text_image_attention_states(txt_v, img_v)
 
         q, k = apply_rope(q, k, pe)
-        attn = varlen_attention(
+        attn = _varlen_attention(
             self.inner_attention, q, k, v, attention_metadata=attention_metadata
         )
         attn = rearrange(attn, "B L H D -> B L (H D)")
@@ -473,7 +474,7 @@ class SingleStreamBlock(Module):
 
         # compute attention
         q, k = apply_rope(q, k, pe)
-        attn = varlen_attention(
+        attn = _varlen_attention(
             self.inner_attention, q, k, v, attention_metadata=attention_metadata
         )
         attn = rearrange(attn, "B L H D -> B L (H D)")

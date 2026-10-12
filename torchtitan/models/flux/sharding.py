@@ -11,12 +11,7 @@ import torch
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common.attention import (
-    create_varlen_metadata_for_document,
-    VarlenAttentionMetadata,
-)
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
@@ -60,25 +55,6 @@ def flux_inner_attention_sharding_config() -> ShardingConfig:
         },
         out_src_shardings=q_layout,
         local_spmd=True,
-    )
-
-
-def create_flux_attention_metadata(
-    batch_size: int, seq_len: int, *, device: torch.device
-) -> VarlenAttentionMetadata:
-    """Boundaries for each sample's local queries and gathered keys/values."""
-    positions_T = torch.arange(seq_len, device=device, dtype=torch.int32).repeat(
-        batch_size
-    )
-    metadata = create_varlen_metadata_for_document(
-        positions_T,
-        max_num_documents=batch_size,
-        max_context_length=seq_len,
-    )
-    cp_size = spmd_mesh_size(CP)
-    return metadata._replace(
-        cu_seq_k=metadata.cu_seq_k * cp_size,
-        max_k=metadata.max_k * cp_size,
     )
 
 
