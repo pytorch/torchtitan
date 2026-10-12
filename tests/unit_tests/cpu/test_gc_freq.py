@@ -33,6 +33,14 @@ def test_positive_gc_freq_is_accepted(gc_freq: int) -> None:
             gc.enable()
 
 
+def test_freeze_moves_survivors_to_the_permanent_generation() -> None:
+    try:
+        GarbageCollector.freeze("test")
+        assert gc.get_freeze_count() > 0
+    finally:
+        gc.unfreeze()
+
+
 def test_training_engine_owns_garbage_collector_defaults() -> None:
     garbage_collector = TrainingEngine.Config().garbage_collector
     assert garbage_collector.gc_freq == 50

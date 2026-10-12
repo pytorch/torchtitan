@@ -95,11 +95,13 @@ import os
 import time
 import warnings
 from dataclasses import dataclass, field, replace
+from typing import Literal
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
 import torch  # noqa: F401
 import torchstore as ts
+
 from monarch.actor import ProcMesh, this_host
 
 from torchtitan.components.renderer import RendererConfig
@@ -130,8 +132,9 @@ from torchtitan.rl.observability.controller import (
 from torchtitan.rl.observability.rollout_recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.types import Completion, GenerateFn
+from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
 from torchtitan.rl.trainer import Trainer
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 logger = logging.getLogger(__name__)
 
@@ -182,12 +185,12 @@ class AsyncLoopConfig(Configurable.Config):
     `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
     ``torchtitan/rl/components/WINDOWED_FIFO.md``."""
 
-    enable_rdma: bool = False
-    """How trainer ranks read their microbatches (weight sync has TorchStore's own switch):
-        False (default): over TCP.
-        True: over RDMA (ibverbs) where the host has it, else TCP; 25 vs 1.3 GB/s reading 256 MiB
-            on one host. A host that lists ibverbs devices it can't use fails instead of falling back.
-    MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP either way."""
+    microbatch_rdma_transport: Literal["tcp", "ibverbs"] = "tcp"
+    """How trainer ranks read their microbatches' Monarch RDMA buffers (weight sync has TorchStore's switch):
+        "tcp" (default): Monarch's TCP transport; 1.3 GB/s reading 256 MiB on one host.
+        "ibverbs": RDMA hardware; 25 GB/s on the same read. Falls back to TCP, with a warning, on hosts
+            without ibverbs. A host that lists ibverbs devices it can't use fails instead.
+    MONARCH_RDMA_DISABLE_IBVERBS=1 forces "tcp"."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -528,6 +531,17 @@ class Controller(Configurable):
 
         return generate
 
+    def _make_release_session_fn(self) -> ReleaseSessionFn:
+        """Build the rollouter's `ReleaseSessionFn`: tell the generator router a rollout ended."""
+        generator_router = self.generator_router
+
+        async def release_session(*, routing_session_id: str) -> None:
+            await generator_router.release_session.call_one(
+                routing_session_id=routing_session_id
+            )
+
+        return release_session
+
     @sl.log_trace_span("setup_async")
     async def setup_async(
         self,
@@ -660,7 +674,7 @@ class Controller(Configurable):
                     pad_id=self.tokenizer.eos_id,
                     temperature=self._sampling.temperature,
                 ),
-                enable_rdma=async_loop.enable_rdma,
+                microbatch_rdma_transport=async_loop.microbatch_rdma_transport,
                 output_dir=config.dump_folder,
                 enable_structured_logging=config.trainer.debug.enable_structured_logging,
             )
@@ -735,11 +749,13 @@ class Controller(Configurable):
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
         generate = self._make_generate_fn(metrics_prefix="validation_generator")
+        release_session_fn = self._make_release_session_fn()
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         group_results = await asyncio.gather(
             *(
                 self._rollouter.run_group_rollouts(
                     generate_fn=generate,
+                    release_session_fn=release_session_fn,
                     sample=sample,
                     # Negative ids keep validation disjoint from training group ids, so their
                     # request_ids can't collide in the shared engine (e.g. post-validation).
@@ -813,8 +829,11 @@ class Controller(Configurable):
     async def run(self) -> None:
         """Start every async loop and run until training completes or a stage crashes.
 
-        Producers (_data_input_loop, _rollout_loop[N], _batcher_loop) loop forever; _trainer_loop is the
-        only finite loop -- it runs num_training_steps, then returns, which drives shutdown.
+        Producers (_data_input_loop, _rollout_loop[N], _batcher_loop) loop forever, and
+        _generator_loop waits for the generators' engine loops, which run until close; _trainer_loop is
+        the only finite loop -- it runs num_training_steps, then returns, which drives shutdown.
+        _generator_loop watches the training loop only: an engine loop that dies during pre- or
+        post-training validation shows up as failed validation rollouts.
 
         Shutdown (healthy):  _trainer_loop finishes N steps -> run() finally ->
           group_buffer.close()  (wakes _data_input_loop / _rollout_loop / _batcher_loop blocked on the buffer)
@@ -822,6 +841,12 @@ class Controller(Configurable):
           -> gather(..., return_exceptions=True)
         Shutdown (crash):    any loop raises -> appears in `done` -> run() re-raises -> same finally.
         """
+        # Setup objects (modules, configs, dataset, actor handles) live until exit. Freeze them
+        # so full GCs skip them: ~1M objects, ~0.5 s per full GC (Python 3.12, x86).
+        GarbageCollector.freeze(
+            "Full GC before freezing the controller's setup objects"
+        )
+
         async_loop = self.config.async_loop
         num_training_steps = async_loop.num_training_steps
         logger.info(
@@ -865,6 +890,7 @@ class Controller(Configurable):
 
         # rollout_loop
         generate_fn = self._make_generate_fn(metrics_prefix="generator")
+        release_session_fn = self._make_release_session_fn()
 
         # One rollout worker per active buffer slot: lets generation fill every active slot,
         # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
@@ -874,6 +900,7 @@ class Controller(Configurable):
                 self._rollout_loop(
                     group_buffer=self._group_buffer,
                     generate_fn=generate_fn,
+                    release_session_fn=release_session_fn,
                 ),
                 name=f"rollout_worker_{group_worker_id}",
             )
@@ -903,12 +930,19 @@ class Controller(Configurable):
             name="trainer",
         )
 
+        # Engine loops run until the generators close, so this ends only if one stops mid-run.
+        # Otherwise a crashed generator would only show up as failed rollouts.
+        generator_task = asyncio.create_task(
+            self._generator_loop(), name="generator_wait_engine_loop"
+        )
+
         # run everything until trainer finishes its number of steps
         # or some other loop breaks
         background_tasks = [
             data_input_task,
             *rollout_tasks,
             batcher_task,
+            generator_task,
         ]
         try:
             done, _ = await asyncio.wait(
@@ -938,6 +972,10 @@ class Controller(Configurable):
         # Post-training validation (held-out eval after the final step).
         post_validation = await self._validate_and_log(step=num_training_steps)
         self._log_reward_delta(pre_validation, post_validation)
+
+    async def _generator_loop(self) -> None:
+        """Wait until every generator's engine loop exits; raise as soon as one crashes."""
+        await self.generator_router.wait_engine_loop.call_one()
 
     async def _validate_and_log(self, *, step: int) -> dict[str, float]:
         """Run one validation pass, log it, and return its aggregated values for the pre/post delta."""
@@ -988,6 +1026,7 @@ class Controller(Configurable):
         *,
         group_buffer: RolloutGroupWorkBuffer,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
     ) -> None:
         """Generate + score one group at a time; a failed group becomes an empty group + a failure metric.
 
@@ -1010,6 +1049,7 @@ class Controller(Configurable):
                 with sl.log_trace_span("rollout_group"):
                     group = await self._rollouter.run_group_rollouts(
                         generate_fn=generate_fn,
+                        release_session_fn=release_session_fn,
                         sample=work.sample,
                         group_id=work.group_id,
                         group_size=self.config.async_loop.num_samples_per_prompt,
@@ -1036,8 +1076,6 @@ class Controller(Configurable):
             await group_buffer.finalize_work(group)
 
             # Drop both refs (work.rollout_group is the group too): held groups made every full GC slow.
-            # TODO: investigate a better type for the per-token lists in RolloutTurn and TrainingSample:
-            # a full GC walks every entry of a Python list, which is slow. A torch tensor may be better.
             del group, work
 
     async def _batcher_loop(

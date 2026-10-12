@@ -11,9 +11,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections import deque
-from typing import Any
+from typing import Any, Literal
 
-import monarch
 from monarch.actor import Actor, endpoint
 
 from torchtitan.observability import structured_logger as sl
@@ -21,7 +20,7 @@ from torchtitan.observability.logging import init_logger
 from torchtitan.rl.components.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.distributed.rdma_microbatch import (
-    create_cuda_context_to_silence_monarch_log,
+    init_rdma_microbatch_owner,
     RDMAMicrobatch,
 )
 from torchtitan.rl.rollout.types import RolloutGroup
@@ -33,15 +32,15 @@ class BatcherActor(Actor):
     Keeps each batch's tensors until `release_oldest_batch` and returns `RDMAMicrobatch`es, so
     trainer ranks read from this process.
 
-    Why not in the controller, whose busy event loop holds the GIL:
-        build on the loop thread:     blocks every rollout while it runs
-        pack in `asyncio.to_thread`:  each torch op waits up to 5 ms (the GIL switch interval)
+    Why not build and pack in the controller, whose busy event loop holds the GIL:
+        on the loop thread:      blocks every rollout while it runs
+        in `asyncio.to_thread`:  each GIL release waits up to 5 ms to get it back (the switch interval)
 
     Args:
         training_sample_builder_config: Built in this process.
         batcher_config: Built in this process with `batcher_kwargs`.
         batcher_kwargs: Runtime kwargs for `batcher_config.build`, e.g. `dp_degree` and `pad_id`.
-        enable_rdma: See `AsyncLoopConfig.enable_rdma`.
+        microbatch_rdma_transport: See `AsyncLoopConfig.microbatch_rdma_transport`.
         output_dir: Where the structured logger writes this process's spans.
         enable_structured_logging: Whether to write those spans.
 
@@ -52,7 +51,7 @@ class BatcherActor(Actor):
             training_sample_builder_config=TrainingSampleBuilder.Config(),
             batcher_config=Batcher.Config(),
             batcher_kwargs=dict(num_prompts_per_train_step=2, dp_degree=1, ...),
-            enable_rdma=False,
+            microbatch_rdma_transport="tcp",
             output_dir="outputs",
             enable_structured_logging=False,
         )
@@ -67,7 +66,7 @@ class BatcherActor(Actor):
         training_sample_builder_config: TrainingSampleBuilder.Config,
         batcher_config: Batcher.Config,
         batcher_kwargs: dict[str, Any],
-        enable_rdma: bool,
+        microbatch_rdma_transport: Literal["tcp", "ibverbs"],
         output_dir: str,
         enable_structured_logging: bool,
     ) -> None:
@@ -80,10 +79,7 @@ class BatcherActor(Actor):
         )
         self._training_sample_builder = training_sample_builder_config.build()
         self._batcher = batcher_config.build(**batcher_kwargs)
-        if not enable_rdma:
-            # Trainer ranks read this process's buffers over TCP; their own processes keep ibverbs.
-            monarch.configure(rdma_disable_ibverbs=True)
-        create_cuda_context_to_silence_monarch_log()
+        init_rdma_microbatch_owner(transport=microbatch_rdma_transport)
         # Batches trainer ranks may still read, oldest first. Each buffer keeps its tensor's
         # storage alive until drop().
         self._batches_being_read: deque[list[list[RDMAMicrobatch]]] = deque()

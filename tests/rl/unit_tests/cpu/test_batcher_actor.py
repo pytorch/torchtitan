@@ -9,6 +9,7 @@
 import asyncio
 import dataclasses
 
+import numpy as np
 import pytest
 import torch
 from monarch.actor import ActorError, this_host
@@ -45,9 +46,10 @@ def _group(group_id: int, rewards: list[float]) -> RolloutGroup:
                     rollout_id=RolloutTurnID(
                         group_id=group_id, rollout_id=rollout_id, turn_id=0
                     ),
-                    prompt_token_ids=[1, 2, 3],
-                    completion_token_ids=[4 + rollout_id, 5],
-                    completion_logprobs=[-0.5, -0.25],
+                    prompt_prefix_len=0,
+                    prompt_delta_token_ids=np.array([1, 2, 3], dtype=np.int32),
+                    completion_token_ids=np.array([4 + rollout_id, 5], dtype=np.int32),
+                    completion_logprobs=np.array([-0.5, -0.25], dtype=np.float32),
                     min_policy_version=0,
                     max_policy_version=0,
                 )
@@ -90,7 +92,7 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path) -> None:
                 training_sample_builder_config=TrainingSampleBuilder.Config(),
                 batcher_config=Batcher.Config(),
                 batcher_kwargs=_BATCHER_KWARGS,
-                enable_rdma=False,
+                microbatch_rdma_transport="tcp",
                 output_dir=str(tmp_path),
                 enable_structured_logging=False,
             )
