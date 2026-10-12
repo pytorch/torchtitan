@@ -4,9 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Trainer microbatches as Monarch RDMA buffers: the process that registers them keeps the large
-tensors, and each trainer rank reads its own column, over TCP or, with
-`AsyncLoopConfig.microbatch_rdma_transport="ibverbs"`, over ibverbs.
+"""Opt-in RDMA fast path for trainer microbatches (`AsyncLoopConfig.rdma_fast_path_threshold`): the
+process that registers them keeps the large tensors, and each trainer rank reads its own column.
 """
 
 from __future__ import annotations
@@ -20,9 +19,8 @@ import time
 from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Literal
+from typing import Any
 
-import monarch
 import torch
 from monarch.rdma import RDMAAction, RDMABuffer
 from torch.utils import _pytree as pytree
@@ -33,43 +31,24 @@ from torchtitan.rl.components.batcher import TrainingMicrobatch
 logger = logging.getLogger(__name__)
 
 
-def init_rdma_microbatch_owner(*, transport: Literal["tcp", "ibverbs"]) -> None:
-    """Prepare this process to own `RDMAMicrobatch` buffers: pick the transport, silence Monarch's per-buffer log.
-
-    Call it in this order:
-        1. spawn every mesh   (meshes spawned after step 2 would lose ibverbs too; weight sync uses it)
-        2. init_rdma_microbatch_owner(transport=...)   (see `AsyncLoopConfig.microbatch_rdma_transport`)
-        3. first register()   (after this, Monarch ignores a transport change)
-    """
-    if transport == "tcp":
-        # This process only: trainer ranks read its buffers over TCP.
-        monarch.configure(rdma_disable_ibverbs=True)
-    _create_cuda_context_to_silence_monarch_log()
-
-
-# Tensors under 1 KiB go inside the message instead of in a buffer:
-#   token counts (8 B):   registering a buffer (~0.15 ms) costs more than sending the bytes
-#   empty tensors (0 B):  RDMABuffer rejects them
-# Per-token tensors reach 1 KiB at 1,024 tokens (bool masks), so those go over RDMA.
-_MIN_RDMA_BYTES = 1024
-
-
 @dataclasses.dataclass(frozen=True, slots=True)
 class RDMAMicrobatch:
     """A `TrainingMicrobatch` whose large tensors stay in its owner, the process that registered it.
 
     Example:
-        rdma_microbatch = RDMAMicrobatch.register(microbatch)  # owner
+        rdma_microbatch = RDMAMicrobatch.register(microbatch, min_bytes=1024)  # owner
         microbatch = await rdma_microbatch.read()  # trainer rank: one RDMA action reads every buffer
         await rdma_microbatch.drop()               # owner, after every rank has read it
     """
 
     fields: dict[str, Any]
-    """The microbatch's fields: tensors of at least 1 KiB (also inside `model_kwargs`) as
+    """The microbatch's fields: tensors of at least `min_bytes` (also inside `model_kwargs`) as
     `_TensorRef`s, the rest by value. Tensors inside a container that pytree can't flatten also go by value."""
 
     @classmethod
-    def register(cls, microbatch: TrainingMicrobatch) -> RDMAMicrobatch:
+    def register(
+        cls, microbatch: TrainingMicrobatch, *, min_bytes: int
+    ) -> RDMAMicrobatch:
         fields = {
             field.name: getattr(microbatch, field.name)
             for field in dataclasses.fields(microbatch)
@@ -77,7 +56,7 @@ class RDMAMicrobatch:
         return cls(
             fields=pytree.tree_map_only(
                 lambda leaf: (
-                    isinstance(leaf, torch.Tensor) and leaf.nbytes >= _MIN_RDMA_BYTES
+                    isinstance(leaf, torch.Tensor) and leaf.nbytes >= min_bytes
                 ),
                 _TensorRef.register,
                 fields,
@@ -191,7 +170,7 @@ def _wait_for_microbatch(read: Future[TrainingMicrobatch]) -> TrainingMicrobatch
 _CU_LIMIT_STACK_SIZE = 0
 
 
-def _create_cuda_context_to_silence_monarch_log() -> None:
+def create_cuda_context_to_silence_monarch_log() -> None:
     """Make a CUDA context current on GPU 0, so Monarch stops logging one line per registered buffer.
 
     Monarch checks each registered pointer with a CUDA driver call, and prints

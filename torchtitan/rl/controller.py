@@ -96,7 +96,6 @@ import os
 import time
 import warnings
 from dataclasses import dataclass, field, replace
-from typing import Literal
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
@@ -119,7 +118,7 @@ from torchtitan.rl.components.work_buffer import (
 from torchtitan.rl.distributed.monarch_actors.generator import VLLMGeneratorActor
 from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
 from torchtitan.rl.distributed.rdma_microbatch import (
-    init_rdma_microbatch_owner,
+    create_cuda_context_to_silence_monarch_log,
     RDMAMicrobatch,
 )
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
@@ -189,12 +188,15 @@ class AsyncLoopConfig(Configurable.Config):
     `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
     ``torchtitan/rl/components/WINDOWED_FIFO.md``."""
 
-    microbatch_rdma_transport: Literal["tcp", "ibverbs"] = "tcp"
-    """How trainer ranks read their microbatches' Monarch RDMA buffers (weight sync has TorchStore's switch):
-        "tcp" (default): Monarch's TCP transport; 1.3 GB/s reading 256 MiB on one host.
-        "ibverbs": RDMA hardware; 25 GB/s on the same read. Falls back to TCP, with a warning, on hosts
-            without ibverbs. A host that lists ibverbs devices it can't use fails instead.
-    MONARCH_RDMA_DISABLE_IBVERBS=1 forces "tcp"."""
+    rdma_fast_path_threshold: int | None = None
+    """Trainer microbatches travel in Monarch RPC messages. With a value, tensors of at least that many
+    bytes go as Monarch RDMA buffers instead, and each trainer rank reads only its own microbatches:
+        None (default): no RDMA; every tensor in the message.
+        e.g. 1024: tensors of 1 KiB or more stay in the sender; token counts (8 B) and empty tensors
+            stay in the message.
+    Monarch uses ibverbs where the host has it, else TCP. A host that lists ibverbs devices it can't
+    use fails instead of falling back; MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process,
+    weight sync included."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -218,6 +220,14 @@ class AsyncLoopConfig(Configurable.Config):
         if self.windowed_fifo_batches is not None and self.windowed_fifo_batches < 1:
             raise ValueError(
                 f"windowed_fifo_batches must be None or >= 1, got {self.windowed_fifo_batches}"
+            )
+        if (
+            self.rdma_fast_path_threshold is not None
+            and self.rdma_fast_path_threshold < 1
+        ):
+            raise ValueError(
+                "rdma_fast_path_threshold must be None or >= 1 (RDMABuffer rejects empty tensors), "
+                f"got {self.rdma_fast_path_threshold}"
             )
 
     @property
@@ -704,10 +714,8 @@ class Controller(Configurable):
             )
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
-        # After every spawn, before the first register(): see its docstring.
-        init_rdma_microbatch_owner(
-            transport=config.async_loop.microbatch_rdma_transport
-        )
+        if config.async_loop.rdma_fast_path_threshold is not None:
+            create_cuda_context_to_silence_monarch_log()
 
         # Start each generator's engine loop on all ranks once, before any
         # rank-0-only generate / pull (rank 0 drives the followers through this
@@ -1185,22 +1193,29 @@ class Controller(Configurable):
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
-                    # Each rank reads its column from this process. Register in a thread: at
-                    # ~0.15 ms per tensor (0.3 s for 2,200), doing it here would stall the rollouts.
-                    # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks
-                    # over TCP). Register in _batcher_loop and send the refs to the trainer
-                    # during the previous optim_step, so each rank reads microbatch 0 then.
-                    rdma_microbatches = await asyncio.to_thread(
-                        lambda rows: [
-                            [RDMAMicrobatch.register(microbatch) for microbatch in row]
-                            for row in rows
-                        ],
-                        packed.microbatches,
-                    )
+                    rdma_microbatches: list[list[RDMAMicrobatch]] = []
+                    min_bytes = self.config.async_loop.rdma_fast_path_threshold
+                    if min_bytes is not None:
+                        # Each rank reads its column from this process. Register in a thread: at
+                        # ~0.15 ms per tensor (0.3 s for 2,200), doing it here would stall the rollouts.
+                        # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks
+                        # over TCP). Register in _batcher_loop and send the refs to the trainer
+                        # during the previous optim_step, so each rank reads microbatch 0 then.
+                        rdma_microbatches = await asyncio.to_thread(
+                            lambda: [
+                                [
+                                    RDMAMicrobatch.register(
+                                        microbatch, min_bytes=min_bytes
+                                    )
+                                    for microbatch in row
+                                ]
+                                for row in packed.microbatches
+                            ]
+                        )
                     try:
                         fwd_bwd_metrics = self._get_rank_0_value(
                             await self.trainer.forward_backward.call(
-                                rdma_microbatches,
+                                rdma_microbatches or packed.microbatches,
                                 packed.global_loss_token_counts,
                                 packed.global_routing_token_counts,
                             )
