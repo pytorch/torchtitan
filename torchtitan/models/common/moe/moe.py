@@ -38,8 +38,7 @@ from torchtitan.models.common.activation import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
-from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.linear import GroupedLinear, Linear
 
 from .token_dispatcher import LocalTokenDispatcher
 
@@ -176,16 +175,29 @@ class TokenChoiceTopKRouter(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
-        gate: HiMidLoLinear.Config
+        gate: Linear.Config
         score_func: UnaryActivationFn.Config
         top_k: int = 1
         route_norm: bool = False
         route_norm_epsilon: float = 1e-20
         route_scale: float = 1.0
+        routing_weight_dtype: torch.dtype | None = None
+        """Cast selected, normalized routing weights before auxiliary injection.
+
+        None preserves score precision. This does not change logits, selection
+        or auxiliary-loss arithmetic; those follow the gate and score function.
+        """
         aux_loss: AuxLoss.Config | None = None
         freeze_gate: bool = False
         """Keep ``gate.weight`` (and ``gate.bias``, if any) at their loaded values: no gradient,
         no optimizer state. The gate's input still gets gradients."""
+
+        def __post_init__(self) -> None:
+            if (
+                self.routing_weight_dtype is not None
+                and not self.routing_weight_dtype.is_floating_point
+            ):
+                raise ValueError("routing_weight_dtype must be a floating-point dtype")
 
     def __init__(self, config: Config):
         super().__init__()
@@ -198,6 +210,7 @@ class TokenChoiceTopKRouter(Module):
         self.route_norm = config.route_norm
         self.route_norm_epsilon = config.route_norm_epsilon
         self.route_scale = config.route_scale
+        self.routing_weight_dtype = config.routing_weight_dtype
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
         # tokens_per_expert_E will be used to track expert usage and to update the expert bias for load balancing
         self.register_buffer(
@@ -249,7 +262,7 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
-        # HiMidLoLinear returns FP32, so configured scoring runs in FP32.
+        # The gate determines the configured scoring function's input precision.
         gate_TE = self.gate(x_TD)
         # The scoring function reads the router gate projection output with bare ops.
         remat.recompute_needs_tensor(gate_TE)
@@ -289,6 +302,8 @@ class TokenChoiceTopKRouter(Module):
             )
             topk_scores_TK = topk_scores_TK / denominator_T1
         topk_scores_TK = topk_scores_TK * self.route_scale
+        if self.routing_weight_dtype is not None:
+            topk_scores_TK = topk_scores_TK.to(self.routing_weight_dtype)
 
         # Build a one-hot boolean routing map (T, E) marking the experts each
         # token is routed to. Under TP/SP the router outputs are sharded on the
@@ -554,6 +569,17 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         build a plain ``AuxLoss``, which has no ``forward``.
         """
 
+    def _compute_local_stats(
+        self,
+        scores_TE: torch.Tensor,
+        routing_map_TE: torch.Tensor,
+        padding_mask_T: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return local counts and score sums using this objective's normalization."""
+        return _microbatch_load_balance_local_stats(
+            scores_TE, routing_map_TE, padding_mask_T
+        )
+
     def forward(
         self,
         scores_TE: torch.Tensor,
@@ -588,7 +614,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             # degree and follows any masking the router applies to the map.
             # The map is cast to float before the reduction: casting a Partial
             # tensor is non-linear and rejected by spmd_types.
-            local_counts_E, local_prob_sums_E = _microbatch_load_balance_local_stats(
+            local_counts_E, local_prob_sums_E = self._compute_local_stats(
                 scores_TE,
                 routing_map_TE,
                 padding_mask_T,
@@ -596,9 +622,8 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             counts_E = self._reduce_token_partials(local_counts_E)
             f_E = F.normalize(counts_E, p=1, dim=0) * E
 
-            # Eq. 19: p_i = (1/T) sum_t s'_t,i, the per-token L1-normalized
-            # scores.  F.normalize's eps clamp only guards an all-zero score
-            # row: the scores are non-negative, so the norm is a plain sum.
+            # Eq. 19: p_i = (1/T) sum_t s'_t,i. The local-stats hook owns
+            # score normalization; this reduction only combines token shards.
             p_E = self._reduce_token_partials(local_prob_sums_E)
 
             # Eq. 17: L_bal = sum_i f_i * p_i
@@ -729,6 +754,12 @@ class MoE(FeedForward):
         routed_experts: RoutedExperts.Config
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
+        center_expert_bias_update: bool = True
+        """Subtract the mean from each sign-based expert-bias increment.
+
+        False applies the uncentered sign update used by NVIDIA MLPerf.
+        This setting does not affect quantile-based balancing.
+        """
         freeze_expert_bias: bool = False
         """Route with ``expert_bias_E`` but never update it: no balancing hook is registered.
         ``load_balance_coeff=None`` instead removes the bias from routing."""
@@ -763,6 +794,7 @@ class MoE(FeedForward):
         #       expert_bias_E is updated outside the model in an optimizer step pre hook
         #       to work with gradient accumulation.
         self.load_balance_coeff = config.load_balance_coeff
+        self.center_expert_bias_update = config.center_expert_bias_update
         self.freeze_expert_bias = config.freeze_expert_bias
         if self.load_balance_coeff is not None:
             assert self.load_balance_coeff > 0.0
@@ -941,6 +973,7 @@ class _MoERouterLike(Protocol):
 
 class _MoELike(Protocol):
     load_balance_coeff: float | None
+    center_expert_bias_update: bool
     freeze_expert_bias: bool
     expert_bias_E: torch.Tensor  # noqa: N815
     router: _MoERouterLike
@@ -1023,12 +1056,13 @@ def register_moe_load_balancing_hook(
                 ].float()
                 moe_layer_idx += 1
 
-                # update the expert bias
-                # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
                 expert_bias_delta_E = load_balance_coeff * torch.sign(
                     tokens_per_expert_E.mean() - tokens_per_expert_E
                 )
-                expert_bias_delta_E = expert_bias_delta_E - expert_bias_delta_E.mean()
+                if moe.center_expert_bias_update:
+                    expert_bias_delta_E = (
+                        expert_bias_delta_E - expert_bias_delta_E.mean()
+                    )
                 moe.expert_bias_E.add_(expert_bias_delta_E)
                 moe.router.tokens_per_expert_E.zero_()
 

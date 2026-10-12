@@ -66,6 +66,7 @@ class FakeMoE(MoE):
     def __init__(self, load_balance_coeff, tokens):
         nn.Module.__init__(self)
         self.load_balance_coeff = load_balance_coeff
+        self.center_expert_bias_update = True
         self.freeze_expert_bias = False
         self.router = FakeRouter(tokens)
         if load_balance_coeff is not None:
@@ -232,6 +233,39 @@ class TestOptimizerConfig(unittest.TestCase):
             model.layers["1"].feed_forward.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
+
+    def test_moe_bias_update_can_match_uncentered_mlperf_policy(self):
+        for center in (True, False):
+            with self.subTest(center=center):
+                model = FakeMoEModel(load_balance_coeffs=(0.001, 0.001))
+                for block in model.layers.values():
+                    moe = block.feed_forward
+                    moe.center_expert_bias_update = center
+                    moe.expert_bias_E = torch.zeros(4)
+                    moe.router.tokens_per_expert_E = torch.tensor([13, 1, 2, 0])
+                container = OptimizersContainer.Config(
+                    optimizers=[
+                        AdamW.Config(
+                            pattern=r".*", fused=False, lr=0.0, weight_decay=0.0
+                        )
+                    ],
+                ).build(model_parts=[model])
+                register_moe_load_balancing_hook(
+                    container, [model], FakeParallelismContext()
+                )
+
+                container.step()
+
+                expected = torch.tensor([-0.001, 0.001, 0.001, 0.001])
+                if center:
+                    expected = expected - torch.tensor(0.0005)
+                for block in model.layers.values():
+                    torch.testing.assert_close(
+                        block.feed_forward.expert_bias_E, expected, atol=0, rtol=0
+                    )
+                    self.assertTrue(
+                        block.feed_forward.router.tokens_per_expert_E.eq(0).all()
+                    )
 
     def test_moe_load_balancing_skips_a_frozen_bias(self):
         model = FakeMoEModel()

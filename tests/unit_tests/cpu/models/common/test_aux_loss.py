@@ -134,6 +134,67 @@ class _AuxLossTestCase(unittest.TestCase):
 class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
     """Numerics vs the reference, metric accumulation, and torch_remat safety."""
 
+    def test_mlperf_adapter_counts_unbiased_choices_not_dispatch(self):
+        from torchtitan_recipes.overrides.dsv3_mlperf import UnbiasedTopKLoadBalanceLoss
+
+        scores = torch.tensor(
+            [[0.8, 0.2, 0.1], [0.2, 0.9, 0.1]], dtype=torch.float64, requires_grad=True
+        )
+        dispatch = _routing_map(torch.tensor([[2], [2]]), 3)
+        unbiased = _routing_map(scores.detach().topk(1, dim=-1).indices, 3)
+        self.assertFalse(torch.equal(dispatch, unbiased))
+        # Integer routing-token denominators produce the injected FP32 scale.
+        scale = (0.01 * (1.0 / torch.tensor(2))).double()
+        expected = (
+            F.normalize(unbiased.double().sum(0), p=1, dim=0)
+            * 3
+            * F.normalize(scores, p=1, dim=-1).sum(0)
+        ).sum() * scale
+        (expected_grad,) = torch.autograd.grad(expected, scores)
+        carrier = torch.zeros(2, 1, dtype=torch.float64, requires_grad=True)
+        loss = UnbiasedTopKLoadBalanceLoss.Config(coeff=0.01, top_k=1).build()
+        result = loss(scores, dispatch, carrier=carrier, denominator=torch.tensor(2))
+        torch.testing.assert_close(result, carrier, rtol=0, atol=0)
+        result.sum().backward()
+        torch.testing.assert_close(scores.grad, expected_grad, rtol=1e-12, atol=1e-12)
+
+    def test_mlperf_tiny_positive_normalization_and_padding(self):
+        from torchtitan_recipes.overrides.dsv3_mlperf import UnbiasedTopKLoadBalanceLoss
+
+        for scale in (1e-18, 1e-24, 0.0):
+            with self.subTest(scale=scale):
+                scores = (torch.arange(1, 257) * scale).repeat(4, 1).requires_grad_()
+                expected_scores = scores.detach().clone().requires_grad_()
+                normalized = expected_scores / (
+                    expected_scores.sum(-1, keepdim=True) + 1e-20
+                )
+                ids = normalized.detach().topk(8, sorted=False).indices
+                mask = torch.tensor([False, True, False, True])
+                mapping = _routing_map(ids, 256) & ~mask[:, None]
+                counts = mapping.float().sum(0)
+                raw = (
+                    counts / counts.sum() * 256 * (normalized * ~mask[:, None]).sum(0)
+                ).sum()
+                expected_metric = raw.detach() / 4
+                (raw * (0.01 * (1.0 / torch.tensor(4)))).backward()
+                carrier = torch.ones(4, 8, requires_grad=True)
+                loss = UnbiasedTopKLoadBalanceLoss.Config(coeff=0.01, top_k=8).build()
+                result = loss(
+                    scores,
+                    torch.zeros_like(mapping),
+                    carrier=carrier,
+                    padding_mask_T=mask,
+                    denominator=torch.tensor(4),
+                )
+                result.sum().backward()
+                torch.testing.assert_close(result, carrier, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    loss.instance_acc, expected_metric, rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    scores.grad, expected_scores.grad, rtol=0, atol=0
+                )
+
     def setUp(self):
         super().setUp()
         self.T, self.E, self.K = 15, 7, 2

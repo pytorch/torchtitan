@@ -145,6 +145,81 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
         converter.convert(_router_config_for_quantization(128))
 
 
+def test_mxfp8_backend_selection_is_not_user_configuration(monkeypatch):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    converter = MXFP8LinearConverter.Config().build()
+    converted = converter.convert(Linear.Config(in_features=128, out_features=128))
+    assert isinstance(converted, MXFP8Linear.Config)
+    assert not hasattr(converted, "activation_quantization_backend")
+    assert not hasattr(converter.config, "activation_quantization_backend")
+
+
+def test_mxfp8_weight_and_activation_scaling_contract(monkeypatch):
+    import torchtitan.quantization.mxfp8.tensor as mxfp8_tensor
+
+    assert mxfp8_tensor._MXFP8_SCALING_MODE == "rceil"
+    monkeypatch.setattr(mxfp8_tensor, "_MXFP8_SCALING_MODE", "floor")
+    with pytest.raises(AssertionError, match="weight cast requires RCEIL"):
+        mxfp8_tensor._quantize_mxfp8_weight(torch.empty(32, 32, dtype=torch.bfloat16))
+
+
+@pytest.mark.parametrize(
+    "shape,dtype,rowwise,colwise,message",
+    [
+        ((128,), torch.bfloat16, True, True, "2D BF16"),
+        ((128, 128), torch.float32, True, True, "2D BF16"),
+        ((128, 128), torch.bfloat16, False, False, "at least one axis"),
+    ],
+)
+def test_mxfp8_activation_cast_validates_input_contract(
+    shape, dtype, rowwise, colwise, message
+):
+    from torchtitan.quantization.mxfp8.tensor import _quantize_activation
+
+    with pytest.raises(ValueError, match=message):
+        _quantize_activation(
+            torch.empty(shape, dtype=dtype), rowwise=rowwise, colwise=colwise
+        )
+
+
+def test_mxfp8_cutedsl_requires_provider_at_construction(monkeypatch):
+    from torchao.prototype.moe_training.kernels.mxfp8 import quant
+    from torchtitan.quantization.mxfp8.tensor import (
+        _require_cutedsl_activation_quantizers,
+    )
+
+    monkeypatch.delattr(quant, "mxfp8_quantize_2d_1x32_32x1_cutedsl")
+    with pytest.raises(ImportError, match="fused dual-axis MXFP8 quantizers"):
+        _require_cutedsl_activation_quantizers()
+
+
+def test_mxfp8_cutedsl_rejects_provider_without_dense_api(monkeypatch):
+    """A required-offset provider cannot silently stand in for dense support."""
+    from torchao.prototype.moe_training.kernels.mxfp8 import quant
+    from torchtitan.quantization.mxfp8.tensor import (
+        _require_cutedsl_activation_quantizers,
+    )
+
+    def old_api(x, offs, block_size=32, scaling_mode="rceil"):
+        raise AssertionError("Capability checks must not launch kernels")
+
+    monkeypatch.setattr(quant, "mxfp8_quantize_2d_1x32_32x1_cutedsl", old_api)
+    with pytest.raises(ImportError, match="dense None-offset"):
+        _require_cutedsl_activation_quantizers()
+
+
+def test_mxfp8_default_reports_missing_cutedsl_runtime(monkeypatch):
+    from torchao.prototype.moe_training.kernels.mxfp8 import quant
+
+    monkeypatch.setattr(quant, "_mxfp8_cutedsl_kernels_available", False)
+    with pytest.raises(
+        ImportError, match="install nvidia-cutlass-dsl and apache-tvm-ffi"
+    ):
+        MXFP8Linear.Config(in_features=128, out_features=128).build()
+
+
 @pytest.mark.parametrize(
     ("config_cls", "parallel_cls"),
     [

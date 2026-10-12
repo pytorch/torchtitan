@@ -67,6 +67,34 @@ Non-pipeline MTP supports CP by constructing shifted inputs before CP sharding.
 Eager pipeline parallelism supports DeepSeek-V3 MTP1 through
 `pipeline.py`; combining MTP pipeline parallelism with CP remains a TODO.
 
+### 1.4 Shared Head Projection
+
+Set `MTPDecoder.Config.coalesce_lm_head=True` when the training loss consumes
+every head objective, as the MLPerf recipes do. Full-logit execution then
+concatenates the main and MTP head-ready hidden rows, calls the shared LM head
+once, then splits logits into their original depths.
+The head norms have already gathered TP sequence shards, so row ordering is
+preserved. This gives the shared weight one autograd edge: MXFP8 WGRAD can
+accumulate the joint contribution into its running gradient without a separate
+weight-sized fan-in add. No parameter/gradient cache or custom hook is added.
+
+The default is `False`: separate projections preserve absent gradients for an
+unused MTP branch. Coalescing instead materializes zero gradients for unused
+head rows, so it must not be enabled for a loss that ignores an entire head.
+
+```text
+main hidden --+
+              +--> concatenate rows --> shared LM head --> split logits
+MTP hidden ---+                               |             LM / MTP loss
+                                        one weight edge
+```
+
+Objectives still use independent valid-token denominators and the configured
+MTP weight. Coalescing the GEMM changes floating-point reduction grouping,
+not the objective or gradient dtype. The validation-only chunked-loss path
+continues to project and release each depth sequentially to bound live logits;
+it does not use this full-logit concatenation.
+
 ## 2. MTP Input Handling
 
 Document boundaries come from position resets, not token IDs or a separate
@@ -393,6 +421,74 @@ every prediction, preserves the tensor-or-tuple structure when calling the
 inner loss, and routes one accumulated hidden-state gradient back to each model
 output. `MTPLoss` receives the aligned tuples and combines the main and weighted
 auxiliary cross-entropy objectives.
+
+## MLPerf-scale recipes
+
+The eager recipes in `torchtitan_recipes.models.deepseek_v3` share one
+671B/MTP1 objective and explicit16-stage partition:
+
+| Recipe | PP/VPP | DP/EP | Train microbatches | Validation microbatches |
+|---|---|---|---:|---:|
+| `deepseek_v3_671b_mtp1_pp2_mlperf` |2/8 |128/64 |120 |8 |
+| `deepseek_v3_671b_mtp1_pp4_mlperf` |4/4 |64/64 |240 |16 |
+
+Both use sequence4096, MBS1, trainGBS15360, validationGBS1024 and MTP weight0.1.
+The corresponding `_mlperf_perf` recipes preserve the objective but use
+round-robin routing, CF1 scratch and maximum-useful saved activations. Learned
+routing uses CF32 scratch and minimum saved activations. Neither enables VMM.
+
+Pass `training_source`, `validation_source` and `hf_assets_path` to the recipe.
+The sources implement `SourceConfig` and return already-aligned `TextSequence`
+rows in immutable global-index order. Storage-specific adapters stay out of
+TorchTitan. No tokenizer processor or packing node is inserted; DP ownership
+is strided after global ordering. The warmed HF checkpoint restores model
+weights only. An out-of-tree zero-argument recipe can bind these inputs for
+the ordinary configuration loader.
+
+`Validator.Config.global_batch_size` specifies context rows independently of
+the training batch. Eager validation wraps the same model modules in a separate
+schedule with independent receive buffers and metadata. Directed P2P groups
+are reused. The training and evaluation graphs share the existing graph pool.
+`training.cuda_graph_warmup_steps=1` captures the second update after all
+wrappers complete warmup; the default remains two updates.
+
+All four MLPerf leaves enable `Optim.Config.enable_cuda_graph=True`, capturing
+gradient clipping and the AdamW update as a separate optimizer graph. Explicit
+graph-disabled controls remain available for numerical/performance comparisons.
+
+`ChunkedLossWrapper.Config(validation_only=True, num_chunks=1)` keeps full
+training logits. During validation, the decoder supplies hidden states and
+the loss projects main and MTP heads sequentially, releasing each full logits
+tensor before the next projection. Validation reports the canonical main-LM
+metric; normalization and the MTP objective are unchanged.
+
+The recipe's router uses the standard `Linear` with BF16 operands, BF16 logits
+and BF16 backward GEMM results, matching NVIDIA's submitted MLPerf
+`MOE_ROUTER_DTYPE="bf16"` policy. FSDP supplies the BF16 gathered parameters;
+no custom router autograd function or per-call TF32 operator is needed.
+`Sigmoid.Config(compute_dtype=torch.float32)` keeps score, group/top-k selection
+and normalization in FP32. `routing_weight_dtype=torch.bfloat16` casts selected
+weights after normalization/scaling and before auxiliary injection. Both dtype
+settings default to None outside these recipes, preserving existing behavior.
+Learned routing uses256 experts, top-k8, eight groups/four selected groups,
+scale2.5, expert-bias update0.001 and unbiased sequence auxiliary coefficient0.01.
+`center_expert_bias_update=False` selects NVIDIA's raw sign-based increment;
+the default True retains TorchTitan's mean-centered increment.
+Sequence balancing counts unbiased, ungrouped top-k choices,
+independently of dispatch bias and the forced-routing benchmark path, and
+reuses the existing microbatch loss normalization and gradient injection.
+
+Dense MXFP8 projections automatically use CuTe activation quantization for
+128-aligned operands. Selection is per actual forward/backward matrix, with
+no user-facing backend choice. MLA's KV-A projection emits576 features, so its
+aligned forward input uses CuTe, while its576-wide output gradient uses CUDA
+MXFP8 quantization and scale rearrangement. Missing CuTe dependencies are an
+error, not a silent fallback. Routed experts retain
+the standalone Dist-MoE kernels and schedule-derived activation-slot policy.
+
+These recipes describe the model/runtime contract; local fake-SPMD execution
+does not establish full-cluster throughput or MLPerf convergence. Independent
+validation scheduling in GraphTrainer remains outside this eager implementation.
 
 ## TODO
 

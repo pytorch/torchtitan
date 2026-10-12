@@ -31,7 +31,6 @@ from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
-    NUM_CUDA_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_cuda_graph,
     wrap_with_cuda_graph,
 )
@@ -457,6 +456,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             model_parts=self.model_parts,
             parallelism_context=self.parallelism_context,
             training_steps=self.config.training.steps,
+            cuda_graph_warmup_steps=self.config.training.cuda_graph_warmup_steps,
             pp_has_last_stage=self.pp_has_last_stage,
             cuda_graph_annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
         )
@@ -559,7 +559,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if self.config.training.cuda_graph_per_microbatch_group:
             graph_group_runner = wrap_with_cuda_graph(
                 eager_forward_backward_fn,
-                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                num_warmup_iterations=self.config.training.cuda_graph_warmup_steps,
                 prepare_for_capture=prepare_for_capture
                 if self.parallelism_context.pp_enabled
                 else None,
@@ -606,7 +606,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 for model_part in self.model_parts
                 for parameter in model_part.parameters()
             ),
-            num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+            num_warmup_iterations=self.config.training.cuda_graph_warmup_steps,
             prepare_for_capture=prepare_for_capture
             if self.parallelism_context.pp_enabled
             else None,

@@ -4,11 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""MXFP8 specialization of the generic FSDP unsharded-tensor lifecycle."""
+"""MXFP8 activation casts and FSDP-managed weight quantization.
+
+Tensor shape suffixes:
+    M: flattened token rows
+    N: output features
+    K: input features
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from inspect import signature
 
 import torch
 
@@ -28,6 +35,118 @@ __all__: list[str] = []
 # group along both axes at once, which is what makes it transpose-
 # invariant and lets FPROP and DGRAD share one qdata allocation.
 _MXFP8_BLOCK_SIZE = 32
+# The square weight cast has a fixed RCEIL contract; activations must match it.
+_MXFP8_SCALING_MODE = "rceil"
+
+
+def _require_cutedsl_activation_quantizers() -> None:
+    """Validate the dense AO CuTeDSL API and runtime before model execution."""
+    try:
+        from torchao.prototype.moe_training.kernels.mxfp8 import quant
+    except ImportError as error:
+        raise ImportError(
+            "MXFP8 activation casts require torchao with fused dual-axis MXFP8 "
+            "quantizers; install a current torchao nightly."
+        ) from error
+    required = (
+        "mxfp8_quantize_2d_1x32_32x1_cutedsl",
+        "mxfp8_quantize_2d_1x32_cutedsl",
+        "mxfp8_quantize_2d_32x1_cutedsl",
+    )
+    if any(not hasattr(quant, name) for name in required):
+        raise ImportError(
+            "MXFP8 activation casts require torchao with fused dual-axis MXFP8 "
+            "quantizers; install a current torchao nightly."
+        )
+    offs_parameter = signature(
+        quant.mxfp8_quantize_2d_1x32_32x1_cutedsl
+    ).parameters.get("offs")
+    if offs_parameter is None or offs_parameter.default is not None:
+        raise ImportError(
+            "MXFP8 activation casts require torchao's dense None-offset MXFP8 API; "
+            "install a current torchao nightly."
+        )
+    if not quant._mxfp8_cutedsl_kernels_available:
+        raise ImportError(
+            "MXFP8 activation casts require SM10.x, CUDA 12.8+, and "
+            "the CuTeDSL runtime; install nvidia-cutlass-dsl and apache-tvm-ffi."
+        )
+
+
+def _quantize_activation(
+    x_MK: torch.Tensor, *, rowwise: bool, colwise: bool
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return MXFP8 operands with blocked E8M0 scales for the requested axes.
+
+    CuTeDSL handles positive, 128-aligned BF16 matrices. Other matrix shapes
+    use the existing CUDA cast and scale rearrangement, without padding a
+    larger GEMM. Selection uses the actual operand, so a linear's forward and
+    backward can use different kernels. Missing CuTe dependencies are errors,
+    not a reason to select CUDA. All casts use the weight's RCEIL policy.
+
+    Args:
+        x_MK: Contiguous two-dimensional BF16 activation or output gradient.
+        rowwise: Produce the rowwise FPROP/DGRAD operand.
+        colwise: Produce the columnwise WGRAD operand.
+
+    Returns:
+        Rowwise qdata, columnwise qdata, and their blocked E8M0 scales.
+        Unrequested operands are empty tensors.
+    """
+    if x_MK.ndim != 2 or x_MK.dtype != torch.bfloat16:
+        raise ValueError(
+            "MXFP8 activation casts require a 2D BF16 matrix; "
+            f"got {x_MK.dtype}, {tuple(x_MK.shape)}."
+        )
+    if not rowwise and not colwise:
+        raise ValueError("MXFP8 activation casts require at least one axis.")
+    if any(size <= 0 or size % 128 for size in x_MK.shape):
+        from torchao.prototype.mx_formats.kernels import (
+            mxfp8_quantize_cuda,
+            triton_mx_block_rearrange,
+        )
+
+        row, col, row_scale, col_scale = mxfp8_quantize_cuda(
+            x_MK, rowwise=rowwise, colwise=colwise, scaling_mode=_MXFP8_SCALING_MODE
+        )
+        return (
+            row,
+            col,
+            triton_mx_block_rearrange(row_scale) if rowwise else row_scale,
+            triton_mx_block_rearrange(col_scale) if colwise else col_scale,
+        )
+    from torchao.prototype.moe_training.kernels.mxfp8.quant import (
+        mxfp8_quantize_2d_1x32_32x1_cutedsl,
+        mxfp8_quantize_2d_1x32_cutedsl,
+        mxfp8_quantize_2d_32x1_cutedsl,
+    )
+
+    if rowwise and colwise:
+        row, row_scale, col, col_scale = mxfp8_quantize_2d_1x32_32x1_cutedsl(
+            x_MK, scaling_mode=_MXFP8_SCALING_MODE
+        )
+        return (
+            row,
+            col.t(),
+            row_scale.flatten().view(torch.float8_e8m0fnu),
+            col_scale.flatten().view(torch.float8_e8m0fnu),
+        )
+    empty_data = x_MK.new_empty(0, dtype=torch.float8_e4m3fn)
+    empty_scale = x_MK.new_empty(0, dtype=torch.float8_e8m0fnu)
+    if rowwise:
+        row, row_scale = mxfp8_quantize_2d_1x32_cutedsl(
+            x_MK, scaling_mode=_MXFP8_SCALING_MODE
+        )
+        return (
+            row,
+            empty_data,
+            row_scale.flatten().view(torch.float8_e8m0fnu),
+            empty_scale,
+        )
+    col, col_scale = mxfp8_quantize_2d_32x1_cutedsl(
+        x_MK, scaling_mode=_MXFP8_SCALING_MODE
+    )
+    return empty_data, col, empty_scale, col_scale.flatten().view(torch.float8_e8m0fnu)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +172,7 @@ class _MXFP8LinearOperands:
 
 def _quantize_mxfp8_weight(weight_NK: torch.Tensor) -> _MXFP8LinearOperands:
     """Quantize a BF16 weight using fixed square 32x32 scale tiles."""
+    assert _MXFP8_SCALING_MODE == "rceil", "The AO 32x32 weight cast requires RCEIL"
     if weight_NK.ndim != 2:
         raise ValueError(
             "MXFP8 32x32 weight quantization requires a 2D weight, "
