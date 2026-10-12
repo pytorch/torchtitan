@@ -363,6 +363,7 @@ def build_mla_moe_layers(
                     w2_param_init=depth_init(layer_id),
                     enable_sp=enable_sp,
                 ),
+                load_balance_coeff=1e-3,
                 aux_loss_coeff=aux_loss_coeff,
                 enable_sp=enable_sp,
             )
