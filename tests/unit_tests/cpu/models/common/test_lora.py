@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import math
 from dataclasses import dataclass
 from typing import cast
@@ -12,6 +13,10 @@ import pytest
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import LoRATransform, transform_model_config_
@@ -27,6 +32,7 @@ from torchtitan.models.common.linear import (
     Linear,
     RowParallelLinear,
 )
+from torchtitan.models.common.lora import merge_lora_state_dict, trainable_state_dict
 from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
@@ -702,3 +708,179 @@ def test_lora_preserves_frozen_config_type_checks():
     assert not model.proj.weight.requires_grad
     assert model.proj.lora_a.weight.requires_grad
     assert model.proj.lora_b.weight.requires_grad
+
+
+def _llama3_lora_model():
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+    model_config = transform_model_config_(
+        model_config,
+        [LoRATransform(rank=8, alpha=16.0, target_modules=["wqkv", "wo"])],
+    )
+    model = model_config.build()
+    model.init_states()
+    return model
+
+
+def test_trainable_state_dict_is_exactly_the_adapters():
+    model = _llama3_lora_model()
+    trainable = trainable_state_dict(model)
+    assert trainable
+    assert set(trainable) == {
+        name for name in model.state_dict() if ".lora_a." in name or ".lora_b." in name
+    }
+
+
+def test_merge_lora_state_dict_with_zero_adapters_is_the_base():
+    model = _llama3_lora_model()
+    state_dict = model.state_dict()
+    merged = merge_lora_state_dict(model)
+    assert set(merged) == {name for name in state_dict if ".lora_" not in name}
+    for name, value in merged.items():
+        assert torch.equal(value, state_dict[name])
+
+
+def test_merge_lora_state_dict_folds_each_adapter():
+    torch.manual_seed(0)
+    model = _llama3_lora_model()
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if ".lora_" in name:
+                param.normal_()
+    before = {name: value.clone() for name, value in model.state_dict().items()}
+
+    merged = merge_lora_state_dict(model)
+
+    attention = model.layers["0"].attention
+    for name, module in (
+        ("wo", attention.wo),
+        ("qkv_linear.wqkv", attention.qkv_linear.wqkv),
+    ):
+        expected = module.weight + module._lora_scaling * torch.matmul(
+            module.lora_b.weight, module.lora_a.weight
+        )
+        torch.testing.assert_close(
+            merged[f"layers.0.attention.{name}.weight"], expected
+        )
+    wo_fp64 = copy.deepcopy(attention.wo).double()
+    input_XI = torch.randn(3, wo_fp64.weight.shape[1], dtype=torch.float64)
+    with torch.no_grad():
+        torch.testing.assert_close(
+            F.linear(input_XI, merged["layers.0.attention.wo.weight"].double()),
+            wo_fp64(input_XI),
+            rtol=1e-4,
+            atol=1e-4,
+        )
+    after = model.state_dict()
+    assert set(after) == set(before)
+    for name, value in before.items():
+        assert torch.equal(after[name], value)
+
+
+def test_merge_lora_state_dict_folds_grouped_adapters():
+    torch.manual_seed(0)
+    grouped = (
+        LoRATransform(rank=8, alpha=16.0)
+        .transform(
+            GroupedLinear.Config(
+                group_size=2,
+                in_features=8,
+                out_features=8,
+                num_linears=2,
+                param_init={"weight": torch.nn.init.normal_},
+            )
+        )
+        .build()
+    )
+    grouped.init_states()
+    with torch.no_grad():
+        grouped.lora_a.weight.normal_()
+        grouped.lora_b.weight.normal_()
+
+    merged = merge_lora_state_dict(grouped)
+
+    assert set(merged) == {"weight"}
+    for expert in range(2):
+        for linear in range(2):
+            expected = (
+                grouped.weight[expert, linear]
+                + 2
+                * grouped.lora_b.weight[expert, linear]
+                @ grouped.lora_a.weight[expert]
+            )
+            torch.testing.assert_close(merged["weight"][expert, linear], expected)
+
+
+def test_merge_lora_state_dict_sees_through_wrappers():
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+        CheckpointWrapper,
+    )
+
+    model = _llama3_lora_model()
+    model.layers["0"] = CheckpointWrapper(model.layers["0"])
+
+    merged = merge_lora_state_dict(model)
+
+    assert "layers.0.attention.wo.weight" in merged
+    assert not any(
+        ".lora_" in name or "_checkpoint_wrapped_module" in name for name in merged
+    )
+
+
+class TestMergeLoRAStateDictTensorParallel(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    def _feed_forward(self):
+        init = {"weight": torch.nn.init.normal_}
+        config = LoRATransform(rank=8, alpha=16.0).transform(
+            make_ffn_config(
+                dim=64,
+                hidden_dim=128,
+                w13_param_init=init,
+                w2_param_init=init,
+                enable_sp=True,
+            )
+        )
+        torch.manual_seed(0)
+        feed_forward = config.build()
+        feed_forward.init_states()
+        with torch.no_grad():
+            for name, param in feed_forward.named_parameters():
+                if ".lora_" in name:
+                    param.normal_()
+        return feed_forward
+
+    @with_comms
+    def test_merge_gives_each_rank_its_shard_of_the_unsharded_merge(self):
+        from unittest.mock import patch
+
+        from torchtitan.distributed.parallelism_context import ParallelismContext
+
+        reference = merge_lora_state_dict(self._feed_forward())
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=self.world_size,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+            enable_sequence_parallel=True,
+        )
+        with patch(
+            "torchtitan.distributed.parallelism_context.device_type", self.device_type
+        ):
+            parallelism_context.build_mesh()
+        feed_forward = self._feed_forward().to(self.device_type)
+        feed_forward._parallelize(parallelism_context)
+
+        merged = merge_lora_state_dict(feed_forward)
+
+        hidden = slice(self.rank * 64, (self.rank + 1) * 64)
+        torch.testing.assert_close(
+            merged["w13.weight"].cpu(), reference["w13.weight"][:, hidden]
+        )
+        torch.testing.assert_close(
+            merged["w2.weight"].cpu(), reference["w2.weight"][:, hidden]
+        )

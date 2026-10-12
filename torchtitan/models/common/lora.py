@@ -20,6 +20,7 @@ import spmd_types as spmd
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
@@ -33,6 +34,8 @@ __all__ = [
     "get_lora_dist_moe_routed_experts",
     "get_lora_grouped_linear",
     "get_lora_linear",
+    "merge_lora_state_dict",
+    "trainable_state_dict",
 ]
 
 
@@ -346,3 +349,82 @@ def get_lora_dist_moe_routed_experts() -> type[DistMoeRoutedExperts]:
             pass
 
     return LoRADistMoeRoutedExperts
+
+
+_WRAPPER_SEGMENTS = frozenset(
+    {"_checkpoint_wrapped_module", "_fsdp_wrapped_module", "_orig_mod"}
+)
+
+
+def _strip_wrappers(name: str) -> str:
+    return ".".join(part for part in name.split(".") if part not in _WRAPPER_SEGMENTS)
+
+
+def _key(prefix: str, name: str) -> str:
+    return f"{prefix}.{name}" if prefix else name
+
+
+def _state_dict_prefix(module_name: str, state_dict: dict[str, torch.Tensor]) -> str:
+    for candidate in (_strip_wrappers(module_name), module_name):
+        if _key(candidate, "lora_a.weight") in state_dict:
+            return candidate
+    raise KeyError(
+        f"LoRA module {module_name!r} has no adapter in the state dict; "
+        "an unknown module wrapper is in its path."
+    )
+
+
+def _merged_weight(module: _LoRAMixin, base: torch.Tensor) -> torch.Tensor:
+    module = cast(_LoRALinearMixin | _LoRAGroupedLinearMixin, module)
+    grouped = isinstance(module, _LoRAGroupedLinearMixin)
+    lora_a, lora_b, weight = module.lora_a.weight, module.lora_b.weight, base
+    if isinstance(base, DTensor):
+        # B shares the base's output sharding; A is only cut on its rank dim, by FSDP.
+        rank_dim = 1 if grouped else 0
+        lora_a = lora_a.redistribute(
+            placements=[
+                Replicate() if placement.is_shard(rank_dim) else placement
+                for placement in lora_a.placements
+            ]
+        ).to_local()
+        lora_b, weight = lora_b.to_local(), base.to_local()
+    lora_a, lora_b = lora_a.float(), lora_b.float()
+    if grouped:
+        delta = torch.bmm(lora_b.flatten(1, -2), lora_a).view(weight.shape)
+    else:
+        delta = torch.matmul(lora_b, lora_a)
+    merged = (weight.float() + module._lora_scaling * delta).to(base.dtype)
+    if isinstance(base, DTensor):
+        return DTensor.from_local(
+            merged,
+            base.device_mesh,
+            base.placements,
+            run_check=False,
+            shape=base.shape,
+            stride=base.stride(),
+        )
+    return merged
+
+
+def trainable_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    """The parameters left trainable, keyed as in ``state_dict()``: under LoRA, the adapters."""
+    return {
+        _strip_wrappers(name): param
+        for name, param in model.named_parameters()
+        if param.requires_grad
+    }
+
+
+def merge_lora_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    """``model.state_dict()`` with each base weight replaced by ``W + (alpha / rank) * B @ A`` and no adapter keys."""
+    state_dict = dict(model.state_dict())
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            if not isinstance(module, _LoRAMixin):
+                continue
+            prefix = _state_dict_prefix(name, state_dict)
+            key = _key(prefix, "weight")
+            state_dict[key] = _merged_weight(module, state_dict[key])
+            del state_dict[_key(prefix, "lora_a.weight")]
+            del state_dict[_key(prefix, "lora_b.weight")]
+    return state_dict
