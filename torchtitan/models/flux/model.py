@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Shape suffixes: B = batch, T = packed tokens, D = feature dimension.
-
 from dataclasses import dataclass, field
 from typing import Any, cast, Self
 
@@ -397,26 +395,22 @@ class FluxModel(BaseModel):
         attention_metadata = create_flux_attention_metadata(
             batch_size, img.shape[1] + text_seq_len, device=img.device
         )
-        img_TD = self.img_in(local_pack(img))
-        txt_TD = self.txt_in(local_pack(txt))
-        vec_BD = self.time_in(timestep_embedding(timesteps, 256))
-        vec_BD = vec_BD + self.vector_in(y)
-        ids_TD = local_concat_text_image(
+        img = self.img_in(local_pack(img))
+        txt = self.txt_in(local_pack(txt))
+        vec = self.time_in(timestep_embedding(timesteps, 256))
+        vec = vec + self.vector_in(y)
+        ids = local_concat_text_image(
             local_pack(txt_ids), local_pack(img_ids), batch_size
         )
-        pe = self.pe_embedder(ids_TD)
+        pe = self.pe_embedder(ids)
 
         for block in self.double_blocks:
-            img_TD, txt_TD = block(
-                img_TD, txt_TD, vec_BD, pe, attention_metadata=attention_metadata
-            )
+            img, txt = block(img, txt, vec, pe, attention_metadata=attention_metadata)
 
-        combined_TD = local_concat_text_image(txt_TD, img_TD, batch_size)
+        img = local_concat_text_image(txt, img, batch_size)
         for block in self.single_blocks:
-            combined_TD = block(
-                combined_TD, vec_BD, pe, attention_metadata=attention_metadata
-            )
-        _, img_TD = local_split_text_image(combined_TD, text_seq_len, batch_size)
+            img = block(img, vec, pe, attention_metadata=attention_metadata)
+        _, img = local_split_text_image(img, text_seq_len, batch_size)
 
-        img_TD = self.final_layer(img_TD, vec_BD)
-        return local_unpack(img_TD, batch_size)
+        img = self.final_layer(img, vec)
+        return local_unpack(img, batch_size)
