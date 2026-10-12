@@ -22,6 +22,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
+import torch
 from torchtitan.observability.structured_logger import (
     step_state,
     structured_logging as sl_mod,
@@ -1155,6 +1156,36 @@ class TestLogTraceSpan:
             "inner_async_start",
             "inner_async_end",
             "outer_async_end",
+        ]
+
+    def test_pairs_while_another_thread_compiles(
+        self, tmp_path, structured_logger_fixture
+    ):
+        """A compile on another thread must not drop this thread's span records,
+        as when vLLM compiles on the RL generator's engine thread."""
+        init_structured_logger(rank=0, source="generator", output_dir=str(tmp_path))
+        compiling, release = threading.Event(), threading.Event()
+
+        def blocking_backend(graph_module, example_inputs):
+            compiling.set()
+            release.wait()
+            return graph_module.forward
+
+        compile_thread = threading.Thread(
+            target=torch.compile(lambda x: x + 1, backend=blocking_backend),
+            args=(torch.ones(1),),
+            daemon=True,
+        )
+        compile_thread.start()
+        assert compiling.wait(timeout=60)
+        with log_trace_span("generate"):
+            release.set()
+            compile_thread.join()
+
+        lines = _read_trace_lines(tmp_path)
+        assert [line["log_type_name"] for line in lines] == [
+            "generate_start",
+            "generate_end",
         ]
 
 
