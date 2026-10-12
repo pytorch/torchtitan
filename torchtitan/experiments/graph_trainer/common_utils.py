@@ -26,8 +26,10 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     FSDP_PARAM_FQNS_META,
     MixedPrecisionPolicy,
 )
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.linear import Linear
 
 
 logger = logging.getLogger(__name__)
@@ -85,6 +87,16 @@ def log_timer(label: str):
     logger.info("%s took %.3fs", label, elapsed_s)
 
 
+def disable_inplace_wgrad_accum(model: Module.Config) -> None:
+    """Turn off ``inplace_wgrad_accum`` on every ``Linear`` config in ``model``.
+
+    GraphTrainer traces the backward, which cannot add a WGRAD into
+    ``weight.grad`` in place.
+    """
+    for _, linear_config, _, _ in model.traverse(Linear.Config):
+        linear_config.inplace_wgrad_accum = False
+
+
 def build_decoder_config_for_backend(
     config_builder: Callable, attn_backend: str, **builder_kwargs
 ):
@@ -101,20 +113,25 @@ def build_decoder_config_for_backend(
     input), and overflows the fp32 Triton shared-memory limit on large head dims.
 
     For SDPA we build the flex config (a valid backend) and swap each layer's
-    ``inner_attention`` to ``GraphTrainerScaledDotProductInnerAttention.Config()``.
+    ``inner_attention`` to ``GraphTrainerScaledDotProductInnerAttention.Config()``,
+    keeping its sharding.
     The adapter adds a singleton batch around the flat graph-trainer inputs and
     delegates to the common batched SDPA implementation. Production code never
     reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
     registry can construct an SDPA language model outside these tests.
     """
     if attn_backend != "sdpa":
-        return config_builder(attn_backend=attn_backend, **builder_kwargs)
-
-    config = config_builder(attn_backend="flex", **builder_kwargs)
-    for layer in config.layers:
-        layer.attention.inner_attention = (
-            GraphTrainerScaledDotProductInnerAttention.Config()
-        )
+        config = config_builder(attn_backend=attn_backend, **builder_kwargs)
+    else:
+        config = config_builder(attn_backend="flex", **builder_kwargs)
+        for layer in config.layers:
+            layer.attention.inner_attention = (
+                GraphTrainerScaledDotProductInnerAttention.Config(
+                    sharding_config=layer.attention.inner_attention.sharding_config
+                )
+            )
+    # GraphTrainer traces the backward.
+    disable_inplace_wgrad_accum(config)
     return config
 
 

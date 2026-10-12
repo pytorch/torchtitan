@@ -10,10 +10,10 @@ import pytest
 import torch
 
 from torchtitan.rl.model import gdn
-from torchtitan.rl.model.linear_attention_backend import (
-    GDNExecutionPath,
-    TorchTitanGDNAttentionMetadata,
-    TorchTitanGDNAttentionMetadataBuilder,
+from torchtitan.rl.model.linear_attention import (
+    LinearAttentionExecutionPath,
+    TorchTitanLinearAttentionMetadata,
+    TorchTitanLinearAttentionMetadataBuilder,
 )
 from torchtitan.rl.model.vllm_worker import TorchTitanCudagraphDispatcher
 from vllm.config import (
@@ -56,7 +56,7 @@ def test_gdn_supports_eager_and_full_decode_only_modes(graph_mode):
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
     )
 
-    TorchTitanGDNAttentionMetadataBuilder(spec, [], config, torch.device("cpu"))
+    TorchTitanLinearAttentionMetadataBuilder(spec, [], config, torch.device("cpu"))
 
     dispatcher = TorchTitanCudagraphDispatcher(config)
     dispatcher.initialize_cudagraph_keys(graph_mode)
@@ -110,7 +110,7 @@ def test_full_metadata_and_native_dispatch_variants():
         dtypes=(torch.bfloat16, torch.float32),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
     )
-    builder = TorchTitanGDNAttentionMetadataBuilder(
+    builder = TorchTitanLinearAttentionMetadataBuilder(
         spec, [], config, torch.device("cpu")
     )
     offsets = torch.tensor([0, 1, 2], dtype=torch.int32)
@@ -128,7 +128,7 @@ def test_full_metadata_and_native_dispatch_variants():
     captured = builder.build_for_cudagraph_capture(common)
     assert isinstance(captured, GDNAttentionMetadata)
     # Native splits stay truthful; the graph key keeps this general dummy packed.
-    assert captured.execution_path is GDNExecutionPath.PACKED
+    assert captured.execution_path is LinearAttentionExecutionPath.PACKED
     assert captured.num_prefills == 0 and captured.num_decodes == 2
     assert captured.num_decode_tokens == 4 and captured.num_prefill_tokens == 0
     assert captured.has_initial_state is not None
@@ -160,7 +160,7 @@ def test_full_metadata_and_native_dispatch_variants():
             _num_computed_tokens_cache=None,
         ),
     )
-    assert decode_metadata.execution_path is GDNExecutionPath.SINGLE_TOKEN
+    assert decode_metadata.execution_path is LinearAttentionExecutionPath.SINGLE_TOKEN
     assert decode_metadata.has_initial_state.tolist() == [True, False]
     assert decode_metadata.num_actual_tokens == 2
     assert decode_metadata.non_spec_query_start_loc.tolist() == [0, 1, 2]
@@ -169,7 +169,7 @@ def test_full_metadata_and_native_dispatch_variants():
     decode_capture = builder.build_for_cudagraph_capture(single_token)
     assert not decode_capture.has_initial_state.any()
     actual = builder.build(0, single_token)
-    assert actual.execution_path is GDNExecutionPath.SINGLE_TOKEN
+    assert actual.execution_path is LinearAttentionExecutionPath.SINGLE_TOKEN
     assert actual.has_initial_state.tolist() == [False, True]
     for name in (
         "non_spec_query_start_loc",
@@ -214,9 +214,11 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
     torch.nn.Module.__init__(layer)
     layer.prefix, layer.kv_cache = "gdn", (torch.empty(0), torch.empty(0))
     extent = 4 if decode else 3
-    metadata = TorchTitanGDNAttentionMetadata(
+    metadata = TorchTitanLinearAttentionMetadata(
         execution_path=(
-            GDNExecutionPath.SINGLE_TOKEN if decode else GDNExecutionPath.PACKED
+            LinearAttentionExecutionPath.SINGLE_TOKEN
+            if decode
+            else LinearAttentionExecutionPath.PACKED
         ),
         # General capture dummies can have zero native prefills as well.
         num_prefills=0,

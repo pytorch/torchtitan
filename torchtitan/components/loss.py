@@ -35,7 +35,12 @@ def cross_entropy_loss(
     global_vocab_size: int | None = None,
     reduction: Literal["sum", "none"] = "sum",
 ) -> torch.Tensor:
-    """Cross-entropy over ``pred[T, V]`` and ``labels[T]``."""
+    """Cross-entropy over ``pred[T, V]`` and ``labels[T]``.
+
+    ``pred`` is upcast to fp32 here rather than in the model forward, so that
+    compiling the loss region fuses the forward and backward casts into the loss
+    kernels, which saves both time and memory.
+    """
     if reduction not in ("sum", "none"):
         raise ValueError(f"Unsupported cross-entropy reduction: {reduction}")
     if spmd_mesh_size("tp") > 1:

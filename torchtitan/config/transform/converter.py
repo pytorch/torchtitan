@@ -10,7 +10,7 @@ from abc import abstractmethod
 from dataclasses import dataclass
 
 from torchtitan.config import Configurable
-from torchtitan.protocols.module import Module
+from torchtitan.models.base.module import Module
 
 __all__ = ["ModelConfigConverter", "validate_converter_compatibility"]
 

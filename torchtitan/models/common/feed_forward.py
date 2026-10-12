@@ -9,9 +9,10 @@ from dataclasses import dataclass, field
 import torch
 import torch_remat as remat
 
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.module import Module
 
 # Shape suffix legend:
 #   T = token dimensions, D = model dimension, F = feed-forward hidden dimension

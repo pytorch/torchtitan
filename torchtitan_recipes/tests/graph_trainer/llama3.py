@@ -52,6 +52,7 @@ def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
         converters=[
             llama3_mxfp8_linear_converter_config(),
         ],
+        parallelism=base.parallelism,
     )
     config = to_graph_trainer_config(base, GraphTrainerLlama3Model.Config)
     config.compile = GraphTrainerCompileConfig()
@@ -73,6 +74,7 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
         "debugmodel",
         seq_len=base.training.max_context_length,
         attn_backend="sdpa",
+        parallelism=base.parallelism,
     )
     config = to_graph_trainer_config(base, GraphTrainerLlama3Model.Config)
     config.compile = GraphTrainerCompileConfig()

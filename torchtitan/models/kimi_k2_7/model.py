@@ -95,15 +95,6 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
                 modules_excluded_from_active_params=(kimi_model.vision_encoder,),
             )
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_kimi_k2_5_sharding_config
-
-            set_kimi_k2_5_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
     def __init__(self, config: Config):
         tp = spmd_mesh_size("tp")
         if (

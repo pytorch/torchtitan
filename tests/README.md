@@ -7,16 +7,25 @@ This directory contains tests for the torchtitan project, including unit tests a
 - `unit_tests/cpu/`: Unit tests that run without a GPU
 - `unit_tests/gpu/`: Tests that require GPUs; multi-GPU tests use the
   `multi_gpu` pytest marker
+
+  Both mirror the source tree: a test for `torchtitan/<path>/<module>.py` lives
+  under `unit_tests/{cpu,gpu}/<path>/` (e.g. `models/common/`,
+  `components/data/`, `distributed/flex_shard/`). `recipes/` covers
+  `torchtitan_recipes` (overrides and recipe sanity) and `scripts/` covers
+  `scripts/`. Tests of the trainer as a whole stay at the top level.
 - `rl/unit_tests/cpu/`: RL unit tests that run without a GPU
 - `rl/unit_tests/gpu/`: RL tests that require GPUs; multi-GPU tests use the
   `multi_gpu` pytest marker and each runs under its own `torchrun` launch
-- `rl/integration_tests/`: RL end-to-end runner
-- `integration_tests/`: Contains integration tests that test multiple components together
+- `integration_tests/`: End-to-end tests, one module per suite. Each module
+  holds the suite's run configurations next to the test definitions that name
+  them, so adding a test edits one file.
   - `features.py`: Tests for torchtitan features and composability
-  - `flux.py`: Tests for the FLUX model
+  - `models.py`: Tests for model architectures
+  - `flux.py`: Tests for the FLUX model (training, then image generation)
   - `h100.py`: Tests cases for H100 GPUs
   - `b200.py`: Test cases that require SM100 or SM103 GPUs
-  - `models.py`: Tests for model architectures
+  - `rl.py`: RL end-to-end suites (`rl`, `rl_kda`, `rl_b200`)
+  - `run_tests.py`: The runner for every suite
 - `assets/`: Contains test assets and fixtures used by the tests
   - `losses/`: Golden loss and gradient norm curves for the numerics guards
   - `tokenizer/`: Tokenizer configuration and vocabulary files for testing
@@ -67,7 +76,9 @@ that feature combinations configure, transform, and complete training, while
 Real-PG runs additionally cover real collectives and distributed state. Model
 tests provide width across supported implementations. Their definitions remain
 separate for clarity. Each 8 GPU Real-PG suite runs as its own CI job with an
-independent timeout. The fake-pg job and the real-pg models job always run the FLUX tests after `run_tests`, including when `run_tests` failed, and the job still fails if either suite failed.
+independent timeout. The fake-pg job runs the FLUX suite together with
+`features,models`; the real-pg models job runs it in a second `run_tests` call,
+including when the first failed, and the job still fails if either suite failed.
 
 ### Numerics tests (Goal: deterministic regression coverage)
 
@@ -178,12 +189,17 @@ Arguments:
 - `--ngpu`: (Optional) Number of GPUs to use for testing (default: 8)
 - `--export-numerics`: (Optional) Export results for numerical tests instead of
   comparing against their `golden_numerics_path` files
+- `--hf_assets_path`: (Optional) HF checkpoint exported to configs as
+  `TORCHTITAN_TEST_HF_ASSETS_PATH` (used by RL tests that need real weights)
 
-Each test names the full configurations it runs, one per run, and the runner passes
-them to `run_train.sh` as the `MODULE` and `CONFIG` env vars. The configurations
-live in [torchtitan_recipes/tests](../torchtitan_recipes/tests/), one module per
-test suite. To run something else, add a configuration there and a test entry
-that names it.
+Each test names the full configurations it runs, one per run. By default each
+configuration runs `torchtitan.train` through `run_train.sh`, which receives the
+`MODULE`, `CONFIG` and `ENTRYPOINT` env vars. A test can set `entrypoints` to
+launch another module per configuration (e.g. Flux image generation). RL tests
+use `torchtitan.rl.train`, which places its own processes with Monarch, so the
+runner starts it with `python -m` and runs RL suites sequentially. Suite
+configurations live in the suite module itself; reusable model debug
+configurations live in [torchtitan_recipes/tests](../torchtitan_recipes/tests/).
 
 Examples:
 ```bash
@@ -204,6 +220,9 @@ python -m tests.integration_tests.run_tests test_output --test_suite h100 --exec
 
 # Run B200-only cases with real process groups
 python -m tests.integration_tests.run_tests test_output --test_suite b200 --execution_mode real_pg --ngpu 8
+
+# Run the RL end-to-end suite (requires the RL dependencies)
+python -m tests.integration_tests.run_tests test_output --test_suite rl --ngpu 8
 ```
 
 ### Running Unit Tests
@@ -238,7 +257,7 @@ rerun the RL unit job after that image is available.
 To run a specific test file:
 
 ```bash
-pytest -s tests/unit_tests/cpu/test_config_loader.py
+pytest -s tests/unit_tests/cpu/config/test_config_loader.py
 ```
 
 ### Running Specific Test Functions in Unit Tests
@@ -246,5 +265,5 @@ pytest -s tests/unit_tests/cpu/test_config_loader.py
 To run a specific test function:
 
 ```bash
-pytest -s tests/unit_tests/cpu/test_config_loader.py::test_operational_overrides
+pytest -s tests/unit_tests/cpu/config/test_config_loader.py::test_operational_overrides
 ```

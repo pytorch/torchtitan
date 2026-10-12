@@ -58,10 +58,9 @@ def test_vllm_uneven_decode_tp_padding():
         )
 
     register_to_vllm(
-        config.model,
+        config.generator.model,
         parallelism=config.generator.parallelism,
         checkpointer_config=None,
-        override=config.generator.override,
     )
 
     engine = build_inference_engine(config)

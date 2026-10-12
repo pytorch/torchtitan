@@ -12,6 +12,8 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.experiments.graph_trainer.llama3 import (
     build_model_config as build_llama3_model_config,
@@ -36,7 +38,9 @@ def _set_deterministic() -> None:
 
 
 def _build_model(model_flavor: str, attn_backend: str = "flex") -> nn.Module:
-    model_config = build_llama3_model_config(model_flavor, attn_backend=attn_backend)
+    model_config = build_llama3_model_config(
+        model_flavor, attn_backend=attn_backend, parallelism=ParallelismConfig()
+    )
     with torch.device("meta"):
         model = model_config.build()
     model.to_empty(device="cuda")
@@ -125,7 +129,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         SelectiveAC.Config().build().apply(eager_model)
         eager_trainer = build_minimal_trainer(
             eager_model,
-            build_llama3_model_config(DEBUGMODEL),
+            build_llama3_model_config(DEBUGMODEL, parallelism=ParallelismConfig()),
             Trainer,
             parallelism_context=self.parallelism_context,
         )
@@ -134,7 +138,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         traced_model.load_state_dict(copy.deepcopy(self.state_dict))
         traced_trainer = build_minimal_trainer(
             traced_model,
-            build_llama3_model_config(DEBUGMODEL),
+            build_llama3_model_config(DEBUGMODEL, parallelism=ParallelismConfig()),
             GraphTrainer,
             activation_checkpoint_mode="selective",
             parallelism_context=self.parallelism_context,
@@ -189,7 +193,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         FullAC.Config().build().apply(eager_model)
         eager_trainer = build_minimal_trainer(
             eager_model,
-            build_llama3_model_config(DEBUGMODEL),
+            build_llama3_model_config(DEBUGMODEL, parallelism=ParallelismConfig()),
             Trainer,
             parallelism_context=self.parallelism_context,
         )
@@ -198,7 +202,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         traced_model.load_state_dict(copy.deepcopy(self.state_dict))
         traced_trainer = build_minimal_trainer(
             traced_model,
-            build_llama3_model_config(DEBUGMODEL),
+            build_llama3_model_config(DEBUGMODEL, parallelism=ParallelismConfig()),
             GraphTrainer,
             activation_checkpoint_mode="selective",
             parallelism_context=self.parallelism_context,

@@ -60,8 +60,8 @@ _buffer: ElasticBuffer | None = None
 # The torch.library custom ops can only pass tensors across the op boundary, so we
 # smuggle the opaque EPHandle through a CPU int64 handle_id tensor + this cache.
 # SAC saves the handle_id tensor; we use it to retrieve the non-tensor handle.
-# Combine removes the entry it uses. If a dispatch never reaches its combine (e.g. a RegionAC
-# replay that stops before combine), a finalizer in _dispatch_op_impl removes it.
+# Combine removes the entry it uses. If a dispatch never reaches its combine (a recomputed
+# dispatch whose combine region is saved), a finalizer in _dispatch_op_impl removes it.
 # TODO: return an opaque handle from the ops (like hybridep.DispatchHandle) and delete this cache.
 _handle_cache: dict = {}
 _handle_counter: int = 0
@@ -106,12 +106,12 @@ _lib.define(
 # autograd disables grad regardless of the outer context. When False (generator no_grad /
 # inference), the op frees the handle itself (setup_context never runs).
 _lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
-# Ordered effects, so PyTorch's selective checkpointing (FullAC) saves both ops instead of
-# replaying them in backward. DeepEP assigns receive slots with atomics, so a replayed
-# dispatch can receive rows in another order, while backward routes the gradients with the
-# forward's handle. torch_remat (RegionAC) ignores effects and follows the ``recompute``
-# argument of dispatch_tokens/combine_tokens; dispatch_tokens only replays with a
-# deterministic buffer.
+# Ordered effects, so graph-level selective checkpointing (the graph trainer's memory
+# policy) saves both ops instead of replaying them in backward. DeepEP assigns receive
+# slots with atomics, so a replayed dispatch can receive rows in another order, while
+# backward routes the gradients with the forward's handle. torch_remat ignores effects and
+# follows the ``recompute`` argument of dispatch_tokens/combine_tokens; dispatch_tokens
+# only replays with a deterministic buffer.
 _lib._register_effectful_op("deepep::dispatch", torch.library.EffectType.ORDERED)
 _lib._register_effectful_op("deepep::combine", torch.library.EffectType.ORDERED)
 

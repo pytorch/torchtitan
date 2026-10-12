@@ -22,15 +22,15 @@ from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
-from torchtitan.components.validate import BaseValidator, Validator
-from torchtitan.config import apply_overrides, Configurable
+from torchtitan.components.validator import BaseValidator, Validator
+from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
+from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
-from torchtitan.protocols.model import BaseModel
 from torchtitan.training_engine import TrainingEngine
 
 
@@ -71,6 +71,10 @@ class Trainer(Configurable):
 
         create_seed_checkpoint: bool = False
         """Initialize and save an unsharded model-only checkpoint, then exit."""
+
+        override: OverrideConfig = field(default_factory=OverrideConfig)
+        """Registered overrides applied to this config tree when the trainer is
+        constructed."""
 
         def __post_init__(self):
             TrainingEngine.Config.__post_init__(self)
@@ -149,9 +153,7 @@ class Trainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        model_config = copy.deepcopy(config.model)
-        model_config.set_sharding_(config.parallelism)
-        config.model = model_config
+        config.model = copy.deepcopy(config.model)
         if config.override.imports:
             apply_overrides(config.override, config)
         model_config = config.model
