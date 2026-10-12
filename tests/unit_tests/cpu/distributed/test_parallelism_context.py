@@ -10,6 +10,7 @@ import os
 import socket
 import tempfile
 import unittest
+from dataclasses import dataclass
 from unittest.mock import patch
 
 import spmd_types as spmd
@@ -38,6 +39,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_validate_redistributions,
 )
 from torchtitan.models.base.sharding import resolve_placements, ShardingConfig
+from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     dense_activation_placement,
@@ -1023,6 +1025,29 @@ class TestParallelismContextWorld8MeshOperations(DTensorTestBase):
             )  # tp * (cp * 2) = 2 * (1 * 2) = 2 * 2
 
 
+class _CausalAttentionReference(InnerAttention):
+    """Math-only causal attention for the CPU FSDP mixed-precision test."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(InnerAttention.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+
+    def forward(self, q_THK, k_THK, v_THV, *, scale=None, **kwargs):
+        num_repeats = q_THK.shape[1] // k_THK.shape[1]
+        k_THK = k_THK.repeat_interleave(num_repeats, dim=1)
+        v_THV = v_THV.repeat_interleave(num_repeats, dim=1)
+        scores_HTT = torch.einsum("thk,shk->hts", q_THK, k_THK)
+        scores_HTT = scores_HTT * (q_THK.shape[-1] ** -0.5 if scale is None else scale)
+        causal_TT = torch.ones(
+            q_THK.shape[0], k_THK.shape[0], device=q_THK.device, dtype=torch.bool
+        ).tril()
+        probs_HTT = scores_HTT.masked_fill(~causal_TT, -torch.inf).softmax(dim=-1)
+        return torch.einsum("hts,shv->thv", probs_HTT, v_THV)
+
+
 class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
     """Verify apply_fsdp on Llama3 debugmodel matches single-device reference.
 
@@ -1045,12 +1070,8 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
 
         model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
 
-        from tests.unit_tests.cpu.models.common.attention_reference import (
-            CausalAttentionReference,
-        )
-
         for layer in model_config.layers:
-            layer.attention.inner_attention = CausalAttentionReference.Config()
+            layer.attention.inner_attention = _CausalAttentionReference.Config()
 
         with torch.device("meta"):
             model = model_config.build()
