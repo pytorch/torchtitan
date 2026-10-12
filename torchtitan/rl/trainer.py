@@ -239,16 +239,15 @@ class Trainer(Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[list[RDMAMicrobatch]],
+        microbatches: list[RDMAMicrobatch],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
-            training_data: Microbatch-major grid of `RDMAMicrobatch`es,
-                ``[num_microbatches][dp_degree]``; this rank reads its column, a few
-                microbatches ahead of training.
+            microbatches: This rank's `RDMAMicrobatch`es, `[num_microbatches]`: one column of the
+                batcher's `[num_microbatches][dp_degree]` grid, read a few ahead of training.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -256,6 +255,12 @@ class Trainer(Configurable):
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
+
+        Example:
+            # dp_degree=2, tp=2: ranks 0-1 share DP rank 0, ranks 2-3 share DP rank 1.
+            # grid = [[mb_00, mb_01], [mb_10, mb_11]]
+            # ranks 0 and 1 get microbatches = [mb_00, mb_10]
+            # ranks 2 and 3 get microbatches = [mb_01, mb_11]
         """
         logger.debug(
             f"{os.getpid()=} Trainer forward_backward "
@@ -265,16 +270,13 @@ class Trainer(Configurable):
         self._step_compute_start = time.perf_counter()
         # The batcher pads every microbatch to the same token count.
         self._step_num_tokens_per_dp_rank = (
-            len(training_data)
+            len(microbatches)
             * self.config.training.num_tokens_per_microbatch_per_dp_rank
         )
         # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
         # and broadcast it, to cut the batcher's reads by cp * tp. Needs a per-replica group.
-        microbatch_groups = MicrobatchStream(
-            [rank_batches[self.dp_rank] for rank_batches in training_data]
-        )
         result = engine.forward_backward(
-            microbatch_groups=microbatch_groups,
+            microbatch_groups=MicrobatchStream(microbatches),
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )

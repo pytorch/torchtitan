@@ -356,7 +356,6 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         )
         trainer.engine = engine
         trainer.config = Trainer.Config(model=MagicMock())
-        trainer.dp_rank = 1
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
                 key: float(value.item())
@@ -379,13 +378,12 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             advantages=torch.tensor([1.0]),
         )
 
-        # This rank (dp_rank 1) reads only its own column.
-        other_rank = MagicMock(spec=RDMAMicrobatch)
-        own = MagicMock(spec=RDMAMicrobatch, read=AsyncMock(return_value=batch))
+        # This rank's column.
+        microbatch = MagicMock(spec=RDMAMicrobatch, read=AsyncMock(return_value=batch))
 
         result = await Trainer.forward_backward(
             trainer,
-            [[other_rank, own], [other_rank, own]],
+            [microbatch, microbatch],
             torch.tensor([3]),
             torch.tensor([2]),
         )
@@ -398,7 +396,6 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
         assert isinstance(groups, MicrobatchStream)
         assert list(groups) == [[batch], [batch]]
-        other_rank.read.assert_not_called()
         assert trainer._step_num_tokens_per_dp_rank == (
             2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
         )
