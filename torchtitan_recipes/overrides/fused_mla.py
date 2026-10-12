@@ -143,6 +143,32 @@ def _deterministic_default(block_h: int, num_warps: int):
     return prune
 
 
+_q_rope_trial_input: dict[str, torch.Tensor] = {}
+
+
+def _save_q_if_in_place(kwargs: dict, reset_only: bool = False) -> None:
+    """Autotune pre-hook: snapshot ``q`` before each trial of an in-place call.
+
+    The in-place caller passes the same tensor as ``q`` and ``q_out``, and the
+    autotuner runs each candidate against the same buffer, so every trial
+    after the first would otherwise rotate already-rotated data and the chosen
+    config would be benchmarked (and the caller's tensor left) wrong. This is
+    ``restore_value=["q"]`` restricted to in-place calls: the functional call
+    leaves ``q`` untouched, and restoring it anyway would bump its version
+    counter on every trial, which activation checkpointing reads as an
+    in-place modification of a saved tensor.
+    """
+    if not reset_only and kwargs["q"].data_ptr() == kwargs["q_out"].data_ptr():
+        _q_rope_trial_input["q"] = kwargs["q"].clone()
+
+
+def _restore_q_if_in_place(kwargs: dict, exception: BaseException | None) -> None:
+    """Autotune post-hook: restore ``q`` saved by ``_save_q_if_in_place``."""
+    saved = _q_rope_trial_input.pop("q", None)
+    if saved is not None:
+        kwargs["q"].copy_(saved)
+
+
 @triton.autotune(
     configs=_AUTOTUNE_CONFIGS,
     key=_AUTOTUNE_KEY,
@@ -151,11 +177,8 @@ def _deterministic_default(block_h: int, num_warps: int):
     # functional forward is nearly flat across tiles (59.6-65.3us) while the
     # in-place backward is not (14.2-20.2us), so the backward decides.
     prune_configs_by={"early_config_prune": _deterministic_default(128, 4)},
-    # The in-place caller passes the same tensor as q and q_out, and the
-    # autotuner runs each candidate against the same buffer. Without this,
-    # every trial after the first would rotate already-rotated data and the
-    # chosen config would be benchmarked (and the caller's tensor left) wrong.
-    restore_value=["q"],
+    pre_hook=_save_q_if_in_place,
+    post_hook=_restore_q_if_in_place,
 )
 @triton.jit
 def _fused_q_rope_kernel(

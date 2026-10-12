@@ -16,13 +16,11 @@ import torch.distributed.checkpoint.stateful
 from torch.distributed.fsdp import FSDPModule
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
-from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.optim import Optim
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import CommConfig, DebugConfig, TrainingConfig
-from torchtitan.config.override import OverrideConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
@@ -38,6 +36,7 @@ from torchtitan.distributed.cuda_graph import (
     wrap_with_cuda_graph,
 )
 from torchtitan.distributed.pipeline_parallel import initialize_pipeline_schedule
+from torchtitan.models.base import BaseModel
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -46,7 +45,6 @@ from torchtitan.observability.metrics import (
 )
 from torchtitan.observability.profiler import Profiler
 from torchtitan.observability.sdc_replayer import SDCReplayer
-from torchtitan.protocols import BaseModel
 from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
 from torchtitan.tools.garbage_collector import GarbageCollector
@@ -123,14 +121,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         sdc_replayer: SDCReplayer.Config | None = None
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
-        override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
-        dist_moe: Configurable.Config | None = None
+        dist_moe_runtime: Configurable.Config | None = None
         """Optional rank-wide Dist-MoE memory and pipeline-slot policy."""
 
         def __post_init__(self) -> None:
             if (
-                self.dist_moe is not None
+                self.dist_moe_runtime is not None
                 and self.training.mixed_precision_param != "bfloat16"
             ):
                 raise ValueError("Dist-MoE requires mixed_precision_param='bfloat16'")
@@ -294,7 +291,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         *,
         hf_assets_path: str,
-        dataloader: BaseDataLoader | None = None,
+        extra_states: dict[str, torch.distributed.checkpoint.stateful.Stateful]
+        | None = None,
         create_seed_checkpoint: bool = False,
     ) -> None:
         """Initialize model execution and the state required to train it."""
@@ -305,7 +303,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.model_device_mem_stats = self.device_memory_monitor.get_peak_stats()
         self._initialize_optim()
         self._initialize_checkpointer(
-            dataloader=dataloader,
+            extra_states=extra_states,
             sd_adapter=self.state_dict_adapter,
         )
         if create_seed_checkpoint:
@@ -439,7 +437,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def _initialize_checkpointer(
         self,
         *,
-        dataloader: BaseDataLoader | None,
+        extra_states: dict[str, torch.distributed.checkpoint.stateful.Stateful] | None,
         sd_adapter: Any | None,
     ) -> None:
         """Build checkpointing around core and optional owner-provided state."""
@@ -447,20 +445,19 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if checkpointer_config is None:
             return
         self.checkpointer = checkpointer_config.build(
-            dataloader=dataloader,
             model_parts=self.model_parts,
             optimizers=self.optim.optimizers,
             lr_schedulers=self.optim.lr_schedulers,
             ema=self.optim.ema,
-            states={"train_state": self},
+            extra_states={"train_state": self, **(extra_states or {})},
             sd_adapter=sd_adapter,
             base_folder=self.output_dir,
         )
 
     def _initialize_forward_backward(self) -> None:
         """Build SDC replay and the gradient accumulation execution path."""
-        if self.config.dist_moe is not None:
-            self._dist_moe_runtime = self.config.dist_moe.build(
+        if self.config.dist_moe_runtime is not None:
+            self._dist_moe_runtime = self.config.dist_moe_runtime.build(
                 model_parts=self.model_parts,
                 parallelism_context=self.parallelism_context,
                 device=self.device,

@@ -5,7 +5,7 @@ A run is described by a **full configuration**: a function that returns a comple
 Select one with `--module` (the module that defines the function) and `--config` (the function):
 
 ```bash
-NGPU=4 MODULE=torchtitan_recipes.tests.suites.features CONFIG=llama3_debugmodel_fsdp2_cp2 ./run_train.sh
+NGPU=4 MODULE=tests.integration_tests.features CONFIG=llama3_debugmodel_fsdp2_cp2 ./run_train.sh
 ```
 
 The parallelism degrees are in the configuration but the world size is not. So `NGPU` still has to match the product of them. If you want to change any behavior, change the configuration directly -- write your own function, instead of using CLI flags, to return a new `Trainer.Config`:
@@ -42,23 +42,32 @@ The [torchtitan_recipes](../../torchtitan_recipes/) package holds full configura
 A different cluster usually means a different sharding layout, and therefore a
 different configuration. That needs no code change: add a function under
 `torchtitan_recipes/models/`, in a module named for the model, and name it on
-the command line. `torchtitan_recipes/tests/` is separate: reusable model test
-fixtures live under `tests/models/`, while cross-model integration
-configurations live under `tests/suites/`.
+the command line. Test configurations are separate: reusable model test
+fixtures live under `torchtitan_recipes/tests/models/`, while cross-model
+integration configurations live next to their test definitions in
+`tests/integration_tests/`.
 
 ```python
 # torchtitan_recipes/models/llama3.py
 def llama3_8b_fsdp8_tp2_h200() -> Trainer.Config:
-    model_config = build_model_config("8B", attn_backend="flex")
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=8,
+        tensor_parallel_degree=2,
+    )
+    model_config = build_model_config(
+        "8B", attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         model=model_config,
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=8,
-            tensor_parallel_degree=2,
-        ),
+        parallelism=parallelism,
         ...
     )
 ```
+
+A model config is built, and sharded, for one parallelism, so declare the
+parallelism first and pass it to `build_model_config`. A recipe derived from
+another one that changes sequence or expert parallelism must build the model for
+the new parallelism (e.g. through a `parallelism=` argument of the base recipe).
 
 `--module` takes any importable module, so a configuration kept outside this repository works the same way:
 
@@ -93,6 +102,31 @@ model, or -- for the few options with no other home, such as
 `training.num_tokens_per_microbatch_per_dp_rank` -- in [configs.py](configs.py),
 after discussing with the maintainers. Adding a dataclass field does not change
 the CLI surface.
+
+An experiment that needs its own options subclasses `Trainer` and its nested
+`Config`, then returns that type from its recipes:
+
+```python
+# my_project/trainer.py
+@dataclass(kw_only=True, slots=True)
+class CustomConfig:
+    how_is_your_day: str = "good"
+
+
+class MyTrainer(Trainer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Trainer.Config):
+        custom_config: CustomConfig = field(default_factory=CustomConfig)
+
+
+# my_project/recipes.py
+def my_experiment_debugmodel() -> MyTrainer.Config:
+    return MyTrainer.Config(custom_config=CustomConfig(how_is_your_day="great"))
+```
+
+```bash
+MODULE=my_project.recipes CONFIG=my_experiment_debugmodel ./run_train.sh
+```
 
 ### What belongs in `torchtitan_recipes`
 

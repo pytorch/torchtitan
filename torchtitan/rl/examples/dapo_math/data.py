@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from datasets import concatenate_datasets, load_dataset
 
-from torchtitan.config import Configurable
+from torchtitan.rl.components.data import RLDataset
 
 _MATH_PROMPT_TEMPLATE = (
     "Solve the following math problem step by step. The last line of your response "
@@ -33,7 +33,7 @@ class DapoMathSample:
 
 # TODO: Share this cycling iterator with other RL datasets instead of keeping
 # per-environment implementations.
-class _CyclingDataset(Configurable):
+class _CyclingDataset(RLDataset):
     """Provides an endless, resumable stream over a finite sample list."""
 
     def __init__(
@@ -86,7 +86,7 @@ class DapoMathDataset(_CyclingDataset):
     """Provides filtered DAPO-Math problems in the original `Answer:` format."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(RLDataset.Config):
         repo_id: str = "hamishivi/DAPO-Math-17k-Processed_filtered"
         split: str = "train"
         seed: int = 42
@@ -113,7 +113,7 @@ class AIME2025Dataset(_CyclingDataset):
     """Provides AIME 2025 I+II problems using the DAPO answer format."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(RLDataset.Config):
         repo_id: str = "opencompass/AIME2025"
         subsets: tuple[str, ...] = ("AIME2025-I", "AIME2025-II")
         split: str = "test"

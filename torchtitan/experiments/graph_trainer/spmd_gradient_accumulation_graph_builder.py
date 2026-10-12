@@ -480,6 +480,7 @@ def _extract_fwd_bwd_action_graphs(
     traced: TracedResult,
     *,
     trainer_config: "GraphTrainer.Config",
+    parallelism_context: ParallelismContext,
     plan: "GraphExecutionPlan",
     num_param_grads: int,
 ) -> tuple[_ScheduledFwdBwdGraphs, _FwdBwdGraphsMeta, Callable | None,]:
@@ -515,6 +516,7 @@ def _extract_fwd_bwd_action_graphs(
             stage,
             traced,
             config=trainer_config,
+            parallelism_context=parallelism_context,
             split_fsdp_param_unshard=plan.split_fsdp_param_unshard,
             split_fsdp_grad_reduction=plan.split_fsdp_grad_reduction,
         )
@@ -745,6 +747,7 @@ def _build_scheduled_fwd_bwd_graphs(
     traced: TracedResult,
     *,
     trainer_config: "GraphTrainer.Config",
+    parallelism_context: ParallelismContext,
     plan: "GraphExecutionPlan",
     num_param_grads: int,
 ) -> GraphTrainerScheduledFwdBwdStageGraphs:
@@ -756,6 +759,7 @@ def _build_scheduled_fwd_bwd_graphs(
         stage,
         traced,
         trainer_config=trainer_config,
+        parallelism_context=parallelism_context,
         plan=plan,
         num_param_grads=num_param_grads,
     )
@@ -808,6 +812,7 @@ def _build_gradient_accumulation_fwd_bwd_graphs(
         stage,
         traced,
         trainer_config=trainer_config,
+        parallelism_context=parallelism_context,
         plan=plan,
         num_param_grads=num_param_grads,
     )

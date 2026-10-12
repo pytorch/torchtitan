@@ -18,6 +18,7 @@ from torchtitan.components.data import (
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
 )
+from torchtitan.components.data.text_datasets import ChatProcessor, DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     Adam,
@@ -34,7 +35,6 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -50,8 +50,14 @@ from torchtitan.trainer import Trainer
 
 def qwen3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig(enable_sequence_parallel=True)
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -81,7 +87,7 @@ def qwen3_debugmodel(
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(enable_sequence_parallel=True),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
@@ -100,6 +106,7 @@ def qwen3_debugmodel_nvfp4(
                 fqns=["layers"],
             ),
         ],
+        parallelism=config.parallelism,
     )
     return config
 
@@ -124,14 +131,17 @@ def qwen3_debugmodel_first_85_pct_layers_nvfp4(
                 fqns=fqns,
             ),
         ],
+        parallelism=config.parallelism,
     )
     return config
 
 
 def qwen3_debugmodel_moe_param_groups(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    config = qwen3_moe_debug(seq_len=seq_len)
+    config = qwen3_moe_debug(seq_len=seq_len, parallelism=parallelism)
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[
             AdamW.Config(
@@ -162,8 +172,12 @@ def qwen3_debugmodel_moe_param_groups(
 def qwen3_debugmodel_flex_flash(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
+    parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="flex_flash"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="flex_flash",
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -174,6 +188,7 @@ def qwen3_debugmodel_flex_flash(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
+        parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
@@ -200,7 +215,8 @@ def qwen3_debugmodel_flex_flash(
 
 
 def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("0.6B", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config("0.6B", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -210,6 +226,7 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-0.6B",
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
+        parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
@@ -230,7 +247,8 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("1.7B", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config("1.7B", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -239,6 +257,7 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-1.7B",
         model=model_config,
+        parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
@@ -271,7 +290,10 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
             },
         ]
 
-    model_config = build_model_config("8B", seq_len=seq_len, attn_backend="varlen")
+    parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "8B", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
+    )
     config = Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -280,6 +302,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
         ),
         hf_assets_path="./assets/hf/Qwen3-8B",
         model=model_config,
+        parallelism=parallelism,
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=2e-5)]
@@ -331,6 +354,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
                 fqns=fqns,
             ),
         ],
+        parallelism=config.parallelism,
     )
     config.loss = ChunkedLossWrapper.Config(
         loss_fn=CrossEntropyLoss.Config(
@@ -341,7 +365,13 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
 
 
 def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("14B", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=-1,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+    )
+    model_config = build_model_config("14B", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -364,19 +394,22 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=3000,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=1,
-            context_parallel_degree=1,
-            pipeline_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
 
 def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("30B-A3B", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=-1,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+    )
+    model_config = build_model_config(
+        "30B-A3B", seq_len=seq_len, parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -399,19 +432,20 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=3000,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=1,
-            context_parallel_degree=1,
-            pipeline_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
 
 def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("32B", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=-1,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+    )
+    model_config = build_model_config("32B", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -434,12 +468,7 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=3000,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=1,
-            context_parallel_degree=1,
-            pipeline_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
@@ -447,8 +476,16 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
 
 def qwen3_moe_debug(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel_moe", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig(
+            expert_parallel_degree=1,
+        )
+    model_config = build_model_config(
+        "debugmodel_moe", seq_len=seq_len, parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -469,13 +506,14 @@ def qwen3_moe_debug(
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         ),
         training=TrainingConfig(
+            # The stock all-to-all EP dispatcher syncs with the CPU, so it
+            # cannot run under CUDA graphs.
+            disable_cuda_graphs=parallelism.expert_parallel_degree > 1,
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
@@ -499,7 +537,10 @@ def qwen3_moe_deepep(
       - LD_LIBRARY_PATH must include the deep_ep wheels' nvshmem + nccl lib dirs
     Then launch with NGPU=4 ./run_train.sh (none of this is needed on RDMA/RoCE hosts).
     """
-    model_config = build_model_config("debugmodel_moe", seq_len=seq_len)
+    parallelism = ParallelismConfig(expert_parallel_degree=4)
+    model_config = build_model_config(
+        "debugmodel_moe", seq_len=seq_len, parallelism=parallelism
+    )
     config = Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -524,13 +565,25 @@ def qwen3_moe_deepep(
             steps=10,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(expert_parallel_degree=4),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
     return apply_transforms(
         config,
-        [TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)],
+        [
+            TokenDispatcherTransform(
+                dispatcher=DeepEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
+            )
+        ],
     )
 
 
@@ -549,7 +602,10 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
             },
         ]
 
-    model_config = build_model_config("8B", seq_len=seq_len, attn_backend="varlen")
+    parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "8B", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -558,6 +614,7 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-8B",
         model=model_config,
+        parallelism=parallelism,
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=2e-5)]
