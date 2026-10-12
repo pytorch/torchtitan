@@ -89,6 +89,7 @@ def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfi
                 "idx_k": replicated_activation,
                 "idx_w": replicated_activation,
                 "attn_sink": _attn_sink_placement,
+                "padding_mask_T": token_id_placement(),
             }
         )
     elif compress_ratio > 1:

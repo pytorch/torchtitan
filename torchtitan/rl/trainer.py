@@ -295,7 +295,20 @@ class Trainer(Configurable):
                 )
             )
 
-        return combine_microbatch_metrics(microbatch_metrics)
+        metrics = combine_microbatch_metrics(microbatch_metrics)
+        # The slowest rank's total read time this step, hidden or not (max over the loss mesh).
+        read_microbatches_s = torch.tensor(
+            microbatch_groups.read_s, device=engine.device
+        )
+        metrics.update(
+            self._reduce_forward_backward_metrics(
+                sum_reduced_metrics={},
+                max_reduced_metrics={
+                    "timing/trainer/read_microbatches/max": read_microbatches_s
+                },
+            )
+        )
+        return metrics
 
     @sl.log_trace_span("optim_step")
     async def optim_step(
