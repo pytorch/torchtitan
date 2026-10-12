@@ -6,7 +6,7 @@
 
 import sys
 from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from itertools import count
 
@@ -340,7 +340,13 @@ class _UnshardAndReduceGradFunction(torch.autograd.Function):
         # (e.g. FSDP_PARAM_FQNS_META). Tracing copies them from forward nodes
         # with the same seq_nr, which misses here: the nested DTensor Functions
         # give the forward nodes their own seq_nr. Re-apply them in backward.
-        ctx.annotations = dict(get_current_meta().get("custom", {}))
+        # Skip this under Dynamo, which tracks annotate itself: reading the
+        # global metadata would install a guard on it.
+        ctx.annotations = (
+            {}
+            if torch.compiler.is_dynamo_compiling()
+            else dict(get_current_meta().get("custom", {}))
+        )
         # TODO: Drop the guard once the nightly has Dynamo support for
         # set_output_grad_dtype. Until then, under torch.compile a gradient
         # computed in a wider dtype is rounded to param_dtype on entry.
@@ -362,7 +368,7 @@ class _UnshardAndReduceGradFunction(torch.autograd.Function):
     @staticmethod
     # pyrefly: ignore [bad-override]
     def backward(ctx, grad: torch.Tensor):
-        with annotate(ctx.annotations):
+        with annotate(ctx.annotations) if ctx.annotations else nullcontext():
             for axis in ctx.non_dp_replicate_axes:
                 grad = spmd.all_reduce(
                     grad, axis, src=spmd.P, dst=spmd.I, op_dtype=ctx.reduce_dtype
