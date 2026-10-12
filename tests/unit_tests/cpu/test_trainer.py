@@ -872,6 +872,49 @@ def no_registered_aux_losses():
     AuxLoss._group_counts.update(saved_group_counts)
 
 
+@pytest.mark.parametrize("owns_loss", [False, True])
+def test_trainer_reduces_loss_counts_only_on_loss_owner(monkeypatch, owns_loss):
+    reductions = []
+
+    def reduce_counts(value, mesh):
+        reductions.append(value.clone())
+        return value * 2
+
+    monkeypatch.setattr("torchtitan.trainer.dist_utils.dist_sum_tensor", reduce_counts)
+    forward_backward = MagicMock(
+        return_value=ForwardBackwardResult(torch.tensor(1.0), [])
+    )
+    engine = SimpleNamespace(
+        num_completed_steps=0,
+        pp_has_last_stage=owns_loss,
+        device=torch.device("cpu"),
+        parallelism_context=SimpleNamespace(
+            pp_enabled=True, dp_enabled=True, get_mesh=lambda axis: object()
+        ),
+        forward_backward=forward_backward,
+        optim_step=lambda: torch.tensor(0.0),
+    )
+    trainer = SimpleNamespace(
+        engine=engine,
+        gradient_accumulation_steps=1,
+        num_pp_microbatches=1,
+        metrics_processor=SimpleNamespace(
+            should_log=lambda step: False, step_last_log=None
+        ),
+    )
+    losses, routing = torch.tensor([1, 2]), torch.tensor([3, 4])
+    Trainer.train_step(trainer, iter([_batch(losses, routing)]))
+    assert len(reductions) == 1
+    torch.testing.assert_close(
+        reductions[0], torch.cat((losses, routing)) if owns_loss else routing
+    )
+    received = forward_backward.call_args.kwargs
+    torch.testing.assert_close(
+        received["global_loss_token_counts"], losses * 2 if owns_loss else losses
+    )
+    torch.testing.assert_close(received["global_routing_token_counts"], routing * 2)
+
+
 @pytest.mark.parametrize(
     ("loss_token_counts", "routing_token_counts"),
     (

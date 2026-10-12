@@ -250,7 +250,8 @@ total_loss = main_loss + mtp_scale * mean(mtp_losses)
 
 Preprocessing also produces separate target-token and routed-token count
 vectors ordered as `(main, depth 1, ..., depth N)`. The trainer sums both
-vectors over the optimizer step and reduces them together. Each prediction
+vectors over the optimizer step. Routing counts reduce on every MoE stage;
+loss counts reduce only on loss-owning pipeline stages. Each prediction
 loss uses its target count, while each MoE auxiliary loss uses the routed-token
 count for the block that owns it. This keeps instruction-style label masking
 independent from MoE routing.
