@@ -140,11 +140,31 @@ class TrainingSampleBuilder(Configurable):
                 group_id=rollout_group.group_id, training_samples=[], metrics=metrics
             )
 
-        # Untrainable: any sibling with no completion tokens -> drop the whole group
-        if any(
-            not any(len(turn.completion_token_ids) > 0 for turn in rollout.turns)
+        # Drop each rollout with no turns or an empty completion, and keep its siblings: e.g. the env
+        # failed before the first turn, the initial prompt was too long, or a request was aborted.
+        # TODO: `AdvantageEstimator` runs in the rollouter, before this filter, so dropped rollouts still
+        # count in the group mean: k of G dropped at reward 0 raise each trainable advantage by
+        # k * mean(trainable rewards) / G. Skip them there too; that needs this same check there.
+        trainable_rollouts = [
+            rollout
             for rollout in rollout_group.rollouts
-        ):
+            if len(rollout.turns) > 0
+            and all(
+                len(rollout_turn.completion_token_ids) > 0
+                for rollout_turn in rollout.turns
+            )
+        ]
+        num_rollouts_dropped_empty_completion = len(rollout_group.rollouts) - len(
+            trainable_rollouts
+        )
+        if num_rollouts_dropped_empty_completion:
+            metrics.append(
+                m.Metric(
+                    "training_sample_builder/num_rollouts_dropped_empty_completion",
+                    m.Sum(float(num_rollouts_dropped_empty_completion)),
+                )
+            )
+        if not trainable_rollouts:
             metrics.append(
                 m.Metric(
                     "training_sample_builder/num_groups_dropped_untrainable", m.Sum(1.0)
@@ -154,9 +174,12 @@ class TrainingSampleBuilder(Configurable):
                 group_id=rollout_group.group_id, training_samples=[], metrics=metrics
             )
 
-        # Zero-std reward: no learning signal across siblings.
-        rewards = [rollout.reward for rollout in rollout_group.rollouts]
-        is_zero_std = len(rewards) > 1 and statistics.pstdev(rewards) == 0.0
+        # Zero-std reward: no learning signal across siblings. One rollout left of several has no
+        # sibling to compare against, so it counts as zero-std.
+        rewards = [rollout.reward for rollout in trainable_rollouts]
+        is_zero_std = (
+            len(rollout_group.rollouts) > 1 and statistics.pstdev(rewards) == 0.0
+        )
         metrics.append(
             m.Metric(
                 "rollout_reward/group_zero_std_frac",
@@ -178,17 +201,7 @@ class TrainingSampleBuilder(Configurable):
         unfiltered_training_samples: list[TrainingSample] = []
         branches_per_rollout: list[float] = []
         num_samples_dropped_no_valid_tokens = 0
-        num_rollouts_dropped_empty_completion = 0
-        for rollout in rollout_group.rollouts:
-            # A later turn with no completion (e.g. a request aborted before its first token): drop the
-            # rollout, so `rollout_to_training_samples` doesn't raise and stop the run.
-            if any(
-                len(rollout_turn.completion_token_ids) == 0
-                for rollout_turn in rollout.turns[1:]
-            ):
-                num_rollouts_dropped_empty_completion += 1
-                continue
-
+        for rollout in trainable_rollouts:
             rollout_training_samples = self.rollout_to_training_samples(rollout)
             unfiltered_training_samples.extend(rollout_training_samples)
             kept = [
@@ -202,13 +215,6 @@ class TrainingSampleBuilder(Configurable):
             training_samples.extend(kept)
             branches_per_rollout.append(float(len(rollout_training_samples)))
 
-        if num_rollouts_dropped_empty_completion:
-            metrics.append(
-                m.Metric(
-                    "training_sample_builder/num_rollouts_dropped_empty_completion",
-                    m.Sum(float(num_rollouts_dropped_empty_completion)),
-                )
-            )
         if num_samples_dropped_no_valid_tokens:
             metrics.append(
                 m.Metric(
@@ -225,7 +231,7 @@ class TrainingSampleBuilder(Configurable):
             training_sample.max_policy_version
             for training_sample in unfiltered_training_samples
         ]
-        advantages = [rollout.advantage for rollout in rollout_group.rollouts]
+        advantages = [rollout.advantage for rollout in trainable_rollouts]
         metrics += [
             m.Metric(
                 "training_sample_builder/num_training_samples",

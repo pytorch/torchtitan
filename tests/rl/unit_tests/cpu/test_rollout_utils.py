@@ -266,38 +266,97 @@ def test_empty_completion_on_a_later_turn_raises() -> None:
         rollout_to_training_samples(rollout)
 
 
-def test_build_from_group_drops_a_rollout_with_an_empty_later_completion() -> None:
-    # e.g. turn 1 aborted before its first token: drop that rollout and count it, keep the others
-    empty_later = _scored_rollout(
+@pytest.mark.parametrize(
+    "completions",
+    [
+        pytest.param([], id="no_turns"),  # the env failed before its first turn
+        pytest.param([[]], id="empty_first_turn"),  # the initial prompt was too long
+        pytest.param([[], [4]], id="empty_first_of_two_turns"),
+        pytest.param([[4], []], id="empty_later_turn"),  # turn 1 aborted
+    ],
+)
+def test_build_from_group_drops_only_the_rollout_with_an_empty_completion(
+    completions: list[list[int]],
+) -> None:
+    # The empty rollout is dropped and counted; two siblings with different rewards still train
+    empty = _scored_rollout(
         [
-            _turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1),
-            _turn(prompt_token_ids=[1, 2, 4, 8], completion_token_ids=[], version=1),
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=completion, version=1)
+            for completion in completions
         ],
         reward=0.0,
-        advantage=1.0,
+        advantage=-0.5,
     )
-    kept = _scored_rollout(
+    correct = _scored_rollout(
         [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
         reward=1.0,
-        advantage=1.0,
+        advantage=0.5,
     )
-    kept.rollout_id = 1
+    wrong = _scored_rollout(
+        [_turn(prompt_token_ids=[1, 2], completion_token_ids=[6], version=1)],
+        reward=0.0,
+        advantage=-0.5,
+    )
+    correct.rollout_id, wrong.rollout_id = 1, 2
 
     group = (
         TrainingSampleBuilder.Config()
         .build()
         .build_from_group(
-            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[empty_later, kept])
+            rollout_group=RolloutGroup(
+                group_id=_GROUP_ID, rollouts=[empty, correct, wrong]
+            )
         )
     )
 
-    assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [1]
+    assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [1, 2]
     [dropped] = [
         metric
         for metric in group.metrics
         if metric.key == "training_sample_builder/num_rollouts_dropped_empty_completion"
     ]
     assert dropped.value.value == 1.0
+
+
+def test_build_from_group_drops_a_lone_trainable_rollout_as_zero_std() -> None:
+    # One rollout left of two has no sibling to compare against
+    empty = _scored_rollout([], reward=0.0, advantage=-0.5)
+    trainable = _scored_rollout(
+        [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
+        reward=1.0,
+        advantage=0.5,
+    )
+    trainable.rollout_id = 1
+
+    group = (
+        TrainingSampleBuilder.Config()
+        .build()
+        .build_from_group(
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[empty, trainable])
+        )
+    )
+
+    assert group.training_samples == []
+    metric_keys = [metric.key for metric in group.metrics]
+    assert "training_sample_builder/num_groups_dropped_zero_std" in metric_keys
+
+
+def test_build_from_group_counts_an_all_empty_group_as_untrainable() -> None:
+    empty_rollouts = [_scored_rollout([], reward=0.0, advantage=0.0) for _ in range(2)]
+
+    group = (
+        TrainingSampleBuilder.Config()
+        .build()
+        .build_from_group(
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=empty_rollouts)
+        )
+    )
+
+    assert group.training_samples == []
+    assert {metric.key: metric.value.value for metric in group.metrics} == {
+        "training_sample_builder/num_rollouts_dropped_empty_completion": 2.0,
+        "training_sample_builder/num_groups_dropped_untrainable": 1.0,
+    }
 
 
 def test_empty_completion_on_first_turn_is_skipped() -> None:
