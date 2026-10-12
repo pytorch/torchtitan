@@ -80,7 +80,7 @@ class _TensorRef:
 
     @classmethod
     def register(cls, tensor: torch.Tensor) -> _TensorRef:
-        # A view, not a copy: the controller's tensor keeps owning the storage.
+        # A view, not a copy: the buffer keeps the tensor's storage alive until drop().
         # view(-1) needs a contiguous tensor; the batcher builds only contiguous ones.
         return cls(
             buffer=RDMABuffer(tensor.view(-1).view(torch.uint8)),

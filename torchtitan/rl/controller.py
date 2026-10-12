@@ -188,8 +188,8 @@ class AsyncLoopConfig(Configurable.Config):
     """How microbatches reach the trainer ranks:
         None (default): by value; every rank receives the whole grid.
         e.g. 1024: tensors of >= 1024 bytes as Monarch RDMA buffers; each rank reads only its DP column.
-    Where Monarch's ibverbs fails (some RoCE hosts, native InfiniBand), also set
-    MONARCH_RDMA_DISABLE_IBVERBS=1; it moves TorchStore's weight sync to TCP too."""
+    Where Monarch's ibverbs fails, set MONARCH_RDMA_DISABLE_IBVERBS=1 for its TCP fallback;
+    it moves TorchStore's weight sync to TCP too."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -1175,9 +1175,7 @@ class Controller(Configurable):
                         )
                     finally:
                         if min_bytes is not None:
-                            # Drop while `packed` holds the tensors, and don't free it right after:
-                            # drop() returns before Monarch 0.6 lets go of the storage, and a free
-                            # racing that release deadlocks. `packed` lives until the next step's batch.
+                            # Every rank has read its column, or the step failed.
                             await asyncio.gather(
                                 *(
                                     rdma_microbatch.drop()
