@@ -168,6 +168,26 @@ class RoutedExperts(Module):
         return out_TD
 
 
+def _topk_ids_by_argmax(scores: torch.Tensor, k: int) -> torch.Tensor:
+    """Return the ids of the ``k`` largest entries on the last dim; ties go to the lower id.
+
+    Compiled replacement for ``torch.topk(...).indices``: Inductor lowers ``topk``
+    to an ATen fallback (a radix-select kernel), while ``k`` masked argmax rounds
+    fuse with the surrounding pointwise code into one kernel.
+
+    Example:
+        >>> _topk_ids_by_argmax(torch.tensor([[0.1, 0.9, 0.5, 0.9]]), 2)
+        tensor([[1, 3]])
+    """
+    ids = torch.arange(scores.size(-1), device=scores.device)
+    topk_ids = []
+    for _ in range(k):
+        top_id = scores.argmax(dim=-1, keepdim=True)
+        topk_ids.append(top_id)
+        scores = scores.masked_fill(ids == top_id, float("-inf"))
+    return torch.cat(topk_ids, dim=-1)
+
+
 class TokenChoiceTopKRouter(Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
     routed to top K experts based on the router scores.
@@ -225,6 +245,8 @@ class TokenChoiceTopKRouter(Module):
         scores_for_choice_TE = (
             scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
         )
+        if torch.compiler.is_compiling():
+            return _topk_ids_by_argmax(scores_for_choice_TE, self.top_k)
         return torch.topk(
             scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
         ).indices
@@ -249,25 +271,80 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
-        # HiMidLoLinear returns FP32, so configured scoring runs in FP32.
-        gate_TE = self.gate(x_TD)
-        # The scoring function reads the router gate projection output with bare ops.
-        remat.recompute_needs_tensor(gate_TE)
-        scores_TE = self.score_func(gate_TE)
-
         if padding_mask_T is not None:
             if padding_mask_T.dtype != torch.bool:
                 raise ValueError(
                     "padding_mask_T must have dtype bool, "
                     f"got {padding_mask_T.dtype}."
                 )
-            if padding_mask_T.shape != scores_TE.shape[:-1]:
+            if padding_mask_T.shape != x_TD.shape[:-1]:
                 raise ValueError(
                     "padding_mask_T must have shape matching the routing-map "
-                    f"token axis, got {tuple(padding_mask_T.shape)} for scores "
-                    f"{tuple(scores_TE.shape)}."
+                    f"token axis, got {tuple(padding_mask_T.shape)} for input "
+                    f"{tuple(x_TD.shape)}."
                 )
 
+        # HiMidLoLinear returns FP32, so configured scoring runs in FP32. It stays
+        # out of the router region: its in-place weight-grad accumulation can't be traced.
+        gate_TE = self.gate(x_TD)
+        # The scoring function reads the router gate projection output with bare ops.
+        remat.recompute_needs_tensor(gate_TE)
+        scores_TE, topk_scores_TK, topk_expert_ids_TK, routing_map_TE = self._route(
+            gate_TE,
+            expert_bias_E,
+            padding_mask_T=padding_mask_T,
+            **router_kwargs,
+        )
+        # Keep the full routing map for dispatch, and build the masked view once
+        # for all load-balancing statistics. The auxiliary-loss gradient is
+        # injected into topk_scores_TK on backward; see ``AuxLoss.inject``.
+        if self.training:
+            masked_routing_map_TE = (
+                routing_map_TE
+                if padding_mask_T is None
+                else routing_map_TE & ~padding_mask_T.unsqueeze(-1)
+            )
+            if not remat.is_recomputing():
+                with torch.no_grad():
+                    self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
+            if self.aux_loss is not None:
+                if aux_loss_denominator is None:
+                    raise ValueError("An auxiliary-loss denominator is required.")
+                topk_scores_TK = self.aux_loss(
+                    scores_TE,
+                    masked_routing_map_TE,
+                    carrier=topk_scores_TK,
+                    padding_mask_T=padding_mask_T,
+                    denominator=aux_loss_denominator,
+                )
+        return (
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            routing_map_TE,
+        )
+
+    # Compiled only when "router" is listed in the model's local_compile_regions.
+    # The expert counts and the aux loss stay in forward: under compile
+    # torch_remat.is_recomputing() is always False, so a RegionAC recompute pass
+    # would count them twice.
+    @local_compile("router", batch_invariant=False)
+    def _route(
+        self,
+        gate_TE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None,
+        *,
+        padding_mask_T: torch.Tensor | None,
+        **router_kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Score the gate logits and pick experts: ``forward`` after the gate, without side effects.
+
+        Returns:
+            scores_TE: Router scores ``(T, E)`` in FP32.
+            topk_scores_TK: Routing scores ``(T, K)``.
+            topk_expert_ids_TK: Expert indices ``(T, K)``.
+            routing_map_TE: One-hot boolean routing map ``(T, E)``.
+        """
+        scores_TE = self.score_func(gate_TE)
         topk_expert_ids_TK = remat.region(
             self._select_experts,
             "routing_decision",
@@ -299,33 +376,7 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK,
             True,
         )
-        # Keep the full routing map for dispatch, and build the masked view once
-        # for all load-balancing statistics. The auxiliary-loss gradient is
-        # injected into topk_scores_TK on backward; see ``AuxLoss.inject``.
-        if self.training:
-            masked_routing_map_TE = (
-                routing_map_TE
-                if padding_mask_T is None
-                else routing_map_TE & ~padding_mask_T.unsqueeze(-1)
-            )
-            if not remat.is_recomputing():
-                with torch.no_grad():
-                    self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
-            if self.aux_loss is not None:
-                if aux_loss_denominator is None:
-                    raise ValueError("An auxiliary-loss denominator is required.")
-                topk_scores_TK = self.aux_loss(
-                    scores_TE,
-                    masked_routing_map_TE,
-                    carrier=topk_scores_TK,
-                    padding_mask_T=padding_mask_T,
-                    denominator=aux_loss_denominator,
-                )
-        return (
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            routing_map_TE,
-        )
+        return scores_TE, topk_scores_TK, topk_expert_ids_TK, routing_map_TE
 
 
 class RoundRobinTokenChoiceTopKRouter(TokenChoiceTopKRouter):
@@ -508,6 +559,14 @@ def _microbatch_load_balance_local_stats(
     return counts_E, probs_TE.sum(dim=0)
 
 
+@local_compile("moe_aux_loss", batch_invariant=False)
+def _expert_counts(routing_map_TE: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Routed-token count per expert ``(E,)`` over this rank's tokens, in ``dtype``."""
+    # Cast before summing: casting a Partial tensor is non-linear and
+    # rejected by spmd_types.
+    return routing_map_TE.to(dtype).sum(dim=0)
+
+
 class MicrobatchWiseLoadBalanceLoss(AuxLoss):
     """Per-forward MoE load-balance gradient (DeepSeek-V3 Sec 2.1.2 Eqs 17-20).
 
@@ -669,9 +728,7 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
     ) -> torch.Tensor:
         """Compute batch-wise balance and inject its router gradient."""
         E = scores_TE.size(-1)
-        # Cast before summing: casting a Partial tensor is non-linear and
-        # rejected by spmd_types.
-        counts_E = routing_map_TE.to(scores_TE.dtype).sum(dim=0)
+        counts_E = _expert_counts(routing_map_TE, scores_TE.dtype)
 
         # The rolling-count update is a forward side effect, and the snapshot
         # must match the original forward even if later microbatches' forwards
