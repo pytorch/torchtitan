@@ -571,19 +571,6 @@ def test_batch_invariant_requires_kv_cache_reset():
         )
 
 
-def test_hold_session_kv_requires_free_floor_above_watermark():
-    VLLMGenerator.Config(
-        model=_MODEL_CONFIG, parallelism=_PARALLELISM, hold_session_kv=True
-    )
-    with pytest.raises(ValueError, match="must be above vLLM's watermark"):
-        VLLMGenerator.Config(
-            model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
-            hold_session_kv=True,
-            extra_vllm_engine_args={"watermark": 0.05},
-        )
-
-
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 

@@ -22,9 +22,14 @@ class SessionKVHolder:
     blocks and the matching GDN state blocks), and lets go of the session's previous hold. Held blocks
     count as used in vLLM's ``kv_cache_usage``.
 
-    When free blocks fall below ``free_floor_blocks``, whole sessions without a running request are
-    released, the one idle longest first. Every mutating method must run on the engine thread of
-    every rank, in the same order, so the schedulers of all TP ranks stay identical.
+    It releases whole idle sessions, idle longest first:
+    - before each step, while fewer than ``free_floor_blocks`` are free: room for the step's growth,
+      because the holder can't act inside a step;
+    - after a step where nothing runs and requests wait: vLLM refused the head for lack of blocks.
+
+    A release only demotes: the blocks go to vLLM's LRU free queue and stay prefix hits until reused.
+    Every mutating method must run on the engine thread of every rank, in the same order, so the
+    schedulers of all TP ranks stay identical.
 
     Example:
 
@@ -38,7 +43,7 @@ class SessionKVHolder:
 
     Args:
         scheduler: The vLLM v1 scheduler of this rank's in-process engine.
-        free_floor_blocks: Release idle sessions while fewer blocks than this are free.
+        free_floor_blocks: Blocks to keep free before each step.
     """
 
     def __init__(self, scheduler: Any, free_floor_blocks: int) -> None:
@@ -61,7 +66,8 @@ class SessionKVHolder:
         self._live[internal_request_id] = (session_id, group_id, False)
 
     def after_step(self) -> None:
-        """Hold the prefix of requests whose prefill finished; mark sessions whose request left."""
+        """Hold the prefix of requests whose prefill finished; mark sessions whose request left;
+        release sessions if vLLM could not admit anything."""
         for internal_id, (session_id, group_id, held) in list(self._live.items()):
             request = self._scheduler.requests.get(internal_id)
             if request is None:  # finished or aborted: the session is idle from now on
@@ -71,6 +77,18 @@ class SessionKVHolder:
             elif not held and request.num_computed_tokens >= request.num_prompt_tokens:
                 self._live[internal_id] = (session_id, group_id, True)
                 self._hold(request, session_id, group_id)
+
+        # Nothing runs and requests wait: with an empty batch vLLM skips the watermark, so it refused
+        # the head for lack of blocks (or the batch just drained: one cheap extra release).
+        scheduler = self._scheduler
+        if not scheduler.running and (scheduler.waiting or scheduler.skipped_waiting):
+            free_before = self._block_pool.get_num_free_blocks()
+            for session_id in list(self._held):
+                self._release(session_id)
+                self.num_evicted += 1
+                # GRPO siblings share prompt blocks, so one release may free none.
+                if self._block_pool.get_num_free_blocks() > free_before:
+                    break
 
     def evict_until_free(self) -> None:
         """Release sessions with no running request, idle longest first, until enough blocks are free.

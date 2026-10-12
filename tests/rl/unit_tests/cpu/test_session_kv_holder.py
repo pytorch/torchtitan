@@ -104,9 +104,15 @@ def _churn(manager, tag: str) -> None:
         manager.free(request)
 
 
-def _holder(manager, requests, floor=0, running=()) -> SessionKVHolder:
+def _holder(
+    manager, requests, floor=0, running=(), waiting=(), skipped_waiting=()
+) -> SessionKVHolder:
     scheduler = SimpleNamespace(
-        kv_cache_manager=manager, requests=requests, running=running
+        kv_cache_manager=manager,
+        requests=requests,
+        running=running,
+        waiting=waiting,
+        skipped_waiting=skipped_waiting,
     )
     return SessionKVHolder(scheduler, free_floor_blocks=floor)
 
@@ -271,3 +277,31 @@ def test_next_turn_moves_the_hold_and_release_frees_everything(manager):
 
     holder.release(session_ids=["s"])
     assert manager.block_pool.get_num_free_blocks() == free_before
+
+
+@pytest.mark.parametrize("queue", ["waiting", "skipped_waiting"])
+def test_a_waiting_turn_gets_room_when_held_sessions_fill_the_pool(manager, queue):
+    """Nothing runs, free >= floor, and the waiting turn needs more blocks than are free.
+    vLLM serves `skipped_waiting` first and leaves a refused request there."""
+    requests, waiting = {}, []
+    holder = _holder(manager, requests, floor=4, **{queue: waiting})
+    for i in range(12):  # 6 held blocks each: 7 of 80 stay free
+        _finished_turn(
+            manager, holder, requests, f"s{i}", [1000 * i + j for j in range(50)]
+        )
+    # 10 attention blocks + GDN state: more than the 7 free.
+    head = _request("head", list(range(50_000, 50_160)))
+    requests["head"] = head
+    waiting.append(head)
+
+    # The engine loop with an empty batch: the holder, then vLLM's admission check.
+    for _ in range(20):
+        holder.evict_until_free()
+        manager.new_step_starts()
+        if manager.allocate_slots(
+            head, head.num_tokens, full_sequence_must_fit=True, has_scheduled_reqs=False
+        ):
+            break
+        holder.after_step()
+    else:
+        pytest.fail("held sessions stalled the engine: the waiting turn never fit")
