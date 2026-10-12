@@ -68,7 +68,8 @@ class GenerationServer(Configurable):
         """Listening port; zero requests an ephemeral port."""
 
         max_rollout_tokens: int
-        """Inclusive upper bound for the rendered prompt length.
+        """Context length; set it to the generator's ``max_model_len``.
+        Prompts of this many tokens or more get a 400.
 
         The server advertises this value as ``max_model_len`` through
         ``GET /v1/models`` so Verifiers can reject longer prompts before
@@ -178,6 +179,14 @@ class GenerationServer(Configurable):
             prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
+            # vLLM needs room for one output token. Verifiers reads this wording as an
+            # overlong prompt and ends the rollout as context_length.
+            if len(prompt_token_ids) >= self.max_rollout_tokens:
+                raise ValueError(
+                    f"This model's maximum context length is {self.max_rollout_tokens} "
+                    f"tokens, and the prompt has {len(prompt_token_ids)} tokens, "
+                    "leaving no room for an output token"
+                )
             sampling_params = body.get("sampling_params")
             if not isinstance(sampling_params, dict):
                 raise ValueError("sampling_params must be an object")

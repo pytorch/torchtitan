@@ -20,8 +20,9 @@ from typing import Any, TYPE_CHECKING
 
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.moe_state_dict_adapter import MoEStateDictAdapter
+
 from torchtitan.models.common.rope import CosSinRoPE
-from torchtitan.models.utils import MoEStateDictAdapter
 
 if TYPE_CHECKING:
     from .model import Qwen3Model

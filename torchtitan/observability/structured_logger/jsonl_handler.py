@@ -185,6 +185,13 @@ class TraceJsonlHandler(logging.FileHandler):
     """
 
     def __init__(self, rank: int, source: str, output_dir: str):
+        # An empty output_dir would silently write into the launch directory.
+        if not output_dir:
+            raise ValueError(
+                "Structured logging requires an output directory (the run's "
+                "dump_folder); disable debug.enable_structured_logging to run "
+                f"without one. Found {output_dir=}"
+            )
         timestamp_str = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         random_str = "".join(
             random.choice(string.ascii_uppercase + string.digits) for _ in range(6)

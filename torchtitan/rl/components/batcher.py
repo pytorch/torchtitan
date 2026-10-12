@@ -16,17 +16,66 @@ from dataclasses import dataclass, replace
 
 import torch
 
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
+
 from torchtitan.config import Configurable
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
-from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.types import (
-    TrainerStepBatch,
-    TrainingMicrobatch,
+from torchtitan.rl.components.training_sample_builder import (
     TrainingSample,
     TrainingSampleGroup,
 )
+from torchtitan.rl.observability import metrics as m
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(kw_only=True, slots=True)
+class TrainingMicrobatch(TokenizedTrainingMicrobatch):
+    """Packed training microbatch for the RL trainer.
+
+    Each training_sample's raw tokens (length N) are split into
+    ``token_ids = raw[:-1]`` and ``labels = raw[1:]`` (both length
+    N-1), matching the pre-training dataloader convention.
+    """
+
+    generator_logprobs: torch.Tensor  # [T]
+    temperature: torch.Tensor  # [T]
+    loss_mask: torch.Tensor  # [T]
+    advantages: torch.Tensor  # [T]
+
+    def loss_kwargs(self) -> dict[str, torch.Tensor]:
+        return {
+            "generator_logprobs": self.generator_logprobs,
+            "temperature": self.temperature,
+            "loss_mask": self.loss_mask,
+            "advantages": self.advantages,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TrainerStepBatch:
+    """Packed microbatches for one optimizer step.
+
+    Example:
+        # 5 training samples, effective length 5 each; 2 rows/rank, dp_degree=1
+        # next-fit rows -> [[s5, s5], [s5, s5], [s5]] = 3 rows; rows_per_microbatch = 2 * 1 = 2
+        # -> 2 microbatches (3 rows padded to 4 with one pad-only row):
+        #    microbatches = [[TrainingMicrobatch(input=[20])],
+        #                    [TrainingMicrobatch(input=[20])]]
+        # The second microbatch contains one real row and one pad row.
+        # global_loss_token_counts = per-objective loss-token counts
+        # global_routing_token_counts = per-depth non-padding token counts
+    """
+
+    microbatches: list[list[TrainingMicrobatch]]  # [num_microbatches][dp_degree]
+    global_loss_token_counts: torch.Tensor
+    global_routing_token_counts: torch.Tensor
+    metrics: list[m.Metric]
+    group_ids: list[int]
+    """Every consumed rollout group, including metric-only groups."""
+    # one per packed training_sample; trainer computes policy_age at consume time
+    min_policy_versions: list[int]
+
 
 _MAX_CONSECUTIVE_UNTRAINABLE_BATCHES = 10
 

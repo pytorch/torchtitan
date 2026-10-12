@@ -37,13 +37,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.models.base.module import Module, ModuleDict
+
 from torchtitan.models.common import ComplexRoPE, Linear
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     VisionTransformerBlock,
 )
-from torchtitan.protocols.module import Module, ModuleDict
 
 
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
@@ -52,7 +53,7 @@ def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
         return spmd.mutate_type(
             tensor,
             src=spmd.R,
-            dst={"dp": spmd.V, "cp": spmd.R, "tp": spmd.I},
+            dst={"dp": spmd.V, "cp": spmd.I, "tp": spmd.I},
         )
     return tensor
 

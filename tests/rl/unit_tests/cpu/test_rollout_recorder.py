@@ -19,7 +19,7 @@ from torchtitan.rl.observability.rollout_recorder import (
 )
 
 from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
-from torchtitan.rl.types import RolloutTurnID
+from torchtitan.rl.rollout.types import RolloutTurnID
 
 
 def _recorder(tmp_path, **config_kwargs) -> RolloutSampleRecorder:

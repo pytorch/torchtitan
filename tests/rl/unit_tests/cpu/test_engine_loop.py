@@ -496,6 +496,7 @@ def _finished_output(request_id: str) -> SimpleNamespace:
             first_token_ts=1.01,
             last_token_ts=1.02,
             num_generation_tokens=1,
+            num_preemptions=0,
         ),
         outputs=[
             SimpleNamespace(
@@ -632,11 +633,7 @@ def _pulling_engine(monkeypatch, pull_pre_hook=None) -> _FakeEngine:
         await original_pull(self, version)
 
     monkeypatch.setattr(VLLMGenerator, "_pull_model_state_dict", new_pull)
-    model = SimpleNamespace(
-        model=SimpleNamespace(load_state_dict=lambda sd, strict: None),
-        prepare_for_state_dict_load=lambda: None,
-        prepare_for_forward=lambda: None,
-    )
+    model = SimpleNamespace(load_state_dict=lambda state_dict: None)
     engine = _FakeEngine()
     engine.model_executor = SimpleNamespace(
         driver_worker=SimpleNamespace(get_model=lambda: model)

@@ -15,6 +15,10 @@ import pytest
 import torch
 
 from torchtitan.rl.components.batcher import Batcher
+from torchtitan.rl.components.training_sample_builder import (
+    TrainingSample,
+    TrainingSampleGroup,
+)
 from torchtitan.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
@@ -26,7 +30,7 @@ from torchtitan.rl.observability.controller import (
     MetricsTimer,
 )
 from torchtitan.rl.rollout import RolloutGroup
-from torchtitan.rl.types import RolloutTurnID, TrainingSample, TrainingSampleGroup
+from torchtitan.rl.rollout.types import RolloutTurnID
 
 
 def test_controller_config_maybe_log(tmp_path, caplog) -> None:

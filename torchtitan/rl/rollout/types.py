@@ -13,7 +13,6 @@ from typing import Any, Protocol, TYPE_CHECKING
 from renderers import Message
 
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.types import Completion, RolloutTurnID
 
 if TYPE_CHECKING:
     # Type-only: importing the generator module here would pull in vLLM at import time.
@@ -24,6 +23,62 @@ _TRUNCATED = frozenset(
     {"truncated_length", "truncated_prompt_too_long", "truncated_max_turns"}
 )
 _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutTurnID:
+    """A turn's id: (group, sibling rollout, turn index); renders to the generator request_id.
+
+    Example:
+
+        RolloutTurnID(group_id=5, rollout_id=2, turn_id=0).to_string()
+        # -> "group=5/rollout=2/turn=0"
+        RolloutTurnID(group_id=5, rollout_id=2, turn_id=0).to_string(include_turn=False)
+        # -> "group=5/rollout=2"
+    """
+
+    group_id: int
+    """Globally-unique GRPO group id; siblings share it (the sticky-routing key, sans turn)."""
+    rollout_id: int
+    """Sibling index within the group (0..group_size-1)."""
+    turn_id: int
+    """Turn index within the rollout; for a TrainingSample, the turn where begins.
+    This is not 0 when a single rollout is split into multiple training samples."""
+
+    def to_string(self, *, include_turn: bool = True) -> str:
+        base = f"group={self.group_id}/rollout={self.rollout_id}"
+        return f"{base}/turn={self.turn_id}" if include_turn else base
+
+
+@dataclass(kw_only=True, slots=True)
+class Completion:
+    """A single generated sequence from the generator.
+
+    Example:
+
+        Completion(min_policy_version=7, max_policy_version=7, request_id="r0", token_ids=[12, 9],
+                   token_logprobs=[-0.2, -1.1], finish_reason="stop",
+                   metrics=[Metric("generator/queue_time_ms", ...)])
+    """
+
+    min_policy_version: int
+    """Oldest policy version among this turn's decode."""
+    max_policy_version: int
+    """Newest policy version among this turn's decode."""
+    # TODO(async-rl): for exact per-token version attribution, switch the engine to
+    #   RequestOutputKind.CUMULATIVE and record (start_token, version) boundaries; today we keep only
+    #   the per-turn min (min_policy_version) / max (max_policy_version).
+    request_id: str
+    """Echoes the id the caller passed to `generate`, so callers can validate
+    ordered completions or map by id."""
+    token_ids: list[int]
+    token_logprobs: list[float]
+    finish_reason: str | None = None
+    """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort")"""
+
+    metrics: list[m.Metric] = field(default_factory=list)
+    """Per-generation metrics measured by the generator (latencies); the
+    controller attaches them to the rollout turn."""
 
 
 class GenerateFn(Protocol):

@@ -16,10 +16,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.optim import Optimizer
 
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
@@ -29,6 +29,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_size,
     spmd_sparse_mesh,
 )
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
     Sigmoid,
@@ -39,7 +40,6 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher
 
@@ -108,12 +108,21 @@ class RoutedExperts(Module):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
         When parallelized, ``local_spmd`` (from ``sharding_config``) establishes
         the local SPMD types for the forward body.
+
+        ``padding_mask_T`` is unused: padding rows are dispatched and computed
+        like real tokens, and the router already leaves them out of the
+        load-balancing statistics.
         """
+        # TODO(acisseJZhong): skip padding rows' dispatch, expert compute and
+        # combine in the stock token dispatchers too, as Dist-MoE does.
+        del padding_mask_T
         (
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
@@ -480,6 +489,20 @@ class QuantileBalancer(Module):
             )
 
 
+@local_compile("moe_aux_loss", batch_invariant=False)
+def _microbatch_load_balance_local_stats(
+    scores_TE: torch.Tensor,
+    routing_map_TE: torch.Tensor,
+    padding_mask_T: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute local counts and score sums without a compiled ``[T, E]`` temporary."""
+    counts_E = routing_map_TE.to(scores_TE.dtype).sum(dim=0)
+    probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+    if padding_mask_T is not None:
+        probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
+    return counts_E, probs_TE.sum(dim=0)
+
+
 class MicrobatchWiseLoadBalanceLoss(AuxLoss):
     """Per-forward MoE load-balance gradient (DeepSeek-V3 Sec 2.1.2 Eqs 17-20).
 
@@ -558,17 +581,20 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             # sum_i f_i = E).  The latter is the (E / (K T)) form with
             # T = sum_j counts_j / K, so it needs no token count, shape or mesh
             # degree and follows any masking the router applies to the map.
-            # Cast before summing: casting a Partial tensor is non-linear and
-            # rejected by spmd_types.
-            counts_E = routing_map_TE.to(scores_TE.dtype).sum(dim=0)
-            prob_sums_E = self._norm_sum_scores_over_tokens(scores_TE, padding_mask_T)
-            counts_E = self._reduce_token_partials(counts_E)
+            # The map is cast to float before the reduction: casting a Partial
+            # tensor is non-linear and rejected by spmd_types.
+            local_counts_E, local_prob_sums_E = _microbatch_load_balance_local_stats(
+                scores_TE,
+                routing_map_TE,
+                padding_mask_T,
+            )
+            counts_E = self._reduce_token_partials(local_counts_E)
             f_E = F.normalize(counts_E, p=1, dim=0) * E
 
             # Eq. 19: p_i = (1/T) sum_t s'_t,i, the per-token L1-normalized
             # scores.  F.normalize's eps clamp only guards an all-zero score
             # row: the scores are non-negative, so the norm is a plain sum.
-            p_E = self._reduce_token_partials(prob_sums_E)
+            p_E = self._reduce_token_partials(local_prob_sums_E)
 
             # Eq. 17: L_bal = sum_i f_i * p_i
             loss = (f_E * p_E).sum()
@@ -619,15 +645,8 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
         global_counts_E = self._reduce_token_partials(counts_E, include_dp_axis=True)
         # The buffer is allocated at build time without an SPMD type; update it
         # outside the checker and type the snapshot like the counts it sums.
-        # The checkpoint_wrapper used by FullAC ignores torch_remat regions and
-        # replays this body inside the autograd engine, detected via the graph
-        # task id (the same signal torch.utils.checkpoint uses). The replay
-        # skips the update and re-reads the buffer, which matches the original
-        # forward only if no other microbatch's forward ran in between (see
-        # validate_model_training_config).
         with torch.no_grad(), spmd.no_typecheck():
-            if torch._C._current_graph_task_id() == -1:
-                self._cumulative_expert_counts_E.add_(global_counts_E)
+            self._cumulative_expert_counts_E.add_(global_counts_E)
             cumulative_counts_E = self._cumulative_expert_counts_E.clone().to(
                 global_counts_E.dtype
             )
@@ -788,6 +807,7 @@ class MoE(Module):
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
+            padding_mask_T=routed_padding_mask_T,
         )
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
@@ -967,9 +987,6 @@ def register_moe_load_balancing_hook(
         return load_balance_enabled
 
     # for MoE auxiliary-loss-free load balancing
-    def _is_recomputation_enabled(module):
-        return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
-
     def _update_expert_bias(
         model_parts: list[nn.Module],
         parallelism_context: ParallelismContext,
@@ -978,15 +995,8 @@ def register_moe_load_balancing_hook(
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
-        for transformer_block, moe in _iter_moe_layers(model_parts):
-            tokens_per_expert_E = moe.router.tokens_per_expert_E
-            if _is_recomputation_enabled(transformer_block):
-                # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
-                # This does not affect to expert choice, but affects the experts usage metrics.
-                # We divide by 2 to correct for this double-counting due to recomputation
-                # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
-                tokens_per_expert_E = tokens_per_expert_E // 2
-            tokens_per_expert_E_list.append(tokens_per_expert_E)
+        for _, moe in _iter_moe_layers(model_parts):
+            tokens_per_expert_E_list.append(moe.router.tokens_per_expert_E)
 
         if not tokens_per_expert_E_list:
             return
