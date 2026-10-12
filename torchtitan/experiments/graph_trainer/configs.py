@@ -293,6 +293,17 @@ class GraphTrainerCompileConfig:
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
     """Configuration for EP-overlap chunking and scheduling."""
 
+    deepep_dispatch_overlap: bool = False
+    """Schedule independent MoE work (the shared experts) between a DeepEP
+    dispatch launch and its wait, see ``deepep_overlap_pass``.
+
+    Requires the DeepEP token dispatcher with ``split_dispatch_launch_wait``,
+    which gives the graph separate ``deepep.launch_dispatch`` and
+    ``deepep.wait_dispatch`` nodes. Forward only. Independent of
+    ``ep_overlap``, which chunks the input and needs a second in-flight
+    exchange that DeepEP's single buffer cannot hold.
+    """
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:
