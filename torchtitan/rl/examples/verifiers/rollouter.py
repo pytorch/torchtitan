@@ -243,14 +243,13 @@ class VerifiersRollouter(Rollouter):
         sampling: SamplingConfig,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
-        # TODO: release each rollout's session; until then `max_sessions` evicts them.
-        del release_session_fn
         if self._generation_server is None:
             raise RuntimeError("Verifiers rollouter is not initialized")
         self._generation_server.set_generate_fn(generate_fn)
         results = await asyncio.gather(
             *(
                 self._run_single_rollout(
+                    release_session_fn=release_session_fn,
                     sample=sample,
                     sampling=(
                         sampling
@@ -284,12 +283,14 @@ class VerifiersRollouter(Rollouter):
     async def _run_single_rollout(
         self,
         *,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         sampling: SamplingConfig,
         group_id: int,
         rollout_id: int,
     ) -> Rollout:
-        """Send one task to Verifiers and convert its trace to a rollout."""
+        """Send one task to Verifiers, release its routing sessions, and convert its trace to a
+        rollout."""
         if not isinstance(sample, VerifiersTaskSample):
             raise TypeError("Verifiers requires a VerifiersTaskSample")
         if (
@@ -314,6 +315,15 @@ class VerifiersRollouter(Rollouter):
                 **{GROUP_ID_SAMPLING_PARAM: group_id},
             ),
         )
+        # The rollout made its last call. Verifiers sent each trace's id as its X-Session-ID.
+        # TODO: sessions of attempts Verifiers retried (not in `traces`) wait for the group's
+        # release; the generation server could track each rollout's sessions.
+        for trace in verifiers_episode.traces:
+            try:
+                await release_session_fn(routing_session_id=trace.id)
+            except Exception:
+                # Not fatal: `max_sessions` evicts an unreleased session.
+                logger.exception("releasing routing session %s failed", trace.id)
         traces = [trace for trace in verifiers_episode.traces if trace.agent.trainable]
         if len(traces) != 1:
             raise ValueError(

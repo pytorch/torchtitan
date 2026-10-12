@@ -548,6 +548,7 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         rollout = asyncio.run(
             rollouter._run_single_rollout(
+                release_session_fn=AsyncMock(),
                 sample=VerifiersTaskSample(verifiers_task_data={"name": "huge-task"}),
                 sampling=SamplingConfig(),
                 group_id=1,
@@ -557,6 +558,58 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
 
     assert rollout.status is RolloutStatus.ERROR
     assert "first prompt of task huge-task does not fit" in caplog.text
+
+
+def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) -> None:
+    """Each trace generated under its own id; another agent's trace has one too."""
+    span = SimpleNamespace(duration=0.0)
+    traces = [
+        SimpleNamespace(
+            id=trace_id,
+            task=SimpleNamespace(key="task"),
+            agent=SimpleNamespace(trainable=trainable),
+            ok=True,
+            is_truncated=False,
+            stop_condition=None,
+            errors=[],
+            timing=SimpleNamespace(
+                setup=span,
+                agent=SimpleNamespace(duration=0.0, model=span, harness=span),
+                scoring=span,
+            ),
+            calls=[],
+            nodes=[],
+            branches=[],
+        )
+        for trace_id, trainable in [("opponent", False), ("policy", True)]
+    ]
+    rollouter = object.__new__(VerifiersRollouter)
+    rollouter._generation_server = SimpleNamespace(
+        model_id="model", pop_generation_metadata=lambda trace_id: None
+    )
+    rollouter._verifiers_env_client = SimpleNamespace(
+        run=AsyncMock(return_value=SimpleNamespace(ok=True, errors=[], traces=traces))
+    )
+    rollouter._verifiers_train_client_config = object()
+    release_session_fn = AsyncMock(side_effect=[RuntimeError("router down"), None])
+
+    with caplog.at_level(logging.ERROR):
+        rollout = asyncio.run(
+            rollouter._run_single_rollout(
+                release_session_fn=release_session_fn,
+                sample=VerifiersTaskSample(verifiers_task_data={"name": "task"}),
+                sampling=SamplingConfig(),
+                group_id=1,
+                rollout_id=0,
+            )
+        )
+
+    assert [call.kwargs for call in release_session_fn.call_args_list] == [
+        {"routing_session_id": "opponent"},
+        {"routing_session_id": "policy"},
+    ]
+    assert "releasing routing session opponent failed" in caplog.text
+    assert rollout.group_id == 1
 
 
 def test_a_failing_rollout_fails_its_group_only_after_every_sibling_finished() -> None:
