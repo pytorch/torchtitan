@@ -12,7 +12,6 @@ import asyncio
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from enum import auto, Enum
 from typing import Any
 
 from monarch.actor import Actor, concurrent_endpoint, current_size
@@ -24,13 +23,6 @@ from torchtitan.rl.distributed.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.rl.distributed.routing.types import RoutingCandidate, RoutingContext
-
-
-class _GeneratorState(Enum):
-    """Lifecycle state controlling routability; ``SYNCING`` is only entered when draining (i.e. hot-swap is off)."""
-
-    SERVING = auto()
-    SYNCING = auto()
 
 
 @dataclass(kw_only=True, slots=True)
@@ -48,12 +40,6 @@ class _GeneratorHandle(RoutingCandidate):
     reserved_load: int = 0
     """Router-side estimate of in-flight routed generation work."""
 
-    state: _GeneratorState = _GeneratorState.SERVING
-    """Current routing lifecycle state for this generator."""
-
-    idle: asyncio.Event = field(default_factory=asyncio.Event)
-    """Set when this generator has no reserved routed calls."""
-
 
 class InterGeneratorRouter(Actor, Configurable):
     """Routes generation calls across generator meshes and pulls model's state dict.
@@ -63,10 +49,10 @@ class InterGeneratorRouter(Actor, Configurable):
     then routes the request across that mesh's data-parallel ranks.
 
     Singleton:
-        Routing decisions read and write mutable states such as ``_serving``,
-        ``_GeneratorHandle.state``, and so on. These states are not backed by
-        shared storage, so if there are multiple router instances, they cannot
-        know each others' routing decisions. Instead of using shared storage,
+        Routing decisions read and write mutable states such as the strategy's
+        session map and ``_GeneratorHandle.reserved_load``. These states are not
+        backed by shared storage, so if there are multiple router instances, they
+        cannot know each others' routing decisions. Instead of using shared storage,
         we solve the problem by enforcing the singleton pattern:
           * there should be only 1 router mesh in a training job;
           * this mesh should consists of only 1 actor.
@@ -92,17 +78,11 @@ class InterGeneratorRouter(Actor, Configurable):
         session's requests (one multi-turn rollout) on one generator, so each turn
         reuses that generator's prefix KV; new sessions go to the least-loaded
         generator. Other options: ``LeastLoadedRoutingStrategy.Config()``,
-        ``RoundRobinRoutingStrategy.Config()``."""
+        ``RoundRobinRoutingStrategy.Config()``.
 
-        hot_swap: bool = True
-        """When True, pulls model's state dict concurrently with in-flight
-        generation (no draining). When False, each generator is drained before
-        its pull.
-
-        Draining only waits for a generator's in-flight ``_route`` call (one
-        turn) to finish; between turns of a multi-turn rollout the generator is
-        idle, so a weight sync may land mid-rollout and successive turns can run
-        under different policy versions."""
+        Every generator stays routable during a weight sync; a generator that
+        drains before its pull (``VLLMGenerator.Config.drain_on_weight_sync``)
+        holds the requests it receives meanwhile."""
 
     def __init__(
         self,
@@ -115,7 +95,6 @@ class InterGeneratorRouter(Actor, Configurable):
             num_actors == 1
         ), f"InterGeneratorRouter must be a singleton, but its mesh holds {num_actors} actors"
 
-        self._config = config
         self._generators = [
             _GeneratorHandle(
                 actor=generator,
@@ -125,39 +104,14 @@ class InterGeneratorRouter(Actor, Configurable):
         ]
         if not self._generators:
             raise ValueError("InterGeneratorRouter requires at least one generator")
-        for h in self._generators:
-            h.idle.set()
 
         self._strategy = config.strategy.build()
-        self._serving = asyncio.Event()
-        self._refresh_serving_status()
-
-    def _candidates(self) -> list[_GeneratorHandle]:
-        """Return generator handles that are currently routable."""
-
-        return [h for h in self._generators if h.state is _GeneratorState.SERVING]
-
-    def _refresh_serving_status(self) -> None:
-        """Update whether any generator can serve; only changes while draining (i.e. hot-swap is off)."""
-
-        if self._candidates():
-            self._serving.set()
-        else:
-            self._serving.clear()
-
-    def _set_state(self, h: _GeneratorHandle, state: _GeneratorState) -> None:
-        """Move a generator between serving and syncing states."""
-
-        h.state = state
-        self._refresh_serving_status()
 
     def _reserve(self, h: _GeneratorHandle, cost: int) -> None:
         """Reserve estimated generation work on a handle before dispatch."""
 
         if cost < 0:
             raise ValueError(f"route estimated_cost must be non-negative, got {cost}")
-        if h.reserved_load == 0:
-            h.idle.clear()
         h.reserved_load += cost
 
     def _release(self, h: _GeneratorHandle, cost: int) -> None:
@@ -167,8 +121,6 @@ class InterGeneratorRouter(Actor, Configurable):
         assert (
             h.reserved_load >= 0
         ), f"generator reserved_load went negative: {h.reserved_load}"
-        if h.reserved_load == 0:
-            h.idle.set()
 
     async def _route(
         self,
@@ -177,13 +129,10 @@ class InterGeneratorRouter(Actor, Configurable):
         routing_ctx: RoutingContext,
         **kwargs,
     ) -> Any:
-        """Dispatch one call to a strategy-chosen serving generator's rank 0;
-        return its result.
+        """Dispatch one call to a strategy-chosen generator's rank 0; return its
+        result.
         """
-        await self._serving.wait()
-        candidates = self._candidates()
-        assert candidates, "serving event was set with no serving generators"
-        h = self._strategy.choose(routing_ctx, candidates)
+        h = self._strategy.choose(routing_ctx, self._generators)
         self._reserve(h, routing_ctx.estimated_cost)
         try:
             return await getattr(h.rank0_actor, method).call_one(*args, **kwargs)
@@ -227,23 +176,9 @@ class InterGeneratorRouter(Actor, Configurable):
         async def _pull_one(h: _GeneratorHandle) -> None:
             # Transfer over RDMA while the generator remains available
             await h.actor.prefetch_model_state_dict.call()
-            if self._config.hot_swap:
-                # Hot swap: pull concurrently with in-flight generation, without
-                # draining. Whether the pull is genuinely concurrent and safe is
-                # up to the generator's implementation.
-                await h.rank0_actor.pull_model_state_dict.call_one(policy_version)
-            else:
-                # Drain: stop routing to this generator and wait for in-flight
-                # work to finish before pulling, then re-admit it.
-                # Draining starts only for the local CPU-to-GPU apply rather
-                # than the network transfer
-                self._set_state(h, _GeneratorState.SYNCING)
-                try:
-                    with sl.log_trace_span("router_drain_wait"):
-                        await h.idle.wait()
-                    await h.rank0_actor.pull_model_state_dict.call_one(policy_version)
-                finally:
-                    self._set_state(h, _GeneratorState.SERVING)
+            # Apply the prefetched weights. Whether in-flight requests drain first
+            # is up to the generator (`VLLMGenerator.Config.drain_on_weight_sync`).
+            await h.rank0_actor.pull_model_state_dict.call_one(policy_version)
 
         # Start the pulls in parallel. Technically we could do rolling sync to
         # maintain availability during weight sync, but that's not a priority
