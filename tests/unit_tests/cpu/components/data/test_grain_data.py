@@ -1181,6 +1181,47 @@ def test_strided_map_composition_rejects_streaming_child(compose):
         )
 
 
+def test_loader_restart_preserves_source_and_checkpoint_cursor():
+    rows = tuple(
+        TextSequence(
+            input_ids=np.full(9, index, dtype=np.int64),
+            labels=np.full(9, index + 1, dtype=np.int64),
+            positions=np.arange(9, dtype=np.int64),
+        )
+        for index in range(11)
+    )
+    source = RowsSourceConfig(rows=rows)
+    with mock.patch.object(
+        RowsSourceConfig, "build", autospec=True, side_effect=RowsSourceConfig.build
+    ) as build_source:
+        loader = GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(source=source),
+            shuffle=False,
+            repeat=True,
+            map_dataset_dp_sharding="strided",
+        ).build(
+            dp_world_size=2,
+            dp_rank=1,
+            tokenizer=FakeTokenizer(),
+            max_context_length=9,
+            num_tokens_per_microbatch=18,
+        )
+        try:
+            iterator = iter(loader)
+            first = next(iterator)
+            state = loader.state_dict()
+            expected_next = next(iterator)
+            for _ in range(4):
+                next(iterator)
+            loader.restart()
+            assert torch.equal(next(iter(loader)).input, first.input)
+            loader.load_state_dict(state)
+            assert torch.equal(next(iter(loader)).input, expected_next.input)
+            build_source.assert_called_once()
+        finally:
+            loader.close()
+
+
 @pytest.mark.parametrize(
     "packing_type",
     [ConcatThenSplitPackingConfig, FirstFitPackingConfig],
