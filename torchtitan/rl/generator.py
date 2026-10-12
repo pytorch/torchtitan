@@ -960,11 +960,14 @@ class VLLMGenerator(Configurable):
         blocks) from the end of a turn's prefill until its next turn or its end, so no other
         request evicts it (see `SessionKVHolder`). Held blocks count in vLLM's KV usage."""
 
-        session_kv_free_floor: float = 0.05
-        """With ``hold_session_kv``, release whole idle sessions, idle longest first, while
-        fewer than this fraction of KV blocks are free. Keep it above vLLM's ``watermark`` (set in
-        ``extra_vllm_engine_args``): vLLM admits no waiting request (a later turn included) while
-        fewer than ``watermark`` are free."""
+        session_kv_free_headroom: float = 0.05
+        """With ``hold_session_kv``, before each step the holder releases idle sessions while fewer
+        than (vLLM's ``watermark`` + this) fraction of KV blocks are free:
+        - watermark: while a batch runs, vLLM starts a new turn only if this much stays free after
+          it, so the holder never holds into it.
+        - headroom: room for one step's growth and for a new turn to start, since the holder can't
+          act inside a step.
+        """
 
         kv_offload_gib: float = 0.0
         """Host RAM (GiB) per generator for vLLM's native CPU KV offload, split across its DP x TP
@@ -979,14 +982,6 @@ class VLLMGenerator(Configurable):
                 raise ValueError(
                     "hold_session_kv needs reset_kv_cache_on_weight_sync=False: vLLM cannot reset "
                     "the prefix cache while blocks are held"
-                )
-            # vLLM's default watermark is 0.0.
-            watermark = self.extra_vllm_engine_args.get("watermark", 0.0)
-            if self.hold_session_kv and self.session_kv_free_floor <= watermark:
-                raise ValueError(
-                    f"session_kv_free_floor ({self.session_kv_free_floor}) must be above vLLM's "
-                    f"watermark ({watermark}, set in extra_vllm_engine_args), or held blocks can "
-                    "stall every waiting turn"
                 )
             if self.kv_offload_gib < 0:
                 raise ValueError(
@@ -1300,12 +1295,14 @@ class VLLMGenerator(Configurable):
                     raise ValueError(
                         "hold_session_kv does not support speculative decoding"
                     )
+            kv_cache_manager = scheduler.kv_cache_manager
+            headroom_blocks = int(
+                config.session_kv_free_headroom
+                * kv_cache_manager.block_pool.num_gpu_blocks
+            )
             self._session_kv = SessionKVHolder(
                 scheduler,
-                free_floor_blocks=int(
-                    config.session_kv_free_floor
-                    * scheduler.kv_cache_manager.block_pool.num_gpu_blocks
-                ),
+                free_floor_blocks=kv_cache_manager.watermark_blocks + headroom_blocks,
                 hold=config.hold_session_kv,
                 # Built by vLLM from kv_connector_extra_config above.
                 offload_policy=(

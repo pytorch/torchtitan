@@ -577,19 +577,6 @@ def test_batch_invariant_requires_kv_cache_reset():
         )
 
 
-def test_hold_session_kv_requires_free_floor_above_watermark():
-    VLLMGenerator.Config(
-        model=_MODEL_CONFIG, parallelism=_PARALLELISM, hold_session_kv=True
-    )
-    with pytest.raises(ValueError, match="must be above vLLM's watermark"):
-        VLLMGenerator.Config(
-            model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
-            hold_session_kv=True,
-            extra_vllm_engine_args={"watermark": 0.05},
-        )
-
-
 def test_kv_offload_rejects_kv_cache_reset_on_weight_sync():
     with pytest.raises(ValueError, match="needs reset_kv_cache_on_weight_sync=False"):
         VLLMGenerator.Config(
