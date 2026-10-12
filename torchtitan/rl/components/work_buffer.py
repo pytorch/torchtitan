@@ -38,7 +38,7 @@ class RolloutGroupWork:
 
     group_id: int
     sample: object
-    """Data input produced by `rollouter.get_training_sample()`;
+    """Indexed data input produced by the rollouter;
     passed unchanged to the env in `rollouter.run_group_rollouts`."""
     state: _RolloutGroupWorkState = field(
         default=_RolloutGroupWorkState.WAITING, init=False

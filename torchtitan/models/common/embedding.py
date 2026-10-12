@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torchtitan.distributed.spmd_types import spmd_mesh_group
-from torchtitan.protocols.module import Module
+from torchtitan.models.base.module import Module
 
 
 class Embedding(nn.Embedding, Module):

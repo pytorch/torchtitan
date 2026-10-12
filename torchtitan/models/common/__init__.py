@@ -6,6 +6,7 @@
 
 from .activation import (
     BinaryActivationFn,
+    ClampedSwiGLU,
     Sigmoid,
     SiLU,
     SiTUGLU,
@@ -28,7 +29,7 @@ from .attention import (
     get_sliding_window_mask_mod,
     GQAttention,
     InnerAttention,
-    KDAAttentionMetadata,
+    LinearAttentionMetadata,
     QKVLinear,
     ScaledDotProductInnerAttention,
     SlidingWindowFlexInnerAttention,
@@ -39,14 +40,8 @@ from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .hi_mid_lo_linear import HiMidLoLinear
-from .linear import (
-    ColumnParallelLinear,
-    GroupedLinear,
-    Linear,
-    RowParallelLinear,
-    SharedExpertRowParallelLinear,
-)
-from .moe import MicrobatchWiseLoadBalanceLoss, MoE
+from .linear import ColumnParallelLinear, GroupedLinear, Linear, RowParallelLinear
+from .moe import BatchWiseLoadBalanceLoss, MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
 from .nn_modules import Conv1d, Conv2d, GELU, GroupNorm, Identity, LayerNorm, RMSNorm
 from .norm import GatedRMSNorm
@@ -58,6 +53,7 @@ __all__ = [
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
+    "ClampedSwiGLU",
     "ColumnParallelLinear",
     "CosSinRoPE",
     "create_attention_mask",
@@ -81,16 +77,16 @@ __all__ = [
     "GroupedLinear",
     "Identity",
     "InnerAttention",
-    "KDAAttentionMetadata",
     "LayerNorm",
     "Linear",
+    "LinearAttentionMetadata",
+    "BatchWiseLoadBalanceLoss",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
     "MultimodalModel",
     "RMSNorm",
     "RoPE",
     "RowParallelLinear",
-    "SharedExpertRowParallelLinear",
     "ScaledDotProductInnerAttention",
     "SlidingWindowFlexInnerAttention",
     "Sigmoid",

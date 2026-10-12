@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from datasets import load_dataset
 
-from torchtitan.config import Configurable
+from torchtitan.rl.components.data import RLDataset
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -26,7 +26,7 @@ class SearchR1Sample:
     """Accepted golden answer strings; a prediction matching any one is correct (EM)."""
 
 
-class SearchR1Dataset(Configurable):
+class SearchR1Dataset(RLDataset):
     """Endless, seeded stream of Search-R1 QA samples.
 
     The NQ/HotpotQA parquet (columns ``question``, ``golden_answers``, ``data_source``)
@@ -35,7 +35,7 @@ class SearchR1Dataset(Configurable):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(RLDataset.Config):
         filename: str = "train.parquet"
         """Which split to load from the HF dataset repo: ``train.parquet`` (train) or
         ``test.parquet`` (validation)."""

@@ -11,7 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from torchtitan.models.common.activation import SwiGLU
+from torchtitan.models.base.module import Module
+
+from torchtitan.models.common.activation import ClampedSwiGLU, SwiGLU
 from torchtitan.models.common.dist_moe import (
     _dist_moe as dist_moe,
     DistMoeRoutedExperts,
@@ -20,8 +22,7 @@ from torchtitan.models.common.dist_moe import (
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
-from torchtitan.protocols.module import Module
-from .base import ModelConfigTransform, ModelConfigTransformContext
+from .base import ModelConfigTransform
 
 
 __all__ = ["DistMoeTransform"]
@@ -42,10 +43,20 @@ def _replace_routed_experts(
         if (
             type(source.w13) is not GroupedLinear.Config
             or type(source.w2) is not GroupedLinear.Config
-            or type(source.activation_fn) is not SwiGLU.Config
         ):
+            raise TypeError("Dist-MoE requires stock GroupedLinear W13/W2 projections")
+        if isinstance(source.activation_fn, SwiGLU.Config):
+            activation = "swiglu"
+            swiglu_alpha = None
+            swiglu_limit = None
+        elif isinstance(source.activation_fn, ClampedSwiGLU.Config):
+            activation = "swiglu_clamped"
+            swiglu_alpha = source.activation_fn.swiglu_alpha
+            swiglu_limit = source.activation_fn.swiglu_limit
+        else:
             raise TypeError(
-                "Dist-MoE requires stock GroupedLinear W13/W2 projections and SwiGLU"
+                "Dist-MoE supports SwiGLU.Config or ClampedSwiGLU.Config; "
+                f"got {type(source.activation_fn).__qualname__} at {fqn!r}"
             )
         if not isinstance(source.token_dispatcher, AllToAllTokenDispatcher.Config):
             raise ValueError(
@@ -59,6 +70,9 @@ def _replace_routed_experts(
             w2=source.w2,
             top_k=source.token_dispatcher.top_k,
             output_postprocess=source.output_postprocess,
+            activation=activation,
+            swiglu_alpha=swiglu_alpha,
+            swiglu_limit=swiglu_limit,
             **values,
         )
         if parent is None:
@@ -75,6 +89,11 @@ def _replace_routed_experts(
 @dataclass(kw_only=True, slots=True)
 class DistMoeTransform(ModelConfigTransform):
     """Replace stock routed experts with BF16 or MXFP8 Dist-MoE execution.
+
+    Expert activation semantics come from each source
+    ``RoutedExperts.Config.activation_fn``. The transform translates supported
+    source activations to the Annex kernel policy instead of owning an
+    independent activation setting.
 
     Args:
         expert_precision: Expert compute precision. BF16 is the high-precision
@@ -115,12 +134,7 @@ class DistMoeTransform(ModelConfigTransform):
                 f"unsupported Dist-MoE expert precision {self.expert_precision!r}"
             )
 
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
+    def transform(self, model: Module.Config) -> Module.Config:
         """Replace each stock routed-expert config with the selected precision."""
         if self.expert_precision == "bf16":
             return _replace_routed_experts(

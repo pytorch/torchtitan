@@ -43,16 +43,17 @@ from torch.nn.attention.varlen import (
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
 if TYPE_CHECKING:
-    from .kda import KDAAttentionMetadata
+    from . import AttentionMetadata
 
 __all__ = [
+    "BaseAttention",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
@@ -151,7 +152,7 @@ class InnerAttention(Module):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata | None":
+        ) -> "AttentionMetadata | None":
             """Build metadata consumed by this inner attention, if any.
 
             Inner attentions that do not require metadata inherit the default

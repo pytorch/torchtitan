@@ -40,7 +40,6 @@ class MultimodalModel(Decoder):
         local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> Self:
         # Bind local implementations early; torch.compile traces on first use.
         apply_local_compile(local_compile_regions)
@@ -57,12 +56,11 @@ class MultimodalModel(Decoder):
                 for encoder in encoders:
                     policy.apply(encoder)
 
-            if not skip_dp:
-                self._apply_fsdp(
-                    parallelism_context=parallelism_context,
-                    training=training,
-                    parallelism=parallelism,
-                )
+            self._apply_fsdp(
+                parallelism_context=parallelism_context,
+                training=training,
+                parallelism=parallelism,
+            )
         return self
 
     def _apply_fsdp(
@@ -77,23 +75,25 @@ class MultimodalModel(Decoder):
             resolve_fsdp_mesh,
         )
 
-        if not parallelism_context.pp_enabled:
-            dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
-            for encoder_fqn in self.multimodal_encoder_fqns:
-                encoder = getattr(self, encoder_fqn)
-                if encoder is not None:
-                    apply_fsdp_to_multimodal_encoder(
-                        encoder,
-                        dp_mesh,
-                        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-                        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-                        reshard_after_forward_policy=(
-                            parallelism.fsdp_reshard_after_forward
-                        ),
-                        pp_enabled=parallelism_context.pp_enabled,
-                        cpu_offload=training.enable_cpu_offload,
-                        dp_mesh_dims=dp_mesh_dims,
-                    )
+        # Encoders are CP-invariant, so FSDP shards them over dp_shard only.
+        # That differs from the decoder, so they always get their own FSDP
+        # wrapper, including under PP.
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
+            parallelism_context, shard_on_cp_axis=False
+        )
+        for encoder_fqn in self.multimodal_encoder_fqns:
+            encoder = getattr(self, encoder_fqn)
+            if encoder is not None:
+                apply_fsdp_to_multimodal_encoder(
+                    encoder,
+                    dp_mesh,
+                    param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                    reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                    reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+                    pp_enabled=parallelism_context.pp_enabled,
+                    cpu_offload=training.enable_cpu_offload,
+                    dp_mesh_dims=dp_mesh_dims,
+                )
         super()._apply_fsdp(
             parallelism_context=parallelism_context,
             training=training,
@@ -115,6 +115,7 @@ def build_dummy_vision_inputs(
         for tensor in (pixel_values_TP, grid_thw_N3):
             spmd.mutate_type(tensor, "dp", src=spmd.R, dst=spmd.V)
             spmd.mutate_type(tensor, "tp", src=spmd.R, dst=spmd.I)
+            spmd.mutate_type(tensor, "cp", src=spmd.R, dst=spmd.I)
     return pixel_values_TP, grid_thw_N3
 
 

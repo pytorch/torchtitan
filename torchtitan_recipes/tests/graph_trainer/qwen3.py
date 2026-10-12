@@ -6,6 +6,7 @@
 
 """Qwen3 GraphTrainer configurations used by tests."""
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
@@ -24,8 +25,10 @@ def graph_trainer_qwen3_debugmodel() -> GraphTrainer.Config:
 
 
 def graph_trainer_qwen3_debugmodel_moe() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(qwen3_moe_debug(), GraphTrainerQwen3Model.Config)
+    config = to_graph_trainer_config(
+        qwen3_moe_debug(parallelism=ParallelismConfig(expert_parallel_degree=2)),
+        GraphTrainerQwen3Model.Config,
+    )
     config.compile = GraphTrainerCompileConfig()
-    config.parallelism.expert_parallel_degree = 2
     config.training.disable_cuda_graphs = True
     return config

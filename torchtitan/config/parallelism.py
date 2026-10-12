@@ -158,7 +158,7 @@ class ParallelismConfig:
     reshard placement. ``"auto"`` uses ``min(pp_rank + 2,
     pp_max_unsharded_active_stages)``. ``"full"`` uses the complete residency
     window. A tuple supplies one positive value per pipeline rank for expert
-    tuning. See ``docs/composability.md`` for the detailed contract.
+    tuning. See ``torchtitan/distributed/PIPELINE_PARALLEL.md`` for the detailed contract.
     """
 
     context_parallel_degree: int = 1

@@ -12,6 +12,12 @@ from typing import cast
 from torch.distributed.tensor import Shard
 
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
+from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.mm_datasets import (
+    MM_DATASETS,
+    VisionProcessor,
+)
+from torchtitan.components.data.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -31,9 +37,6 @@ from torchtitan.distributed.flex_shard import (
     Owned,
 )
 from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS, VisionProcessor
-from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -86,10 +89,15 @@ def _kimi_k3_multimodal_dataloader(
 
 def kimi_k3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
     """Debugmodel with per-head Muon for all logical 2D matrices."""
-    parallelism = ParallelismConfig()
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
+    )
     return _KimiK3TrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -141,13 +149,23 @@ def _dist_muon_optimizer(
         for layer in model_config.layers
         if layer.delta_attention is not None
     )
-    dp_shard = MeshAxisName.DP_SHARD.value
-    owned = ComputeLayout(shardings_by_mesh_axis={dp_shard: Owned()})
+    # FSDP flattens dp_shard and cp into one storage axis under CP.
+    owned = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: Owned(),
+            f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Owned(),
+        },
+    )
 
     def blocks_of(*num_rows: int) -> ComputeLayout:
         """A repeating BlockShard pattern with one Muon matrix per entry."""
         return ComputeLayout(
-            shardings_by_mesh_axis={dp_shard: BlockShard(dim=0, block_sizes=num_rows)},
+            shardings_by_mesh_axis={
+                MeshAxisName.DP_SHARD.value: BlockShard(dim=0, block_sizes=num_rows),
+                f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": BlockShard(
+                    dim=0, block_sizes=num_rows
+                ),
+            },
         )
 
     # MLA fuses several projections into one parameter; Kimi runs Newton-Schulz
@@ -178,7 +196,10 @@ def _dist_muon_optimizer(
     per_expert = _per_expert_compute_layout(parallelism)
     feed_forward_shardings = {
         "w13": ComputeLayout(
-            shardings_by_mesh_axis={dp_shard: Shard(0)},
+            shardings_by_mesh_axis={
+                MeshAxisName.DP_SHARD.value: Shard(0),
+                f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Shard(0),
+            },
         ),
         "w2": owned,
     }

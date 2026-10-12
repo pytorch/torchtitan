@@ -13,7 +13,7 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttentionMetadata,
@@ -21,15 +21,14 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.flops import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
-from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
-from torchtitan.protocols.module import Module
 
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
@@ -278,6 +277,7 @@ class DeepSeekV3Model(MTPDecoder):
                 "loss",
                 "fused_binary_activation",
                 "fp32_to_bf16_split",
+                "moe_aux_loss",
             ]
         )
 
@@ -285,15 +285,6 @@ class DeepSeekV3Model(MTPDecoder):
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
             return get_deepseek_v3_nparams_and_flops(self, model, seq_len)
-
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_deepseek_v3_sharding_config
-
-            set_deepseek_v3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
 
     def __init__(self, config: Config):
         super().__init__(config)

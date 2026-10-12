@@ -121,15 +121,9 @@ jobs:
         python -m tests.integration_tests.run_tests \
           --gpu_arch_type ${{ matrix.gpu-arch-type }} \
           --gpu_arch "$GPU_ARCH" \
-          --test_suite features,models --execution_mode fake_pg --ngpu 1 \
+          --test_suite features,models,flux --execution_mode fake_pg --ngpu 1 \
           $EXPORT_ARG $TEST_NAME_ARG \
           "$RUNNER_ARTIFACT_DIR" || status=$?
-        # FLUX is a separate runner only because it does not fit in run_tests.
-        # Always run it, then fail the job if either suite failed.
-        python -m tests.integration_tests.flux \
-          --execution_mode fake_pg --ngpu 1 \
-          $TEST_NAME_ARG \
-          "$RUNNER_ARTIFACT_DIR/flux" || status=$?
         exit "$status"
 
   integration-real-pg:

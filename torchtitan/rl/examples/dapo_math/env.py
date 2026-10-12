@@ -12,7 +12,7 @@ from renderers import Message
 
 from torchtitan.rl.examples.dapo_math.data import DapoMathSample
 
-from torchtitan.rl.rollout.environment import (
+from torchtitan.rl.rollout.message_env import (
     MessageEnv,
     MessageEnvInitOutput,
     MessageEnvStepOutput,
