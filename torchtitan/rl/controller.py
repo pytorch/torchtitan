@@ -97,11 +97,12 @@ import time
 import warnings
 from dataclasses import dataclass, field, replace
 
+import monarch
+
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
 import torch  # noqa: F401
 import torchstore as ts
-
 from monarch.actor import ProcMesh, this_host
 
 from torchtitan.components.renderer import RendererConfig
@@ -187,12 +188,12 @@ class AsyncLoopConfig(Configurable.Config):
     `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
     ``torchtitan/rl/components/WINDOWED_FIFO.md``."""
 
-    rdma_fast_path_threshold: int | None = None
-    """How microbatches reach the trainer ranks:
-        None (default): by value; every rank receives the whole grid.
-        e.g. 1024: tensors of >= 1024 bytes as Monarch RDMA buffers; each rank reads only its DP column.
-    Where Monarch's ibverbs fails, set MONARCH_RDMA_DISABLE_IBVERBS=1 for its TCP fallback;
-    it moves TorchStore's weight sync to TCP too."""
+    enable_rdma: bool = False
+    """How trainer ranks read their microbatches (weight sync has TorchStore's own switch):
+        False (default): over TCP.
+        True: over RDMA (ibverbs) where the host has it, else TCP; 25 vs 1.3 GB/s reading 256 MiB
+            on one host. A host that lists ibverbs devices it can't use fails instead of falling back.
+    MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP either way."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -216,14 +217,6 @@ class AsyncLoopConfig(Configurable.Config):
         if self.windowed_fifo_batches is not None and self.windowed_fifo_batches < 1:
             raise ValueError(
                 f"windowed_fifo_batches must be None or >= 1, got {self.windowed_fifo_batches}"
-            )
-        if (
-            self.rdma_fast_path_threshold is not None
-            and self.rdma_fast_path_threshold < 1
-        ):
-            raise ValueError(
-                "rdma_fast_path_threshold must be None or >= 1 (RDMABuffer rejects empty tensors), "
-                f"got {self.rdma_fast_path_threshold}"
             )
 
     @property
@@ -699,8 +692,11 @@ class Controller(Configurable):
             )
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
-        if config.async_loop.rdma_fast_path_threshold is not None:
-            create_cuda_context_to_silence_monarch_log()
+        if not config.async_loop.enable_rdma:
+            # Trainer ranks read this process's buffers over TCP. After spawning, so trainer and
+            # generator processes keep ibverbs for weight sync; before the first buffer, or it's ignored.
+            monarch.configure(rdma_disable_ibverbs=True)
+        create_cuda_context_to_silence_monarch_log()
 
         # Start each generator's engine loop on all ranks once, before any
         # rank-0-only generate / pull (rank 0 drives the followers through this
@@ -1152,42 +1148,32 @@ class Controller(Configurable):
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
-                    microbatches = packed.microbatches
-                    min_bytes = self.config.async_loop.rdma_fast_path_threshold
-                    if min_bytes is not None:
-                        # Each rank reads its column from this process. Register in a thread: at
-                        # ~0.15 ms per tensor (0.3 s for 2,200), doing it here would stall the rollouts.
-                        microbatches = await asyncio.to_thread(
-                            lambda rows, threshold: [
-                                [
-                                    RDMAMicrobatch.register(
-                                        microbatch, min_bytes=threshold
-                                    )
-                                    for microbatch in row
-                                ]
-                                for row in rows
-                            ],
-                            packed.microbatches,
-                            min_bytes,
-                        )
+                    # Each rank reads its column from this process. Register in a thread: at
+                    # ~0.15 ms per tensor (0.3 s for 2,200), doing it here would stall the rollouts.
+                    rdma_microbatches = await asyncio.to_thread(
+                        lambda rows: [
+                            [RDMAMicrobatch.register(microbatch) for microbatch in row]
+                            for row in rows
+                        ],
+                        packed.microbatches,
+                    )
                     try:
                         fwd_bwd_metrics = self._get_rank_0_value(
                             await self.trainer.forward_backward.call(
-                                microbatches,
+                                rdma_microbatches,
                                 packed.global_loss_token_counts,
                                 packed.global_routing_token_counts,
                             )
                         )
                     finally:
-                        if min_bytes is not None:
-                            # Every rank has read its column, or the step failed.
-                            await asyncio.gather(
-                                *(
-                                    rdma_microbatch.drop()
-                                    for row in microbatches
-                                    for rdma_microbatch in row
-                                )
+                        # Every rank has read its column, or the step failed.
+                        await asyncio.gather(
+                            *(
+                                rdma_microbatch.drop()
+                                for row in rdma_microbatches
+                                for rdma_microbatch in row
                             )
+                        )
 
                     if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                         logger.error("Loss is NaN/Inf; training diverged")

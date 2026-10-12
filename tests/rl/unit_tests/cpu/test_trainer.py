@@ -329,8 +329,7 @@ def test_get_controller_state_returns_restored_state() -> None:
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("rdma", [False, True])
-def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
+def test_forward_backward_accumulates_microbatch_metrics() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         engine = SimpleNamespace(
@@ -379,12 +378,9 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             advantages=torch.tensor([1.0]),
         )
 
-        # This rank (dp_rank 1) reads only its own column with the RDMA fast path.
-        if rdma:
-            other_rank = MagicMock(spec=RDMAMicrobatch)
-            own = MagicMock(spec=RDMAMicrobatch, read=AsyncMock(return_value=batch))
-        else:
-            other_rank, own = MagicMock(spec=TrainingMicrobatch), batch
+        # This rank (dp_rank 1) reads only its own column.
+        other_rank = MagicMock(spec=RDMAMicrobatch)
+        own = MagicMock(spec=RDMAMicrobatch, read=AsyncMock(return_value=batch))
 
         result = await Trainer.forward_backward(
             trainer,
@@ -398,8 +394,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             global_loss_token_counts=torch.tensor([3]),
             global_routing_token_counts=torch.tensor([2]),
         )
-        if rdma:
-            other_rank.read.assert_not_called()
+        other_rank.read.assert_not_called()
         assert trainer._step_num_tokens_per_dp_rank == 2
         assert trainer._reduce_forward_backward_metrics.call_count == 2
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}

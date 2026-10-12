@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The RDMA fast path for trainer microbatches: large tensors stay with the controller, each rank reads its own."""
+"""Trainer microbatches as Monarch RDMA buffers: the process that registers them keeps the large
+tensors, and each trainer rank reads its own column, over TCP or, with
+`AsyncLoopConfig.enable_rdma`, over RDMA (ibverbs).
+"""
 
 from __future__ import annotations
 
@@ -22,23 +25,29 @@ from torchtitan.rl.components.batcher import TrainingMicrobatch
 
 logger = logging.getLogger(__name__)
 
+# Tensors under 1 KiB go inside the message instead of in a buffer:
+#   token counts (8 B):   registering a buffer (~0.15 ms) costs more than sending the bytes
+#   empty tensors (0 B):  RDMABuffer rejects them
+# Per-token tensors reach 1 KiB at 1,024 tokens (bool masks), so those go over RDMA.
+_MIN_RDMA_BYTES = 1024
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class RDMAMicrobatch:
     """A `TrainingMicrobatch` whose large tensors stay in the controller's memory, for trainer ranks to read over RDMA.
 
     Example:
-        rdma_microbatch = RDMAMicrobatch.register(microbatch, min_bytes=1024)  # controller
+        rdma_microbatch = RDMAMicrobatch.register(microbatch)  # controller
         microbatch = await rdma_microbatch.read()  # trainer: one RDMA action reads every buffer
         await rdma_microbatch.drop()               # controller, after every rank has read it
     """
 
     fields: dict[str, Any]
-    """The microbatch's fields: tensors of at least `min_bytes` (also inside `model_kwargs`) as
+    """The microbatch's fields: tensors of at least 1 KiB (also inside `model_kwargs`) as
     `_TensorRef`s, the rest by value. Tensors inside containers pytree doesn't know go by value too."""
 
     @classmethod
-    def register(cls, microbatch: TrainingMicrobatch, min_bytes: int) -> RDMAMicrobatch:
+    def register(cls, microbatch: TrainingMicrobatch) -> RDMAMicrobatch:
         fields = {
             field.name: getattr(microbatch, field.name)
             for field in dataclasses.fields(microbatch)
@@ -46,7 +55,7 @@ class RDMAMicrobatch:
         return cls(
             fields=pytree.tree_map_only(
                 lambda leaf: (
-                    isinstance(leaf, torch.Tensor) and leaf.nbytes >= min_bytes
+                    isinstance(leaf, torch.Tensor) and leaf.nbytes >= _MIN_RDMA_BYTES
                 ),
                 _TensorRef.register,
                 fields,
