@@ -1007,8 +1007,9 @@ class VLLMGenerator(Configurable):
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
-        # Priority = `EngineRequest.group_id`; see its docstring.
-        # TODO: validation's negative ids put it ahead of training. Revisit once it overlaps training.
+        # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`,
+        # so older groups have higher priority (see its docstring).
+        # TODO: validation's negative ids put validation first. Revisit once it overlaps training.
         engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.
@@ -1249,8 +1250,8 @@ class VLLMGenerator(Configurable):
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
             group_id: Rollout group id. Requests of one group share a prefix cache
-                salt; `release_groups` drops it. Also the vLLM priority, lower first;
-                see `EngineRequest.group_id`.
+                salt; `release_groups` drops it. Also the vLLM priority: lower ids run
+                first; see `EngineRequest.group_id`.
             routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
@@ -1286,6 +1287,7 @@ class VLLMGenerator(Configurable):
                     sampling=sampling,
                     group_id=group_id,
                     routing_session_id=routing_session_id,
+                    arrival_time=time.time(),
                 ),
                 metrics_prefix=metrics_prefix,
                 reply=reply,
@@ -1522,7 +1524,6 @@ class VLLMGenerator(Configurable):
                 request.min_policy_version = self._group_min_policy_versions.setdefault(
                     request.group_id, self.policy_version
                 )
-            request.arrival_time = time.time()
         requests_per_dp_rank = self._request_dispatcher.rank0_route(
             pending_engine_requests
         )
@@ -1717,13 +1718,13 @@ class EngineRequest:
                                                 ^ g4 started before g7
     """
     routing_session_id: str
+    arrival_time: float
+    """Rank 0's `time.time()` in `generate`; vLLM breaks priority ties by it and measures TTFT from it.
+    All TP ranks pass this one value, so they order ties the same way even if their clocks differ."""
     min_policy_version: int = field(init=False)
     """Oldest policy version this request's KV can come from; rank 0 sets it at admission.
     Without a KV reset on weight sync it is the group's pinned version and salts the
     prefix cache."""
-    arrival_time: float = field(init=False)
-    """Rank 0's `time.time()` at admission; vLLM breaks priority ties by it. TP ranks pass rank 0's
-    value, so one rank's clock jumping back cannot make it schedule a different batch."""
 
 
 @dataclass(kw_only=True, slots=True)

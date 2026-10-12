@@ -358,14 +358,14 @@ def _engine_request(request_id: str, *, min_policy_version: int):
         sampling=SamplingConfig(),
         group_id=3,
         routing_session_id="group=3/rollout=0",
+        arrival_time=1.5,
     )
     request.min_policy_version = min_policy_version
-    request.arrival_time = 1.5  # rank 0's clock at admission
     return request
 
 
-def test_admission_passes_group_id_as_priority_and_rank0_arrival_time(monkeypatch):
-    # The group id (3) as priority, not the pinned version (6), and rank 0's arrival_time stamp.
+def test_admission_passes_group_id_as_priority_and_arrival_time(monkeypatch):
+    # Priority is the group id (3), not the pinned version (6); arrival_time is passed through.
     generator = _generator()
     engine = cast(_FakeEngine, generator._engine)
 

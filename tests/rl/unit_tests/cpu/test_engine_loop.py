@@ -111,6 +111,7 @@ def _request(
         sampling=SamplingConfig(),
         group_id=group_id,
         routing_session_id=routing_session_id or request_id,
+        arrival_time=0.0,
     )
 
 
@@ -1051,7 +1052,6 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
 ) -> None:
     request = _request("r0")
     request.min_policy_version = 0  # rank 0 pins it on admission
-    request.arrival_time = 0.0  # and stamps it
     decisions = iter(
         [
             LoopDecision(action=LoopAction.STEP, requests_per_dp_rank=[[request]]),
