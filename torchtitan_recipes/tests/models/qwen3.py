@@ -517,6 +517,9 @@ def qwen3_moe_debug(
         attn_backend=attn_backend,
         parallelism=parallelism,
     )
+    num_tokens_per_microbatch_per_dp_rank = 4 * model_config.max_context_length
+    # The stock all-to-all EP dispatcher syncs with the CPU.
+    disable_cuda_graphs = parallelism.expert_parallel_degree > 1
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -527,7 +530,11 @@ def qwen3_moe_debug(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=64,
+            max_num_documents=(
+                c4_document_capacity(num_tokens_per_microbatch_per_dp_rank)
+                if attn_backend == "varlen" and not disable_cuda_graphs
+                else None
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
@@ -538,10 +545,8 @@ def qwen3_moe_debug(
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         ),
         training=TrainingConfig(
-            # The stock all-to-all EP dispatcher syncs with the CPU, so it
-            # cannot run under CUDA graphs.
-            disable_cuda_graphs=parallelism.expert_parallel_degree > 1,
-            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            disable_cuda_graphs=disable_cuda_graphs,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
