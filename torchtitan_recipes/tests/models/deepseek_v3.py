@@ -182,9 +182,7 @@ def deepseek_v3_16b(
             pipeline_parallel_schedule="Interleaved1F1B",
             expert_parallel_degree=8,
         )
-    model_config = build_model_config(
-        "16B", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
-    )
+    model_config = build_model_config("16B", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -224,7 +222,6 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
     config.model = build_model_config(
         "16B",
         seq_len=seq_len,
-        attn_backend="varlen",
         parallelism=config.parallelism,
     )
     config.training.disable_cuda_graphs = False
@@ -263,7 +260,6 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
     config.model = build_model_config(
         "debugmodel",
         seq_len=seq_len,
-        attn_backend="varlen",
         parallelism=config.parallelism,
     )
     config.dataloader.max_num_documents = 512
@@ -290,7 +286,6 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
     config.model = build_model_config(
         "debugmodel",
         seq_len=seq_len,
-        attn_backend="varlen",
         parallelism=config.parallelism,
         converters=[
             deepseek_v3_mxfp8_linear_converter_config(include_lm_head=True),
@@ -361,7 +356,6 @@ def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
     config.model = build_model_config(
         "16B",
         seq_len=seq_len,
-        attn_backend="varlen",
         parallelism=config.parallelism,
     )
     config.dataloader.max_num_documents = 512
@@ -379,7 +373,6 @@ def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config
     config.model = build_model_config(
         "16B",
         seq_len=seq_len,
-        attn_backend="varlen",
         parallelism=config.parallelism,
         converters=[
             deepseek_v3_mxfp8_linear_converter_config(include_lm_head=True),
@@ -407,7 +400,6 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     model_config = build_model_config(
         "671B",
         seq_len=seq_len,
-        attn_backend="varlen",
         parallelism=parallelism,
     )
     return Trainer.Config(
@@ -488,7 +480,6 @@ def deepseek_v3_16b_nvfp4_ffn_mxfp8_attn(
     config.model = build_model_config(
         "16B",
         seq_len=seq_len,
-        attn_backend="varlen",
         parallelism=config.parallelism,
         converters=[
             NVFP4LinearConverter.Config(

@@ -228,9 +228,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         context_parallel_degree=1,
         pipeline_parallel_degree=1,
     )
-    model_config = build_model_config(
-        "30B", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
-    )
+    model_config = build_model_config("30B", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
@@ -271,7 +269,7 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
         pipeline_parallel_degree=1,
     )
     model_config = build_model_config(
-        "30B_mm", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
+        "30B_mm", seq_len=seq_len, parallelism=parallelism
     )
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;

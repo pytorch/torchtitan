@@ -349,7 +349,7 @@ def sft_debugmodel(
 
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
     )
 
     return Trainer.Config(

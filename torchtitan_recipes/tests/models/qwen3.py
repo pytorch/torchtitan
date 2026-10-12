@@ -301,9 +301,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
         ]
 
     parallelism = ParallelismConfig()
-    model_config = build_model_config(
-        "8B", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
-    )
+    model_config = build_model_config("8B", seq_len=seq_len, parallelism=parallelism)
     config = Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -358,7 +356,6 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
     config.model = build_model_config(
         "8B",
         seq_len=seq_len,
-        attn_backend="varlen",
         converters=[
             NVFP4LinearConverter.Config(
                 fqns=fqns,
@@ -622,9 +619,7 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
         ]
 
     parallelism = ParallelismConfig()
-    model_config = build_model_config(
-        "8B", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
-    )
+    model_config = build_model_config("8B", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
