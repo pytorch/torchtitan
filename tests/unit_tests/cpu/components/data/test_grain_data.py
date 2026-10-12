@@ -46,6 +46,11 @@ from torchtitan.components.data.types import (
     TrainingMicrobatch,
 )
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.models.common.attention import VarlenInnerAttention
+from torchtitan_recipes.overrides.dense_causal_sdpa import (
+    DenseCausalBf16SDPA,
+    unmasked_text_rows,
+)
 
 
 class FakeTokenizer:
@@ -1351,6 +1356,163 @@ def test_text_collator_counts_unmasked_labels():
     torch.testing.assert_close(inputs.loss_token_counts, torch.tensor(2))
     torch.testing.assert_close(inputs.routing_token_counts, torch.tensor([3]))
     assert inputs.input[:3].tolist() == [1, 2, 3]
+
+
+@pytest.mark.parametrize(
+    "mask_document_boundaries,max_context_length,positions,mtp_count",
+    [
+        (True, 4, [0, 1, 0, 1], 2),
+        (False, 4, [0, 1, 2, 3], 3),
+        (False, 2, [0, 1, 0, 1], 2),
+    ],
+)
+def test_text_collator_document_masking_policy(
+    mask_document_boundaries, max_context_length, positions, mtp_count
+):
+    context = replace(
+        CONTEXT,
+        max_context_length=max_context_length,
+        num_tokens_per_microbatch=4,
+        num_mtp_layers=1,
+    )
+    rows = [
+        TextSequence(
+            input_ids=np.asarray([1, 2]),
+            labels=np.asarray([2, 3]),
+            positions=np.asarray([0, 1]),
+        ),
+        TextSequence(
+            input_ids=np.asarray([4, 5]),
+            labels=np.asarray([5, 6]),
+            positions=np.asarray([0, 1]),
+        ),
+    ]
+    batch = TextCollator.Config(
+        mask_document_boundaries=mask_document_boundaries
+    ).build(context=context)(rows)
+
+    assert batch.positions.tolist() == positions
+    assert batch.loss_token_counts.tolist() == [4, mtp_count]
+    assert batch.routing_token_counts.tolist() == [4, mtp_count]
+    assert batch.input.tolist() == [1, 2, 4, 5]
+    assert batch.labels.tolist() == [2, 3, 5, 6]
+    assert not batch.padding_mask.any()
+    assert all(row.positions.tolist() == [0, 1] for row in rows)
+    if mask_document_boundaries:
+        default = TextCollator.Config().build(context=context)(rows)
+        for key, value in batch.as_input_dict().items():
+            torch.testing.assert_close(value, default.as_input_dict()[key])
+
+
+def test_text_collator_document_masking_preserves_padding_and_labels():
+    context = replace(
+        CONTEXT, max_context_length=4, num_tokens_per_microbatch=4, num_mtp_layers=1
+    )
+    row = TextSequence(
+        input_ids=np.asarray([1, 2, 0]),
+        labels=np.asarray([2, 3, IGNORE_INDEX]),
+        positions=np.asarray([0, 1, 0]),
+        padding_mask=np.asarray([False, False, True]),
+    )
+    batch = TextCollator.Config(mask_document_boundaries=False).build(context=context)(
+        [row]
+    )
+
+    assert batch.positions.tolist() == [0, 1, 2, 3]
+    assert batch.labels.tolist() == [2, 3, IGNORE_INDEX, IGNORE_INDEX]
+    assert batch.padding_mask.tolist() == [False, False, True, True]
+    assert batch.loss_token_counts.tolist() == [2, 1]
+    assert batch.routing_token_counts.tolist() == [2, 1]
+    assert row.positions.tolist() == [0, 1, 0]
+
+
+def test_unmasked_text_override_packs_full_rows_and_restores(caplog):
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=tuple({"tokens": [1, 10 + index, 2]} for index in range(8))
+        ),
+        processor=RowToTokens.Config(),
+    )
+    masked_config = GrainDataLoader.Config(
+        dataset=ConcatThenSplitPackingConfig(dataset=documents),
+        max_num_documents=1,
+        num_mtp_layers=1,
+        shuffle=False,
+        repeat=True,
+    )
+    config = replace(masked_config, collator=unmasked_text_rows(masked_config.collator))
+    loader = config.build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        max_context_length=8,
+        num_tokens_per_microbatch=8,
+    )
+    try:
+        first = next(iter(loader))
+        state = loader.state_dict()
+        expected = next(iter(loader))
+        loader.load_state_dict(state)
+        actual = next(iter(loader))
+        assert first.input.tolist() == [1, 10, 1, 11, 1, 12, 1, 13]
+        assert first.labels.tolist() == [10, 2, 11, 2, 12, 2, 13, 2]
+        assert first.positions.tolist() == list(range(8))
+        assert not first.padding_mask.any()
+        assert first.loss_token_counts.tolist() == [8, 7]
+        assert loader.max_num_documents == 1
+        assert "packing is bounded by the token budget" in caplog.text
+        assert masked_config.collator.mask_document_boundaries
+        assert config.max_num_documents == 1  # The configured input is not mutated.
+        for key, value in expected.as_input_dict().items():
+            torch.testing.assert_close(actual.as_input_dict()[key], value)
+        loader.restart()
+        restarted = next(iter(loader))
+        torch.testing.assert_close(restarted.input, first.input)
+        torch.testing.assert_close(restarted.positions, first.positions)
+        dense = DenseCausalBf16SDPA.Config().build_attention_metadata(
+            first.positions, padding_mask=first.padding_mask
+        )
+        stock = VarlenInnerAttention.Config().build_attention_metadata(
+            first.positions, padding_mask=first.padding_mask
+        )
+        torch.testing.assert_close(dense.cu_seq_q, stock.cu_seq_q)
+        assert dense.cu_seq_q.tolist() == [0, 8]
+    finally:
+        loader.close()
+
+
+def test_unmasked_text_metadata_capacity_matches_context_rows():
+    config = GrainDataLoader.Config(
+        dataset=SingleDatasetConfig(
+            source=RowsSourceConfig(
+                rows=(TextSequence(input_ids=np.arange(8), labels=np.arange(1, 9)),)
+            )
+        ),
+        collator=TextCollator.Config(mask_document_boundaries=False),
+        max_num_documents=1,
+        shuffle=False,
+        repeat=True,
+    )
+    loader = config.build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        max_context_length=4,
+        num_tokens_per_microbatch=8,
+    )
+    try:
+        batch = next(iter(loader))
+        metadata = VarlenInnerAttention.Config().build_attention_metadata(
+            batch.positions,
+            padding_mask=batch.padding_mask,
+            max_num_documents=loader.max_num_documents,
+            max_context_length=4,
+        )
+        assert loader.max_num_documents == 2
+        assert batch.positions.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
+        assert metadata.cu_seq_q.tolist() == [0, 4, 8, 8, 8]
+    finally:
+        loader.close()
 
 
 def test_text_collator_builds_per_depth_token_counts():

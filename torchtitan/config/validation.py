@@ -120,7 +120,9 @@ def validate_model_training_config(
 
     if not training.disable_cuda_graphs and cuda_graphs_supported():
         if max_num_documents is None:
-            for fqn, _, _, _ in model.traverse(VarlenInnerAttention.Config):
+            for fqn, attention, _, _ in model.traverse(VarlenInnerAttention.Config):
+                if not attention._requires_document_capacity:
+                    continue
                 raise ValueError(
                     "CUDA graphs require fixed-shape varlen document "
                     f"metadata for {fqn}, but max_num_documents is unset. "

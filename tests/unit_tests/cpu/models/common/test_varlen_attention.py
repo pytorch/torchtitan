@@ -9,10 +9,13 @@
 #   V = value head dimension, D = model dimension
 
 import unittest
+from copy import deepcopy
 from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
+from torchtitan.components.validator import Validator
+from torchtitan.config.override import apply_overrides, OverrideConfig
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -26,6 +29,157 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import ComplexRoPE
+from torchtitan.models.deepseek_v3 import build_model_config
+from torchtitan.models.deepseek_v3.model import Attention
+from torchtitan_recipes.overrides.dense_causal_sdpa import (
+    dense_causal_bf16_sdpa,
+    DenseCausalBf16SDPA,
+)
+from torchtitan_recipes.overrides.fused_mla import FusedMLAAttention
+from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel_mtp
+
+
+class TestDenseCausalSDPAOverride(unittest.TestCase):
+    def test_continuous_row_metadata(self):
+        metadata = DenseCausalBf16SDPA.Config().build_attention_metadata(
+            torch.arange(7, 11), padding_mask=torch.zeros(4, dtype=torch.bool)
+        )
+        torch.testing.assert_close(
+            metadata.cu_seq_q, torch.tensor([0, 4], dtype=torch.int32)
+        )
+        self.assertIs(metadata.cu_seq_q, metadata.cu_seq_k)
+        self.assertEqual(metadata.max_q, 4)
+
+    def test_packed_positions_are_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "enable unmasked_text_rows"):
+            DenseCausalBf16SDPA.Config().build_attention_metadata(
+                torch.tensor([0, 1, 0, 1])
+            )
+
+    def test_padding_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "does not support padding"):
+            DenseCausalBf16SDPA.Config().build_attention_metadata(
+                torch.arange(4), padding_mask=torch.tensor([False, False, False, True])
+            )
+
+    def test_noncausal_windows_are_rejected(self):
+        for window in ((-1, -1), (2, 0)):
+            with self.subTest(window=window), self.assertRaisesRegex(
+                ValueError, "plain causal"
+            ):
+                dense_causal_bf16_sdpa(VarlenInnerAttention.Config(window_size=window))
+
+    def test_override_preserves_shared_config_fields(self):
+        sharding = object()
+        config = dense_causal_bf16_sdpa(
+            VarlenInnerAttention.Config(sharding_config=sharding)
+        )
+        self.assertIs(config.sharding_config, sharding)
+        self.assertEqual(config.window_size, (-1, 0))
+
+    def test_data_and_attention_overrides_cover_training_validation_and_mtp(self):
+        imports = [
+            "torchtitan_recipes.overrides.dense_causal_sdpa.dense_causal_fused_mla",
+            "torchtitan_recipes.overrides.dense_causal_sdpa.unmasked_text_rows",
+        ]
+        for targets in (imports, list(reversed(imports))):
+            with self.subTest(targets=targets):
+                config = deepseek_v3_debugmodel_mtp(seq_len=8)
+                config.model = build_model_config(
+                    "debugmodel",
+                    seq_len=8,
+                    num_mtp_layers=1,
+                    attn_backend="varlen",
+                    parallelism=config.parallelism,
+                )
+                config.validator = Validator.Config(
+                    dataloader=deepcopy(config.dataloader), steps=1
+                )
+                apply_overrides(OverrideConfig(imports=targets), config)
+                self.assertFalse(config.dataloader.collator.mask_document_boundaries)
+                self.assertFalse(
+                    config.validator.dataloader.collator.mask_document_boundaries
+                )
+                attention_configs = [
+                    attention
+                    for _, attention, _, _ in config.model.traverse(Attention.Config)
+                ]
+                self.assertGreater(len(attention_configs), len(config.model.layers))
+                for attention in attention_configs:
+                    self.assertIsInstance(attention, FusedMLAAttention.Config)
+                    self.assertIsInstance(
+                        attention.inner_attention, DenseCausalBf16SDPA.Config
+                    )
+
+    def test_separate_dense_and_fused_mla_overrides_remain_rejected(self):
+        config = deepseek_v3_debugmodel_mtp(seq_len=8)
+        config.model = build_model_config(
+            "debugmodel",
+            seq_len=8,
+            num_mtp_layers=1,
+            attn_backend="varlen",
+            parallelism=config.parallelism,
+        )
+        with self.assertRaisesRegex(ValueError, "Nested overrides"):
+            apply_overrides(
+                OverrideConfig(
+                    imports=[
+                        "torchtitan_recipes.overrides.dense_causal_sdpa.dense_causal_bf16_sdpa",
+                        "torchtitan_recipes.overrides.fused_mla.fused_mla",
+                    ]
+                ),
+                config,
+            )
+
+    def test_dense_override_does_not_silently_skip_flex_with_data_override(self):
+        config = deepseek_v3_debugmodel_mtp(seq_len=8)
+        config.model = build_model_config(
+            "debugmodel",
+            seq_len=8,
+            num_mtp_layers=1,
+            attn_backend="flex",
+            parallelism=config.parallelism,
+        )
+        with self.assertRaisesRegex(ValueError, "plain causal Varlen"):
+            apply_overrides(
+                OverrideConfig(
+                    imports=[
+                        "torchtitan_recipes.overrides.dense_causal_sdpa.dense_causal_bf16_sdpa",
+                        "torchtitan_recipes.overrides.dense_causal_sdpa.unmasked_text_rows",
+                    ]
+                ),
+                config,
+            )
+
+    def test_dense_graph_metadata_does_not_require_document_cap(self):
+        config = deepseek_v3_debugmodel_mtp(seq_len=8)
+        config.model = build_model_config(
+            "debugmodel",
+            seq_len=8,
+            num_mtp_layers=1,
+            attn_backend="varlen",
+            parallelism=config.parallelism,
+        )
+        config.training.disable_cuda_graphs = False
+        config.dataloader.max_num_documents = None
+        apply_overrides(
+            OverrideConfig(
+                imports=[
+                    "torchtitan_recipes.overrides.dense_causal_sdpa.dense_causal_bf16_sdpa",
+                ]
+            ),
+            config,
+        )
+        with patch(
+            "torchtitan.distributed.cuda_graph.cuda_graphs_supported", return_value=True
+        ):
+            config.__post_init__()
+        self.assertFalse(config.training.disable_cuda_graphs)
+        self.assertIsNone(config.dataloader.max_num_documents)
+        metadata = DenseCausalBf16SDPA.Config().build_attention_metadata(
+            torch.arange(8)
+        )
+        self.assertEqual(metadata.cu_seq_q.tolist(), [0, 8])
 
 
 class TestPackedVarlenAttentionMetadata(unittest.TestCase):

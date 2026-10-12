@@ -52,10 +52,16 @@ class TextCollator(Collator):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Collator.Config):
-        pass
+        mask_document_boundaries: bool = True
+        """Preserve source/document position resets by default.
+
+        False uses continuous positions within each max-context-length row,
+        allowing causal attention and MTP shifts across source documents.
+        Input/label alignment and padding masks are unchanged.
+        """
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
-        del config
+        self._mask_document_boundaries = config.mask_document_boundaries
         self._num_tokens_per_microbatch = context.num_tokens_per_microbatch
         self._max_context_length = context.max_context_length
         self._num_mtp_layers = context.num_mtp_layers
@@ -67,7 +73,13 @@ class TextCollator(Collator):
 
         size = self._num_tokens_per_microbatch
         input_ids = torch.zeros(size, dtype=torch.int64, pin_memory=HAS_PIN_MEMORY)
-        positions = torch.zeros(size, dtype=torch.int64, pin_memory=HAS_PIN_MEMORY)
+        positions = (
+            torch.zeros(size, dtype=torch.int64, pin_memory=HAS_PIN_MEMORY)
+            if self._mask_document_boundaries
+            else torch.arange(
+                size, dtype=torch.int64, pin_memory=HAS_PIN_MEMORY
+            ).remainder_(self._max_context_length)
+        )
         labels = torch.full(
             (size,), IGNORE_INDEX, dtype=torch.int64, pin_memory=HAS_PIN_MEMORY
         )
@@ -81,17 +93,18 @@ class TextCollator(Collator):
             [torch.as_tensor(row.labels) for row in rows],
             out=labels[:num_tokens],
         )
-        torch.cat(
-            [
-                (
-                    torch.arange(len(row.input_ids))
-                    if row.positions is None
-                    else torch.as_tensor(row.positions)
-                )
-                for row in rows
-            ],
-            out=positions[:num_tokens],
-        )
+        if self._mask_document_boundaries:
+            torch.cat(
+                [
+                    (
+                        torch.arange(len(row.input_ids))
+                        if row.positions is None
+                        else torch.as_tensor(row.positions)
+                    )
+                    for row in rows
+                ],
+                out=positions[:num_tokens],
+            )
         torch.cat(
             [
                 (
@@ -105,7 +118,7 @@ class TextCollator(Collator):
         )
 
         pad_len = self._num_tokens_per_microbatch - num_tokens
-        if pad_len:
+        if pad_len and self._mask_document_boundaries:
             torch.arange(pad_len, out=positions[num_tokens:])
             positions[num_tokens:].remainder_(self._max_context_length)
 
