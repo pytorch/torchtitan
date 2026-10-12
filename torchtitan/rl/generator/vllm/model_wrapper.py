@@ -41,6 +41,9 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
+from torchtitan.models.common.attention import BaseAttention
+from torchtitan.models.common.attention.gdn import GatedDeltaNet
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -66,7 +69,7 @@ def _replace_vllm_layer_configs(model_config):
         new_layer_cfg = layer_cfg
 
         attention_cfg = getattr(layer_cfg, "attention", None)
-        if attention_cfg is not None:
+        if isinstance(attention_cfg, BaseAttention.Config):
             (
                 num_heads,
                 num_kv_heads,
@@ -90,8 +93,8 @@ def _replace_vllm_layer_configs(model_config):
                 ),
             )
 
-        delta_net_cfg = getattr(layer_cfg, "delta_net", None)
-        if delta_net_cfg is not None:
+        elif isinstance(attention_cfg, GatedDeltaNet.Config):
+            delta_net_cfg = attention_cfg
             from torchtitan.rl.generator.vllm.gdn import VLLMInnerGatedDeltaNet
 
             vllm_inner_gdn_cfg = VLLMInnerGatedDeltaNet.Config(
@@ -109,14 +112,14 @@ def _replace_vllm_layer_configs(model_config):
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
-                delta_net=dataclasses.replace(
+                attention=dataclasses.replace(
                     delta_net_cfg,
                     inner_attention=vllm_inner_gdn_cfg,
                 ),
             )
 
-        kda_cfg = getattr(layer_cfg, "delta_attention", None)
-        if kda_cfg is not None:
+        elif isinstance(attention_cfg, KDA.Config):
+            kda_cfg = attention_cfg
             from torchtitan.rl.generator.vllm.kda import VLLMInnerKDA
 
             vllm_inner_kda_cfg = VLLMInnerKDA.Config(
@@ -129,7 +132,7 @@ def _replace_vllm_layer_configs(model_config):
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
-                delta_attention=dataclasses.replace(
+                attention=dataclasses.replace(
                     kda_cfg,
                     inner_attention=vllm_inner_kda_cfg,
                 ),

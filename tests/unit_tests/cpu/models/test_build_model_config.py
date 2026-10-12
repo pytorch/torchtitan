@@ -14,7 +14,13 @@ import pytest
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import ModelConfigConverter
-from torchtitan.models.common.attention import InnerAttention, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    BaseAttention,
+    InnerAttention,
+    VarlenInnerAttention,
+)
+from torchtitan.models.common.attention.gdn import GatedDeltaNet
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 
 _MODELS = [
@@ -42,7 +48,11 @@ def test_model_defaults_to_varlen(model):
         next(iter(module.MODEL_FLAVORS)), parallelism=ParallelismConfig()
     )
     layers = (
-        [layer.attention for layer in config.layers if layer.attention is not None]
+        [
+            layer.attention
+            for layer in config.layers
+            if isinstance(layer.attention, BaseAttention.Config)
+        ]
         if isinstance(config, Decoder.Config)
         else [config]
     )
@@ -56,6 +66,26 @@ def test_model_defaults_to_varlen(model):
         isinstance(attention, VarlenInnerAttention.Config)
         for attention in attention_configs
     )
+
+
+@pytest.mark.parametrize("model", ["qwen3_5", "qwen3_6", "qwen3_8", "kimi_k3"])
+def test_hybrid_layers_have_one_attention_config(model):
+    module = importlib.import_module(f"torchtitan.models.{model}")
+    config = module.build_model_config("debugmodel", parallelism=ParallelismConfig())
+    for layer in config.layers:
+        assert isinstance(
+            layer.attention, (BaseAttention.Config, GatedDeltaNet.Config, KDA.Config)
+        )
+        assert not hasattr(layer, "delta_net")
+        assert not hasattr(layer, "delta_attention")
+    assert isinstance(config.first_attention, BaseAttention.Config)
+    config.layers = [
+        layer
+        for layer in config.layers
+        if not isinstance(layer.attention, BaseAttention.Config)
+    ]
+    assert config.layers
+    assert config.first_attention is None
 
 
 class _ReplaceRootConverter(ModelConfigConverter):

@@ -222,14 +222,13 @@ class Qwen35TransformerBlock(Module):
     """Hybrid transformer block for Qwen3.5.
 
     Each layer uses either full attention (Qwen35Attention) or linear
-    attention (GatedDeltaNet), determined by which config is provided.
+    attention (GatedDeltaNet), determined by the attention config type.
     Both types share the same FFN/MoE structure.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        attention: Qwen35Attention.Config | None = None
-        delta_net: GatedDeltaNet.Config | None = None
+        attention: Qwen35Attention.Config | GatedDeltaNet.Config
         feed_forward: Module.Config | None = None
         moe: Module.Config | None = None
         attention_norm: OffsetRMSNorm.Config
@@ -237,13 +236,8 @@ class Qwen35TransformerBlock(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.full_attn = config.attention is not None
-
-        if self.full_attn:
-            self.attn = config.attention.build()  # pyrefly: ignore [missing-attribute]
-        else:
-            assert config.delta_net is not None
-            self.attn = config.delta_net.build()
+        self.full_attn = isinstance(config.attention, Qwen35Attention.Config)
+        self.attn = config.attention.build()
 
         self.moe_enabled = config.moe is not None
         if self.moe_enabled:
@@ -383,8 +377,8 @@ class Qwen35Model(MultimodalModel):
                         v_head_dim=attention.head_dim,
                         seq_len=seq_len,
                     )
-                elif isinstance(layer.delta_net, GatedDeltaNet.Config):
-                    delta_net = layer.delta_net
+                elif isinstance(layer.attention, GatedDeltaNet.Config):
+                    delta_net = layer.attention
                     num_value_heads = (
                         delta_net.in_proj_v.out_features // delta_net.value_head_dim
                     )
@@ -401,7 +395,11 @@ class Qwen35Model(MultimodalModel):
         tp = spmd_mesh_size("tp")
         if tp > 1:
             delta_net = next(
-                (layer.delta_net for layer in config.layers if layer.delta_net),
+                (
+                    layer.attention
+                    for layer in config.layers
+                    if isinstance(layer.attention, GatedDeltaNet.Config)
+                ),
                 None,
             )
             if delta_net is not None:

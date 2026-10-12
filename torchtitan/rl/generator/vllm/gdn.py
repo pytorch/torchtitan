@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import LinearAttentionMetadata
+from torchtitan.models.common.attention.gdn import GatedDeltaNet
 from torchtitan.models.common.attention.linear_attention import chunk_kernel_options
 from torchtitan.models.common.attn_gym import (
     causal_conv1d_decode,
@@ -419,7 +420,7 @@ def maybe_configure_gdn_hybrid_model(
                 gdn_config.conv_kernel_size,
             )
             for layer in model_config.layers
-            if (gdn_config := getattr(layer, "delta_net", None)) is not None
+            if isinstance(gdn_config := layer.attention, GatedDeltaNet.Config)
         ),
     )
     if state_shape is None:

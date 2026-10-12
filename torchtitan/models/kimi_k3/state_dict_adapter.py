@@ -14,6 +14,8 @@ from typing import Any, TYPE_CHECKING
 import torch
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.attention import BaseAttention
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.moe_state_dict_adapter import MoEStateDictAdapter
 
 if TYPE_CHECKING:
@@ -131,7 +133,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         layer_config = self.kimi_config.layers[int(layer_num)]
         attention_map = (
             self.mla_from_hf_map
-            if layer_config.attention is not None
+            if isinstance(layer_config.attention, BaseAttention.Config)
             else self.kda_from_hf_map
         )
         return attention_map.get(abstract_key)
@@ -373,10 +375,8 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                     unmapped.append(key)
                     continue
                 if new_abstract_key == "layers.{}.delta_attention.dt_bias":
-                    delta_config = self.kimi_config.layers[
-                        int(layer_num)
-                    ].delta_attention
-                    if delta_config is None:
+                    delta_config = self.kimi_config.layers[int(layer_num)].attention
+                    if not isinstance(delta_config, KDA.Config):
                         raise ValueError(f"HF key '{key}' targets a non-KDA layer.")
                     value = value.reshape(
                         delta_config.num_heads,

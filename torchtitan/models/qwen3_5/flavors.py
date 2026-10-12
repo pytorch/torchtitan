@@ -488,10 +488,7 @@ def _build_qwen35_layers(
                 enable_sp=enable_sp,
             )
             if is_full
-            else None
-        )
-        deltanet = (
-            _qwen35_deltanet_config(
+            else _qwen35_deltanet_config(
                 dim=dim,
                 n_key_heads=n_key_heads,
                 n_value_heads=n_value_heads,
@@ -500,14 +497,11 @@ def _build_qwen35_layers(
                 layer_id=layer_id,
                 enable_sp=enable_sp,
             )
-            if not is_full
-            else None
         )
 
         layers.append(
             Qwen35TransformerBlock.Config(
                 attention=attention,
-                delta_net=deltanet,
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
@@ -572,10 +566,7 @@ def _build_qwen35_moe_layers(
                 enable_sp=enable_sp,
             )
             if is_full
-            else None
-        )
-        deltanet = (
-            _qwen35_deltanet_config(
+            else _qwen35_deltanet_config(
                 dim=dim,
                 n_key_heads=n_key_heads,
                 n_value_heads=n_value_heads,
@@ -584,14 +575,11 @@ def _build_qwen35_moe_layers(
                 layer_id=layer_id,
                 enable_sp=enable_sp,
             )
-            if not is_full
-            else None
         )
 
         layers.append(
             Qwen35TransformerBlock.Config(
                 attention=attention,
-                delta_net=deltanet,
                 moe=make_moe_config(
                     num_experts=num_experts,
                     router=make_router_config(

@@ -28,6 +28,7 @@ from torchtitan.models.common.async_linear import (
     AsyncRowParallelLinear,
 )
 from torchtitan.models.common.attention import (
+    BaseAttention,
     FlexInnerAttention,
     SlidingWindowFlexInnerAttention,
     VarlenInnerAttention,
@@ -545,17 +546,12 @@ class TestTransformModel(unittest.TestCase):
             FlexInnerAttention.Config,
         )
         for layer in model.layers:
-            if layer.attention is not None:
-                self.assertIsInstance(
-                    layer.attention.inner_attention,
-                    KVAllGatherCPFlexInnerAttention.Config,
-                )
-            else:
-                assert layer.delta_attention is not None
-                self.assertIsInstance(
-                    layer.delta_attention.inner_attention,
-                    ContextParallelInnerKDA.Config,
-                )
+            self.assertIsInstance(
+                layer.attention.inner_attention,
+                KVAllGatherCPFlexInnerAttention.Config
+                if isinstance(layer.attention, BaseAttention.Config)
+                else ContextParallelInnerKDA.Config,
+            )
 
     def test_transforms_mtp_layers(self):
         from torchtitan.models.deepseek_v3.mtp import MTPDecoder

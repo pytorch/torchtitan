@@ -25,7 +25,7 @@ from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
 from torchtitan.models.common.attention.cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
 )
-from torchtitan.models.common.attention.gdn import InnerGDN
+from torchtitan.models.common.attention.gdn import GatedDeltaNet, InnerGDN
 
 # Tensor shape suffixes: B batch, L seq len, H heads, K key head dim,
 # V value head dim.
@@ -339,11 +339,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             for layer in model.layers.values()
             if layer.full_attn
         )
-        full_attention_config = next(
-            layer.attention.inner_attention
-            for layer in model.config.layers
-            if layer.attention is not None
-        )
+        full_attention_config = model.config.first_attention.inner_attention
 
         with mock.patch.object(
             type(full_attention_config),
@@ -651,7 +647,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         deltanet_only_config.layers = [
             layer
             for layer in deltanet_only_config.layers
-            if layer.delta_net is not None
+            if isinstance(layer.attention, GatedDeltaNet.Config)
         ]
         deltanet_only_model = deltanet_only_config.build()
         deltanet_only_masks = deltanet_only_model._get_attention_metadata(positions)

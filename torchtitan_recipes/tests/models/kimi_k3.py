@@ -38,6 +38,7 @@ from torchtitan.distributed.flex_shard import (
     Owned,
 )
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -150,9 +151,9 @@ def _dist_muon_optimizer(
 ) -> OptimizersContainer.Config:
     attention = cast(KimiMLAAttention.Config, model_config.first_attention)
     delta_attention = next(
-        layer.delta_attention
+        layer.attention
         for layer in model_config.layers
-        if layer.delta_attention is not None
+        if isinstance(layer.attention, KDA.Config)
     )
     # FSDP flattens dp_shard and cp into one storage axis under CP.
     owned = ComputeLayout(
@@ -217,7 +218,7 @@ def _dist_muon_optimizer(
         layer = model_config.layers[layer_id]
         prefix = f"layers.{layer_id}"
         shardings = {}
-        if layer.attention is not None:
+        if isinstance(layer.attention, KimiMLAAttention.Config):
             shardings.update(
                 {
                     f"{prefix}.attention.{projection}.weight": compute_sharding

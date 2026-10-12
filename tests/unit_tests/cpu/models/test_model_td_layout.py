@@ -90,9 +90,8 @@ class TestModelTDLayout(unittest.TestCase):
         config = build_config(
             "varlen", seq_len=max_context_length, parallelism=ParallelismConfig()
         )
-        attention_config = next(
-            layer.attention for layer in config.layers if layer.attention is not None
-        )
+        attention_config = config.first_attention
+        assert attention_config is not None
         attention = attention_config.build()
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)
