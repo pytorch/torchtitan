@@ -44,7 +44,7 @@ class _GeneratorHandle(RoutingCandidate):
     """Set when this generator has no reserved routed calls."""
 
     serving: asyncio.Event = field(default_factory=asyncio.Event)
-    """Set while routable; cleared while it drains for a weight sync (hot_swap=False only)."""
+    """Set while routable; cleared while it drains for a model state dict load (hot_swap=False only)."""
 
 
 class InterGeneratorRouter(Actor, Configurable):
@@ -94,7 +94,7 @@ class InterGeneratorRouter(Actor, Configurable):
 
         Draining only waits for a generator's in-flight ``_route`` call (one
         turn) to finish; between turns of a multi-turn rollout the generator is
-        idle, so a weight sync may land mid-rollout and successive turns can run
+        idle, so a model state dict load may land mid-rollout and successive turns can run
         under different policy versions. A turn whose session is pinned to a
         draining generator waits for it instead of moving to another one."""
 
@@ -141,7 +141,7 @@ class InterGeneratorRouter(Actor, Configurable):
             self._serving.clear()
 
     def _set_serving(self, h: _GeneratorHandle, serving: bool) -> None:
-        """Take a generator out of routing while it drains for a weight sync, or put it back."""
+        """Take a generator out of routing while it drains for a model state dict load, or put it back."""
 
         if serving:
             h.serving.set()
@@ -180,7 +180,7 @@ class InterGeneratorRouter(Actor, Configurable):
         """
         # TODO(pytorch/torchtitan#5253): drain inside the generator, so this wait goes away.
         # A turn pinned to a draining generator waits for it: all generators drain in the same
-        # weight sync (hot_swap=False), so re-pinning would pile those sessions onto whichever
+        # model state dict sync (hot_swap=False), so re-pinning would pile those sessions onto whichever
         # serves first.
         pinned = self._strategy.pinned_candidate(routing_ctx)
         if pinned is not None:
@@ -255,7 +255,7 @@ class InterGeneratorRouter(Actor, Configurable):
                 # Hot swap: pull concurrently with in-flight generation, without
                 # draining. Whether the pull is genuinely concurrent and safe is
                 # up to the generator's implementation.
-                await h.rank0_actor.pull_model_state_dict.call_one(policy_version)
+                await h.rank0_actor.load_model_state_dict.call_one(policy_version)
             else:
                 # Drain: stop routing to this generator and wait for in-flight
                 # work to finish before pulling, then re-admit it.
@@ -265,12 +265,12 @@ class InterGeneratorRouter(Actor, Configurable):
                 try:
                     with sl.log_trace_span("router_drain_wait"):
                         await h.idle.wait()
-                    await h.rank0_actor.pull_model_state_dict.call_one(policy_version)
+                    await h.rank0_actor.load_model_state_dict.call_one(policy_version)
                 finally:
                     self._set_serving(h, serving=True)
 
         # Start the pulls in parallel. Technically we could do rolling sync to
-        # maintain availability during weight sync, but that's not a priority
+        # maintain availability during model state dict loads, but that's not a priority
         # for now.
         # TODO(perf): stagger the per-generator fetches when num_generators is large so they don't
         #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for

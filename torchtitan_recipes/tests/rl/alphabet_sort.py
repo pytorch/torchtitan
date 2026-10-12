@@ -256,7 +256,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 max_tokens=50,
             ),
             debug=batch_invariant_config,
-            reset_kv_cache_on_weight_sync=True,
+            reset_kv_cache_on_model_state_dict_load=True,
         ),
     )
 
@@ -496,7 +496,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
                 max_tokens=50,
             ),
             debug=_BATCH_INVARIANT_DEBUG,
-            reset_kv_cache_on_weight_sync=True,
+            reset_kv_cache_on_model_state_dict_load=True,
         ),
     )
 
@@ -594,7 +594,7 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_weight_sync=True,
+        reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
         "debugmodel",
@@ -725,7 +725,7 @@ def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_weight_sync=True,
+        reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _kimi_k3_rl_model_configs(
         "debugmodel",

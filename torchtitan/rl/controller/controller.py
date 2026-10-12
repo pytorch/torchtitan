@@ -33,7 +33,7 @@ RolloutGroupWorkBuffer
 | _rollout_loop[N]  finalize_work(RolloutGroup)                                  INFLIGHT -> FINALIZED                |
 | _batcher_loop     RolloutGroup = take_finalized()                              FINALIZED -> taken (slot still held) |
 | _batcher_loop     release_active_groups(1, "untrainable_group")                slot released                        |
-| _trainer_loop     release_active_groups(num_prompts_per_train_step, "trained")  slots released after weight pull     |
+| _trainer_loop     release_active_groups(num_prompts_per_train_step, "trained")  slots released after state dict pull |
 +---------------------------------------------------------------------------------------------------------------------+
                                                   |
                                                   | group = group_buffer.take_finalized()
@@ -117,7 +117,7 @@ from torchtitan.rl.controller.metrics import (
     compute_rollout_metrics,
     MetricsTimer,
 )
-from torchtitan.rl.controller.model_state_dict_sync import WeightSyncManager
+from torchtitan.rl.controller.model_state_dict_sync import ModelStateDictSync
 from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
@@ -544,7 +544,7 @@ class Controller(Configurable):
 
         Kept separate from ``__init__`` because actor spawning, torch
         elastic env setup, TorchStore initialization, and the initial
-        weight push/pull are all ``await``-based runtime side effects
+        model state dict push/pull are all ``await``-based runtime side effects
         that cannot run in a synchronous constructor.
 
         The trainer and generator meshes are provisioned by the caller (see
@@ -649,7 +649,7 @@ class Controller(Configurable):
                 hf_assets_path=config.hf_assets_path,
             )
 
-        # Initialize TorchStore for weight sync between trainer and generator.
+        # Initialize TorchStore for model state dict sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
         # with the weight source for faster data access in the non-RDMA path.
         # https://github.com/meta-pytorch/torchstore
@@ -699,7 +699,7 @@ class Controller(Configurable):
         with sl.log_trace_span("generator_start_engine_loop"):
             await self.generator_router.start_engine_loop.call_one()
 
-        # Initial weight sync: only the trainer loads weights; generators pull at start_step.
+        # Initial model state dict sync: only the trainer loads weights; generators pull at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
@@ -839,8 +839,8 @@ class Controller(Configurable):
             window_size=window_size,
         )
 
-        # Overlaps each step's weight handoff (push -> pull -> buffer-slot release) with the next step's fwd/bwd
-        self._weight_sync = WeightSyncManager(
+        # Overlaps each step's model state dict handoff (push -> pull -> buffer-slot release) with the next step's fwd/bwd
+        self._model_state_dict_sync = ModelStateDictSync(
             trainer=self.trainer,
             generator_router=self.generator_router,
             group_buffer=self._group_buffer,
@@ -1113,7 +1113,7 @@ class Controller(Configurable):
         """Run num_training_steps optimizer steps: train one packed batch, publish trainer weights,
         then pull them into generators, log metrics.
 
-        NOTE: Weight sync is overlapped with the training step.
+        NOTE: Model state dict sync is overlapped with the training step.
         Trainer push:
             - Called after optimizer.step()
             - Awaited before next optimizer.step (weights changes then)
@@ -1181,14 +1181,14 @@ class Controller(Configurable):
                         logger.error("Loss is NaN/Inf; training diverged")
                         break
 
-                # Await trainer weight push before the optimizer mutates the weights.
+                # Await the trainer model state dict push before the optimizer mutates the weights.
                 with (
                     sl.log_trace_span("blocking_trainer_push_model_state_dict"),
                     step_timer.record(
                         "timing/step/blocking_trainer_push_model_state_dict"
                     ),
                 ):
-                    push_metrics = await self._weight_sync.wait_prev_push()
+                    push_metrics = await self._model_state_dict_sync.wait_prev_push()
 
                 with (
                     sl.log_trace_span("optim_step"),
@@ -1211,17 +1211,17 @@ class Controller(Configurable):
                     )
                 self._trainer_policy_version = optimizer_result.policy_version
 
-                # Await generator weight pull to finish before the trainer's next push.
+                # Await the generator model state dict pull to finish before the trainer's next push.
                 with (
                     sl.log_trace_span("blocking_generator_pull_model_state_dict"),
                     step_timer.record(
                         "timing/step/blocking_generator_pull_model_state_dict"
                     ),
                 ):
-                    pull_metrics = await self._weight_sync.wait_prev_pull()
+                    pull_metrics = await self._model_state_dict_sync.wait_prev_pull()
 
                 # Overlap this step's push -> pull -> buffer-slot release with the next step's fwd/bwd.
-                self._weight_sync.start_async_push_pull(
+                self._model_state_dict_sync.start_async_push_pull(
                     version=optimizer_result.policy_version
                 )
 
@@ -1258,4 +1258,4 @@ class Controller(Configurable):
                 )
 
         # Finish the last in-flight sync so generators hold the final weights for post-validation.
-        await self._weight_sync.wait_inflight_push_pull()
+        await self._model_state_dict_sync.wait_inflight_push_pull()

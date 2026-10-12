@@ -4,9 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for WeightSyncManager.
+"""Unit tests for ModelStateDictSync.
 
-It overlaps the trainer->generator weight handoff with the next training step:
+It overlaps the trainer->generator model state dict handoff with the next training step:
 `start_async_push_pull` fires push -> pull -> buffer-slot release in the background,
 and the loop joins each leg with `wait_prev_*`. These tests use fakes for the
 trainer actor, generator router, and group buffer (no GPU / Monarch / TorchStore).
@@ -15,7 +15,7 @@ trainer actor, generator router, and group buffer (no GPU / Monarch / TorchStore
 import asyncio
 import contextlib
 
-from torchtitan.rl.controller.model_state_dict_sync import WeightSyncManager
+from torchtitan.rl.controller.model_state_dict_sync import ModelStateDictSync
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
 GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"
@@ -68,7 +68,7 @@ async def _noop():
 
 
 def _manager(*, trainer, router, buffer, num_prompts_per_train_step=8):
-    return WeightSyncManager(
+    return ModelStateDictSync(
         trainer=trainer,
         generator_router=router,
         group_buffer=buffer,

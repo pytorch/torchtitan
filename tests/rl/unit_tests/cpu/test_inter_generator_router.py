@@ -53,7 +53,7 @@ class _Actor:
     ):
         self.generate = _Endpoint(name, wait=wait_generate)
         self.prefetch_model_state_dict = _Endpoint(wait=wait_prefetch)
-        self.pull_model_state_dict = _Endpoint(None, wait=wait_pull, raises=raises_pull)
+        self.load_model_state_dict = _Endpoint(None, wait=wait_pull, raises=raises_pull)
 
     def flatten(self, *args, **kwargs):
         return self
@@ -127,7 +127,7 @@ def test_least_loaded_tie_break_spreads_over_a_changing_candidate_set():
         actors = [_Actor(f"gen{i}") for i in range(4)]
         router = _router(actors)
 
-        # gen1 drains for a weight sync on every other request, so the candidate
+        # gen1 drains for a model state dict load on every other request, so the candidate
         # set alternates between four and three generators. Each route finishes
         # before the next starts, so the survivors are always tied at zero load
         # and only the tie-break decides.
@@ -238,7 +238,7 @@ def test_sticky_session_waits_for_its_syncing_generator():
             == "gen0"
         )
 
-        # gen0 drains for a weight sync: s0's next turn waits instead of moving to gen1.
+        # gen0 drains for a model state dict load: s0's next turn waits instead of moving to gen1.
         router._set_serving(router._generators[0], False)
         turn = asyncio.create_task(
             router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
@@ -408,15 +408,15 @@ def test_drain_excludes_syncing_generator_from_routes():
         router = _router(actors)
 
         pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=1))
-        await actors[0].pull_model_state_dict.started.wait()
+        await actors[0].load_model_state_dict.started.wait()
 
         assert not router._generators[0].serving.is_set()
         assert await router._route("generate", routing_ctx=RoutingContext()) == "gen1"
 
-        actors[0].pull_model_state_dict.release.set()
+        actors[0].load_model_state_dict.release.set()
         await pull_task
         assert [h.serving.is_set() for h in router._generators] == [True, True]
-        assert [actor.pull_model_state_dict.calls for actor in actors] == [
+        assert [actor.load_model_state_dict.calls for actor in actors] == [
             [((1,), {})],
             [((1,), {})],
         ]
@@ -441,16 +441,16 @@ def test_drain_pulls_idle_generators_while_busy_generator_drains():
 
         pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=2))
         await asyncio.wait_for(
-            actors[1].pull_model_state_dict.started.wait(), timeout=1.0
+            actors[1].load_model_state_dict.started.wait(), timeout=1.0
         )
 
         # Both are draining, but gen0's pull is still waiting for its in-flight
         # route to drain, so only gen1 (idle) has started pulling.
         assert [h.serving.is_set() for h in router._generators] == [False, False]
-        assert actors[0].pull_model_state_dict.calls == []
+        assert actors[0].load_model_state_dict.calls == []
 
         # gen1 finishes pulling and is routable again while gen0 still drains.
-        actors[1].pull_model_state_dict.release.set()
+        actors[1].load_model_state_dict.release.set()
         assert (
             await asyncio.wait_for(
                 router._route("generate", routing_ctx=RoutingContext()),
@@ -463,7 +463,7 @@ def test_drain_pulls_idle_generators_while_busy_generator_drains():
         actors[0].generate.release.set()
         assert await route_task == "gen0"
         await pull_task
-        assert [actor.pull_model_state_dict.calls for actor in actors] == [
+        assert [actor.load_model_state_dict.calls for actor in actors] == [
             [((2,), {})],
             [((2,), {})],
         ]
@@ -477,15 +477,15 @@ def test_hot_swap_keeps_generators_serving_during_pull():
         router = _router([actor], hot_swap=True)
 
         pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=3))
-        await actor.pull_model_state_dict.started.wait()
+        await actor.load_model_state_dict.started.wait()
 
         # Hot swap does not quiesce the generator, so it keeps serving.
         assert router._generators[0].serving.is_set()
         assert await router._route("generate", routing_ctx=RoutingContext()) == "gen0"
 
-        actor.pull_model_state_dict.release.set()
+        actor.load_model_state_dict.release.set()
         await pull_task
-        assert actor.pull_model_state_dict.calls == [((3,), {})]
+        assert actor.load_model_state_dict.calls == [((3,), {})]
 
     asyncio.run(_run())
 
@@ -500,7 +500,7 @@ def test_prefetch_keeps_generator_serving_before_drain():
 
         assert router._generators[0].serving.is_set()
         assert await router._route("generate", routing_ctx=RoutingContext()) == "gen0"
-        assert actor.pull_model_state_dict.calls == []
+        assert actor.load_model_state_dict.calls == []
 
         actor.prefetch_model_state_dict.release.set()
         await pull_task
@@ -515,7 +515,7 @@ def test_single_generator_blocks_routes_while_draining():
         router = _router([actor])
 
         pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=1))
-        await actor.pull_model_state_dict.started.wait()
+        await actor.load_model_state_dict.started.wait()
 
         route_task = asyncio.create_task(
             router._route("generate", routing_ctx=RoutingContext())
@@ -524,7 +524,7 @@ def test_single_generator_blocks_routes_while_draining():
         assert not route_task.done()
         assert actor.generate.calls == []
 
-        actor.pull_model_state_dict.release.set()
+        actor.load_model_state_dict.release.set()
         await pull_task
 
         assert await route_task == "gen0"
@@ -554,7 +554,7 @@ def test_pull_model_state_dict_pulls_every_generator():
         await router._pull_model_state_dict(policy_version=7)
 
         assert all(len(actor.prefetch_model_state_dict.calls) == 1 for actor in actors)
-        assert [actor.pull_model_state_dict.calls for actor in actors] == [
+        assert [actor.load_model_state_dict.calls for actor in actors] == [
             [((7,), {})],
             [((7,), {})],
         ]

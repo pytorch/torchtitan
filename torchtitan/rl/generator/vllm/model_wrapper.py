@@ -372,7 +372,7 @@ class VLLMModelWrapper(Module):
             dump_folder="",
         )
 
-        # Preserve compute storage addresses across weight syncs for CUDA graphs
+        # Preserve compute storage addresses across model state dict loads for CUDA graphs
         assert isinstance(self.model, FSDPModule)
         self.model.set_keep_unsharded_storage(True)
 
@@ -410,7 +410,7 @@ class VLLMModelWrapper(Module):
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
 
-        # Build pinned CPU receive buffers for weight sync while the model
+        # Build pinned CPU receive buffers for model state dict loads while the model
         # is still sharded. Bind first so first-touch places them on the
         # NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")

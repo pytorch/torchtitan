@@ -24,7 +24,7 @@ Note: Unified-model performance varies by model, input shape, and parallelism: i
 ## Model support
 
 Supported entries completed a two-step end-to-end RL run with a representative
-debug model, including rollout generation, training, and weight synchronization.
+debug model, including rollout generation, training, and model state dict sync.
 Generator DP and TP were tested together at degree 2; EP was tested at degree 4
 for MoE models. Generator sequence parallelism was disabled.
 
@@ -60,7 +60,7 @@ optimization, checkpointing, profiling, GC, SDC replay, and CUDA graphs.
 The distributed layer builds on two core components:
 
 - **[Monarch](https://github.com/meta-pytorch/monarch) as the controller:** orchestrates trainers and generators on separate GPU meshes with asynchronous communication.
-- **[TorchStore](https://github.com/meta-pytorch/torchstore) for weight synchronization:** efficiently publishes weights from the trainer to generators, including direct GPU-to-GPU RDMA transfers.
+- **[TorchStore](https://github.com/meta-pytorch/torchstore) for model state dict sync:** efficiently publishes the model state dict from the trainer to generators, including direct GPU-to-GPU RDMA transfers.
 
 ### Package organization
 
@@ -125,7 +125,7 @@ behavior. For example, the Verifiers integration keeps a custom
 `VerifiersRollouter` because it owns an external environment server and a
 different rollout protocol.
 
-The default path handles rollout, scoring, batching, training, and weight sync.
+The default path handles rollout, scoring, batching, training, and model state dict sync.
 
 That's it. Wire the rollouter into a recipe function:
 

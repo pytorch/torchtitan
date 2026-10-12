@@ -206,7 +206,7 @@ class RolloutGroupWorkBuffer(Configurable):
                 await self._condition.wait()  # nothing finalized inside the window -> stall
 
     async def release_active_groups(self, count: int, *, reason: str) -> None:
-        """Free active slots: the trainer releases trained slots after its weight pull; the batcher
+        """Free active slots: the trainer releases trained slots after its model state dict pull; the batcher
         releases untrainable/filtered slots immediately.
 
         Args:

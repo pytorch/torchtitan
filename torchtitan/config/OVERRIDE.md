@@ -411,7 +411,7 @@ checkpoint FQNs. By default an override checkpoints whatever real parameters it
 defines. Keep format-specific layout conversion in a model-level
 `BaseStateDictAdapter` (for example, `Llama3StateDictAdapter` converts native
 `w13.weight` into Hugging Face `gate_proj.weight` and `up_proj.weight`). This
-keeps native DCP checkpoints and per-step RL weight synchronization in the
+keeps native DCP checkpoints and per-step RL model state dict sync in the
 model's physical layout without hook-produced copies.
 
 ## Parallelism

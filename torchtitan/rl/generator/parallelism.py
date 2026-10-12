@@ -44,6 +44,6 @@ class InferenceParallelismConfig:
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
             enable_sequence_parallel=self.enable_sequence_parallel,
-            # Reuse the unsharded compute representation until weight sync.
+            # Reuse the unsharded compute representation until the model state dict load.
             fsdp_reshard_after_forward="never",
         )

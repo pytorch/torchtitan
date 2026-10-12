@@ -116,7 +116,7 @@ class LeastLoadedRoutingStrategy(RoutingStrategy):
         session started from an idle state onto one candidate.
 
         The tie-break tracks per-candidate recency instead of cycling a counter
-        over the tied candidates, because generators drain for weight sync and
+        over the tied candidates, because generators drain for model state dict loads and
         leave the candidate set: cycling by position over a list whose length
         keeps changing can starve a candidate that is only sometimes present.
         """

@@ -218,7 +218,7 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
         ),
         parallelism=trainer_parallelism,
     )
-    # 0.6 (vs the 0.9 default) reserves room for the weight-sync memory spike, which
+    # 0.6 (vs the 0.9 default) reserves room for the model state dict load memory spike, which
     # OOMs the 8B generator otherwise.
     # TODO(@meetv18): the spike is likely GPU-Direct weight transfer being on by default;
     # make the transfer device configurable (CPU default) so this cap can be raised.

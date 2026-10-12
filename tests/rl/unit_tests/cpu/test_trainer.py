@@ -54,7 +54,7 @@ def test_rl_trainer_uses_training_engine_config_defaults() -> None:
     assert not Trainer.Config(model=MagicMock()).training.disable_cuda_graphs
 
 
-def test_pipeline_parallelism_is_rejected_until_weight_sync_supports_it() -> None:
+def test_pipeline_parallelism_is_rejected_until_model_state_dict_sync_supports_it() -> None:
     with pytest.raises(ValueError, match="TorchStore"):
         Trainer.Config(
             model=MagicMock(),

@@ -51,7 +51,7 @@ def test_vllm_replacement_preserves_attention_sharding() -> None:
 
 
 class _Wrapper:
-    """Stand-in `self` for VLLMModelWrapper's real weight-sync methods (no vLLM)."""
+    """Stand-in `self` for VLLMModelWrapper's real model state dict load methods (no vLLM)."""
 
     load_state_dict = VLLMModelWrapper.load_state_dict
 

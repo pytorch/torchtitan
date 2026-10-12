@@ -1,6 +1,6 @@
-# RL weight synchronization
+# RL model state dict sync
 
-The controller uses `WeightSyncManager` to publish each optimized trainer
+The controller uses `ModelStateDictSync` to publish each optimized trainer
 policy through TorchStore, update the generators, and admit new rollouts only
 after the generator update finishes. Trainer staging and publication for policy
 N overlap forward/backward for step N+1. On each generator, the network prefetch
@@ -16,7 +16,7 @@ Trainer:    optimizer N produces policy N
                 |
 Controller: wait for generator update N-1
                 |
-Controller: start asynchronous weight sync N
+Controller: start asynchronous model state dict sync N
                 |
                 +--> Trainer: stage policy N
                 |        --> TorchStore: put_state_dict N
@@ -26,12 +26,12 @@ Controller: start asynchronous weight sync N
                          --> Controller: wait for trainer push N
                          --> Trainer: optimizer N+1 produces policy N+1
                          --> Controller: wait for generator update N
-                         --> Controller: start asynchronous weight sync N+1
+                         --> Controller: start asynchronous model state dict sync N+1
 ```
 
 ## Flow
 
-- Weight sync N and trainer forward/backward N+1 run concurrently.
+- Model state dict sync N and trainer forward/backward N+1 run concurrently.
 - The trainer stages policy N and calls TorchStore `put_state_dict`. The
   generator update then prefetches policy N into pinned CPU memory and applies
   it to the GPU model. Prefetch can overlap generation; application happens at
@@ -39,7 +39,7 @@ Controller: start asynchronous weight sync N
 - Completing `put_state_dict N` releases `wait_prev_push`, allowing trainer
   optimizer N+1 to mutate the model.
 - Completing generator update N releases `wait_prev_pull`, allowing the
-  controller to reuse the staging buffers and TorchStore key for weight sync
+  controller to reuse the staging buffers and TorchStore key for model state dict sync
   N+1.
 
 ## Why the overlap is safe

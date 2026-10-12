@@ -275,7 +275,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
 
     wrapper = engine.model_executor.driver_worker.get_model()
     trainer_sd = trainer_model.state_dict()
-    # As a weight sync: fill the pinned CPU copy, then load it with load_state_dict.
+    # As a model state dict load: fill the pinned CPU copy, then load it with load_state_dict.
     vllm_sd = wrapper._prefetched_model_state_dict
 
     missing = []

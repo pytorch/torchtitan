@@ -87,7 +87,7 @@ def test_single_turn_packs_one_training_sample() -> None:
 
 
 def test_packs_min_and_max_version_across_turns() -> None:
-    # Two turns sampled at different versions (a weight pull landed between them); the packed
+    # Two turns sampled at different versions (a model state dict load landed between them); the packed
     # training_sample records the min (oldest, turn-0) and max (newest, turn-1) version.
     rollout = _scored_rollout(
         [

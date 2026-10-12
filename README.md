@@ -148,7 +148,7 @@ the [model guide](torchtitan/models/README.md).
 **Post-training with [TitanRL](torchtitan/rl/README.md)**
 - One model definition shared by the trainer and vLLM
 - [Bitwise trainer/generator parity](torchtitan/rl/BITWISE_PARITY.md) in batch-invariant mode
-- Async rollouts orchestrated with Monarch; weight sync over TorchStore
+- Async rollouts orchestrated with Monarch; model state dict sync over TorchStore
 - GRPO and DAPO losses; [DAPO Math](torchtitan/rl/examples/dapo_math), [Search-R1](torchtitan/rl/examples/search_r1), and [Verifiers](torchtitan/rl/examples/verifiers) examples
 
 **Checkpointing**

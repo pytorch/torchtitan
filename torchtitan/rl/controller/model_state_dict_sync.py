@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Overlap the trainer->generator weight handoff with the next training step.
+"""Overlap the trainer->generator model state dict handoff with the next training step.
 
 See ``MODEL_STATE_DICT_SYNC.md`` for the end-to-end ordering and concurrency model.
 """
@@ -24,18 +24,18 @@ if TYPE_CHECKING:
     from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
     from torchtitan.rl.trainer.trainer import Trainer
 
-# dummy no-op for step 0, used in WeightSyncManager
+# dummy no-op for step 0, used in ModelStateDictSync
 async def _noop() -> None:
     return None
 
 
-class WeightSyncManager:
-    """Overlap the trainer->generator weight sync with the next training step.
+class ModelStateDictSync:
+    """Overlap the trainer->generator model state dict sync with the next training step.
 
-     Trainer weight push:
+     Trainer model state dict push:
         - Called after optimizer.step()
         - Awaited before next optimizer.step (weights changes then)
-    Generator weight pull:
+    Generator model state dict pull:
         - Called after push completes.
         - Awaited before next push (weights changes then)
 
@@ -45,11 +45,11 @@ class WeightSyncManager:
     Example:
         for step in training_steps:
             fwd_bwd(batch)
-            push_metrics = await weight_sync.wait_prev_push()    # before optim mutates the weights
+            push_metrics = await model_state_dict_sync.wait_prev_push()    # before optim mutates the weights
             optimizer_result = await trainer.optim_step.call()
-            pull_metrics = await weight_sync.wait_prev_pull()  # before the next push overwrites the key
-            weight_sync.start_async_push_pull(version=optimizer_result.policy_version)
-        await weight_sync.wait_inflight_push_pull()  # finish the last step's sync before validation
+            pull_metrics = await model_state_dict_sync.wait_prev_pull()  # before the next push overwrites the key
+            model_state_dict_sync.start_async_push_pull(version=optimizer_result.policy_version)
+        await model_state_dict_sync.wait_inflight_push_pull()  # finish the last step's sync before validation
     """
 
     def __init__(

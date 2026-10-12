@@ -727,8 +727,8 @@ class RequestDispatcher:
 class VLLMGenerator(Configurable):
     """vLLM engine to drive concurrent `generate` calls through one SPMD engine loop.
 
-    The controller fires independent calls (`generate`, `pull_model_state_dict`, `close`),
-    and the router calls `prefetch_model_state_dict` before `pull_model_state_dict` to prefetch weights into CPU.
+    The controller fires independent calls (`generate`, `load_model_state_dict`, `close`),
+    and the router calls `prefetch_model_state_dict` before `load_model_state_dict` to prefetch weights into CPU.
     Rank 0 puts each call on a thread-safe queue and awaits its reply. One background `_engine_loop` per rank
     executes the `LoopDecision` rank 0 makes from the queue. Rank 0 resolves each reply when its request finishes and
     return the result back to the controller.
@@ -764,11 +764,11 @@ class VLLMGenerator(Configurable):
     `concurrent.futures.Future`s it resolves, so the actor's loop stays free to take calls while the engine steps.
     Two endpoints are exceptions. `release_groups` pops cache-salt pins directly: each pop, like the engine loop's
     `setdefault`, is a single dict operation, atomic under the GIL. `prefetch_model_state_dict` writes the staging
-    buffers the engine loop reads on a pull: the router awaits it before `pull_model_state_dict`, and the
-    controller awaits that pull before the next weight sync, so the two never overlap.
+    buffers the engine loop reads on a load: the router awaits it before `load_model_state_dict`, and the
+    controller awaits that load before the next model state dict sync, so the two never overlap.
 
-    A weight sync rides the same loop: `pull_model_state_dict` puts a `ModelStateDictPullMessage` on the queue, which
-    rank 0 turns into a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied between step bursts. The engine does
+    A model state dict load rides the same loop: `load_model_state_dict` puts a `ModelStateDictLoadMessage` on the queue, which
+    rank 0 turns into a `LoopDecision(LoopAction.LOAD_MODEL_STATE_DICT)` applied between step bursts. The engine does
     NOT drain in-flight requests first ("hotswap"). This behavior can be changed in the inter-generator router, by
     blocking new requests until the engine is drained.
 
@@ -859,12 +859,12 @@ class VLLMGenerator(Configurable):
         Every generation call is queued for execution by the `engine_loop`. A higher value enables buffering
         of more requests to avoid a prefill between every engine decode step, which is inefficient."""
 
-        reset_kv_cache_on_weight_sync: bool = False
-        """Reset cached and running-request KV after each weight sync.
+        reset_kv_cache_on_model_state_dict_load: bool = False
+        """Reset cached and running-request KV after each model state dict load.
 
         The default preserves in-flight requests and their KV: a rollout group keeps the
         cache salt pinned when this generator first admitted it, so its rollouts and
-        later turns reuse its KV across weight syncs, while new groups use the current
+        later turns reuse its KV across model state dict loads, while new groups use the current
         version.
         Enable this to clear prefix-cache entries and preempt running requests; vLLM
         then recomputes their KV under the new weights when they resume."""
@@ -892,9 +892,12 @@ class VLLMGenerator(Configurable):
                     f"tensor_parallel_degree ({full_ep}) in the generator."
                 )
 
-            if self.debug.batch_invariant and not self.reset_kv_cache_on_weight_sync:
+            if (
+                self.debug.batch_invariant
+                and not self.reset_kv_cache_on_model_state_dict_load
+            ):
                 raise ValueError(
-                    "batch_invariant requires reset_kv_cache_on_weight_sync=True so "
+                    "batch_invariant requires reset_kv_cache_on_model_state_dict_load=True so "
                     "cached KV cannot cross a policy update"
                 )
 
@@ -1119,8 +1122,8 @@ class VLLMGenerator(Configurable):
         self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the
         # group's first admission and used as its prefix cache salt. Unused with
-        # reset_kv_cache_on_weight_sync. All rollouts of a group share the pin, so a
-        # rollout first admitted after a pull still reuses its group's prompt KV, at the
+        # reset_kv_cache_on_model_state_dict_load. All rollouts of a group share the pin, so a
+        # rollout first admitted after a load still reuses its group's prompt KV, at the
         # cost of depending on the group's older version. Only the controller knows when
         # a group makes no more generation calls, so entries live until it calls
         # `release_groups`.
@@ -1310,7 +1313,7 @@ class VLLMGenerator(Configurable):
         Example:
             max_engine_steps_between_decisions = 16
             check `_decide_next_action` --> "STEP"         --> run engine.step 16 times
-            check `_decide_next_action` --> "PULL_MODEL_STATE_DICT" --> run `_pull_model_state_dict`
+            check `_decide_next_action` --> "LOAD_MODEL_STATE_DICT" --> run `_load_model_state_dict`
             check `_decide_next_action` --> "STEP"         --> run engine.step 16 times
             check `_decide_next_action` --> "CLOSE"        --> stop
         """
@@ -1318,8 +1321,8 @@ class VLLMGenerator(Configurable):
         # We need to cache such requests in this field, so they can be carried across `_decide_next_action` calls.
         # Note these requests' parent `GenerationMessage`s have been registered as `OutstandingGeneration` in dispatcher.
         pending_engine_requests: list[EngineRequest] = []
-        # Engine-loop state (rank 0): weight pulls taken off the queue but not yet applied.
-        pending_pull_messages: list[ModelStateDictPullMessage] = []
+        # Engine-loop state (rank 0): model state dict loads taken off the queue but not yet applied.
+        pending_load_messages: list[ModelStateDictLoadMessage] = []
         try:
             # One-time dispatcher setup before the loop starts.
             self._request_dispatcher.setup()
@@ -1327,7 +1330,7 @@ class VLLMGenerator(Configurable):
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
                 decision = (
                     await self._decide_next_action(
-                        pending_engine_requests, pending_pull_messages
+                        pending_engine_requests, pending_load_messages
                     )
                     if self._rank == 0
                     else None
@@ -1335,7 +1338,7 @@ class VLLMGenerator(Configurable):
 
                 # Barrier(gloo, CPU): Ship rank 0's decision (incl. prompts) to every TP rank via gloo/CPU, off the
                 # NCCL stream. broadcast_object_list mutates a list in place; `to_thread` runs the
-                # blocking call in a worker so the event loop can still serve generate/pull/close.
+                # blocking call in a worker so the event loop can still serve generate/load/close.
                 # TODO(perf): overlap this broadcast with the step burst (pipeline the next decision) so
                 # gloo transfer hides behind GPU compute.
                 # TODO(perf): swap broadcast_object_list (double serialization of pickle+broadcast) for a byte
@@ -1354,20 +1357,20 @@ class VLLMGenerator(Configurable):
 
                 if decision.action is LoopAction.CLOSE:
                     if self._rank == 0:
-                        _fail_pulls(
-                            pending_pull_messages,
+                        _fail_loads(
+                            pending_load_messages,
                             RuntimeError(
-                                "generator closed before the pull was applied"
+                                "generator closed before the load was applied"
                             ),
                         )
                     return
 
-                if decision.action is LoopAction.PULL_MODEL_STATE_DICT:
-                    await self._pull_model_state_dict(decision.pull_version)
-                    # One pull applied every pull this decision coalesced (only rank 0 holds any).
-                    for pull in pending_pull_messages:
-                        pull.reply.set_result(None)
-                    pending_pull_messages.clear()
+                if decision.action is LoopAction.LOAD_MODEL_STATE_DICT:
+                    await self._load_model_state_dict(decision.load_version)
+                    # One load serves every load this decision coalesced (only rank 0 holds any).
+                    for load in pending_load_messages:
+                        load.reply.set_result(None)
+                    pending_load_messages.clear()
                     continue  # back to the start for the next decision
 
                 if decision.action is LoopAction.STEP:
@@ -1390,7 +1393,7 @@ class VLLMGenerator(Configurable):
                     ] = []
                     for request in local_requests:
                         prompt = {"prompt_token_ids": request.prompt_token_ids}
-                        if not self.config.reset_kv_cache_on_weight_sync:
+                        if not self.config.reset_kv_cache_on_model_state_dict_load:
                             # Salt by the pinned version so a request only reuses KV
                             # computed under that version.
                             prompt["cache_salt"] = str(request.min_policy_version)
@@ -1436,7 +1439,7 @@ class VLLMGenerator(Configurable):
             logger.exception("engine loop crashed; failing all outstanding replies")
             if self._rank == 0:
                 self._request_dispatcher.fail_outstanding_generations(exc)
-                _fail_pulls(pending_pull_messages, exc)
+                _fail_loads(pending_load_messages, exc)
                 await self._rank0_close_and_fail_queue(exc)
             raise
         finally:
@@ -1458,14 +1461,14 @@ class VLLMGenerator(Configurable):
     async def _decide_next_action(
         self,
         pending_engine_requests: list[EngineRequest],
-        pending_pull_messages: list[ModelStateDictPullMessage],
+        pending_load_messages: list[ModelStateDictLoadMessage],
     ) -> LoopDecision:
         """RANK 0: takes everything off the queue and picks the next action. Sleeps until there is
         something to do.
         """
-        if pending_pull_messages:
+        if pending_load_messages:
             raise AssertionError(
-                "the engine loop applies or fails every pull before deciding again"
+                "the engine loop applies or fails every load before deciding again"
             )
 
         # * If there are outstanding generations, we drain the queue and make the next decision right away,
@@ -1494,8 +1497,8 @@ class VLLMGenerator(Configurable):
             # the engine loop resolves it.
             if not message.reply.set_running_or_notify_cancel():
                 continue
-            if isinstance(message, ModelStateDictPullMessage):
-                pending_pull_messages.append(message)
+            if isinstance(message, ModelStateDictLoadMessage):
+                pending_load_messages.append(message)
             else:
                 self._request_dispatcher.rank0_register_generation(
                     message.engine_request.request_id,
@@ -1504,20 +1507,20 @@ class VLLMGenerator(Configurable):
                 )
                 pending_engine_requests.append(message.engine_request)
 
-        # A weight pull takes priority over admitting new requests. Pulls taken off the queue
-        # together are coalesced into one, at the highest version: every pull reads the latest push from
+        # A model state dict load takes priority over admitting new requests. Loads taken off the queue
+        # together are coalesced into one, at the highest version: every load reads the latest push from
         # one TorchStore key, so the weights read are at least as new as any version requested.
-        if pending_pull_messages:
+        if pending_load_messages:
             return LoopDecision(
-                action=LoopAction.PULL_MODEL_STATE_DICT,
+                action=LoopAction.LOAD_MODEL_STATE_DICT,
                 requests_per_dp_rank=[],
-                pull_version=max(pull.version for pull in pending_pull_messages),
+                load_version=max(load.version for load in pending_load_messages),
             )
 
         # `LoopAction.STEP`: admit whatever is pending (may be empty -> just keep stepping in-flight work).
         for request in pending_engine_requests:
-            if self.config.reset_kv_cache_on_weight_sync:
-                # Each pull resets all KV, so requests need no pin or salt.
+            if self.config.reset_kv_cache_on_model_state_dict_load:
+                # Each load resets all KV, so requests need no pin or salt.
                 request.min_policy_version = self.policy_version
             else:
                 request.min_policy_version = self._group_min_policy_versions.setdefault(
@@ -1588,25 +1591,25 @@ class VLLMGenerator(Configurable):
         """
         await ts.client(role=RankRole.REQUESTER, group=requester_index)
 
-    @sl.log_trace_span("pull_model_state_dict")
-    async def pull_model_state_dict(self, version: int) -> None:
-        """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.
-        Pulls queued together are applied once, at the highest version.
+    @sl.log_trace_span("load_model_state_dict")
+    async def load_model_state_dict(self, version: int) -> None:
+        """Queues a model state dict load for `version` and blocks until the engine loop has finished loading.
+        Loads queued together are applied once, at the highest version.
 
-        The network transfer has already completed and this pull applies the
+        The network transfer has already completed and this load applies the
         prefetched weights to the GPU.
 
         NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
         an idle engine holds off new `generate` calls until the queue drains, then calls this.
 
         Args:
-            version: Policy version to pull
+            version: Policy version to load
         """
-        self._rank0_check_engine_loop_running("pull_model_state_dict")
+        self._rank0_check_engine_loop_running("load_model_state_dict")
 
         reply: concurrent.futures.Future[None] = concurrent.futures.Future()
         self._engine_loop_queue.put(
-            ModelStateDictPullMessage(version=version, reply=reply)
+            ModelStateDictLoadMessage(version=version, reply=reply)
         )
         await asyncio.wrap_future(reply)
 
@@ -1620,8 +1623,8 @@ class VLLMGenerator(Configurable):
             direct_rdma=False,
         )
 
-    @sl.log_trace_span("pull_model_state_dict_copy")
-    async def _pull_model_state_dict(self, version: int) -> None:
+    @sl.log_trace_span("load_model_state_dict_copy")
+    async def _load_model_state_dict(self, version: int) -> None:
         """ALL RANKS: collectively copy the latest weights from TorchStore, optionally drop the
         prefix cache when configured, and bump the policy version.
 
@@ -1635,7 +1638,7 @@ class VLLMGenerator(Configurable):
         # Perform the local CPU-to-GPU copy
         model.load_state_dict(model_sd)
         self.policy_version = version
-        if self.config.reset_kv_cache_on_weight_sync:
+        if self.config.reset_kv_cache_on_model_state_dict_load:
             # Always reset running requests too: the only reason to reset is a strict
             # recompute under the new weights. Keeping running requests' KV while hiding
             # old KV from new requests is already what the default (no reset) does via the salt.
@@ -1712,7 +1715,7 @@ class EngineRequest:
     routing_session_id: str
     min_policy_version: int = field(init=False)
     """Oldest policy version this request's KV can come from; rank 0 sets it at admission.
-    Without a KV reset on weight sync it is the group's pinned version and salts the
+    Without a KV reset on model state dict load it is the group's pinned version and salts the
     prefix cache."""
 
 
@@ -1727,22 +1730,22 @@ class GenerationMessage:
 
 
 @dataclass(kw_only=True, slots=True)
-class ModelStateDictPullMessage:
-    """A queued weight pull: the policy `version` to copy from TorchStore, and the `reply` the engine
-    loop resolves once the pull has been applied."""
+class ModelStateDictLoadMessage:
+    """A queued model state dict load: the policy `version` to copy from TorchStore, and the `reply` the engine
+    loop resolves once the load has been applied."""
 
     version: int
     reply: concurrent.futures.Future[None]
 
 
-def _fail_pulls(
-    pending_pull_messages: list[ModelStateDictPullMessage], exc: BaseException
+def _fail_loads(
+    pending_load_messages: list[ModelStateDictLoadMessage], exc: BaseException
 ) -> None:
-    """Fail the replies of `pending_pull_messages`, which the engine loop took off the queue but never
+    """Fail the replies of `pending_load_messages`, which the engine loop took off the queue but never
     applied."""
-    for pull in pending_pull_messages:
-        if not pull.reply.done():
-            pull.reply.set_exception(exc)
+    for load in pending_load_messages:
+        if not load.reply.done():
+            load.reply.set_exception(exc)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1751,7 +1754,7 @@ class CloseMessage:
     returns `LoopAction.CLOSE` when it sees one."""
 
 
-EngineLoopMessage = GenerationMessage | ModelStateDictPullMessage | CloseMessage
+EngineLoopMessage = GenerationMessage | ModelStateDictLoadMessage | CloseMessage
 
 
 class EngineLoopQueue:
@@ -1834,8 +1837,8 @@ class LoopAction(enum.Enum):
     STEP = "step"
     # run a burst of engine.step(); first admit any newly-queued requests.
 
-    PULL_MODEL_STATE_DICT = "pull_model_state_dict"
-    # pull the latest weights between bursts
+    LOAD_MODEL_STATE_DICT = "load_model_state_dict"
+    # load the latest model state dict between bursts
 
     CLOSE = "close"
     # stop the loop
@@ -1853,5 +1856,5 @@ class LoopDecision:
     # length data_parallel_degree. Each rank admits only its own DP-rank slice.
     # (empty unless any queued)
 
-    pull_version: int | None = None
-    # set iff action is PULL_MODEL_STATE_DICT
+    load_version: int | None = None
+    # set iff action is LOAD_MODEL_STATE_DICT

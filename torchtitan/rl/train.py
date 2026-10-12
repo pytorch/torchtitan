@@ -10,7 +10,7 @@ RL training loop using Monarch Actors.
 This demonstrates:
 1. Distributed actor architecture with VLLMGenerator (vLLM) and Trainer (TorchTitan)
    running on separate GPU meshes
-2. Weight synchronization across meshes via TorchStore: the trainer publishes its
+2. Model state dict sync across meshes via TorchStore: the trainer publishes its
    model state dict and the generator pulls it into its own parallelism layout,
    with direct GPU-to-GPU RDMA transfer when available
 3. Envs driven rollouts; reward and advantage computation live inline

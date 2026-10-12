@@ -74,8 +74,8 @@ class _GeneratorActorEndpoints:
         await super().release_groups(group_ids)
 
     @concurrent_endpoint
-    async def pull_model_state_dict(self, version: int) -> None:
-        await super().pull_model_state_dict(version)
+    async def load_model_state_dict(self, version: int) -> None:
+        await super().load_model_state_dict(version)
 
     @concurrent_endpoint
     async def prefetch_model_state_dict(self) -> None:

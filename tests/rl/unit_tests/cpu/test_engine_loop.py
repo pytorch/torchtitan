@@ -8,7 +8,7 @@
 and the engine thread it runs on.
 
 Built on a bare `VLLMGenerator` (no vLLM engine) + a fake engine, so the loop's
-admit/pull/shutdown branching is tested without a GPU.
+admit/load/shutdown branching is tested without a GPU.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from torchtitan.rl.generator.generator import (
     GenerationMessage,
     LoopAction,
     LoopDecision,
-    ModelStateDictPullMessage,
+    ModelStateDictLoadMessage,
     RequestDispatcher,
     SamplingConfig,
     VLLMGenerator,
@@ -65,14 +65,14 @@ def _bare_generator(
     inflight: bool = False,
     dp_size: int = 1,
     dp_routing_strategy: RoutingStrategy.Config | None = None,
-    reset_kv_cache_on_weight_sync: bool = False,
+    reset_kv_cache_on_model_state_dict_load: bool = False,
 ) -> VLLMGenerator:
     # Bypass __init__ (which builds the vLLM engine); set only the loop's state.
     # _decide_next_action delegates the in-flight check and routing to the
     # dispatcher, so wire up a bare one (no engine / GPU needed here).
     generator = object.__new__(VLLMGenerator)
     generator.config = SimpleNamespace(
-        reset_kv_cache_on_weight_sync=reset_kv_cache_on_weight_sync,
+        reset_kv_cache_on_model_state_dict_load=reset_kv_cache_on_model_state_dict_load,
     )
     generator.policy_version = 0
     generator._group_min_policy_versions = {}
@@ -122,8 +122,8 @@ def _message(engine_request: EngineRequest) -> GenerationMessage:
     )
 
 
-def _pull(version: int) -> ModelStateDictPullMessage:
-    return ModelStateDictPullMessage(version=version, reply=concurrent.futures.Future())
+def _load(version: int) -> ModelStateDictLoadMessage:
+    return ModelStateDictLoadMessage(version=version, reply=concurrent.futures.Future())
 
 
 async def _put(
@@ -146,7 +146,7 @@ def _decide(
     generator: VLLMGenerator,
     pending_engine_requests: list[EngineRequest],
     *messages: EngineLoopMessage | EngineRequest,
-    pending_pull_messages: list[ModelStateDictPullMessage] | None = None,
+    pending_load_messages: list[ModelStateDictLoadMessage] | None = None,
 ) -> LoopDecision:
     """Puts `messages` on the queue, then runs one decision."""
 
@@ -155,7 +155,7 @@ def _decide(
         return await asyncio.wait_for(
             generator._decide_next_action(
                 pending_engine_requests,
-                [] if pending_pull_messages is None else pending_pull_messages,
+                [] if pending_load_messages is None else pending_load_messages,
             ),
             _TIMEOUT_S,
         )
@@ -252,41 +252,41 @@ def test_queue_close_lands_behind_a_put_from_another_thread_in_progress(runner) 
 
 def test_close_takes_precedence_over_everything(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
-    pull = _pull(5)
-    pending_pull_messages: list[ModelStateDictPullMessage] = []
+    load = _load(5)
+    pending_load_messages: list[ModelStateDictLoadMessage] = []
     decision = _decide(
         runner,
         generator,
         [],
         _request(),
-        pull,
+        load,
         CloseMessage(),
-        pending_pull_messages=pending_pull_messages,
+        pending_load_messages=pending_load_messages,
     )
     assert decision.action is LoopAction.CLOSE
-    assert pending_pull_messages == [pull]  # for the engine loop to fail
+    assert pending_load_messages == [load]  # for the engine loop to fail
 
 
-def test_pull_takes_precedence_over_queued_requests(runner) -> None:
+def test_load_takes_precedence_over_queued_requests(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
     request = _request()
     pending_engine_requests: list[EngineRequest] = []
-    pull = _pull(5)
-    pending_pull_messages: list[ModelStateDictPullMessage] = []
+    load = _load(5)
+    pending_load_messages: list[ModelStateDictLoadMessage] = []
     decision = _decide(
         runner,
         generator,
         pending_engine_requests,
         request,
-        pull,
-        pending_pull_messages=pending_pull_messages,
+        load,
+        pending_load_messages=pending_load_messages,
     )
     assert (
-        decision.action is LoopAction.PULL_MODEL_STATE_DICT
-        and decision.pull_version == 5
+        decision.action is LoopAction.LOAD_MODEL_STATE_DICT
+        and decision.load_version == 5
     )
-    assert pending_pull_messages == [pull]
-    assert pending_engine_requests == [request]  # NOT admitted -- pull runs first
+    assert pending_load_messages == [load]
+    assert pending_engine_requests == [request]  # NOT admitted -- load runs first
 
     # The carried-over request is admitted at the next decision without a new message.
     decision = _decide(runner, generator, pending_engine_requests)
@@ -295,40 +295,40 @@ def test_pull_takes_precedence_over_queued_requests(runner) -> None:
     assert pending_engine_requests == []
 
 
-def test_pulls_taken_off_the_queue_together_coalesce_at_the_highest_version(
+def test_loads_taken_off_the_queue_together_coalesce_at_the_highest_version(
     runner,
 ) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
     # Out of order, so the highest version wins rather than the last.
-    queued = [_pull(5), _pull(4)]
-    pending_pull_messages: list[ModelStateDictPullMessage] = []
+    queued = [_load(5), _load(4)]
+    pending_load_messages: list[ModelStateDictLoadMessage] = []
     decision = _decide(
-        runner, generator, [], *queued, pending_pull_messages=pending_pull_messages
+        runner, generator, [], *queued, pending_load_messages=pending_load_messages
     )
     assert (
-        decision.action is LoopAction.PULL_MODEL_STATE_DICT
-        and decision.pull_version == 5
+        decision.action is LoopAction.LOAD_MODEL_STATE_DICT
+        and decision.load_version == 5
     )
-    assert pending_pull_messages == queued
+    assert pending_load_messages == queued
 
 
 def test_calls_cancelled_on_the_queue_are_skipped(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
-    message, pull = _message(_request()), _pull(5)
-    for call in (message, pull):
+    message, load = _message(_request()), _load(5)
+    for call in (message, load):
         call.reply.cancel()
     pending_engine_requests: list[EngineRequest] = []
-    pending_pull_messages: list[ModelStateDictPullMessage] = []
+    pending_load_messages: list[ModelStateDictLoadMessage] = []
     decision = _decide(
         runner,
         generator,
         pending_engine_requests,
         message,
-        pull,
-        pending_pull_messages=pending_pull_messages,
+        load,
+        pending_load_messages=pending_load_messages,
     )
     assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
-    assert pending_engine_requests == [] and pending_pull_messages == []
+    assert pending_engine_requests == [] and pending_load_messages == []
     assert generator._request_dispatcher._rank0_outstanding_generations == {}
 
 
@@ -447,7 +447,7 @@ def test_step_pins_min_policy_version_per_group(runner) -> None:
 
 def test_step_with_kv_reset_uses_current_version_without_pins(runner) -> None:
     generator = _bare_generator(
-        event_loop=runner.get_loop(), reset_kv_cache_on_weight_sync=True
+        event_loop=runner.get_loop(), reset_kv_cache_on_model_state_dict_load=True
     )
     generator.policy_version = 3
     assert (
@@ -618,7 +618,7 @@ def engine_thread(monkeypatch):
         generator.config = SimpleNamespace(
             sampling=SamplingConfig(stop_token_ids=[]),
             max_engine_steps_between_decisions=16,
-            reset_kv_cache_on_weight_sync=False,
+            reset_kv_cache_on_model_state_dict_load=False,
         )
         generator.policy_version = 0
         generator._rank = 0
@@ -635,16 +635,16 @@ def engine_thread(monkeypatch):
         _stop_engine_thread(generator)
 
 
-def _pulling_engine(monkeypatch, pull_pre_hook=None) -> _FakeEngine:
-    """A fake engine whose weight pull first awaits `pull_pre_hook`."""
-    original_pull = VLLMGenerator._pull_model_state_dict
+def _loading_engine(monkeypatch, load_pre_hook=None) -> _FakeEngine:
+    """A fake engine whose model state dict load first awaits `load_pre_hook`."""
+    original_load = VLLMGenerator._load_model_state_dict
 
-    async def new_pull(self, version):
-        if pull_pre_hook is not None:
-            await pull_pre_hook()
-        await original_pull(self, version)
+    async def new_load(self, version):
+        if load_pre_hook is not None:
+            await load_pre_hook()
+        await original_load(self, version)
 
-    monkeypatch.setattr(VLLMGenerator, "_pull_model_state_dict", new_pull)
+    monkeypatch.setattr(VLLMGenerator, "_load_model_state_dict", new_load)
     model = SimpleNamespace(load_state_dict=lambda state_dict: None)
     engine = _FakeEngine()
     engine.model_executor = SimpleNamespace(
@@ -752,13 +752,13 @@ def test_actor_loop_takes_calls_while_the_engine_steps(engine_thread) -> None:
     asyncio.run(run())
 
 
-def test_pull_runs_on_the_engine_thread(engine_thread, monkeypatch) -> None:
+def test_load_runs_on_the_engine_thread(engine_thread, monkeypatch) -> None:
     # Monarch finds the calling actor through a ContextVar, so the engine loop's work must
     # see the context of the endpoint that started it.
     endpoint_context = contextvars.ContextVar("endpoint_context", default=None)
     reads: list[tuple] = []
 
-    async def pull_pre_hook():
+    async def load_pre_hook():
         reads.append(
             (
                 threading.current_thread(),
@@ -768,12 +768,12 @@ def test_pull_runs_on_the_engine_thread(engine_thread, monkeypatch) -> None:
         )
 
     async def run() -> None:
-        generator = engine_thread(_pulling_engine(monkeypatch, pull_pre_hook))
+        generator = engine_thread(_loading_engine(monkeypatch, load_pre_hook))
         # Set after the engine thread started, so only `start_engine_loop` can carry it there.
         endpoint_context.set("endpoint")
         await generator.start_engine_loop()
 
-        await asyncio.wait_for(generator.pull_model_state_dict(4), _TIMEOUT_S)
+        await asyncio.wait_for(generator.load_model_state_dict(4), _TIMEOUT_S)
         assert generator.policy_version == 4
         assert reads == [
             (generator._engine_thread, generator._engine_event_loop, "endpoint")
@@ -797,7 +797,7 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
 
     monkeypatch.setattr(generator_module.ts, "get_state_dict", get_state_dict)
     gate = _StepGate()
-    engine = _pulling_engine(monkeypatch)
+    engine = _loading_engine(monkeypatch)
     engine.step_hook = gate
 
     async def run() -> None:
@@ -812,8 +812,8 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
 
         gate.release()
         await asyncio.wait_for(first, _TIMEOUT_S)
-        # The pull applies the prefetched weights without reading TorchStore again.
-        await asyncio.wait_for(generator.pull_model_state_dict(4), _TIMEOUT_S)
+        # The load applies the prefetched weights without reading TorchStore again.
+        await asyncio.wait_for(generator.load_model_state_dict(4), _TIMEOUT_S)
         assert reads == [actor_loop]
         assert generator.policy_version == 4
 
@@ -822,39 +822,39 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
     asyncio.run(run())
 
 
-def test_pulls_queued_during_a_pull_are_applied_together_after_it(
+def test_loads_queued_during_a_load_are_applied_together_after_it(
     engine_thread, monkeypatch
 ) -> None:
     reading = [threading.Event(), threading.Event()]
     released = [threading.Event(), threading.Event()]
     reads: list[int] = []
 
-    async def pull_pre_hook():
+    async def load_pre_hook():
         read = len(reads)
         reads.append(read)
         reading[read].set()
         assert await asyncio.to_thread(released[read].wait, _TIMEOUT_S)
 
     async def run() -> None:
-        generator = engine_thread(_pulling_engine(monkeypatch, pull_pre_hook))
+        generator = engine_thread(_loading_engine(monkeypatch, load_pre_hook))
         await generator.start_engine_loop()
-        first = asyncio.create_task(generator.pull_model_state_dict(3))
+        first = asyncio.create_task(generator.load_model_state_dict(3))
         assert await asyncio.to_thread(reading[0].wait, _TIMEOUT_S)
 
         later = [
-            asyncio.create_task(generator.pull_model_state_dict(version))
+            asyncio.create_task(generator.load_model_state_dict(version))
             for version in (4, 5)
         ]
         await asyncio.sleep(0)  # both put their call on the queue
-        # Queued on the engine loop behind both puts, so both pulls are on the queue once it returns.
+        # Queued on the engine loop behind both puts, so both loads are on the queue once it returns.
         await _on_engine_loop(generator, lambda: None)
         released[0].set()
         await asyncio.wait_for(first, _TIMEOUT_S)
         assert generator.policy_version == 3
 
-        # The first pull resolves only its own caller; the later two wait for one more read.
+        # The first load resolves only its own caller; the later two wait for one more read.
         assert await asyncio.to_thread(reading[1].wait, _TIMEOUT_S)
-        assert not any(pull.done() for pull in later)
+        assert not any(load.done() for load in later)
         released[1].set()
         await asyncio.wait_for(asyncio.gather(*later), _TIMEOUT_S)
         assert generator.policy_version == 5
@@ -870,27 +870,27 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
 ) -> None:
     reading, released = threading.Event(), threading.Event()
 
-    async def pull_pre_hook():
+    async def load_pre_hook():
         reading.set()
         assert await asyncio.to_thread(released.wait, _TIMEOUT_S)
         raise RuntimeError("TorchStore is down")
 
     async def run() -> None:
-        generator = engine_thread(_pulling_engine(monkeypatch, pull_pre_hook))
+        generator = engine_thread(_loading_engine(monkeypatch, load_pre_hook))
         await generator.start_engine_loop()
-        failing_pull = asyncio.create_task(generator.pull_model_state_dict(3))
+        failing_load = asyncio.create_task(generator.load_model_state_dict(3))
         assert await asyncio.to_thread(reading.wait, _TIMEOUT_S)
 
         queued = [
             _generate(generator, "r0"),
-            asyncio.create_task(generator.pull_model_state_dict(4)),
+            asyncio.create_task(generator.load_model_state_dict(4)),
         ]
         await asyncio.sleep(0)  # both put their call on the queue
         # Queued on the engine loop behind both puts, so both are on the queue once it returns.
         await _on_engine_loop(generator, lambda: None)
         released.set()
 
-        for call in (failing_pull, *queued):
+        for call in (failing_load, *queued):
             with pytest.raises(RuntimeError, match="TorchStore is down"):
                 await asyncio.wait_for(call, _TIMEOUT_S)
         with pytest.raises(RuntimeError, match="generator is closed"):
@@ -1006,13 +1006,13 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
         in_flight = _generate(generator, "r0")
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
         queued = _generate(generator, "r1")
-        queued_pull = asyncio.create_task(generator.pull_model_state_dict(4))
+        queued_load = asyncio.create_task(generator.load_model_state_dict(4))
         closing = asyncio.create_task(generator.close())
         # Runs after `close` has closed the queue, while the loop still runs, so the guard rejects it
         # before it reaches the queue.
         during_close = _generate(generator, "r2")
-        # Run all four calls while `step` holds the engine thread, so the loop takes the pull and the
-        # `CloseMessage` off the queue together; alone, the pull would run on `_StuckEngine`.
+        # Run all four calls while `step` holds the engine thread, so the loop takes the load and the
+        # `CloseMessage` off the queue together; alone, the load would run on `_StuckEngine`.
         await asyncio.sleep(0)
         # `close` and the rejected call ran on this loop, without waiting for the engine thread.
         assert generator._engine_loop_queue.closed and during_close.done()
@@ -1029,8 +1029,8 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
                 RuntimeError, match="closed before the request finished"
             ):
                 await request
-        with pytest.raises(RuntimeError, match="closed before the pull was applied"):
-            await asyncio.wait_for(queued_pull, _TIMEOUT_S)
+        with pytest.raises(RuntimeError, match="closed before the load was applied"):
+            await asyncio.wait_for(queued_load, _TIMEOUT_S)
         with pytest.raises(
             RuntimeError, match="generator is closed; cannot call generate"
         ):
@@ -1040,7 +1040,7 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
         with pytest.raises(RuntimeError, match="generator is closed"):
             await asyncio.wait_for(_generate(generator, "r3"), _TIMEOUT_S)
         with pytest.raises(RuntimeError, match="generator is closed"):
-            await asyncio.wait_for(generator.pull_model_state_dict(4), _TIMEOUT_S)
+            await asyncio.wait_for(generator.load_model_state_dict(4), _TIMEOUT_S)
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
     asyncio.run(run())
@@ -1055,9 +1055,9 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
         [
             LoopDecision(action=LoopAction.STEP, requests_per_dp_rank=[[request]]),
             LoopDecision(
-                action=LoopAction.PULL_MODEL_STATE_DICT,
+                action=LoopAction.LOAD_MODEL_STATE_DICT,
                 requests_per_dp_rank=[],
-                pull_version=4,
+                load_version=4,
             ),
             LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[]),
         ]
@@ -1073,11 +1073,11 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
     )
     reads: list[threading.Thread] = []
 
-    async def pull_pre_hook():
+    async def load_pre_hook():
         reads.append(threading.current_thread())
 
     async def run() -> None:
-        engine = _pulling_engine(monkeypatch, pull_pre_hook)
+        engine = _loading_engine(monkeypatch, load_pre_hook)
         stepped: list[list[str]] = []
         engine.step_hook = lambda: stepped.append(list(engine.running))
         generator = engine_thread(engine)
