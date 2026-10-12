@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from .attention import (  # noqa: F401
     __all__ as _attention_all,
     BaseAttention,
+    BatchedVarlenInnerAttention,
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexAttentionMetadata,

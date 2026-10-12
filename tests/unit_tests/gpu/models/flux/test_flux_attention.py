@@ -18,7 +18,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.flux.attention import FluxInnerAttention
+from torchtitan.models.common.attention import BatchedVarlenInnerAttention
 from torchtitan.models.flux.sharding import flux_inner_attention_sharding_config
 
 
@@ -48,7 +48,7 @@ class TestFluxVarlenContextParallel(DTensorTestBase):
             world_size=2,
             enable_sequence_parallel=False,
         )
-        config = FluxInnerAttention.Config(
+        config = BatchedVarlenInnerAttention.Config(
             sharding_config=flux_inner_attention_sharding_config()
         )
         attention = config.build()

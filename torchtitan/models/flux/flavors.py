@@ -17,10 +17,10 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 
+from torchtitan.models.common.attention import BatchedVarlenInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 
-from .attention import FluxInnerAttention
 from .autoencoder import AutoEncoder
 from .hf_embedder import FluxEmbedder
 from .layers import (
@@ -108,7 +108,7 @@ def _make_double_block_config(
                     param_init=_NORM_INIT,
                 ),
             ),
-            inner_attention=FluxInnerAttention.Config(
+            inner_attention=BatchedVarlenInnerAttention.Config(
                 sharding_config=flux_inner_attention_sharding_config()
             ),
         ),
@@ -137,7 +137,7 @@ def _make_double_block_config(
                     param_init=_NORM_INIT,
                 ),
             ),
-            inner_attention=FluxInnerAttention.Config(
+            inner_attention=BatchedVarlenInnerAttention.Config(
                 sharding_config=flux_inner_attention_sharding_config()
             ),
         ),
@@ -165,7 +165,7 @@ def _make_double_block_config(
             bias=True,
             param_init=_XAVIER_LINEAR,
         ),
-        inner_attention=FluxInnerAttention.Config(
+        inner_attention=BatchedVarlenInnerAttention.Config(
             sharding_config=flux_inner_attention_sharding_config()
         ),
     )
@@ -214,7 +214,7 @@ def _make_single_block_config(
                 param_init=_NORM_INIT,
             ),
         ),
-        inner_attention=FluxInnerAttention.Config(
+        inner_attention=BatchedVarlenInnerAttention.Config(
             sharding_config=flux_inner_attention_sharding_config()
         ),
     )

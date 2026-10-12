@@ -16,10 +16,9 @@ from torch import nn, Tensor
 from torchtitan.models.base.module import Module, Sequential
 
 from torchtitan.models.common.activation import SiLU
+from torchtitan.models.common.attention import BatchedVarlenInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-
-from .attention import FluxInnerAttention
 
 
 @spmd.local_map(
@@ -153,8 +152,8 @@ class SelfAttention(Module):
         norm: QKNorm.Config
         num_heads: int = 8
         qkv_bias: bool = False
-        inner_attention: FluxInnerAttention.Config = field(
-            default_factory=FluxInnerAttention.Config
+        inner_attention: BatchedVarlenInnerAttention.Config = field(
+            default_factory=BatchedVarlenInnerAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -221,8 +220,8 @@ class DoubleStreamBlock(Module):
         txt_mlp_out: Linear.Config
         mlp_ratio: float = 4.0
         qkv_bias: bool = False
-        inner_attention: FluxInnerAttention.Config = field(
-            default_factory=FluxInnerAttention.Config
+        inner_attention: BatchedVarlenInnerAttention.Config = field(
+            default_factory=BatchedVarlenInnerAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -341,8 +340,8 @@ class SingleStreamBlock(Module):
         norm: QKNorm.Config
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
-        inner_attention: FluxInnerAttention.Config = field(
-            default_factory=FluxInnerAttention.Config
+        inner_attention: BatchedVarlenInnerAttention.Config = field(
+            default_factory=BatchedVarlenInnerAttention.Config
         )
 
     def __init__(self, config: Config):
