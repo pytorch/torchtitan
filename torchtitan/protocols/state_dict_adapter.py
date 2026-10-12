@@ -55,6 +55,13 @@ def dtensor_safe(fn):
     return wrapper
 
 
+def resolve_state_dict_adapter_cls(
+    model_config: BaseModel.Config, model_cls: type[BaseModel]
+) -> type["BaseStateDictAdapter"] | None:
+    """The adapter a recipe chose, else the model class's default."""
+    return model_config.state_dict_adapter_cls or model_cls.state_dict_adapter_cls
+
+
 class BaseStateDictAdapter(ABC):
     """Abstract base class for state dict transformations.
 
