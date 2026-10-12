@@ -107,7 +107,8 @@ def _rollout(response: str) -> Rollout:
         turns=[
             RolloutTurn(
                 rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
-                prompt_token_ids=[1],
+                prompt_prefix_len=0,
+                prompt_delta_token_ids=[1],
                 completion_token_ids=[2],
                 completion_logprobs=[-0.1],
                 completion_message={"role": "assistant", "content": response},

@@ -153,7 +153,14 @@ class TrainingSampleBuilder(Configurable):
         unfiltered_training_samples: list[TrainingSample] = []
         branches_per_rollout: list[float] = []
         num_samples_dropped_no_valid_tokens = 0
+        num_rollouts_dropped_empty_completion = 0
         for rollout in rollout_group.rollouts:
+            # A later turn with no completion (e.g. a request aborted before its first token): drop the
+            # rollout, so `rollout_to_training_samples` doesn't raise and stop the run.
+            if any(not rollout_turn.completion_token_ids for rollout_turn in rollout.turns[1:]):
+                num_rollouts_dropped_empty_completion += 1
+                continue
+
             rollout_training_samples = self.rollout_to_training_samples(rollout)
             unfiltered_training_samples.extend(rollout_training_samples)
             kept = [
@@ -167,6 +174,13 @@ class TrainingSampleBuilder(Configurable):
             training_samples.extend(kept)
             branches_per_rollout.append(float(len(rollout_training_samples)))
 
+        if num_rollouts_dropped_empty_completion:
+            metrics.append(
+                m.Metric(
+                    "training_sample_builder/num_rollouts_dropped_empty_completion",
+                    m.Sum(float(num_rollouts_dropped_empty_completion)),
+                )
+            )
         if num_samples_dropped_no_valid_tokens:
             metrics.append(
                 m.Metric(
@@ -249,9 +263,6 @@ class TrainingSampleBuilder(Configurable):
             )
         training_samples: list[TrainingSample] = []
 
-        # Used to check if [P1, C1] is prefix of [P1,C1,E1] in the docstring example
-        prev_prompt_and_completion: list[int] = []
-
         # Skip if no completion (nothing to train on). This happens when the prompt is too
         # long in the first turn, before any generation. We keep these rollouts for debugging.
         # TODO(async-rl): confirm this signal actually reaches the rollout_recorder.
@@ -267,12 +278,41 @@ class TrainingSampleBuilder(Configurable):
                     f"non-final turn {turn_idx} has no completion"
                 )
 
-            prompt = rollout_turn.prompt_token_ids
+            # A training_sample opens with a full prompt and each later turn appends to it, so the last
+            # training_sample's token_ids are exactly the previous turn's prompt + completion.
+            prev_prompt_and_completion = (
+                training_samples[-1].token_ids if training_samples else []
+            )
+            prompt_prefix_len = rollout_turn.prompt_prefix_len
+            prompt_delta_token_ids = rollout_turn.prompt_delta_token_ids
+
+            # Too many: e.g. prev = [0, 1, 2, 3] has 4 tokens; a turn can't reuse 6.
+            if prompt_prefix_len > len(prev_prompt_and_completion):
+                raise ValueError(
+                    f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn {turn_idx} "
+                    f"reuses {prompt_prefix_len} tokens, but the previous turn has only "
+                    f"{len(prev_prompt_and_completion)}; build it with `split_prompt`"
+                )
+
+            # Too few: the first new token equals prev's token at the same position, so the turn could
+            # reuse at least one more. E.g. prev = [0, 1, 2, 3], stored (0, [0, 1, 9, 3]): 0 == prev[0];
+            # split_prompt gives (2, [9, 3]). Catches a full prompt stored as the delta.
+            could_reuse_one_more = (
+                prompt_prefix_len < len(prev_prompt_and_completion)
+                and len(prompt_delta_token_ids) > 0
+                and prompt_delta_token_ids[0]
+                == prev_prompt_and_completion[prompt_prefix_len]
+            )
+            if could_reuse_one_more:
+                raise ValueError(
+                    f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn {turn_idx} "
+                    f"reuses {prompt_prefix_len} tokens but could reuse more; build it with "
+                    "`split_prompt`"
+                )
+
             # True when this prompt continues the previous one (prefix-preserving);
             # False when the env edited history -> open a new training_sample (branch).
-            extends_prev = (
-                prompt[: len(prev_prompt_and_completion)] == prev_prompt_and_completion
-            )
+            extends_prev = prompt_prefix_len == len(prev_prompt_and_completion)
             if not training_samples or not extends_prev:
                 # Start a new training_sample; its RolloutTurnID marks the turn the segment begins at.
                 training_samples.append(
@@ -290,14 +330,15 @@ class TrainingSampleBuilder(Configurable):
                         advantage=[],
                     )
                 )
-                # New branch (first turn or a branch): no shared prefix.
-                prefix_len = 0
+                # A new training_sample needs the full prompt: the shared prefix + the delta.
+                prompt_delta = (
+                    prev_prompt_and_completion[:prompt_prefix_len] + prompt_delta_token_ids
+                )
             else:
-                prefix_len = len(prev_prompt_and_completion)
+                prompt_delta = prompt_delta_token_ids
 
             # Append this turn's new info to `training_sample`: prefix delta (untrained) + completion (trained).
             training_sample = training_samples[-1]
-            prompt_delta = prompt[prefix_len:]
             num_delta = len(prompt_delta)
             num_completion = len(rollout_turn.completion_token_ids)
             training_sample.token_ids += prompt_delta
@@ -312,7 +353,5 @@ class TrainingSampleBuilder(Configurable):
             training_sample.loss_mask += [True] * num_completion
             training_sample.logprobs += rollout_turn.completion_logprobs
             training_sample.advantage += [rollout_advantage] * num_completion
-
-            prev_prompt_and_completion = prompt + rollout_turn.completion_token_ids
 
         return training_samples

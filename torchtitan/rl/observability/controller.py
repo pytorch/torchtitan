@@ -250,10 +250,10 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         for rollout_turn in rollout.turns
     ]
     prompt_lens = [
-        len(rollout.turns[0].prompt_token_ids) for rollout in rollouts if rollout.turns
+        rollout.turns[0].num_prompt_tokens for rollout in rollouts if rollout.turns
     ]
     total_lens = [
-        len(rollout.turns[-1].prompt_token_ids)
+        rollout.turns[-1].num_prompt_tokens
         + len(rollout.turns[-1].completion_token_ids)
         for rollout in rollouts
         if rollout.turns

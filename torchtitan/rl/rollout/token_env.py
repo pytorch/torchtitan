@@ -14,7 +14,7 @@ from renderers import Message, Renderer, ToolSpec
 
 from torchtitan.config import Configurable
 from torchtitan.rl.rollout.message_env import MessageEnv
-from torchtitan.rl.rollout.types import Completion, RolloutStatus
+from torchtitan.rl.rollout.types import Completion, RolloutStatus, split_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,10 @@ class TokenEnvOutput:
     next_prompt_token_ids: list[int] | None  # [num_prompt_tokens] or None
     """Tokens for the next `generate` call. `None` once no further prompt is
     rendered (COMPLETED, or a completion-level error)."""
+
+    next_prompt_prefix_len: int = 0
+    """Length of the longest prefix shared with the previous prompt + completion; 0 on the first prompt.
+    Set it with `split_prompt` on every later prompt, from the tokens in `next_prompt_token_ids`."""
 
     next_prompt_messages: list[Message] | None = None  # [num_prompt_messages] or None
     """Message form of `next_prompt_token_ids`; `None` whenever that is `None`."""
@@ -46,6 +50,11 @@ class TokenEnvOutput:
     env_rewards: dict[str, float] = field(default_factory=dict)
     """Per-step reward signals from the env; empty when the env was not stepped. This
     can be used by the rubric to compute the final rollout reward."""
+
+    @property
+    def next_prompt_delta_token_ids(self) -> list[int]:
+        """The next prompt after its first `next_prompt_prefix_len` tokens."""
+        return (self.next_prompt_token_ids or [])[self.next_prompt_prefix_len :]
 
 
 class TokenEnv(Configurable):
@@ -283,9 +292,15 @@ class TokenEnv(Configurable):
                 env_rewards=step_output.env_rewards,
             )
 
+        # RolloutTurn stores the next prompt as a delta on this prompt + completion
+        next_prompt_prefix_len, _ = split_prompt(
+            prompt_token_ids=next_prompt_token_ids,
+            previous_token_ids=self._last_prompt_token_ids + completion.token_ids,
+        )
         self._last_prompt_token_ids = next_prompt_token_ids
         return TokenEnvOutput(
             next_prompt_token_ids=next_prompt_token_ids,
+            next_prompt_prefix_len=next_prompt_prefix_len,
             next_prompt_messages=self._messages,
             status=RolloutStatus.ONGOING,
             completion_message=completion_message,

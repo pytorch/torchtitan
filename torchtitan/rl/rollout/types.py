@@ -139,9 +139,21 @@ class RolloutStatus(StrEnum):
 
 @dataclass(kw_only=True, slots=True)
 class RolloutTurn:
-    """Full per-turn snapshot: the prompt fed to the generator + the sampled completion +
+    """One turn: the prompt fed to the generator + the sampled completion +
     the env's reply, in both token and message space. Rubrics score it and
-    `rollout_to_training_samples` packs the rollout into training tokens."""
+    `rollout_to_training_samples` packs the rollout into training tokens.
+
+    A turn doesn't store its full prompt. It stores how many leading tokens it copies from the previous
+    turn's prompt + completion, then its new tokens (`prompt_messages` stay in full):
+
+        full prompt = (previous prompt + completion)[:prompt_prefix_len] + prompt_delta_token_ids
+
+    Example: the previous turn's prompt is [0, 1, 2] and its completion [3].
+
+        this turn's prompt   prompt_prefix_len  prompt_delta_token_ids
+        [0, 1, 2, 3, 4, 5]   4                  [4, 5]                  # continues
+        [0, 1, 9, 3]         2                  [9, 3]                  # edited 2 -> 9: 3 is stored again
+    """
 
     # TODO: add a `logs` field (raw prompt/response text, finish_reason, timings)
     # so a turn can be dumped and inspected without re-deriving from tokens.
@@ -150,8 +162,11 @@ class RolloutTurn:
     """Identifies this turn (group, sibling index, turn index)."""
 
     # Fields needed for training
-    prompt_token_ids: list[int]  # [num_prompt_tokens]
-    """Tokenized conversation up to this turn, used to generate this turn's completion."""
+    prompt_prefix_len: int
+    """Length of the longest prefix shared with the previous turn's prompt + completion; set by `split_prompt`."""
+
+    prompt_delta_token_ids: list[int]  # [num_prompt_tokens - prompt_prefix_len]
+    """The prompt after its first `prompt_prefix_len` tokens."""
 
     completion_token_ids: list[int]  # [num_completion_tokens]
     """This turn's completion token ids."""
@@ -170,7 +185,7 @@ class RolloutTurn:
     prompt_messages: list[Message] = field(
         default_factory=list
     )  # [num_prompt_messages]
-    """Full conversation up to this turn; equivalent to `prompt_token_ids`."""
+    """Full conversation up to this turn, not a delta."""
 
     completion_message: Message | None = None
     """This turn's completion decoded into a message by the renderer (the TokenEnv's parse,
@@ -186,6 +201,40 @@ class RolloutTurn:
     metrics: list[m.Metric] = field(default_factory=list)
     """Per-turn metrics produced during rollouts"""
 
+    @property
+    def num_prompt_tokens(self) -> int:
+        """Length of the full prompt this turn generated from."""
+        return self.prompt_prefix_len + len(self.prompt_delta_token_ids)
+
+
+def split_prompt(
+    prompt_token_ids: list[int], previous_token_ids: list[int]
+) -> tuple[int, list[int]]:
+    """Split a prompt into the part shared with the previous turn and the new part.
+
+    Args:
+        prompt_token_ids: this turn's full prompt.
+        previous_token_ids: the previous turn's prompt + completion; [] on the first turn.
+
+    Returns:
+        `(prompt_prefix_len, prompt_delta_token_ids)`: the length of the longest shared prefix, and the
+        prompt after it.
+
+    Example:
+        split_prompt([0, 1, 2, 3, 4, 5], previous_token_ids=[0, 1, 2, 3])  # -> (4, [4, 5]): continues
+        split_prompt([0, 1, 9, 3], previous_token_ids=[0, 1, 2, 3])        # -> (2, [9, 3]): history edited
+        split_prompt([0, 1, 2], previous_token_ids=[])                     # -> (0, [0, 1, 2]): first turn
+    """
+    # Common case: the prompt extends the previous turn. One list compare, no Python loop.
+    if prompt_token_ids[: len(previous_token_ids)] == previous_token_ids:
+        return len(previous_token_ids), prompt_token_ids[len(previous_token_ids) :]
+    prefix_len = 0
+    for token, previous in zip(prompt_token_ids, previous_token_ids):
+        if token != previous:
+            break
+        prefix_len += 1
+    return prefix_len, prompt_token_ids[prefix_len:]
+
 
 @dataclass(kw_only=True, slots=True)
 class Rollout:
@@ -198,10 +247,9 @@ class Rollout:
     """Sibling index within the group (0..group_size-1)."""
 
     turns: list[RolloutTurn] = field(default_factory=list)  # [num_turns]
-    """Ordered rollout turns. Each turn stores its full prompt (redundant across turns); kept so a
-    rollout can be replayed/branched and divergences found, then collapsed at training_sample assembly."""
-    # TODO: represent shared history as graph nodes so branching does not repeat
-    # complete prompt prefixes and consume O(num_turns**2) token storage.
+    """Ordered rollout turns; each stores its prompt as a delta on the previous turn (see `RolloutTurn`)."""
+    # TODO: let a turn be a delta on any earlier turn, not just the previous one, so a turn that resumes
+    # an older turn (a retry, or a main agent after a subagent) stores only its new tokens.
 
     status: RolloutStatus
     """Rollout-level terminal status."""

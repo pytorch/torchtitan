@@ -71,7 +71,8 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
     )
 
     assert len(turns) == 1
-    assert turns[0].prompt_token_ids == [10, 11]
+    assert turns[0].prompt_prefix_len == 0
+    assert turns[0].prompt_delta_token_ids == [10, 11]
     assert turns[0].completion_token_ids == [12, 13]
     assert turns[0].completion_logprobs == [-0.2, -0.3]
     assert turns[0].completion_message == {
@@ -120,9 +121,54 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
 
     assert [turn.min_policy_version for turn in turns] == [3, 3]
     assert [turn.max_policy_version for turn in turns] == [8, 8]
-    assert [turn.prompt_token_ids for turn in turns] == [[10], [10, 11, 12]]
+    # turn 1's prompt [10, 11, 12] continues turn 0's [10] + [11], so it stores only [12]
+    stored = [(turn.prompt_prefix_len, turn.prompt_delta_token_ids) for turn in turns]
+    assert stored == [(0, [10]), (2, [12])]
     assert [turn.completion_token_ids for turn in turns] == [[11], [13]]
     assert [turn.completion_logprobs for turn in turns] == [[-0.1], [-0.2]]
+
+
+def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> None:
+    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
+
+    def node(token_ids: list[int], content: str) -> SimpleNamespace:
+        message = VerifiersAssistantMessage(content=content)
+        return SimpleNamespace(
+            token_ids=token_ids, mask=[False, True], sampled=True, message=message
+        )
+
+    shared = node([10, 11], "a")
+    first_leaf = node([12, 13], "b")
+    second_leaf = node([14, 15], "c")
+    trace = SimpleNamespace(
+        nodes=[shared, first_leaf, second_leaf],
+        branches=[
+            SimpleNamespace(
+                nodes=[shared, first_leaf],
+                token_ids=[10, 11, 12, 13],
+                logprobs=[0.0, -0.1, 0.0, -0.2],
+            ),
+            SimpleNamespace(
+                nodes=[shared, second_leaf],
+                token_ids=[10, 11, 14, 15],
+                logprobs=[0.0, -0.1, 0.0, -0.3],
+            ),
+        ],
+    )
+    turns = VerifiersRollouter.trace_to_rollout_turns(
+        trace=trace,
+        generation_metadata=VerifiersGenerationMetadata(
+            min_policy_version=1, max_policy_version=1, metrics=[]
+        ),
+        group_id=5,
+        rollout_id=2,
+    )
+
+    # The shared node trains once; the second branch's prompt [10, 11, 14] keeps [10, 11] of the
+    # previous turn's [10, 11, 12, 13], so it stores (2, [14]) and the builder opens a new sample.
+    stored = [(turn.prompt_prefix_len, turn.prompt_delta_token_ids) for turn in turns]
+    assert stored == [(0, [10]), (2, [12]), (2, [14])]
+    assert [turn.completion_token_ids for turn in turns] == [[11], [13], [15]]
 
 
 def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:

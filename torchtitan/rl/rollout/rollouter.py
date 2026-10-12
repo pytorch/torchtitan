@@ -447,11 +447,12 @@ class RolloutWorker(Configurable):
                 # env call
                 next_env_step = await env.step(completion)
 
-                # full snapshot of this turn from a token and message perspective
+                # this turn from a token and message perspective
                 turns.append(
                     RolloutTurn(
                         rollout_id=turn_rollout_id,
-                        prompt_token_ids=env_step.next_prompt_token_ids or [],
+                        prompt_prefix_len=env_step.next_prompt_prefix_len,
+                        prompt_delta_token_ids=env_step.next_prompt_delta_token_ids,
                         prompt_messages=env_step.next_prompt_messages or [],
                         completion_token_ids=completion.token_ids,
                         completion_logprobs=completion.token_logprobs,

@@ -29,7 +29,8 @@ def _recorder(tmp_path, **config_kwargs) -> RolloutSampleRecorder:
 def _turn(*, completion_logprobs: list[float], policy_version: int = 1) -> RolloutTurn:
     return RolloutTurn(
         rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
-        prompt_token_ids=[1, 2, 3],
+        prompt_prefix_len=0,
+        prompt_delta_token_ids=[1, 2, 3],
         completion_token_ids=[4, 5],
         completion_logprobs=completion_logprobs,
         min_policy_version=policy_version,
@@ -135,7 +136,7 @@ def test_record_dumps_the_rollout_minus_token_arrays(tmp_path) -> None:
     assert turn["completion_message"] == {"role": "assistant", "content": "a b c"}
     assert turn["env_messages"] == [{"role": "user", "content": "ok"}]
     # token-id / logprob arrays are large, so they are dropped unless opted in.
-    assert "prompt_token_ids" not in turn
+    assert "prompt_delta_token_ids" not in turn
     assert "completion_token_ids" not in turn
     assert "completion_logprobs" not in turn
 
@@ -144,7 +145,8 @@ def test_log_tensors_and_logprobs_opt_in(tmp_path) -> None:
     recorder = _recorder(tmp_path, log_tensors=True, log_logprobs=True)
     recorder.record(is_validation=False, rollout_groups=[_group(0, rewards=[1.0])])
     (turn,) = _read_lines(tmp_path / "rollout_samples.jsonl")[0]["turns"]
-    assert turn["prompt_token_ids"] == [1, 2, 3]
+    assert turn["prompt_prefix_len"] == 0
+    assert turn["prompt_delta_token_ids"] == [1, 2, 3]
     assert turn["completion_token_ids"] == [4, 5]
     assert turn["completion_logprobs"] == [-0.5, -1.5]
 
@@ -209,7 +211,8 @@ def test_turn_metrics_are_excluded_not_serialized(tmp_path) -> None:
 def test_none_policy_version_and_completion_message(tmp_path) -> None:
     turn = RolloutTurn(
         rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
-        prompt_token_ids=[1, 2],
+        prompt_prefix_len=0,
+        prompt_delta_token_ids=[1, 2],
         completion_token_ids=[],
         completion_logprobs=[],
         min_policy_version=None,
