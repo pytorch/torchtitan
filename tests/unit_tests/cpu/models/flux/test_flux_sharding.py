@@ -13,14 +13,14 @@ import torch
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.flux.layers import (
-    local_concat_text_image,
     local_split_text_image,
+    prepare_flux_attention_inputs,
+    unpack_flux_attention_output,
 )
+from torchtitan.models.flux.model import local_concat_text_image
 from torchtitan.models.flux.sharding import (
     create_flux_attention_metadata,
     flux_inner_attention_sharding_config,
-    prepare_flux_attention_inputs,
-    unpack_flux_attention_output,
 )
 
 
@@ -51,8 +51,7 @@ class TestFluxSharding(unittest.TestCase):
         for tensor in packed:
             torch.testing.assert_close(tensor, qkv.flatten(0, 1))
         torch.testing.assert_close(unpack_flux_attention_output(packed[0], 2), qkv)
-        with patch("torchtitan.models.flux.sharding.spmd_mesh_group") as group:
-            group.return_value.size.return_value = 2
+        with patch("torchtitan.models.flux.sharding.spmd_mesh_size", return_value=2):
             metadata = create_flux_attention_metadata(2, 8, device=torch.device("cpu"))
         torch.testing.assert_close(
             metadata.cu_seq_q, torch.tensor([0, 8, 16], dtype=torch.int32)

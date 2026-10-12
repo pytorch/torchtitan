@@ -6,7 +6,7 @@
 
 # imported from black-forest-labs/FLUX
 # Shape suffixes: B = batch, L = per-sample sequence, T = packed tokens,
-# D = hidden dimension, H = heads, K = query/key head dimension, V = value dimension.
+# D = feature dimension, H = heads, K = query/key head dimension, V = value dimension.
 import math
 from dataclasses import dataclass, field
 
@@ -15,6 +15,8 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module, Sequential
 
 from torchtitan.models.common.activation import SiLU
@@ -25,18 +27,8 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 
-from .sharding import prepare_flux_attention_inputs, unpack_flux_attention_output
-
-
-@spmd.local_map(
-    in_types=(
-        spmd.PartitionSpec("dp", "cp", None),
-        spmd.PartitionSpec("dp", "cp", None),
-    ),
-    out_types=spmd.PartitionSpec("dp", "cp", None),
-)
-def local_concat_text_image(text: Tensor, image: Tensor) -> Tensor:
-    return torch.cat((text, image), dim=1)
+DP = MeshAxisName.DP
+CP = MeshAxisName.CP
 
 
 @spmd.local_map(
@@ -51,6 +43,53 @@ def local_split_text_image(
     text_seq_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return combined[:, :text_seq_len], combined[:, text_seq_len:]
+
+
+@spmd.local_map(
+    in_types=(
+        spmd.PartitionSpec(DP, CP, None, None),
+        spmd.PartitionSpec(DP, None, None, None),
+        spmd.PartitionSpec(DP, None, None, None),
+    ),
+    out_types=(
+        spmd.PartitionSpec((DP, CP), None, None),
+        spmd.PartitionSpec(DP, None, None),
+        spmd.PartitionSpec(DP, None, None),
+    ),
+)
+def _pack_attention_inputs(
+    q_BLHK: torch.Tensor, k_BLHK: torch.Tensor, v_BLHV: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return q_BLHK.flatten(0, 1), k_BLHK.flatten(0, 1), v_BLHV.flatten(0, 1)
+
+
+def prepare_flux_attention_inputs(
+    q_BLHK: torch.Tensor, k_BLHK: torch.Tensor, v_BLHV: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Gather K/V along sequence before packing to preserve sample boundaries."""
+    cp_group = spmd_mesh_group(CP)
+    if cp_group is not None:
+        k_BLHK, v_BLHV = (
+            spmd.redistribute(
+                x_BLHD,
+                cp_group,
+                src=spmd.S(1),
+                dst=spmd.R,
+                backward_options={"op_dtype": x_BLHD.dtype},
+            )
+            for x_BLHD in (k_BLHK, v_BLHV)
+        )
+    return _pack_attention_inputs(q_BLHK, k_BLHK, v_BLHV)
+
+
+@spmd.local_map(
+    in_types=(spmd.PartitionSpec((DP, CP), None, None), None),
+    out_types=spmd.PartitionSpec(DP, CP, None, None),
+)
+def unpack_flux_attention_output(
+    out_THV: torch.Tensor, batch_size: int
+) -> torch.Tensor:
+    return out_THV.unflatten(0, (batch_size, -1))
 
 
 def varlen_attention(

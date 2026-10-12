@@ -7,6 +7,7 @@
 from dataclasses import dataclass, field
 from typing import Any, cast, Self
 
+import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn, Tensor
@@ -29,7 +30,6 @@ from torchtitan.models.flux.layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
-    local_concat_text_image,
     local_split_text_image,
     MLPEmbedder,
     SingleStreamBlock,
@@ -47,6 +47,17 @@ from torchtitan.models.flux.utils import (
 )
 
 from .state_dict_adapter import FluxStateDictAdapter
+
+
+@spmd.local_map(
+    in_types=(
+        spmd.PartitionSpec("dp", "cp", None),
+        spmd.PartitionSpec("dp", "cp", None),
+    ),
+    out_types=spmd.PartitionSpec("dp", "cp", None),
+)
+def local_concat_text_image(text: Tensor, image: Tensor) -> Tensor:
+    return torch.cat((text, image), dim=1)
 
 
 class FluxModel(BaseModel):
@@ -408,5 +419,5 @@ class FluxModel(BaseModel):
             img = block(img, vec, pe, attention_metadata=attention_metadata)
         _, img = local_split_text_image(img, text_seq_len)
 
-        img = self.final_layer(img, vec)
+        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         return img

@@ -4,18 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Shape suffixes: B = batch, L = sequence, T = packed tokens, H = heads,
-# K = query/key head dimension, V = value head dimension, D = generic head dimension,
-# N = sequence boundaries.
+# Shape suffixes: T = packed tokens.
 
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common.attention import VarlenAttentionMetadata
+from torchtitan.models.common.attention import (
+    create_varlen_metadata_for_document,
+    VarlenAttentionMetadata,
+)
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
@@ -66,62 +67,19 @@ def create_flux_attention_metadata(
     batch_size: int, seq_len: int, *, device: torch.device
 ) -> VarlenAttentionMetadata:
     """Boundaries for each sample's local queries and gathered keys/values."""
-    cp_group = spmd_mesh_group(CP)
-    cp_size = cp_group.size() if cp_group is not None else 1
-    offsets_N = torch.arange(batch_size + 1, device=device, dtype=torch.int32)
-    return VarlenAttentionMetadata(
-        cu_seq_q=offsets_N * seq_len,
-        cu_seq_k=offsets_N * (seq_len * cp_size),
-        max_q=seq_len,
-        max_k=seq_len * cp_size,
+    positions_T = torch.arange(seq_len, device=device, dtype=torch.int32).repeat(
+        batch_size
     )
-
-
-@spmd.local_map(
-    in_types=(
-        spmd.PartitionSpec(DP, CP, None, None),
-        spmd.PartitionSpec(DP, None, None, None),
-        spmd.PartitionSpec(DP, None, None, None),
-    ),
-    out_types=(
-        spmd.PartitionSpec((DP, CP), None, None),
-        spmd.PartitionSpec(DP, None, None),
-        spmd.PartitionSpec(DP, None, None),
-    ),
-)
-def _pack_attention_inputs(
-    q_BLHK: torch.Tensor, k_BLHK: torch.Tensor, v_BLHV: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return q_BLHK.flatten(0, 1), k_BLHK.flatten(0, 1), v_BLHV.flatten(0, 1)
-
-
-def prepare_flux_attention_inputs(
-    q_BLHK: torch.Tensor, k_BLHK: torch.Tensor, v_BLHV: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Gather K/V along sequence before packing to preserve sample boundaries."""
-    cp_group = spmd_mesh_group(CP)
-    if cp_group is not None:
-        k_BLHK, v_BLHV = (
-            spmd.redistribute(
-                x_BLHD,
-                cp_group,
-                src=spmd.S(1),
-                dst=spmd.R,
-                backward_options={"op_dtype": x_BLHD.dtype},
-            )
-            for x_BLHD in (k_BLHK, v_BLHV)
-        )
-    return _pack_attention_inputs(q_BLHK, k_BLHK, v_BLHV)
-
-
-@spmd.local_map(
-    in_types=(spmd.PartitionSpec((DP, CP), None, None), None),
-    out_types=spmd.PartitionSpec(DP, CP, None, None),
-)
-def unpack_flux_attention_output(
-    out_THV: torch.Tensor, batch_size: int
-) -> torch.Tensor:
-    return out_THV.unflatten(0, (batch_size, -1))
+    metadata = create_varlen_metadata_for_document(
+        positions_T,
+        max_num_documents=batch_size,
+        max_context_length=seq_len,
+    )
+    cp_size = spmd_mesh_size(CP)
+    return metadata._replace(
+        cu_seq_k=metadata.cu_seq_k * cp_size,
+        max_k=metadata.max_k * cp_size,
+    )
 
 
 def annotate_flux_forward_inputs(
