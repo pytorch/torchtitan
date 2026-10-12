@@ -123,7 +123,6 @@ def deepseek_v3_eager_numerics():
             expert_parallel_degree=2,
         ),
     )
-    config.dataloader.max_num_documents = None
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     # The numerics baselines keep CUDA graphs on.
     config.training.disable_cuda_graphs = False
@@ -152,7 +151,6 @@ def _pp_ep_parallelism() -> ParallelismConfig:
 def _deepseek_v3_pp_numerics(config, *, schedule: str):
     """Configure PP numerics on a config built with ``_pp_ep_parallelism()``."""
     config.training.disable_cuda_graphs = True
-    config.dataloader.max_num_documents = None
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.max_norm = float("inf")
     config.parallelism.pipeline_parallel_degree = 2

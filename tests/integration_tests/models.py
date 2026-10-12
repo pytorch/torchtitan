@@ -98,7 +98,7 @@ def llama3_debugmodel_region_ac_fsdp2_tp2_cp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=512)
+    config = llama3_debugmodel(attn_backend="flex", seq_len=512)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
@@ -159,7 +159,9 @@ def deepseek_v3_debugmodel_mtp_tp2_cp2() -> Trainer.Config:
 def deepseek_v3_debugmodel_fsdp8_ep8() -> Trainer.Config:
     return _configure_fsdp_numerics(
         deepseek_v3_debugmodel(
-            seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=8)
+            attn_backend="flex",
+            seq_len=512,
+            parallelism=ParallelismConfig(expert_parallel_degree=8),
         )
     )
 
@@ -262,6 +264,7 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
         seq_len=512,
         parallelism=ParallelismConfig(expert_parallel_degree=8),
     )
+    config.dataloader.max_num_documents = None
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -281,7 +284,8 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
 
 
 def qwen3_debugmodel_moe_param_groups_seed() -> Trainer.Config:
-    config = qwen3_debugmodel_moe_param_groups()
+    config = qwen3_debugmodel_moe_param_groups(attn_backend="flex")
+    config.dataloader.max_num_documents = None
     config.checkpointer = CheckpointManager.Config(export_dtype="float16")
     return config
 
@@ -489,7 +493,9 @@ def kimi_k2_5_debugmodel_seed_checkpoint() -> Trainer.Config:
 def muse_glimmer_debugmodel_fsdp8() -> Trainer.Config:
     from torchtitan_recipes.tests.models.muse_glimmer import muse_glimmer_debugmodel
 
-    return _configure_fsdp_numerics(muse_glimmer_debugmodel(seq_len=512))
+    config = muse_glimmer_debugmodel(attn_backend="flex", seq_len=512)
+    config.dataloader.max_num_documents = None
+    return _configure_fsdp_numerics(config)
 
 
 def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
