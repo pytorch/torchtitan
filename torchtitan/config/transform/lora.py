@@ -19,16 +19,13 @@ from torchtitan.models.common.lora import (
 )
 
 from .base import ModelConfigTransform
+from .utils import matches_fqn
 
 
 logger = logging.getLogger(__name__)
 
 
 _frozen_config_class_cache: dict[type, type] = {}
-
-
-def _matches_fqn(fqn: str, target: str) -> bool:
-    return fqn == target or fqn.endswith(f".{target}")
 
 
 def _validate_shared_projection_target_consistency(
@@ -40,7 +37,7 @@ def _validate_shared_projection_target_consistency(
         if not isinstance(cfg, (Linear.Config, GroupedLinear.Config)):
             continue
         is_target = target_module_names is None or any(
-            _matches_fqn(fqn, target) for target in target_module_names
+            matches_fqn(fqn, target) for target in target_module_names
         )
         _, lora_fqns, frozen_fqns = projection_occurrences.setdefault(
             id(cfg), (cfg, [], [])
@@ -68,7 +65,7 @@ def _validate_weight_tied_lm_head_target(
             continue
 
         is_target = target_module_names is None or any(
-            _matches_fqn(fqn, target) for target in target_module_names
+            matches_fqn(fqn, target) for target in target_module_names
         )
         if is_target:
             raise ValueError(
@@ -258,7 +255,7 @@ class LoRATransform(ModelConfigTransform):
             is_target = target_module_names is None
             if isinstance(cfg, (Linear.Config, GroupedLinear.Config)):
                 for target in target_module_names or ():
-                    if _matches_fqn(fqn, target):
+                    if matches_fqn(fqn, target):
                         matched_targets.add(target)
                         is_target = True
 

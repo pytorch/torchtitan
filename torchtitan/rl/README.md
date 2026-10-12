@@ -150,9 +150,23 @@ def my_experiment() -> Controller.Config:
 The trainer and generator each own a model config, built and sharded for that
 role's parallelism. They must use the same model class; keeping them otherwise
 aligned (same architecture, same weights layout) is the recipe's job, and
-`build_rl_model_configs` builds both from one call. Per-role differences, such
-as a CUDA-graph-compatible MoE dispatcher for the generator, are model config
+`build_rl_model_configs` builds both for their respective parallelisms and
+applies shared RL defaults with `transform_model_config_`. Its flags
+`fp32_lm_head=True` and `freeze_moe_routing=True` apply
+`LMHeadFP32OutputTransform` and `FreezeMoERoutingTransform` to both roles.
+Pass `False` to skip either default. Per-role differences, such as a
+CUDA-graph-compatible MoE dispatcher for the generator, are model config
 transforms applied to one role (`apply_transforms(config.generator, ...)`).
+
+RL log-probability and KL calculations need the LM head logits in fp32.
+`LMHeadFP32OutputTransform` uses `HiMidLoLinear` to preserve the vocabulary
+projection's fp32 output; casting already-rounded bf16 logits to fp32 cannot
+recover the lost precision. Recipes do not need to apply this transform again.
+
+Local compile regions do not support batch-invariant mode. Recipes using that
+mode, or otherwise disabling local compilation, clear
+`model.local_compile_regions` after building the shared RL model configs,
+because the LM head transform adds `fp32_to_bf16_split` to that list.
 `Controller.Config.override` applies registered overrides to both models.
 
 Then run it by module and config name. `--output-dir` sets the output directory:

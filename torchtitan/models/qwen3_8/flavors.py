@@ -7,10 +7,7 @@
 """Qwen3.8 model flavors."""
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
+from torchtitan.config.transform import ModelConfigConverter
 from torchtitan.models.common import Embedding, Linear
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
@@ -135,7 +132,6 @@ def build_model_config(
         parallelism=parallelism,
     )
     if converters is not None:
-        validate_converter_compatibility(converters)
         for converter_config in converters:
             config = converter_config.build().convert(config)
     return config

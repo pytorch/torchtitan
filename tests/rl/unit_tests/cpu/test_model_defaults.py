@@ -35,7 +35,7 @@ _OPTIONAL_PACKAGE_RECIPES = {
     "rl_grpo_qwen3_0_6b_varlen_mxfp8",
     "rl_grpo_moe_debug_dist_moe_tp2_ep4",
 }
-# SoftCappedLinear head: LMHeadFP32OutputConverter can't convert it (see the recipe's TODO).
+# SoftCappedLinear head: LMHeadFP32OutputTransform can't convert it (see the recipe's TODO).
 _BF16_HEAD_RECIPES = {"rl_grpo_muse_glimmer_30b_search_r1"}
 
 
@@ -73,17 +73,25 @@ def test_rl_recipes_get_model_defaults(module_name: str) -> None:
             assert all(moe.router.aux_loss is None for moe in moe_configs), name
 
 
-def test_build_rl_model_configs_freeze_moe_routing_false_trains_moe_router() -> None:
+@pytest.mark.parametrize("fp32_lm_head", [True, False])
+@pytest.mark.parametrize("freeze_moe_routing", [True, False])
+def test_build_rl_model_configs_flags(
+    fp32_lm_head: bool, freeze_moe_routing: bool
+) -> None:
     # DeepSeek-V3 builds a load-balancing aux loss on every MoE router.
     for model in build_rl_model_configs(
         build_deepseek_v3_model_config,
         "debugmodel",
         trainer_parallelism=ParallelismConfig(),
         generator_parallelism=InferenceParallelismConfig(),
-        freeze_moe_routing=False,
+        fp32_lm_head=fp32_lm_head,
+        freeze_moe_routing=freeze_moe_routing,
     ):
+        assert isinstance(model.lm_head, HiMidLoLinear.Config) == fp32_lm_head
         moe_configs = [moe for _, moe, _, _ in model.traverse(MoE.Config)]
         assert moe_configs
-        assert not any(moe.freeze_expert_bias for moe in moe_configs)
-        assert not any(moe.router.freeze_gate for moe in moe_configs)
-        assert all(moe.router.aux_loss is not None for moe in moe_configs)
+        assert all(moe.freeze_expert_bias == freeze_moe_routing for moe in moe_configs)
+        assert all(moe.router.freeze_gate == freeze_moe_routing for moe in moe_configs)
+        assert all(
+            (moe.router.aux_loss is None) == freeze_moe_routing for moe in moe_configs
+        )

@@ -15,10 +15,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
+from torchtitan.config.transform import ModelConfigConverter
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     Conv1d,
@@ -809,7 +806,6 @@ def build_model_config(
         parallelism=parallelism,
     )
     if converters is not None:
-        validate_converter_compatibility(converters)
         for converter in converters:
             config = converter.build().convert(config)
     return config

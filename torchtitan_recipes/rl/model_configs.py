@@ -12,7 +12,7 @@ from typing import Any, cast
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     FreezeMoERoutingTransform,
-    LMHeadFP32OutputConverter,
+    LMHeadFP32OutputTransform,
     ModelConfigTransform,
     transform_model_config_,
 )
@@ -44,11 +44,6 @@ def build_rl_model_configs(
                             expert choices don't drift apart
     Per-role transforms go through ``apply_transforms(config.generator, ...)``.
     """
-    if fp32_lm_head:
-        kwargs["converters"] = [
-            *(kwargs.get("converters") or []),
-            LMHeadFP32OutputConverter.Config(),
-        ]
     model_configs = (
         build_model_config(flavor, parallelism=trainer_parallelism, **kwargs),
         build_model_config(
@@ -56,6 +51,8 @@ def build_rl_model_configs(
         ),
     )
     transforms: list[ModelConfigTransform] = []
+    if fp32_lm_head:
+        transforms.append(LMHeadFP32OutputTransform())
     if freeze_moe_routing:
         transforms.append(FreezeMoERoutingTransform())
     # A transform may return a new root (e.g. LoRA), so keep what it returns.
