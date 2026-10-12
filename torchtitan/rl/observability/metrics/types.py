@@ -391,6 +391,10 @@ class NoReduce(MetricValue):
 def fold(metrics: Iterable[Metric]) -> list[Metric]:
     """Merge the `Mean`, `Max`, `Min` and `Sum` records that share a key into one record per type.
 
+    Why: each generate call returns 16 records (8 metrics x Mean/Max). Unfolded, a
+    multi-turn rollout holds every turn's records until the step is logged, and every full GC
+    walks them: ~180K of the ~220K objects added after setup at 12 turns and ~320 rollouts in flight.
+
     `MetricsProcessor` reduces the result to the same numbers. Other types pass through unchanged.
 
     Example:
