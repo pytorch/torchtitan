@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Any
 
+from vllm.v1.request import RequestStatus
+
 
 class SessionKVHolder:
     """Keeps a session's reusable prefix out of vLLM's free pool until its next turn or its end.
@@ -125,8 +127,13 @@ class SessionKVHolder:
 
         # Nothing runs and requests wait: with an empty batch vLLM skips the watermark, so it refused
         # the head for lack of blocks (or the batch just drained: one cheap extra release).
+        # A request loading its KV from CPU waits for the load, not for blocks. One whose CPU lookup
+        # is deferred (a chunk still being stored) still counts: at worst one release per empty step.
         scheduler = self._scheduler
-        if not scheduler.running and (scheduler.waiting or scheduler.skipped_waiting):
+        if not scheduler.running and any(
+            request.status != RequestStatus.WAITING_FOR_REMOTE_KVS
+            for request in (*scheduler.skipped_waiting, *scheduler.waiting)
+        ):
             free_before = self._block_pool.get_num_free_blocks()
             for session_id in list(self._held):
                 self._release(session_id)

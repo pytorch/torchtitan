@@ -28,7 +28,7 @@ from vllm.v1.kv_offload.base import make_offload_key, OffloadKey, ReqContext
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 BLOCK = 16
 
@@ -453,3 +453,14 @@ def test_a_waiting_turn_gets_room_when_held_sessions_fill_the_pool(manager, queu
         holder.after_step()
     else:
         pytest.fail("held sessions stalled the engine: the waiting turn never fit")
+
+
+def test_a_turn_loading_kv_from_cpu_releases_nothing(manager):
+    """A request whose CPU load is in flight waits for the load, not for blocks."""
+    loading = _request("loading", list(range(60)))
+    loading.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    requests = {}
+    holder = _holder(manager, requests, skipped_waiting=[loading])
+    _finished_turn(manager, holder, requests, "s", list(range(50)))
+    assert holder.num_sessions == 1
+    assert holder.num_evicted == 0
