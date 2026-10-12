@@ -6,7 +6,6 @@
 
 import asyncio
 import threading
-import time
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import torch
-from monarch.actor import Actor, ActorError, this_host
+from monarch.actor import Actor, ActorError, this_proc
 from torchstore import RankRole
 from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
@@ -113,9 +112,9 @@ def test_push_model_state_dict_reuses_final_dtype_cpu_staging_buffers() -> None:
         with patch(
             "torchtitan.rl.trainer.ts.put_state_dict", new_callable=AsyncMock
         ) as put_state_dict:
-            await trainer.push_model_state_dict()
+            await trainer.push_model_state_dict(on_published=lambda: None)
             trainer.model.weight.data.fill_(2.0)
-            await trainer.push_model_state_dict()
+            await trainer.push_model_state_dict(on_published=lambda: None)
 
         assert staging["weight"].data_ptr() == weight_data_ptr
         torch.testing.assert_close(
@@ -162,7 +161,7 @@ def test_push_model_state_dict_stages_on_dedicated_cuda_stream() -> None:
             new_callable=AsyncMock,
             side_effect=put_state_dict,
         ) as put:
-            await trainer.push_model_state_dict()
+            await trainer.push_model_state_dict(on_published=lambda: None)
 
         staging_complete.record.assert_called_once_with(
             trainer._staging_model_state_dict_stream
@@ -210,18 +209,17 @@ def test_push_model_state_dict_calls_on_published_in_worker_thread_after_put() -
     asyncio.run(run())
 
 
+_FORWARD_BACKWARD_MAY_RETURN = threading.Event()
+
+
 class _BlockingTrainer:
-    """Like `Trainer`: the push runs its put in a worker thread; forward_backward blocks the event loop."""
+    """Like `Trainer`: the push replies from a worker thread; forward_backward blocks the event loop."""
 
     async def push_model_state_dict(self, on_published) -> None:
-        def put() -> None:
-            time.sleep(0.1)  # the TorchStore put
-            on_published()
-
-        await asyncio.to_thread(put)
+        await asyncio.to_thread(on_published)
 
     async def forward_backward(self, *args) -> dict[str, float]:
-        time.sleep(2.0)  # like `Trainer.forward_backward`, never awaits
+        _FORWARD_BACKWARD_MAY_RETURN.wait()  # like `Trainer.forward_backward`, never awaits
         return {}
 
 
@@ -238,28 +236,32 @@ class _FailingPushTrainerActor(Actor, _TrainerActorEndpoints, _FailingPushTraine
     pass
 
 
-def test_trainer_actor_push_replies_during_forward_backward_and_forwards_errors() -> None:
+def test_trainer_actor_push_replies_during_forward_backward() -> None:
     async def run() -> None:
-        procs = this_host().spawn_procs(per_host={"procs": 1})
+        _FORWARD_BACKWARD_MAY_RETURN.clear()
+        # In the test process, so forward_backward can wait on the test's threading.Event.
+        trainer = this_proc().spawn("trainer", _BlockingTrainerActor)
+        # Sent first, so the push enters its thread before forward_backward blocks the loop.
+        push = asyncio.ensure_future(trainer.push_model_state_dict.call())
+        forward_backward = asyncio.ensure_future(
+            trainer.forward_backward.call([], torch.zeros(1), torch.zeros(1))
+        )
         try:
-            trainer = procs.spawn("trainer", _BlockingTrainerActor)
-            # Sent first, so the push enters its thread before forward_backward blocks the loop.
-            push = asyncio.ensure_future(trainer.push_model_state_dict.call())
-            forward_backward = asyncio.ensure_future(
-                trainer.forward_backward.call([], torch.zeros(1), torch.zeros(1))
-            )
-            done, _ = await asyncio.wait(
-                {push, forward_backward}, return_when=asyncio.FIRST_COMPLETED
-            )
-            assert done == {push}
-            await asyncio.gather(push, forward_backward)
-
-            # A failed push reaches the caller as an ActorError, as from the other endpoints.
-            failing_trainer = procs.spawn("failing_trainer", _FailingPushTrainerActor)
-            with pytest.raises(ActorError, match="put failed"):
-                await failing_trainer.push_model_state_dict.call()
+            # forward_backward can't return yet, so the reply must come from the worker thread.
+            await asyncio.wait_for(push, timeout=10)
         finally:
-            await procs.stop()
+            _FORWARD_BACKWARD_MAY_RETURN.set()
+        await forward_backward
+
+    asyncio.run(run())
+
+
+def test_trainer_actor_push_forwards_errors() -> None:
+    async def run() -> None:
+        trainer = this_proc().spawn("failing_trainer", _FailingPushTrainerActor)
+        # Reaches the caller as an ActorError, as from the other endpoints.
+        with pytest.raises(ActorError, match="put failed"):
+            await trainer.push_model_state_dict.call()
 
     asyncio.run(run())
 

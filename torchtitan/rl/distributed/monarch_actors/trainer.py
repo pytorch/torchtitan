@@ -70,10 +70,20 @@ class _TrainerActorEndpoints:
             worker thread:  | copy + put |
             reply:                       ^ this endpoint             ^ without an explicit port
         """
+        replied = False
+
+        def reply() -> None:
+            nonlocal replied
+            port.send(None)
+            replied = True
+
         try:
-            await super().push_model_state_dict(on_published=lambda: port.send(None))
-        except Exception as e:
-            # We own the port, so Monarch won't send the ActorError to the caller; we send it ourselves.
+            await super().push_model_state_dict(on_published=reply)
+        except BaseException as e:
+            if replied:
+                # The port takes one reply, so let Monarch fail the actor with this error.
+                raise
+            # We own the port, so we send every error, CancelledError included; else the caller waits forever.
             port.exception(ActorError(e))
 
 

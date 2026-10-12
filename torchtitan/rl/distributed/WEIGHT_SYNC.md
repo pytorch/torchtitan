@@ -36,6 +36,9 @@ Controller: start asynchronous weight sync N
   generator update then prefetches policy N into pinned CPU memory and applies
   it to the GPU model. Prefetch can overlap generation; application happens at
   a controlled engine boundary.
+- The generator update reads from StorageVolumes on the trainer's processes, so
+  it can slow forward/backward N+1. In exchange, when the PUT ends during
+  forward/backward N+1, the update starts right away and the loop waits less.
 - Completing `put_state_dict N` releases `wait_prev_push`, allowing trainer
   optimizer N+1 to mutate the model.
 - Completing generator update N releases `wait_prev_pull`, allowing the
