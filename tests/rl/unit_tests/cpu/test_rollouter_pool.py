@@ -168,6 +168,7 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
         dispatch = asyncio.create_task(
             rollouter.run_group_rollouts(
                 generate_fn="generate_fn",
+                release_session_fn="release_session_fn",
                 sample="sample",
                 group_id=1,
                 group_size=2,
@@ -178,6 +179,7 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
         assert actor_mesh.run_group.calls == [
             {
                 "generate_fn": "generate_fn",
+                "release_session_fn": "release_session_fn",
                 "sample": "sample",
                 "group_id": 1,
                 "group_size": 2,

@@ -275,8 +275,9 @@ class Trainer(Configurable):
         )
         # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
         # and broadcast it, to cut the batcher's reads by cp * tp. Needs a per-replica group.
+        microbatch_groups = MicrobatchStream(microbatches)
         result = engine.forward_backward(
-            microbatch_groups=MicrobatchStream(microbatches),
+            microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )
@@ -297,7 +298,20 @@ class Trainer(Configurable):
                 )
             )
 
-        return combine_microbatch_metrics(microbatch_metrics)
+        metrics = combine_microbatch_metrics(microbatch_metrics)
+        # The slowest rank's total read time this step, hidden or not (max over the loss mesh).
+        read_microbatches_s = torch.tensor(
+            microbatch_groups.read_s, device=engine.device
+        )
+        metrics.update(
+            self._reduce_forward_backward_metrics(
+                sum_reduced_metrics={},
+                max_reduced_metrics={
+                    "timing/trainer/read_microbatches/max": read_microbatches_s
+                },
+            )
+        )
+        return metrics
 
     @sl.log_trace_span("optim_step")
     async def optim_step(
