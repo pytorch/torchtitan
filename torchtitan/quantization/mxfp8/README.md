@@ -139,7 +139,7 @@ these model policies.
 
 #### Usage
 
-Quantization is applied at config time in your `build_model_config()` function via the `quantization` parameter. Each converter walks the model config tree and swaps config types so that quantized modules are built directly.
+Quantization is applied at config time in your `build_model_config()` function via the `converters` parameter. Each converter walks the model config tree and swaps config types so that quantized modules are built directly.
 
 To enable MXFP8 training for linear layers, configure it in your recipe function:
 
@@ -149,7 +149,8 @@ from torchtitan.config.transform import MXFP8LinearConverter
 # In your build_model_config call:
 model_spec = build_model_config(
     "flux-schnell",
-    quantization=[
+    parallelism=parallelism,
+    converters=[
         MXFP8LinearConverter.Config(
             fqns=["double_blocks", "single_blocks"],
             # Add audited single-consumer inputs here. Flux uses BF16 by default.
@@ -176,7 +177,8 @@ from torchtitan.config.transform import MXFP8GroupedLinearConverter
 
 model_spec = build_model_config(
     "debugmodel",
-    quantization=[
+    parallelism=parallelism,
+    converters=[
         MXFP8GroupedLinearConverter.Config(
             recipe_name="mxfp8_rceil",
         ),
@@ -191,7 +193,7 @@ model_spec = build_model_config(
       MXFP8LinearConverter,
   )
 
-  quantization=[
+  converters=[
       MXFP8LinearConverter.Config(
           fqns=["double_blocks", "single_blocks"],
       ),
@@ -231,7 +233,8 @@ from torchtitan.config.transform import (
 # In your build_model_config call:
 model_spec = build_model_config(
     "671B",
-    quantization=[
+    parallelism=parallelism,
+    converters=[
         MXFP8LinearConverter.Config(
             fqns=["double_blocks", "single_blocks"],
         ),

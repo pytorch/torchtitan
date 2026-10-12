@@ -7,13 +7,13 @@
 """Verified Llama 3 GraphTrainer recipes."""
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
 )
 from torchtitan.experiments.graph_trainer.llama3.model import GraphTrainerLlama3Model
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.hf_datasets.text_datasets import DATASETS
 
 from torchtitan_recipes.models.llama3 import llama3_8b
 

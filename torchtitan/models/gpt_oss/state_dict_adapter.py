@@ -12,8 +12,9 @@ from typing import Any, TYPE_CHECKING
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
+from torchtitan.models.common.moe_state_dict_adapter import MoEStateDictAdapter
+
 from torchtitan.models.common.rope import CosSinRoPE
-from torchtitan.models.utils import MoEStateDictAdapter
 
 if TYPE_CHECKING:
     from .model import GptOssModel
@@ -59,7 +60,11 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         }
 
     def get_hf_storage_reader(
-        self, path: str, from_quantized: bool = False
+        self,
+        path: str,
+        from_quantized: bool = False,
+        *,
+        thread_count: int | None = None,
     ) -> HuggingFaceStorageReader:
         """
         Override default get_hf_storage_reader function to return QuantizedHFStorageReader.
@@ -74,10 +79,9 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             # If loading checkpoints without quantization, use HuggingFaceStorageReader instead
             return QuantizedHuggingFaceStorageReader(
                 path=path,
-                thread_count=4,
+                thread_count=4 if thread_count is None else thread_count,
             )
-        else:
-            return HuggingFaceStorageReader(path)
+        return super().get_hf_storage_reader(path, thread_count=thread_count)
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """

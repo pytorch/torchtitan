@@ -7,13 +7,13 @@
 """Verified Llama 3 model recipes."""
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import AdamW, Optim, OptimizersContainer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.observability.metrics import MetricsProcessor
@@ -32,7 +32,8 @@ def llama3_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
 
 
 def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("8B", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config("8B", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -43,6 +44,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
         profiler=Profiler.Config(enable_profiling=True, profile_freq=100),
         metrics=MetricsProcessor.Config(enable_tensorboard=True),
         model=model_config,
+        parallelism=parallelism,
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
@@ -63,7 +65,8 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("70B", seq_len=seq_len)
+    parallelism = ParallelismConfig(tensor_parallel_degree=8)
+    model_config = build_model_config("70B", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -87,7 +90,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        parallelism=ParallelismConfig(tensor_parallel_degree=8),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
         validator=None,

@@ -52,6 +52,7 @@ class MTPBlock(DeepSeekV4TransformerBlock):
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if prev_hc_hidden.ndim != 3:
             raise ValueError(
@@ -76,6 +77,7 @@ class MTPBlock(DeepSeekV4TransformerBlock):
                 if padding_mask is None
                 else ~mtp_input_valid_mask | padding_mask
             ),
+            aux_loss_denominator=aux_loss_denominator,
         )
         prediction_hidden = self.hc_head(next_hc_hidden)
         prediction_hidden = self.mtp_norm(prediction_hidden)

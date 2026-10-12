@@ -22,6 +22,7 @@ from torchtitan.components.data.types import (
 from torchtitan.components.optim import Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
@@ -62,7 +63,10 @@ else:
     assert result.returncode == 0, result.stderr
 
 
-def _batch() -> TokenizedTrainingMicrobatch:
+def _batch(
+    loss_token_counts: torch.Tensor | None = None,
+    routing_token_counts: torch.Tensor | None = None,
+) -> TokenizedTrainingMicrobatch:
     """One microbatch produced by ``Trainer.microbatch_generator``.
 
     Built fresh per call because tests may mutate its model-facing dictionary.
@@ -72,7 +76,12 @@ def _batch() -> TokenizedTrainingMicrobatch:
         labels=torch.ones(1, dtype=torch.long),
         positions=torch.zeros(1, dtype=torch.long),
         padding_mask=torch.zeros(1, dtype=torch.bool),
-        num_valid_tokens=1,
+        loss_token_counts=(
+            torch.tensor(1) if loss_token_counts is None else loss_token_counts
+        ),
+        routing_token_counts=(
+            torch.tensor([1]) if routing_token_counts is None else routing_token_counts
+        ),
     )
 
 
@@ -85,7 +94,8 @@ class _DictTrainingMicrobatch(TrainingMicrobatch):
         self._input_dict = input_dict
         self._loss_kwargs = loss_kwargs or {}
         self.labels = input_dict["labels"]
-        self.num_valid_tokens = self.labels.numel()
+        self.loss_token_counts = torch.tensor(self.labels.numel())
+        self.routing_token_counts = self.loss_token_counts.unsqueeze(0)
         self.to_input_dict_calls: list[tuple[torch.device | str, bool]] = []
         self.to_loss_kwargs_calls: list[tuple[torch.device | str, bool]] = []
 
@@ -118,6 +128,8 @@ def _dict_microbatch(
 def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
     if not hasattr(trainer, "optim_step"):
         trainer.optim_step = lambda: TrainingEngine.optim_step(trainer)
+    if not hasattr(trainer.config, "model"):
+        trainer.config.model = SimpleNamespace(traverse=lambda _: iter(()))
 
     return SimpleNamespace(
         engine=trainer,
@@ -135,7 +147,8 @@ def test_microbatch_generator_preserves_labels() -> None:
         labels=labels,
         positions=torch.zeros(1, dtype=torch.long),
         padding_mask=torch.zeros(1, dtype=torch.bool),
-        num_valid_tokens=1,
+        loss_token_counts=torch.tensor(1),
+        routing_token_counts=torch.tensor([1]),
     )
     trainer = cast(
         Trainer,
@@ -183,7 +196,7 @@ def test_pp_forward_backward_microbatch_group_returns_sentinel_without_last_stag
         inputs=None,
         labels=None,
         model_kwargs=[{}],
-        loss_kwargs={"global_valid_tokens": torch.tensor(1)},
+        loss_kwargs={"global_loss_token_counts": torch.tensor(1)},
     )
 
     assert loss is sentinel
@@ -228,7 +241,7 @@ def test_pp_forward_backward_microbatch_group_releases_consumed_loss_graphs(
         inputs=[(torch.ones(1),), (torch.ones(1),)],
         labels=[torch.ones(1), torch.ones(1)],
         model_kwargs=[{}, {}],
-        loss_kwargs={"global_valid_tokens": torch.tensor(2)},
+        loss_kwargs={"global_loss_token_counts": torch.tensor(2)},
     )
 
     torch.testing.assert_close(reporting_loss, torch.tensor(5.0))
@@ -365,19 +378,36 @@ def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs(monkeypatch) -> Non
         )
 
 
-def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("per_group_graph", "set_to_none"),
+    [(False, True), (True, False)],
+)
+def test_forward_backward_runs_whole_accumulation(
+    monkeypatch,
+    per_group_graph: bool,
+    set_to_none: bool,
+) -> None:
     captured: dict[str, Any] = {}
 
     class _FakeModel:
+        def modules(self):
+            return iter(())
+
         def preprocess_inputs(self, input_dict, **kw):
             captured["preprocess_kwargs"] = kw
-            return ("INPUTS", torch.ones(7), {"positions": 1})
+            return (
+                "INPUTS",
+                torch.ones(7),
+                {"positions": 1, "aux_loss_denominators": None},
+            )
 
     losses = iter((torch.tensor(1.0), torch.tensor(2.0)))
 
     def forward_backward_body(*, inputs, labels, model_kwargs, loss_kwargs):
         captured.setdefault("fwd_bwd_args", []).append((inputs, labels, model_kwargs))
-        torch.testing.assert_close(loss_kwargs["global_valid_tokens"], torch.tensor(2))
+        torch.testing.assert_close(
+            loss_kwargs["global_loss_token_counts"], torch.tensor(2)
+        )
         torch.testing.assert_close(loss_kwargs["advantages"], torch.tensor([0.1]))
         assert loss_kwargs["reduction"] == "sum"
         engine.loss_metrics = {"loss/mean": next(losses)}
@@ -409,6 +439,7 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
+    engine._cuda_graph_per_accumulation_group_enabled = per_group_graph
     engine.sdc_replayer = None
     engine._non_pp_forward_backward_microbatch = forward_backward_body
     engine._run_forward_backward = partial(
@@ -426,7 +457,8 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     result = TrainingEngine.forward_backward(
         engine,
         microbatch_groups=[[microbatch] for microbatch in microbatches],
-        global_valid_tokens=2,
+        global_loss_token_counts=2,
+        global_routing_token_counts=torch.tensor([2]),
     )
 
     torch.testing.assert_close(result.loss, torch.tensor(3.0))
@@ -438,14 +470,17 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     assert engine.ntokens_seen == 114
     assert engine.loss is result.loss
     engine.garbage_collector.run.assert_called_once_with(1)
-    engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
+    engine.optim.zero_grad.assert_called_once_with(set_to_none=set_to_none)
     for microbatch in microbatches:
         assert isinstance(microbatch, _DictTrainingMicrobatch)
         assert microbatch.to_input_dict_calls == [(engine.device, True)]
         assert microbatch.to_loss_kwargs_calls == [(engine.device, True)]
     for inputs, labels, model_kwargs in captured["fwd_bwd_args"]:
         assert inputs == "INPUTS"
-        assert model_kwargs == {"positions": 1}
+        assert model_kwargs["positions"] == 1
+        torch.testing.assert_close(
+            model_kwargs["aux_loss_denominators"], torch.tensor([2])
+        )
         assert labels.numel() == 7
     assert captured["preprocess_kwargs"] == {
         "parallelism_context": engine.parallelism_context,
@@ -496,9 +531,9 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             assert loss is graph_loss
 
     assert fwd_bwd.call_count == 3
-    _, _, global_valid_tokens, extra_kwargs = fwd_bwd.call_args.args
-    torch.testing.assert_close(global_valid_tokens, torch.tensor(1))
-    assert global_valid_tokens.dtype == torch.int64
+    _, _, global_loss_token_counts, extra_kwargs = fwd_bwd.call_args.args
+    torch.testing.assert_close(global_loss_token_counts, torch.tensor(1))
+    assert global_loss_token_counts.dtype == torch.int64
     torch.testing.assert_close(extra_kwargs["position"], torch.ones(1))
 
 
@@ -553,10 +588,13 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
-                training=SimpleNamespace(disable_cuda_graphs=False),
+                training=SimpleNamespace(
+                    cuda_graph_per_accumulation_group=False,
+                    disable_cuda_graphs=False,
+                ),
                 parallelism=SimpleNamespace(
                     enable_sequence_parallel=False,
                     fsdp_defer_gradient_reduction=True,
@@ -588,6 +626,71 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
     cuda_graph_forward_backward.assert_called_once()
 
 
+def test_training_engine_replays_one_cuda_graph_per_accumulation_group() -> None:
+    graph_loss = torch.tensor(0.0)
+    graph_metric = torch.tensor(0.0)
+
+    def run_group(
+        microbatch_groups: list[tuple[int]],
+        global_loss_token_counts: torch.Tensor,
+    ) -> ForwardBackwardResult:
+        torch.testing.assert_close(global_loss_token_counts, torch.tensor(3))
+        assert len(microbatch_groups) == 1
+        graph_loss.fill_(microbatch_groups[0][0])
+        graph_metric.fill_(microbatch_groups[0][0])
+        return ForwardBackwardResult(graph_loss, [{"group": graph_metric}])
+
+    group_runner = MagicMock(side_effect=run_group)
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                dist_moe_runtime=None,
+                sdc_replayer=None,
+                debug=SimpleNamespace(spmd_typechecking=False),
+                training=SimpleNamespace(
+                    cuda_graph_per_accumulation_group=True,
+                    disable_cuda_graphs=False,
+                ),
+                parallelism=SimpleNamespace(
+                    fsdp_defer_gradient_reduction=False,
+                ),
+            ),
+            parallelism_context=SimpleNamespace(pp_enabled=False),
+            _forward_backward_body=MagicMock(),
+        ),
+    )
+
+    with (
+        patch(
+            "torchtitan.training_engine.wrap_with_cuda_graph",
+            return_value=group_runner,
+        ) as wrap_group,
+        patch("torchtitan.training_engine.wrap_fwd_bwd_with_cuda_graph") as wrap_step,
+        patch("torchtitan.training_engine.cuda_graphs_supported", return_value=True),
+    ):
+        TrainingEngine._initialize_forward_backward(engine)
+        result = engine._run_forward_backward(
+            [(1,), (2,), (3,)],
+            torch.tensor(3),
+        )
+
+    torch.testing.assert_close(result.loss, torch.tensor(6.0))
+    assert [metrics["group"].item() for metrics in result.loss_metrics] == [
+        1.0,
+        2.0,
+        3.0,
+    ]
+    assert engine._cuda_graph_per_accumulation_group_enabled
+    wrap_group.assert_called_once()
+    wrap_step.assert_not_called()
+    assert [call.args[0] for call in group_runner.call_args_list] == [
+        [(1,)],
+        [(2,)],
+        [(3,)],
+    ]
+
+
 def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() -> None:
     eager_forward_backward = MagicMock(
         return_value=ForwardBackwardResult(torch.tensor(1.0), [])
@@ -596,10 +699,13 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
-                training=SimpleNamespace(disable_cuda_graphs=False),
+                training=SimpleNamespace(
+                    cuda_graph_per_accumulation_group=False,
+                    disable_cuda_graphs=False,
+                ),
                 parallelism=SimpleNamespace(
                     enable_sequence_parallel=False,
                     fsdp_defer_gradient_reduction=False,
@@ -751,13 +857,43 @@ def test_optim_step_waits_for_checkpoint() -> None:
     assert engine.num_completed_steps == 3
 
 
-def test_trainer_accumulates_reused_cuda_graph_losses():
+@pytest.fixture
+def no_registered_aux_losses():
+    """Hide aux-loss metric groups registered by models built in earlier tests.
+
+    ``AuxLoss._group_counts`` is process-global and never shrinks, so groups from
+    an MoE model built elsewhere would make this mock-model step try to log
+    them.
+    """
+    saved_group_counts = dict(AuxLoss._group_counts)
+    AuxLoss._group_counts.clear()
+    yield
+    AuxLoss._group_counts.clear()
+    AuxLoss._group_counts.update(saved_group_counts)
+
+
+@pytest.mark.parametrize(
+    ("loss_token_counts", "routing_token_counts"),
+    (
+        (torch.tensor(1), torch.tensor([1])),
+        (torch.tensor([1, 1]), torch.tensor([1, 1])),
+    ),
+)
+@pytest.mark.usefixtures("no_registered_aux_losses")
+def test_trainer_accumulates_reused_cuda_graph_losses(
+    loss_token_counts, routing_token_counts
+):
     graph_loss = torch.tensor(0.0)
     loss_values = iter((1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
 
-    def forward_backward(*, microbatch_groups, global_valid_tokens):
+    def forward_backward(
+        *, microbatch_groups, global_loss_token_counts, global_routing_token_counts
+    ):
         assert len(microbatch_groups) == 3
-        torch.testing.assert_close(global_valid_tokens, torch.tensor(3))
+        torch.testing.assert_close(global_loss_token_counts, loss_token_counts * 3)
+        torch.testing.assert_close(
+            global_routing_token_counts, routing_token_counts * 3
+        )
         graph_loss.fill_(sum(next(loss_values) for _ in microbatch_groups))
         return ForwardBackwardResult(graph_loss, [])
 
@@ -771,7 +907,10 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                training=SimpleNamespace(disable_cuda_graphs=False),
+                training=SimpleNamespace(
+                    cuda_graph_per_accumulation_group=False,
+                    disable_cuda_graphs=False,
+                ),
             ),
             optim=SimpleNamespace(
                 zero_grad=MagicMock(),
@@ -795,13 +934,16 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             loss=graph_loss,
             sdc_replayer=None,
             model_parts=[],
+            model_config=SimpleNamespace(mtp_layers=None),
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
             num_completed_steps=0,
             ntokens_seen=3,
         ),
     )
-    data_iterator = iter([_batch() for _ in range(3)])
+    data_iterator = iter(
+        [_batch(loss_token_counts, routing_token_counts) for _ in range(3)]
+    )
 
     Trainer.train_step(_training_loop(trainer), data_iterator)
 
@@ -821,7 +963,9 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     metrics_processor.reset.reset_mock()
     Trainer.train_step(
         _training_loop(trainer),
-        data_iterator=iter([_batch() for _ in range(3)]),
+        data_iterator=iter(
+            [_batch(loss_token_counts, routing_token_counts) for _ in range(3)]
+        ),
     )
 
     metrics_processor.log.assert_not_called()
@@ -845,21 +989,26 @@ def test_engine_replay_checks_whole_accumulation() -> None:
             fsdp_reshard_after_forward="default",
         ),
     )
-    engine.parallelism_context = SimpleNamespace()
+    engine.parallelism_context = SimpleNamespace(dp_enabled=False)
+    engine.model_parts = []
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
+    engine._cuda_graph_per_accumulation_group_enabled = False
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
     engine._preprocess_microbatch_groups = MagicMock(
-        side_effect=lambda groups: [(group[0].labels,) for group in groups]
+        side_effect=lambda groups: [
+            ("input", group[0].labels, {}, {}) for group in groups
+        ]
     )
     engine._run_forward_backward = run_forward_backward
 
     TrainingEngine.forward_backward(
         engine,
         microbatch_groups=[[_batch()], [_batch()]],
-        global_valid_tokens=2,
+        global_loss_token_counts=2,
+        global_routing_token_counts=torch.tensor([2]),
     )
 
     replayer.run_fwd_bwd.assert_called_once()
@@ -884,20 +1033,25 @@ def test_replay_failure_propagates_from_engine():
             fsdp_reshard_after_forward="default",
         ),
     )
-    engine.parallelism_context = SimpleNamespace()
+    engine.parallelism_context = SimpleNamespace(dp_enabled=False)
+    engine.model_parts = []
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
+    engine._cuda_graph_per_accumulation_group_enabled = False
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
     engine.num_completed_steps = 0
-    engine._preprocess_microbatch_groups = MagicMock(return_value=[("input",)])
+    engine._preprocess_microbatch_groups = MagicMock(
+        return_value=[("input", "labels", {}, {})]
+    )
     engine._run_forward_backward = MagicMock()
 
     with pytest.raises(SDCReplayMismatch):
         TrainingEngine.forward_backward(
             engine,
             microbatch_groups=[[_batch()]],
-            global_valid_tokens=torch.tensor(1),
+            global_loss_token_counts=torch.tensor(1),
+            global_routing_token_counts=torch.tensor([1]),
         )
 
 
@@ -963,7 +1117,7 @@ def test_seed_checkpoint_initialize_skips_forward_backward():
     )
     engine._initialize_optim.assert_called_once_with()
     engine._initialize_checkpointer.assert_called_once_with(
-        dataloader=None,
+        extra_states=None,
         sd_adapter=engine.state_dict_adapter,
     )
     engine._initialize_forward_backward.assert_not_called()
@@ -1020,8 +1174,11 @@ def test_cuda_graph_accumulation_supports_eager_gradient_reduction() -> None:
         SimpleNamespace(
             parallelism_context=SimpleNamespace(pp_enabled=False),
             config=SimpleNamespace(
-                dist_moe=None,
-                training=SimpleNamespace(disable_cuda_graphs=False),
+                dist_moe_runtime=None,
+                training=SimpleNamespace(
+                    cuda_graph_per_accumulation_group=False,
+                    disable_cuda_graphs=False,
+                ),
                 sdc_replayer=None,
                 parallelism=SimpleNamespace(
                     fsdp_defer_gradient_reduction=False,
@@ -1061,8 +1218,11 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                dist_moe=None,
-                training=SimpleNamespace(disable_cuda_graphs=True),
+                dist_moe_runtime=None,
+                training=SimpleNamespace(
+                    cuda_graph_per_accumulation_group=False,
+                    disable_cuda_graphs=True,
+                ),
                 parallelism=SimpleNamespace(
                     fsdp_defer_gradient_reduction=configured_defer,
                     fsdp_reshard_after_forward="default",

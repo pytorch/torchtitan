@@ -65,4 +65,4 @@ Test scripts:
 
 - `scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` -- Hugging Face vs.
   TorchTitan comparison
-- `tests/unit_tests/gpu/test_kimi_k3.py` -- KDA and FSDP2 correctness
+- `tests/unit_tests/gpu/models/kimi_k3/test_kimi_k3.py` -- KDA and FSDP2 correctness

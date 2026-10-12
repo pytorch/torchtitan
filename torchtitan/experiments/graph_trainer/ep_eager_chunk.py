@@ -231,7 +231,9 @@ class _EagerChunkedForward:
                     kwargs=kwargs,
                     reason="expected exactly one positional activation tensor",
                 )
-            if any(key != "padding_mask_T" for key in kwargs):
+            if any(
+                key not in ("padding_mask_T", "aux_loss_denominator") for key in kwargs
+            ):
                 raise _contract_error(
                     root_fqn=self.root_fqn,
                     root_kind=self.root_kind,
@@ -246,6 +248,23 @@ class _EagerChunkedForward:
                 split_kwargs["padding_mask_T"] = split_optional_tensor(
                     kwargs["padding_mask_T"], logical_name="padding_mask_T"
                 )
+            if "aux_loss_denominator" in kwargs:
+                aux_loss_denominator = kwargs["aux_loss_denominator"]
+                if not isinstance(aux_loss_denominator, torch.Tensor) or (
+                    aux_loss_denominator.ndim != 0
+                ):
+                    raise _contract_error(
+                        root_fqn=self.root_fqn,
+                        root_kind=self.root_kind,
+                        chunk_dim=self.chunk_dim,
+                        args=args,
+                        kwargs=kwargs,
+                        reason="aux_loss_denominator must be a scalar tensor",
+                    )
+                split_kwargs["aux_loss_denominator"] = [
+                    aux_loss_denominator,
+                    aux_loss_denominator,
+                ]
             return [split_tensor(args[0], logical_name="x")], split_kwargs
 
         def split_transformer_block_inputs() -> (

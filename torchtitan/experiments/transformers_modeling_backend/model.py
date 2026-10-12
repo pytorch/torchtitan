@@ -27,14 +27,14 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
     create_attention_mask,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.models.utils import quadratic_attention_flops_per_token
-from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import Module, ModuleDict
+from torchtitan.models.common.flops import quadratic_attention_flops_per_token
 
 from .parallelize import parallelize_hf_transformers
 from .pipeline import pipeline_hf_transformers
@@ -281,7 +281,7 @@ class HFTransformerModel(BaseModel):
             )
             self.sharding_config = None
             # HF modules run eager; the loss and the swapped-in TorchTitan MoE (SwiGLU) can compile.
-            self.local_compile_regions = ["loss", "swiglu"]
+            self.local_compile_regions = ["loss", "fused_binary_activation"]
 
             assert model_config is not None, "model_config is required"
 
@@ -584,11 +584,11 @@ class HFTransformerModel(BaseModel):
                             parameter_weights[id(param)] = Fraction(0)
 
             for layer in model.layers.values():
-                moe_config = getattr(layer, "_native_moe_config", None)
-                if moe_config is None:
+                moe_params = getattr(layer, "_native_moe_params", None)
+                if moe_params is None:
                     continue
                 active_expert_ratio = Fraction(
-                    moe_config.router.top_k, moe_config.num_experts
+                    moe_params["top_k"], moe_params["num_experts"]
                 )
                 if getattr(layer, "_layer_level_moe", False):
                     moe_block = layer
@@ -845,9 +845,9 @@ class HFTransformerModel(BaseModel):
                     layer._layer_level_moe = True
 
         if config.is_moe:
-            from .moe_replacement import prepare_native_moe_configs
+            from .moe_replacement import probe_native_moe_params
 
-            prepare_native_moe_configs(self, config)
+            probe_native_moe_params(self, config)
 
     def set_cp_mesh(self, mesh):
         self.cp_mesh = mesh

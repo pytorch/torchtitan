@@ -13,6 +13,7 @@ during compilation.
 
 import logging
 import operator
+import weakref
 from typing import Any
 
 import torch
@@ -22,6 +23,23 @@ from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
 
 
 logger = logging.getLogger(__name__)
+
+# Every wrapper ``cuda_graph_pass`` applied; see ``reset_cuda_graphs``.
+_WRAPPERS: weakref.WeakSet[CUDAGraphWrapper] = weakref.WeakSet()
+
+
+def reset_cuda_graphs() -> None:
+    """Return every wrapper ``cuda_graph_pass`` applied to its initial state.
+
+    Each drops its captured graph, runs its next call eagerly, and captures
+    again on the one after, so the memory a graph points into can be freed, and
+    the next call can do work a capture cannot, without ending training.
+    ``cuda_graph_teardown`` is for shutdown: it also destroys the shared pool
+    and stream, after which a wrapper cannot capture again.
+    """
+    for wrapper in _WRAPPERS:
+        wrapper.teardown()
+        wrapper._warmup_remaining = 1
 
 
 def _has_dynamic_shape(val: Any) -> bool:
@@ -311,12 +329,14 @@ def cuda_graph_pass(
 
     if static_input_indices is None:
         static_input_indices = get_static_input_indices(gm, is_forward)
-    gm.forward = CUDAGraphWrapper(
+    wrapper = CUDAGraphWrapper(
         gm.forward,
         example_inputs,
         static_input_indices,
         tensor_input_indices=tensor_input_indices,
         num_warmup_iterations=1,
     )
+    _WRAPPERS.add(wrapper)
+    gm.forward = wrapper
     logger.info("Applied CUDA graph pass.")
     return gm

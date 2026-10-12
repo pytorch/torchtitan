@@ -13,8 +13,9 @@ import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.moe_state_dict_adapter import MoEStateDictAdapter
+
 from torchtitan.models.common.rope import ComplexRoPE
-from torchtitan.models.utils import MoEStateDictAdapter
 
 if TYPE_CHECKING:
     from .model import DeepSeekV3Model
@@ -130,7 +131,11 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         return to_hf_map[abstract_key], layer_num
 
     def get_hf_storage_reader(
-        self, path: str, from_quantized: bool = False
+        self,
+        path: str,
+        from_quantized: bool = False,
+        *,
+        thread_count: int | None = None,
     ) -> HuggingFaceStorageReader:
         """
         Override default get_hf_storage_reader function to return QuantizedHFStorageReader.
@@ -147,10 +152,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 path=path,
                 target_dtype=torch.float32,
                 block_size=BLOCK_SIZE,
-                thread_count=4,
+                thread_count=4 if thread_count is None else thread_count,
             )
-        else:
-            return HuggingFaceStorageReader(path)
+        return super().get_hf_storage_reader(path, thread_count=thread_count)
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """

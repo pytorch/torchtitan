@@ -86,7 +86,7 @@ git log --since="<last_report_date>" --oneline -- \
     torchtitan/models/common/ \
     torchtitan/models/llama3/ \
     torchtitan/models/deepseek_v3/ \
-    torchtitan/protocols/ \
+    torchtitan/models/base/ \
     torchtitan/components/ \
     torchtitan/experiments/__init__.py
 ```
