@@ -43,7 +43,7 @@ Coverage below matches the sharding set in [`flavors.py`](./flavors.py),
 | DDP | Including DDP+CP |
 | Activation checkpointing | Selective and full |
 | `torch.compile` | 1D and multi-dimensional jobs |
-| MXFP8 | Eager recipe `llama3_8b_mxfp8`; GraphTrainer recipes `graph_trainer_llama3_debugmodel_mxfp8` and `graph_trainer_llama3_8b_mxfp8` |
+| MXFP8 | Eager `llama3_8b_mxfp8` in `torchtitan_recipes.tests.models.llama3`; GraphTrainer `graph_trainer_llama3_debugmodel_mxfp8` in `torchtitan_recipes.tests.graph_trainer.llama3` |
 
 ## Numerical checks
 
