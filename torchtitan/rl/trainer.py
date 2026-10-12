@@ -240,15 +240,16 @@ class Trainer(Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]],
+        microbatches: list[TrainingMicrobatch] | list[RDMAMicrobatch],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
-            training_data: Microbatch-major grid with shape
-                ``[num_microbatches][dp_degree]``; `RDMAMicrobatch`es with the RDMA fast path.
+            microbatches: This rank's microbatches, `[num_microbatches]`: one column of the
+                batcher's `[num_microbatches][dp_degree]` grid. `RDMAMicrobatch`es with the RDMA
+                fast path.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -256,13 +257,18 @@ class Trainer(Configurable):
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
+
+        Example:
+            # dp_degree=2, tp=2: ranks 0-1 share DP rank 0, ranks 2-3 share DP rank 1.
+            # grid = [[mb_00, mb_01], [mb_10, mb_11]]
+            # ranks 0 and 1 get microbatches = [mb_00, mb_10]
+            # ranks 2 and 3 get microbatches = [mb_01, mb_11]
         """
         logger.debug(
             f"{os.getpid()=} Trainer forward_backward "
             f"policy_version={self.policy_version}"
         )
         engine = self.engine
-        microbatches = [rank_batches[self.dp_rank] for rank_batches in training_data]
         if isinstance(microbatches[0], RDMAMicrobatch):
             # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
             # and broadcast it, to cut the controller's reads by cp * tp. Needs a per-replica group.

@@ -189,8 +189,8 @@ class AsyncLoopConfig(Configurable.Config):
 
     rdma_fast_path_threshold: int | None = None
     """How microbatches reach the trainer ranks:
-        None (default): by value; every rank receives the whole grid.
-        e.g. 1024: tensors of >= 1024 bytes as Monarch RDMA buffers; each rank reads only its DP column.
+        None (default): by value; each DP replica receives only its column of the grid.
+        e.g. 1024: the same, but tensors of >= 1024 bytes go as Monarch RDMA buffers that each rank reads.
     Where Monarch's ibverbs fails, set MONARCH_RDMA_DISABLE_IBVERBS=1 for its TCP fallback;
     it moves TorchStore's weight sync to TCP too."""
 
@@ -432,6 +432,8 @@ class Controller(Configurable):
             apply_overrides(config.override, config)
         config.maybe_log()
         self.trainer: Trainer | None = None
+        # One trainer mesh slice per DP replica, in DP-rank order; set in setup_async.
+        self._trainer_dp_replicas = []
         self.generator_router: InterGeneratorRouter | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
         self.start_step = 0
@@ -677,6 +679,27 @@ class Controller(Configurable):
                     for requester_index, generator in enumerate(generators)
                 ),
             )
+
+        # Torch ranks follow this mesh's order and the trainer lays them out as
+        # (dp, cp, tp) with no PP, so a DP replica is cp * tp consecutive ranks.
+        trainer_by_dp_rank = self.trainer.flatten("rank").split(
+            rank=("dp", "cp_tp"), dp=self.trainer_dp_degree
+        )
+        self._trainer_dp_replicas = [
+            trainer_by_dp_rank.slice(dp=dp_rank)
+            for dp_rank in range(self.trainer_dp_degree)
+        ]
+        # Check that layout once: if it drifts, one TP group's ranks get different columns.
+        for dp_rank, trainer_dp_replica in enumerate(self._trainer_dp_replicas):
+            reported_dp_ranks = list(
+                (await trainer_dp_replica.get_dp_rank.call()).values()
+            )
+            if set(reported_dp_ranks) != {dp_rank}:
+                raise RuntimeError(
+                    f"Trainer ranks in DP replica {dp_rank} report DP ranks "
+                    f"{reported_dp_ranks}; the controller assumes the trainer orders "
+                    "ranks as (dp, cp, tp)."
+                )
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored
         # policy version and controller-owned data state.
@@ -1171,13 +1194,20 @@ class Controller(Configurable):
                             min_bytes,
                         )
                     try:
-                        fwd_bwd_metrics = self._get_rank_0_value(
-                            await self.trainer.forward_backward.call(
-                                microbatches,
-                                packed.global_loss_token_counts,
-                                packed.global_routing_token_counts,
+                        # Each DP replica receives only its column of the grid.
+                        fwd_bwd_results = await asyncio.gather(
+                            *(
+                                trainer_dp_replica.forward_backward.call(
+                                    [row[dp_rank] for row in microbatches],
+                                    packed.global_loss_token_counts,
+                                    packed.global_routing_token_counts,
+                                )
+                                for dp_rank, trainer_dp_replica in enumerate(
+                                    self._trainer_dp_replicas
+                                )
                             )
                         )
+                        fwd_bwd_metrics = self._get_rank_0_value(fwd_bwd_results[0])
                     finally:
                         if min_bytes is not None:
                             # Every rank has read its column, or the step failed.
