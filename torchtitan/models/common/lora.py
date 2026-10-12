@@ -13,7 +13,7 @@ Shape suffixes: ``X`` arbitrary leading dimensions, ``R`` routed rows,
 
 import functools
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 import spmd_types as spmd
@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, Replicate
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 
@@ -132,20 +133,28 @@ class _LoRALinearMixin(_LoRAMixin):
         if base_weight_sharding is None:
             return None, None
 
+        base_weight = ShardingConfig(state_shardings={"weight": base_weight_sharding})
         replicated_weight = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+            state_shardings={
+                "weight": replace(
+                    base_weight_sharding,
+                    local_type={
+                        **base_weight_sharding.local_type,
+                        MeshAxisName.TP: spmd.R,
+                    },
+                )
+            },
         )
-        if base_weight_sharding == dense_param_placement(tp=spmd.S(0)):
-            lora_b_sharding = ShardingConfig(
-                state_shardings={"weight": base_weight_sharding},
-            )
-            return replicated_weight, lora_b_sharding
-
-        assert base_weight_sharding == dense_param_placement(tp=spmd.S(1))
-        lora_a_sharding = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.S(1))},
+        tp = base_weight_sharding.local_type.get(MeshAxisName.TP)
+        if tp == spmd.S(0):
+            return replicated_weight, base_weight
+        if tp == spmd.S(1):
+            return base_weight, replicated_weight
+        if tp is spmd.R or tp is spmd.I:
+            return base_weight, base_weight
+        raise ValueError(
+            f"LoRA adapters have no sharding for a base weight placed as {base_weight_sharding}"
         )
-        return lora_a_sharding, replicated_weight
 
 
 def _grouped_lora_adapter_sharding(

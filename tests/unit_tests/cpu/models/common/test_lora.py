@@ -20,6 +20,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import LoRATransform, transform_model_config_
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -35,6 +36,10 @@ from torchtitan.models.common.linear import (
 from torchtitan.models.common.lora import merge_lora_state_dict, trainable_state_dict
 from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+from torchtitan.models.common.vision_encoder_sharding import (
+    vision_colwise_sharding_config,
+    vision_rowwise_sharding_config,
+)
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.qwen3_5.model import Qwen35Model
@@ -884,3 +889,58 @@ class TestMergeLoRAStateDictTensorParallel(DTensorTestBase):
         torch.testing.assert_close(
             merged["w2.weight"].cpu(), reference["w2.weight"][:, hidden]
         )
+
+
+@pytest.mark.parametrize("tp", [spmd.R, spmd.I])
+def test_lora_adapters_of_a_tp_unsharded_base_take_its_placement(tp):
+    placement = dense_param_placement(tp=tp)
+    linear = (
+        LoRATransform(rank=8)
+        .transform(
+            Linear.Config(
+                in_features=16,
+                out_features=8,
+                sharding_config=ShardingConfig(state_shardings={"weight": placement}),
+                param_init={"weight": torch.nn.init.normal_},
+            )
+        )
+        .build()
+    )
+    assert linear.lora_a._sharding_config.state_shardings["weight"] == placement
+    assert linear.lora_b._sharding_config.state_shardings["weight"] == placement
+
+
+@pytest.mark.parametrize(
+    "base_sharding, sharded_adapter",
+    [
+        (vision_colwise_sharding_config(), "lora_b"),
+        (vision_rowwise_sharding_config(), "lora_a"),
+    ],
+)
+def test_lora_adapters_keep_the_base_placement_outside_tp(
+    base_sharding, sharded_adapter
+):
+    placement = base_sharding.state_shardings["weight"]
+    linear = (
+        LoRATransform(rank=8)
+        .transform(
+            Linear.Config(
+                in_features=16,
+                out_features=8,
+                sharding_config=ShardingConfig(state_shardings={"weight": placement}),
+                param_init={"weight": torch.nn.init.normal_},
+            )
+        )
+        .build()
+    )
+    replicated = spmd.SpmdType(
+        {
+            MeshAxisName.DP: spmd.R,
+            MeshAxisName.CP: spmd.I,
+            MeshAxisName.TP: spmd.R,
+        }
+    )
+    for name in ("lora_a", "lora_b"):
+        expected = placement if name == sharded_adapter else replicated
+        adapter = getattr(linear, name)
+        assert adapter._sharding_config.state_shardings["weight"] == expected
