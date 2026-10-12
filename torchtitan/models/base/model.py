@@ -94,6 +94,10 @@ class BaseModel(Module, ABC):
         FlexAttention manages its own compilation and is not controlled by this list.
         """
 
+        state_dict_adapter_cls: type[BaseStateDictAdapter] | None = None
+        """Adapter for Hugging Face conversion. ``None`` uses the model class's
+        ``state_dict_adapter_cls``."""
+
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             pass

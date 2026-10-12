@@ -12,6 +12,7 @@ from torchtitan.components.optim import Adam, OptimizersContainer
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.base import BaseModel
+from torchtitan.models.base.state_dict_adapter import resolve_state_dict_adapter_cls
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import build_model_config, Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
@@ -58,6 +59,20 @@ def test_build_model_config_returns_model_config() -> None:
     assert isinstance(config, Llama3Model.Config)
     assert config.max_context_length == 131072
     assert Llama3Model.state_dict_adapter_cls is Llama3StateDictAdapter
+
+
+class _OtherAdapter(Llama3StateDictAdapter):
+    pass
+
+
+def test_recipe_can_choose_the_state_dict_adapter() -> None:
+    config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+    assert config.state_dict_adapter_cls is None
+    assert resolve_state_dict_adapter_cls(config, Llama3Model) is Llama3StateDictAdapter
+
+    config.state_dict_adapter_cls = _OtherAdapter
+    assert resolve_state_dict_adapter_cls(config, Llama3Model) is _OtherAdapter
+    assert config.to_dict()["state_dict_adapter_cls"] == repr(_OtherAdapter)
 
 
 def test_optimizer_hook_is_owned_by_model_class() -> None:
