@@ -7,6 +7,8 @@
 import unittest
 from unittest import mock
 
+import torch
+
 from torchtitan.observability.profiler import Profiler
 
 
@@ -232,6 +234,101 @@ class TestProfilerEnabledPaths(unittest.TestCase):
                     base_folder=tmpdir,
                     leaf_folder="",
                 )
+
+    def test_cuspy_raises_when_environment_unsupported(self):
+        import tempfile
+
+        from torchtitan.observability.profiler import CuspyProfilerConfig
+
+        profiler = Profiler(
+            Profiler.Config(
+                enable_profiling=True,
+                profile_freq=4,
+                profiler_warmup=1,
+                profiler_active=1,
+                cuspy=CuspyProfilerConfig(),
+            )
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch("torch.cuda.is_available", return_value=True),
+            mock.patch(
+                "torchtitan.observability.profiler._cuspy_unavailable_reasons",
+                return_value=["reason one", "reason two"],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "Cuspy cannot run here:\n  - reason one\n  - reason two"
+            ):
+                profiler.build_torch_profiler(
+                    global_step=0, base_folder=tmpdir, leaf_folder=""
+                )
+
+    def test_cuspy_activity_and_trace_file(self):
+        import os
+        import tempfile
+
+        from torchtitan.observability.profiler import CuspyProfilerConfig
+
+        for trace_format, file_name in (
+            ("json", "rank0_trace.json.gz"),
+            ("pftrace", "rank0_trace.pftrace.gz"),
+        ):
+            profiler = Profiler(
+                Profiler.Config(
+                    enable_profiling=True,
+                    profile_freq=4,
+                    profiler_warmup=1,
+                    profiler_active=1,
+                    cuspy=CuspyProfilerConfig(trace_format=trace_format),
+                )
+            )
+            with (
+                self.subTest(trace_format=trace_format),
+                tempfile.TemporaryDirectory() as tmpdir,
+                mock.patch("torch.cuda.is_available", return_value=True),
+                mock.patch(
+                    "torchtitan.observability.profiler._cuspy_unavailable_reasons",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "torchtitan.observability.profiler._get_cuspy_activity_config",
+                    return_value="cuspy-activity",
+                ),
+                mock.patch("torch.profiler.profile") as profile,
+            ):
+                profiler.build_torch_profiler(
+                    global_step=0, base_folder=tmpdir, leaf_folder=""
+                )
+                kwargs = profile.call_args.kwargs
+                self.assertIn("cuspy-activity", kwargs["activities"])
+                prof = mock.Mock(step_num=4)
+                kwargs["on_trace_ready"](prof)
+                prof.export_chrome_trace.assert_called_once_with(
+                    os.path.join(tmpdir, "profiling/traces", "iteration_4", file_name)
+                )
+
+    @unittest.skipUnless(
+        hasattr(torch.profiler, "CuspyConfig"), "torch build has no Cuspy"
+    )
+    def test_cuspy_activity_config(self):
+        """Builds real torch Cuspy configs, so torch API changes fail here."""
+        from torchtitan.observability.profiler import (
+            _get_cuspy_activity_config,
+            CuspyProfilerConfig,
+        )
+
+        activity_config = _get_cuspy_activity_config(
+            CuspyProfilerConfig(
+                enable_event_node_ids=True,
+                performance_metrics=["sm__cycles_active.avg"],
+                pm_sampling_interval_ms=0.5,
+            )
+        )[torch.profiler.ProfilerActivity.CUDA]
+        cuspy_config, pm_config = activity_config.profiler_configs
+        self.assertTrue(cuspy_config.enable_event_node_ids)
+        self.assertEqual(pm_config.metric_names, ["sm__cycles_active.avg"])
+        self.assertEqual(pm_config.sampling_interval_ms, 0.5)
 
 
 if __name__ == "__main__":
