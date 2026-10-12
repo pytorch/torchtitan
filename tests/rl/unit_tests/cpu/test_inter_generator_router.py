@@ -341,28 +341,19 @@ def test_sticky_session_respects_max_sessions():
 
 
 async def _generate(router, *, group_id: int, session_id: str):
-    return await router._generate(
-        [0],
-        request_id=f"{session_id}/turn",
-        group_id=group_id,
-        routing_session_id=session_id,
-        sampling_config=None,
-        metrics_prefix="generator",
+    return await router._route(
+        "generate", group_id=group_id, routing_ctx=RoutingContext(session_id=session_id)
     )
 
 
-@pytest.mark.parametrize("release", ["session", "group"])
-def test_sticky_session_release_drops_its_assignment(release):
+def test_sticky_session_release_drops_its_assignment():
     async def _run():
         actors = [_Actor("gen0", wait_generate=True), _Actor("gen1")]
         router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
         first = asyncio.create_task(_generate(router, group_id=0, session_id="s0"))
         await actors[0].generate.started.wait()
 
-        if release == "session":
-            router._release_session(group_id=0, session_id="s0")
-        else:
-            router._release_groups([0])
+        router._release_session(session_id="s0")
         # Released, s0 is a new session: least-loaded picks idle gen1 over busy gen0.
         assert await _generate(router, group_id=0, session_id="s0") == "gen1"
 
