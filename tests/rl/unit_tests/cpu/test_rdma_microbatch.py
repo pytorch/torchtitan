@@ -74,8 +74,8 @@ def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
     # tensors go by ref; the bool masks (512 B), token counts and empty tensor go by value.
     microbatch = _microbatch(num_tokens=512)
 
-    min_bytes = rdma_microbatch._MIN_RDMA_BYTES
-    registered = RDMAMicrobatch.register(microbatch)
+    min_bytes = 1024
+    registered = RDMAMicrobatch.register(microbatch, min_bytes=min_bytes)
     read_microbatch = asyncio.run(registered.read())
 
     names = [field.name for field in dataclasses.fields(microbatch)]

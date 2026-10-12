@@ -27,6 +27,7 @@ from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
+from torchtitan.rl.components.batcher import TrainingMicrobatch
 from torchtitan.rl.components.checkpointer import CONTROLLER_STATE_KEY, MirroredState
 from torchtitan.rl.distributed.rdma_microbatch import RDMAMicrobatch
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
@@ -239,15 +240,15 @@ class Trainer(Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[list[RDMAMicrobatch]],
+        training_data: list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
-            training_data: Microbatch-major grid of `RDMAMicrobatch`es,
-                ``[num_microbatches][dp_degree]``; this rank reads its column.
+            training_data: Microbatch-major grid with shape
+                ``[num_microbatches][dp_degree]``; `RDMAMicrobatch`es with the RDMA fast path.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -261,17 +262,17 @@ class Trainer(Configurable):
             f"policy_version={self.policy_version}"
         )
         engine = self.engine
-        # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
-        # and broadcast it, to cut the controller's reads by cp * tp. Needs a per-replica group.
-        # TODO: investigate prefetching
+        microbatches = [rank_batches[self.dp_rank] for rank_batches in training_data]
+        uses_rdma = bool(microbatches) and isinstance(microbatches[0], RDMAMicrobatch)
         read_start = time.perf_counter()
-        with sl.log_trace_span("read_microbatches"):
-            # One at a time, not asyncio.gather: gathered reads share the controller's bandwidth,
-            # so each takes as long as the whole column and can hit its 60 s RDMA timeout.
-            microbatches = [
-                await rank_batches[self.dp_rank].read()
-                for rank_batches in training_data
-            ]
+        if uses_rdma:
+            # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
+            # and broadcast it, to cut the controller's reads by cp * tp. Needs a per-replica group.
+            # TODO: investigate prefetching
+            with sl.log_trace_span("read_microbatches"):
+                # One at a time, not asyncio.gather: gathered reads share the controller's bandwidth,
+                # so each takes as long as the whole column and can hit its 60 s RDMA timeout.
+                microbatches = [await microbatch.read() for microbatch in microbatches]
         self._step_compute_start = time.perf_counter()
         self._step_num_tokens_per_dp_rank = sum(
             microbatch.labels.numel() for microbatch in microbatches
@@ -299,18 +300,19 @@ class Trainer(Configurable):
             )
 
         metrics = combine_microbatch_metrics(microbatch_metrics)
-        # The slowest rank's read time this step (max over the loss mesh).
-        read_microbatches_s = torch.tensor(
-            self._step_compute_start - read_start, device=engine.device
-        )
-        metrics.update(
-            self._reduce_forward_backward_metrics(
-                sum_reduced_metrics={},
-                max_reduced_metrics={
-                    "timing/trainer/read_microbatches/max": read_microbatches_s
-                },
+        if uses_rdma:
+            # The slowest rank's read time this step (max over the loss mesh).
+            read_microbatches_s = torch.tensor(
+                self._step_compute_start - read_start, device=engine.device
             )
-        )
+            metrics.update(
+                self._reduce_forward_backward_metrics(
+                    sum_reduced_metrics={},
+                    max_reduced_metrics={
+                        "timing/trainer/read_microbatches/max": read_microbatches_s
+                    },
+                )
+            )
         return metrics
 
     @sl.log_trace_span("optim_step")
