@@ -16,7 +16,7 @@ class InferenceParallelismConfig:
     """Focused parallelism configuration for vLLM inference."""
 
     data_parallel_degree: int = 1
-    """Pure data-parallel degree. Values above one are reserved for EP."""
+    """Generator FSDP degree. One keeps full parameters on each generator."""
 
     tensor_parallel_degree: int = 1
     """Tensor parallelism degree. One disables tensor parallelism."""
@@ -44,4 +44,6 @@ class InferenceParallelismConfig:
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
             enable_sequence_parallel=self.enable_sequence_parallel,
+            # Reuse the unsharded compute representation until weight sync.
+            fsdp_reshard_after_forward="never",
         )

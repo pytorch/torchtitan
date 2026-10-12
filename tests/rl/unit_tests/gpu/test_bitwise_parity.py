@@ -53,17 +53,13 @@ from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
-from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
+from torchtitan.config import apply_overrides, CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.distributed.spmd_types import (
-    dtensor_to_plain_tensor_state_dict,
-    plain_tensor_to_dtensor_state_dict,
-    spmd_mesh_group,
-)
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller import Controller
@@ -75,11 +71,13 @@ from torchtitan.rl.model.vllm_registry import (
 )
 from torchtitan.tools import utils
 from torchtitan_recipes.rl.alphabet_sort import (
-    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
-    rl_grpo_kimi_k3_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
     rl_grpo_qwen3_5_9b_varlen_batch_invariant,
+)
+from torchtitan_recipes.tests.rl.alphabet_sort import (
+    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
+    rl_grpo_kimi_k3_debug_varlen_batch_invariant,
     rl_grpo_qwen3_5_debug_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
@@ -107,15 +105,13 @@ def build_trainer_model(
 
     Mirrors Trainer._build_model() without the Monarch actor framework.
     """
-    assert config.model is not None
-    model_config = copy.deepcopy(config.model)
+    model_config = copy.deepcopy(config.trainer.model)
     hf_assets_path = config.hf_assets_path
 
     device = utils.get_local_device()
     utils.device_module.set_device(device)
 
     parallelism = config.trainer.parallelism
-    model_config.set_sharding_(parallelism)
     parallelism_context = ParallelismContext(
         dp_shard=parallelism.data_parallel_shard_degree,
         dp_replicate=parallelism.data_parallel_replicate_degree,
@@ -199,8 +195,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
-    assert config.model is not None
-    attention_backend = config.model.first_base_attention_backend
+    attention_backend = gen_config.model.first_base_attention_backend
     use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same
@@ -249,7 +244,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     if not has_cuda_capability(9, 0) and not use_flex:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
-    engine_kwargs["max_model_len"] = config.model.max_context_length
+    engine_kwargs["max_model_len"] = gen_config.model.max_context_length
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
     # (the active-buffer capacity num_group_workers, or the validation pass).
     async_loop = config.async_loop
@@ -257,7 +252,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     num_group_workers = async_loop.max_active_rollout_groups
     rollout_concurrency = max(
         num_group_workers * async_loop.num_samples_per_prompt,
-        async_loop.validation.num_samples,
+        async_loop.validation.steps,
     )
     max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
     engine_kwargs["max_num_seqs"] = max_num_seqs
@@ -279,14 +274,9 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     """Copy the trainer model's weights into the vLLM model in-process."""
 
     wrapper = engine.model_executor.driver_worker.get_model()
-    vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
-    vllm_sd = vllm_model.state_dict()
-    vllm_sd = plain_tensor_to_dtensor_state_dict(
-        vllm_sd,
-        state_dict_layouts=wrapper.get_state_dict_layouts(),
-        parallelism_context=wrapper.parallelism_context,
-    )
+    # As a weight sync: fill the pinned CPU copy, then load it with load_state_dict.
+    vllm_sd = wrapper._prefetched_model_state_dict
 
     missing = []
     for name, vparam in vllm_sd.items():
@@ -303,9 +293,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             else:
                 vparam.copy_(full)
 
-    vllm_model.load_state_dict(
-        dtensor_to_plain_tensor_state_dict(vllm_sd), strict=False
-    )
+    wrapper.load_state_dict(vllm_sd)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -657,11 +645,12 @@ class BitwiseParityTestBase(unittest.TestCase):
                 initial_load_path=config.hf_assets_path,
             )
 
+        if config.override.imports:
+            apply_overrides(config.override, config)
         register_to_vllm(
-            config.model,
+            config.generator.model,
             parallelism=config.generator.parallelism,
             checkpointer_config=generator_checkpointer,
-            override=config.generator.override,
         )
 
         # Test runs trainer and generator in the same process, so limit
@@ -669,6 +658,18 @@ class BitwiseParityTestBase(unittest.TestCase):
         config.generator.gpu_memory_limit = 0.5
 
         cls.model, cls.device, cls.parallelism_context = build_trainer_model(config)
+
+        # Workaround: Clear the DTensor sharding-propagation caches here since
+        # this test puts both the trainer and the generator in the same process
+        # and builds equal but separate meshes for them. Without this workaround,
+        # the generator's FSDP params pick up the trainer's mesh objects and
+        # fail fully_shard's mesh identity check. This error happens only in
+        # this specific test setup, no production impact.
+        #
+        # TODO: Revisit DTensor sharding-propagation cache semantics on pytorch side
+        torch._C._clear_DTensor_sharding_propagator_cache()
+        DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding.cache_clear()
+
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)

@@ -15,7 +15,8 @@ from typing import Any
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
+from torchtitan.components.checkpointer import DATALOADER
+from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import apply_overrides, Configurable
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
@@ -27,12 +28,12 @@ from torchtitan.experiments.torchft.optimizer import (
     TorchFTOptim,
     TorchFTOptimizersContainer,
 )
+from torchtitan.models.base import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
     ensure_pp_loss_visible,
 )
-from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -121,19 +122,18 @@ class FaultTolerantTrainingEngine(TrainingEngine):
     def _initialize_checkpointer(
         self,
         *,
-        dataloader: BaseDataLoader | None,
+        extra_states: dict[str, torch.distributed.checkpoint.stateful.Stateful] | None,
         sd_adapter: Any | None,
     ) -> None:
         checkpointer_config = self.config.checkpointer
         if checkpointer_config is None:
             return
         self.checkpointer = checkpointer_config.build(
-            dataloader=dataloader,
             model_parts=self.model_parts,
             optimizers=self.optim.optimizers,
             lr_schedulers=self.optim.lr_schedulers,
             ema=self.optim.ema,
-            states={"train_state": self},
+            extra_states={"train_state": self, **(extra_states or {})},
             sd_adapter=sd_adapter,
             base_folder=self.output_dir,
             ft_manager=self.ft_manager,
@@ -151,9 +151,7 @@ class FaultTolerantTrainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        model_config = copy.deepcopy(config.model)
-        model_config.set_sharding_(config.parallelism)
-        config.model = model_config
+        config.model = copy.deepcopy(config.model)
         if config.override.imports:
             apply_overrides(config.override, config)
         model_config = config.model
@@ -244,7 +242,7 @@ class FaultTolerantTrainer(Configurable):
             )
 
         engine.initialize(
-            dataloader=self.dataloader,
+            extra_states={DATALOADER: self.dataloader},
             hf_assets_path=config.hf_assets_path,
             create_seed_checkpoint=config.create_seed_checkpoint,
         )

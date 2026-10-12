@@ -17,14 +17,14 @@ from tokenizers.pre_tokenizers import Whitespace
 
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.dataset import SingleDatasetConfig
+from torchtitan.components.data.multimodal import mm_datasets
+from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.utils.audio import load_pcm_waveform
+from torchtitan.components.data.multimodal.utils.video import load_npy_video_frames
 from torchtitan.components.data.sources import IndexedJsonlSource
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.hf_datasets.multimodal import mm_datasets
-from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.utils.audio import load_pcm_waveform
-from torchtitan.hf_datasets.multimodal.utils.video import load_npy_video_frames
 from torchtitan_recipes.tests.datasets import synthetic_multimodal
 
 

@@ -138,6 +138,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             self.model_flavor,
             attn_backend=self.attn_backend,
             seq_len=SEQ_LEN,
+            parallelism=ParallelismConfig(),
         )
         Trainer.Config(
             model=self.model_config,
