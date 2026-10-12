@@ -507,7 +507,7 @@ def test_pipeline_param_residency_limit(monkeypatch, configured_limit, expected_
     assert "reuse_recv_buffers" not in schedule.kwargs
 
 
-def test_schedule_loss_replaces_loss_metrics(monkeypatch):
+def test_schedule_loss_preserves_structured_metrics(monkeypatch):
     class CapturingSchedule(pipeline_parallel.PipelineScheduleMulti):
         __slots__ = ("kwargs",)
 
@@ -530,23 +530,24 @@ def test_schedule_loss_replaces_loss_metrics(monkeypatch):
         stages=[object(), object()],
         loss_fn=loss_fn,
     )
-    scalar_loss_fn = schedule.kwargs["loss_fn"]
+    pipeline_loss_fn = schedule.kwargs["loss_fn"]
 
     # Stage metadata inference calls the loss once before the microbatch.
-    loss_metrics = {"stale/max": torch.tensor(9.0)}
+    results = []
     for scale in (2.0, 3.0):
-        loss = scalar_loss_fn(
+        result = pipeline_loss_fn(
             torch.tensor(1.0),
             torch.tensor(5.0),
             scale=scale,
-            loss_metrics=loss_metrics,
         )
+        results.append(result)
 
-    torch.testing.assert_close(loss, torch.tensor(3.0))
-    assert loss_metrics == {"loss/mean": torch.tensor(15.0)}
     torch.testing.assert_close(
-        scalar_loss_fn(torch.tensor(1.0), torch.tensor(5.0), scale=1.0),
-        torch.tensor(1.0),
+        results,
+        [
+            {"loss": torch.tensor(2.0), "metrics": {"loss/mean": torch.tensor(10.0)}},
+            {"loss": torch.tensor(3.0), "metrics": {"loss/mean": torch.tensor(15.0)}},
+        ],
     )
 
 

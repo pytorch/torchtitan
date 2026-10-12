@@ -98,6 +98,7 @@ def test_graph_trainer_preserves_eager_pp_validation(monkeypatch):
     torch.testing.assert_close(loss, torch.tensor(2.0), rtol=0, atol=0)
     schedule.eval.assert_called_once()
     assert schedule.eval.call_args.kwargs["return_outputs"] is False
+    assert schedule.eval.call_args.kwargs["loss_results"] is None
     stage.state.clear.assert_called_once()
     stage.clear_runtime_states.assert_called_once()
 

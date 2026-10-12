@@ -455,20 +455,12 @@ def _build_pipeline_schedule(
             "Use a concrete single-stage schedule such as GPipe or 1F1B."
         )
 
-    # Pipeline schedules expect a bare scalar loss tensor. A caller that wants
-    # the loss metrics passes a per-microbatch ``loss_metrics`` dict, which is
-    # replaced rather than accumulated into: the schedule also calls the loss on
-    # the first microbatch while inferring stage metadata.
-    def _scalar_loss_fn(
-        *args: object,
-        loss_metrics: dict[str, torch.Tensor] | None = None,
-        **kwargs: object,
-    ) -> torch.Tensor:
+    def _pipeline_loss_fn(
+        *args: object, **kwargs: object
+    ) -> torch.Tensor | dict[str, Any]:
+        """Preserve named model loss metrics through the pipeline result API."""
         loss, metrics = loss_fn(*args, **kwargs)
-        if loss_metrics is not None:
-            loss_metrics.clear()
-            loss_metrics.update(metrics)
-        return loss
+        return {"loss": loss, "metrics": metrics} if metrics else loss
 
     if looped_schedule:
         schedule_kwargs: dict[str, Any] = {
@@ -485,7 +477,7 @@ def _build_pipeline_schedule(
         schedule = cast(Any, schedule_class)(
             stages,
             n_microbatches=num_microbatches,
-            loss_fn=_scalar_loss_fn,
+            loss_fn=_pipeline_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
             **schedule_kwargs,
@@ -499,7 +491,7 @@ def _build_pipeline_schedule(
         schedule = cast(Any, schedule_class)(
             stages[0],
             n_microbatches=num_microbatches,
-            loss_fn=_scalar_loss_fn,
+            loss_fn=_pipeline_loss_fn,
             scale_grads=False,
         )
     logger.info(

@@ -870,30 +870,37 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         controls whether that step finishes FSDP gradient reduction. Returns
         the group loss and one loss metrics dict per microbatch.
         """
-        # Each microbatch's loss fills its own metrics dict.
         loss_metrics: list[dict[str, torch.Tensor]] = [{} for _ in loss_kwargs]
-        loss_kwarg_mbs = [
-            {**mb_loss_kwargs, "loss_metrics": mb_loss_metrics}
-            for mb_loss_kwargs, mb_loss_metrics in zip(
-                loss_kwargs, loss_metrics, strict=True
-            )
-        ]
         with self.parallelism_context.activate_spmd(
             typechecking=self.config.debug.spmd_typechecking,
         ):
             losses = [] if self.pp_has_last_stage else None
+            loss_results = [] if self.pp_has_last_stage else None
             self.pp_schedule.step(
                 arg_mbs=inputs,
                 kwarg_mbs=model_kwargs,
                 target_mbs=labels,
                 losses=losses,
-                loss_kwarg_mbs=loss_kwarg_mbs,
+                loss_results=loss_results,
+                loss_kwarg_mbs=loss_kwargs,
                 return_outputs=False,
                 finalize_gradients=finalize_gradients,
             )
 
         if self.pp_has_last_stage:
             assert losses is not None
+            assert loss_results is not None
+            if len(loss_results) != len(model_kwargs):
+                raise RuntimeError(
+                    "Expected one loss_results entry per microbatch; use the required PyTorch structured-loss API."
+                )
+            names = loss_results[0]["metrics"].keys() if loss_results else ()
+            if any(result["metrics"].keys() != names for result in loss_results):
+                raise ValueError(
+                    "Loss metric names must remain constant across an optimizer step."
+                )
+            loss_metrics = [result["metrics"] for result in loss_results]
+            loss_results.clear()
             detached_losses = [loss.detach() for loss in losses]
             losses.clear()
             return torch.sum(torch.stack(detached_losses)).to(self.device), loss_metrics
