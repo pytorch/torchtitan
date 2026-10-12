@@ -156,7 +156,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             )
         return super().get_hf_storage_reader(path, thread_count=thread_count)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], to_quantized_keys: bool = False
+    ) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
         2. Split grouped-linear weights into individual expert weights.
@@ -219,7 +221,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], from_quantized_keys: bool = False
+    ) -> dict[str, Any]:
         """
         1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
         2. Convert between the HF shape and the torchtitan shape.

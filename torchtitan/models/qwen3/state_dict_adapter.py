@@ -58,11 +58,18 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "lm_head.weight": "lm_head.weight",
         }
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], to_quantized_keys: bool = False
+    ) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
         2. Split grouped-linear weights into individual expert weights.
         """
+        if to_quantized_keys:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         state_dict = self._native_fused_linears_to_hf(
             state_dict,
             split_routed_experts=True,
@@ -137,11 +144,18 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], from_quantized_keys: bool = False
+    ) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
         2. Concatenate individual expert weights into grouped-linear weights.
         """
+        if from_quantized_keys:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         self._validate_hf_rope_config(CosSinRoPE.Config)
 
         state_dict = {}

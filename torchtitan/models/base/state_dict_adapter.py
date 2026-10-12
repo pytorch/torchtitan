@@ -77,11 +77,17 @@ class BaseStateDictAdapter(ABC):
         pass
 
     @abstractmethod
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], to_quantized_keys: bool = False
+    ) -> dict[str, Any]:
         """Convert from native model state dict to HuggingFace format.
 
         Args:
             state_dict: The native model state dict
+            to_quantized_keys: Use the key names of a quantized HF checkpoint,
+                for an HF load with ``from_quantized``. Only the names change;
+                the values are not quantized. Adapters whose quantized and
+                unquantized checkpoints share names can ignore this.
 
         Returns:
             The converted HuggingFace format state dict
@@ -89,11 +95,18 @@ class BaseStateDictAdapter(ABC):
         pass
 
     @abstractmethod
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], from_quantized_keys: bool = False
+    ) -> dict[str, Any]:
         """Obtain native model state dict from HuggingFace format.
 
         Args:
             hf_state_dict: The HuggingFace format state dict
+            from_quantized_keys: Whether ``hf_state_dict`` uses the key names of
+                a quantized HF checkpoint. Only the names differ: the storage
+                reader has already dequantized the values. In an HF load,
+                ``hf_state_dict`` is the dict ``to_hf`` returned, so pass the
+                ``to_quantized_keys`` value that ``to_hf`` was called with.
 
         Returns:
             The converted native model state dict

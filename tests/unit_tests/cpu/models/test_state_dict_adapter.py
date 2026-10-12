@@ -23,6 +23,8 @@ from torchtitan.models.deepseek_v4 import (
 )
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan.models.deepseek_v4.state_dict_adapter import DeepSeekV4StateDictAdapter
+from torchtitan.models.flux import MODEL_FLAVORS as FLUX_MODEL_FLAVORS
+from torchtitan.models.flux.state_dict_adapter import FluxStateDictAdapter
 from torchtitan.models.gpt_oss import MODEL_FLAVORS as GPT_OSS_MODEL_FLAVORS
 from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
 from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
@@ -180,6 +182,33 @@ class Qwen3StateDictAdapterTest(unittest.TestCase):
         self.assertEqual(restored["tok_embeddings.weight"].ndim, 2)
         self.assertEqual(restored["lm_head.weight"].ndim, 2)
         model.load_state_dict(restored, strict=True)
+
+
+class UnsupportedQuantizedKeysTest(unittest.TestCase):
+    def test_adapters_without_quantized_loads_reject_quantized_keys(self) -> None:
+        adapters = [
+            FluxStateDictAdapter(
+                FLUX_MODEL_FLAVORS["flux-debug"](), hf_assets_path=None
+            )
+        ]
+        for flavors, adapter_cls in (
+            (LLAMA3_MODEL_FLAVORS, Llama3StateDictAdapter),
+            (QWEN3_MODEL_FLAVORS, Qwen3StateDictAdapter),
+        ):
+            build_config, max_context_length = flavors["debugmodel"]
+            config = build_config(
+                attn_backend="flex",
+                seq_len=max_context_length,
+                parallelism=ParallelismConfig(),
+            )
+            adapters.append(adapter_cls(config, hf_assets_path=None))
+
+        for adapter in adapters:
+            with self.subTest(adapter=type(adapter).__name__):
+                with self.assertRaisesRegex(ValueError, "does not support loading"):
+                    adapter.to_hf({}, to_quantized_keys=True)
+                with self.assertRaisesRegex(ValueError, "does not support loading"):
+                    adapter.from_hf({}, from_quantized_keys=True)
 
 
 class DeepSeekV3StateDictAdapterTest(unittest.TestCase):

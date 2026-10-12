@@ -136,8 +136,15 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         )
         return attention_map.get(abstract_key)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], to_quantized_keys: bool = False
+    ) -> dict[str, Any]:
         """Convert a TorchTitan state dict to unquantized HuggingFace format."""
+        if to_quantized_keys:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         state_dict = self._native_fused_linears_to_hf(
             state_dict,
             split_routed_experts=True,
@@ -271,8 +278,15 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             )
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], from_quantized_keys: bool = False
+    ) -> dict[str, Any]:
         """Convert an unquantized HuggingFace state dict to TorchTitan."""
+        if from_quantized_keys:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         state_dict: dict[str, Any] = {}
         expert_weights_by_layer: dict[str, dict[str, dict[int, torch.Tensor]]] = {}
         unmapped: list[str] = []
