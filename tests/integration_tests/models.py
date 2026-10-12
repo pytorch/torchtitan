@@ -112,7 +112,9 @@ def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_mtp_fsdp4_ep2() -> Trainer.Config:
     config = deepseek_v3_debugmodel_mtp(
-        seq_len=2048, parallelism=ParallelismConfig(expert_parallel_degree=2)
+        attn_backend="flex",
+        seq_len=2048,
+        parallelism=ParallelismConfig(expert_parallel_degree=2),
     )
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
@@ -218,7 +220,9 @@ def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_hsdp2x2_ep2() -> Trainer.Config:
     config = deepseek_v3_debugmodel(
-        seq_len=2048, parallelism=ParallelismConfig(expert_parallel_degree=2)
+        attn_backend="flex",
+        seq_len=2048,
+        parallelism=ParallelismConfig(expert_parallel_degree=2),
     )
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_replicate_degree = 2
@@ -246,7 +250,9 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_fused_mla_swiglu_fsdp4_ep2() -> Trainer.Config:
     config = deepseek_v3_debugmodel(
-        seq_len=2048, parallelism=ParallelismConfig(expert_parallel_degree=2)
+        attn_backend="flex",
+        seq_len=2048,
+        parallelism=ParallelismConfig(expert_parallel_degree=2),
     )
     _set_spmd_typechecking(config, typechecking=True)
     config.override.imports = [
