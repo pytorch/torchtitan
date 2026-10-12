@@ -39,6 +39,7 @@ from torchtitan.components.data.multimodal.utils.image import (
     process_image,
     vision_to_patches,
 )
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.qwen3_5 import build_model_config, QWEN3_5_SPECIAL_TOKENS
 from transformers import AutoModelForImageTextToText, AutoProcessor
@@ -91,7 +92,7 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
     # trips the .apply_chat_template call on environments without transformers stubs.
     processor: Any = AutoProcessor.from_pretrained(hf_model_path)
 
-    model_config = build_model_config(model_flavor)
+    model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
     encoder_config = model_config.vision_encoder
     assert encoder_config is not None
     patch_size = encoder_config.patch_size
@@ -270,7 +271,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
     """Run TT model, return last-token logits per sample."""
     print(f"Loading TorchTitan model on {device} ...")
 
-    model_config = build_model_config(model_flavor)
+    model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
     with torch.device("meta"):
         model = model_config.build()
     model.to_empty(device="cpu")

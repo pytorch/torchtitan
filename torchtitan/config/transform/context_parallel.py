@@ -14,7 +14,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 
-from .base import convert_config_type, ModelConfigTransform, ModelConfigTransformContext
+from .base import convert_config_type, ModelConfigTransform
 
 __all__ = ["ContextParallelTransform"]
 
@@ -40,14 +40,7 @@ class ContextParallelTransform(ModelConfigTransform):
                     "CPInnerAttention."
                 )
 
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
-        del context
-
+    def transform(self, model: Module.Config) -> Module.Config:
         def convert(
             traversed: InnerAttention.Config,
             parent: object,

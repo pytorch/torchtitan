@@ -24,7 +24,8 @@ from torchtitan.trainer import Trainer
 
 
 def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("14B", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config("14B", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -47,7 +48,7 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=3000,
         ),
-        parallelism=ParallelismConfig(),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )

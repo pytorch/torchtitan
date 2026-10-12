@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from monarch.actor import Actor, Channel, concurrent_endpoint, context, current_rank
 
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.generator import SamplingConfig, VLLMGenerator
 from torchtitan.rl.rollout.types import Completion
 
@@ -20,14 +19,12 @@ class _GeneratorActorEndpoints:
         self,
         config: VLLMGenerator.Config,
         *,
-        model_config: Decoder.Config,
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
     ) -> None:
         super().__init__(
             config,
-            model_config=model_config,
             model_path=model_path,
             max_num_seqs=max_num_seqs,
             output_dir=output_dir,

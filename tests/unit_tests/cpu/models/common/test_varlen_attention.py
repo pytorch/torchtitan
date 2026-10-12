@@ -14,6 +14,7 @@ from unittest.mock import patch
 import spmd_types as spmd
 import torch
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import (
@@ -143,12 +144,13 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_thk_thv_sharding_uses_varlen_argument_names(self):
-        from torchtitan.models.llama3 import MODEL_FLAVORS
-        from torchtitan.models.llama3.sharding import set_llama3_sharding_config
+        from torchtitan.models.llama3 import build_model_config
 
-        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        model_config = build_config("varlen", seq_len=max_context_length)
-        set_llama3_sharding_config(model_config, enable_sp=False)
+        model_config = build_model_config(
+            "debugmodel",
+            attn_backend="varlen",
+            parallelism=ParallelismConfig(enable_sequence_parallel=False),
+        )
 
         sharding = model_config.layers[0].attention.inner_attention.sharding_config
         assert sharding is not None
@@ -202,7 +204,9 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
         from torchtitan.models.llama3 import MODEL_FLAVORS
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        model = build_config("varlen", seq_len=max_context_length).build()
+        model = build_config(
+            "varlen", seq_len=max_context_length, parallelism=ParallelismConfig()
+        ).build()
         model.init_states()
         num_tokens = 6
         tokens_T = torch.randint(0, 2048, (num_tokens,))

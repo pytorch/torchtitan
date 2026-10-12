@@ -465,32 +465,40 @@ def test_decode_metrics_absent_for_single_generated_token():
 
 # A valid inference parallelism; the weight-sync guards run after it is accepted.
 _PARALLELISM = InferenceParallelismConfig()
+# The fields of a model config that VLLMGenerator reads before building vLLM.
+_MODEL_CONFIG = SimpleNamespace(
+    first_base_attention_backend=VarlenInnerAttention.Config(),
+    max_context_length=1024,
+)
 
 
 def test_generator_dp_requires_expert_parallelism():
     with pytest.raises(ValueError, match="Controller.Config.num_generators"):
         VLLMGenerator.Config(
+            model=_MODEL_CONFIG,
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
                 expert_parallel_degree=1,
-            )
+            ),
         )
 
 
 def test_generator_dp_can_supply_expert_parallelism():
     VLLMGenerator.Config(
+        model=_MODEL_CONFIG,
         parallelism=InferenceParallelismConfig(
             data_parallel_degree=2,
             tensor_parallel_degree=2,
             expert_parallel_degree=4,
-        )
+        ),
     )
 
 
 def test_batch_invariant_requires_kv_cache_reset():
     with pytest.raises(ValueError, match="reset_kv_cache_on_weight_sync"):
         VLLMGenerator.Config(
+            model=_MODEL_CONFIG,
             parallelism=_PARALLELISM,
             debug=DebugConfig(batch_invariant=True),
         )
@@ -502,7 +510,8 @@ def test_qwen36_27b_perf_config():
     config = rl_grpo_qwen3_6_27b_varlen_perf()
 
     assert config.hf_assets_path.endswith("Qwen3.6-27B")
-    assert "offset_rmsnorm" in config.model.local_compile_regions
+    assert "offset_rmsnorm" in config.trainer.model.local_compile_regions
+    assert "offset_rmsnorm" in config.generator.model.local_compile_regions
     assert config.trainer.parallelism.data_parallel_shard_degree == 2
     assert config.trainer.parallelism.tensor_parallel_degree == 2
     assert config.generator.parallelism.tensor_parallel_degree == 4
@@ -525,14 +534,9 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: VLLMGenerator.Config) ->
     monkeypatch.setattr(generator_module, "init_logger", Mock())
     monkeypatch.setattr(generator_module, "sl", Mock())
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    model_config = SimpleNamespace(
-        first_base_attention_backend=VarlenInnerAttention.Config(),
-        max_context_length=1024,
-    )
     with pytest.raises(RuntimeError, match="stop before the engine build"):
         VLLMGenerator(
             config,
-            model_config=model_config,
             model_path="unused",
             max_num_seqs=8,
             output_dir=str(tmp_path),
@@ -545,7 +549,9 @@ def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
     engine_kwargs = _build_engine_kwargs(
         monkeypatch,
         tmp_path,
-        VLLMGenerator.Config(extra_vllm_engine_args={"watermark": 0.03}),
+        VLLMGenerator.Config(
+            model=_MODEL_CONFIG, extra_vllm_engine_args={"watermark": 0.03}
+        ),
     )
     assert engine_kwargs["watermark"] == 0.03
     assert engine_kwargs["scheduling_policy"] == "fcfs"
@@ -791,10 +797,9 @@ def test_vllm_uneven_decode_tp_padding():
         )
 
     register_to_vllm(
-        config.model,
+        config.generator.model,
         parallelism=config.generator.parallelism,
         checkpointer_config=None,
-        override=config.generator.override,
     )
 
     engine = build_inference_engine(config)

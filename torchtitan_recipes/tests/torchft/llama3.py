@@ -11,6 +11,7 @@ from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW, LRSchedulersContainer
 from torchtitan.config import CommConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 
@@ -31,7 +32,10 @@ from torchtitan.observability.profiler import Profiler
 def llama3_torchft_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> FaultTolerantTrainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
+    )
     return FaultTolerantTrainer.Config(
         loss=CrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
@@ -45,6 +49,7 @@ def llama3_torchft_debugmodel(
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
+        parallelism=parallelism,
         optim=TorchFTOptim.Config(
             optimizer=TorchFTOptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]

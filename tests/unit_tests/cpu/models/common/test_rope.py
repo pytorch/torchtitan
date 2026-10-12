@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     GQAttention,
@@ -281,6 +282,7 @@ class TestYaRNScaling(unittest.TestCase):
             "debugmodel",
             attn_backend="flex",
             seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
         )
         attention_config = model_config.layers[0].attention
         assert isinstance(attention_config, Attention.Config)
@@ -336,7 +338,9 @@ class TestPerLayerRoPECache(unittest.TestCase):
         from torchtitan.models.llama3 import MODEL_FLAVORS
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        model = build_config("flex", seq_len=max_context_length).build()
+        model = build_config(
+            "flex", seq_len=max_context_length, parallelism=ParallelismConfig()
+        ).build()
         layer_ropes = [layer.attention.rope for layer in model.layers.values()]
 
         self.assertTrue(all(isinstance(rope, RoPE) for rope in layer_ropes))
@@ -346,7 +350,9 @@ class TestPerLayerRoPECache(unittest.TestCase):
         from torchtitan.models.llama3 import MODEL_FLAVORS
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        cfg = build_config("flex", seq_len=max_context_length)
+        cfg = build_config(
+            "flex", seq_len=max_context_length, parallelism=ParallelismConfig()
+        )
         layer_rope_cfgs = [layer.attention.rope for layer in cfg.layers]
 
         self.assertEqual(

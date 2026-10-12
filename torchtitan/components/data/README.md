@@ -362,6 +362,8 @@ pretraining_corpus_ds = DatasetConcatConfig(
 
 Every `books_ds` row now appears three times in the combined finite index space. With `shuffle=True`, TorchTitan shuffles that combined index space before DP sharding.
 
+Each child is built with seed `seed + index`, the same as mixed children, so repeated copies make independent draws in random processors (for example augmentation or random cropping). Inserting or reordering a child therefore changes the draws of every later child.
+
 Use mixing instead when the desired behavior is relative source-selection frequency rather than exact finite duplication:
 
 ```python

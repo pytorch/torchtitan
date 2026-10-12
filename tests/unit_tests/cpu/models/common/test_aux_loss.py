@@ -281,8 +281,10 @@ class TestMicrobatchWiseLoadBalanceLossConfig(_AuxLossTestCase):
                 num_experts=4,
                 top_k=1,
                 param_init={},
+                enable_ep=False,
             ),
             aux_loss_coeff=_COEFF,
+            enable_sp=True,
         )
         self.assertIs(
             type(moe_cfg.router.aux_loss.build()), MicrobatchWiseLoadBalanceLoss

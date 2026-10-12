@@ -53,7 +53,7 @@ def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
         return spmd.mutate_type(
             tensor,
             src=spmd.R,
-            dst={"dp": spmd.V, "cp": spmd.R, "tp": spmd.I},
+            dst={"dp": spmd.V, "cp": spmd.I, "tp": spmd.I},
         )
     return tensor
 

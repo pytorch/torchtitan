@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import multiprocessing
 import os
+import sys
+import types
 from dataclasses import dataclass, field
 from queue import Empty
 from typing import Any
@@ -25,11 +28,6 @@ from verifiers.v1.utils.logging import setup_logging
 
 from torchtitan.config import Configurable
 from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
-
-
-def _setup_env_server_process() -> None:
-    """Configure logging in the spawned environment-server process."""
-    setup_logging("INFO")
 
 
 def _run_env_server_process(
@@ -51,12 +49,16 @@ def _run_env_server_process(
             local_taskset_module
         )
     env_config = resolve_env_config(environment)
+    # Each spawned pool worker re-runs this process's __main__: the controller's
+    # script, with its trainer imports. An empty __main__ skips that.
+    sys.modules["__main__"] = types.ModuleType("__main__")
     serve_env(
         **pool_serve_kwargs(serve.pool),
         address=serve.address,
         address_queue=address_queue,
         death_pipe=death_pipe,
-        log_setup=_setup_env_server_process,
+        # Workers unpickle this by importing its module, so that module must not import torch.
+        log_setup=functools.partial(setup_logging, "INFO"),
         config_data=env_config_data(env_config),
         max_concurrent=serve.max_concurrent,
     )

@@ -33,11 +33,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
     LoRATransform,
-    ModelConfigTransformContext,
     transform_model_config_,
 )
 from torchtitan.distributed.parallelism_context import ParallelismContext
@@ -47,19 +46,14 @@ from torchtitan.models.common.async_linear import (
 )
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
+    colwise_sharding_config,
     dense_sequence_parallel_placement,
-    set_dense_ffn_sharding,
-    set_gqa_attention_sharding,
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 
 DIM = 256
 N_HEADS = 8
-_CONTEXT = ModelConfigTransformContext(
-    training=TrainingConfig(), parallelism=ParallelismConfig()
-)
 
 
 class TestAsyncTensorParallelConfig(unittest.TestCase):
@@ -69,7 +63,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
     def _model_config():
         from torchtitan.models.llama3 import build_model_config
 
-        return build_model_config("debugmodel")
+        return build_model_config("debugmodel", parallelism=ParallelismConfig())
 
     def test_sharding_setup_declares_common_communication_contracts(self):
         """Async attention and FFN implementations own their collectives."""
@@ -81,17 +75,9 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
                     enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
                 )
             ],
-            context=_CONTEXT,
         )
+        # The configs are sharded for SP when built; the transform keeps it.
         async_layer = async_model.layers[0]
-        set_gqa_attention_sharding(stock_layer.attention, enable_sp=True)
-        set_gqa_attention_sharding(async_layer.attention, enable_sp=True)
-        for layer in (stock_layer, async_layer):
-            set_dense_ffn_sharding(
-                layer.feed_forward,
-                attn_x_layout=dense_sequence_parallel_placement(),
-                enable_sp=True,
-            )
 
         self.assertIsNone(stock_layer.attention.sharding_config.in_dst_shardings)
         self.assertIsNone(stock_layer.attention.sharding_config.out_dst_shardings)
@@ -131,15 +117,8 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             [
                 LoRATransform(),
             ],
-            context=_CONTEXT,
         )
         layer = model.layers[0]
-        set_gqa_attention_sharding(layer.attention, enable_sp=True)
-        set_dense_ffn_sharding(
-            layer.feed_forward,
-            attn_x_layout=dense_sequence_parallel_placement(),
-            enable_sp=True,
-        )
 
         self.assertIsNone(layer.attention.sharding_config.in_dst_shardings)
         self.assertIsNone(layer.attention.qkv_linear.sharding_config)
@@ -186,7 +165,6 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
 
         parallelism_context = self._parallelism_context()
         attn_cfg = llama3_debugmodel_dist_gemm(seq_len=2048).model.layers[0].attention
-        set_gqa_attention_sharding(attn_cfg, enable_sp=True)
         attn = attn_cfg.build().to(self.device_type)
         attn._parallelize(parallelism_context)
 
@@ -209,10 +187,6 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             hidden_dim=hidden_dim,
             w13_param_init=init,
             w2_param_init=init,
-        )
-        set_dense_ffn_sharding(
-            ffn_config,
-            attn_x_layout=dense_sequence_parallel_placement(),
             enable_sp=True,
         )
         feed_forward = ffn_config.build().to(self.device_type)
@@ -242,10 +216,6 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             hidden_dim=128,
             w13_param_init=init,
             w2_param_init=init,
-        )
-        set_dense_ffn_sharding(
-            ffn_config,
-            attn_x_layout=input_layout,
             enable_sp=True,
         )
         feed_forward = ffn_config.build().to(self.device_type)
@@ -273,7 +243,6 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             set_spmd_meshes,
         )
         from torchtitan.models.gpt_oss import build_model_config
-        from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
 
         class _IdentityRope(torch.nn.Module):
             def forward(self, q, k, positions):
@@ -286,8 +255,14 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
                 lse = torch.zeros(q.shape[:2], device=q.device, dtype=q.dtype)
                 return out_transform(q, lse)
 
-        config = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
-        set_gpt_oss_sharding_config(config, enable_sp=True, enable_ep=False)
+        config = build_model_config(
+            "debugmodel",
+            seq_len=128,
+            attn_backend="flex",
+            parallelism=ParallelismConfig(
+                enable_sequence_parallel=True, expert_parallel_degree=1
+            ),
+        )
         attention = config.layers[0].attention.build().to(self.device_type)
         attention.rope = _IdentityRope()
         attention.inner_attention = _AttentionOutput()
@@ -344,7 +319,9 @@ class TestAsyncQKVNumerics(DTensorTestBase):
             ),
         )
         input_layout = dense_sequence_parallel_placement()
-        async_config.wqkv.sharding_config = colwise_config(input_layout=input_layout)
+        async_config.wqkv.sharding_config = colwise_sharding_config(
+            input_layout=input_layout
+        )
         stock = stock_config.build().to(device=device, dtype=torch.bfloat16)
         async_qkv = async_config.build().to(device=device, dtype=torch.bfloat16)
 
@@ -433,7 +410,11 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
         torch.manual_seed(0)
         standard = (
             make_ffn_config(
-                dim=dim, hidden_dim=hidden, w13_param_init=init, w2_param_init=init
+                dim=dim,
+                hidden_dim=hidden,
+                w13_param_init=init,
+                w2_param_init=init,
+                enable_sp=True,
             )
             .build()
             .to(dev)
@@ -443,16 +424,12 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
             hidden_dim=hidden,
             w13_param_init=init,
             w2_param_init=init,
+            enable_sp=True,
         )
         async_config = AsyncTensorParallelTransform(
             enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
         ).transform(base_async_config)
         input_layout = dense_sequence_parallel_placement()
-        set_dense_ffn_sharding(
-            async_config,
-            attn_x_layout=input_layout,
-            enable_sp=True,
-        )
         dist_gemm = async_config.build().to(dev)
 
         with torch.no_grad():
@@ -539,6 +516,7 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
                 hidden_dim=hidden,
                 w13_param_init=init,
                 w2_param_init=init,
+                enable_sp=True,
             )
 
         torch.manual_seed(0)

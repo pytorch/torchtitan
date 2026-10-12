@@ -24,12 +24,10 @@ import torchtitan_recipes.tests.models.deepseek_v3 as eager_test_recipes
 from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW
-from torchtitan.config import ParallelismConfig
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.config.transform import (
     apply_transforms,
     LoRATransform,
-    ModelConfigTransformContext,
     TokenDispatcherTransform,
 )
 from torchtitan.config.transform.dist_moe import DistMoeTransform
@@ -52,11 +50,6 @@ from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 
 
-_CONTEXT = ModelConfigTransformContext(
-    training=TrainingConfig(), parallelism=ParallelismConfig()
-)
-
-
 def _parameter_initializers() -> dict[str, Any]:
     return {
         "w1_EFD": torch.nn.init.zeros_,
@@ -72,6 +65,7 @@ def _stock_config(*, dim: int = 32) -> RoutedExperts.Config:
         num_experts=4,
         top_k=2,
         param_init=_parameter_initializers(),
+        enable_ep=False,
     )
 
 
@@ -397,7 +391,6 @@ def test_lora_dist_moe_loads_grouped_lora_state_with_identical_initialization(
             ),
             DistMoeTransform(inplace_wgrad_accum=False),
         ],
-        context=_CONTEXT,
     )
     dist_moe_module = dist_moe_config.build()
 
@@ -507,7 +500,6 @@ def test_dist_moe_lora_rejects_inplace_wgrad() -> None:
                 LoRATransform(target_modules=["w13"]),
                 DistMoeTransform(inplace_wgrad_accum=True),
             ],
-            context=_CONTEXT,
         )
 
 
@@ -520,7 +512,6 @@ def test_dist_moe_lora_rejects_mxfp8_before_build() -> None:
                 DistMoeTransform(expert_precision="mxfp8"),
                 LoRATransform(target_modules=["w13"]),
             ],
-            context=_CONTEXT,
         )
 
 
@@ -549,7 +540,6 @@ def test_dist_moe_lora_dense_target_remains_legal_with_non_target_experts(
                 target_modules=["wo"],
             ),
         ],
-        context=_CONTEXT,
     )
 
     routed_configs = list(transformed.traverse(DistMoeRoutedExperts.Config))
@@ -650,7 +640,9 @@ def test_mxfp8_transform_is_independent_and_uses_prepared_weights() -> None:
 @pytest.mark.parametrize(
     "other_transform",
     [
-        TokenDispatcherTransform(dispatcher=HybridEPTokenDispatcher),
+        TokenDispatcherTransform(
+            dispatcher=HybridEPTokenDispatcher, num_max_tokens_per_rank=128
+        ),
     ],
 )
 def test_dist_moe_transform_rejects_incompatible_transforms(

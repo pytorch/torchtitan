@@ -8,8 +8,9 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-
 from torchtitan.components.optim import Adam, OptimizersContainer
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import build_model_config, Llama3Model
@@ -53,7 +54,7 @@ class FakeModel(BaseModel):
 
 
 def test_build_model_config_returns_model_config() -> None:
-    config = build_model_config("debugmodel")
+    config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     assert isinstance(config, Llama3Model.Config)
     assert config.max_context_length == 131072
     assert Llama3Model.state_dict_adapter_cls is Llama3StateDictAdapter

@@ -15,9 +15,9 @@ from pathlib import Path
 import pytest
 import torch
 from batch_invariant_ops import enable_batch_invariant_mode
-
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import OverrideConfig
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
@@ -296,7 +296,9 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
 
     setattr(gdn, kernel_name, recurrent)
     model = os.environ[MODEL_ENV]
-    model_config = build_model_config("0.8B", seq_len=256, attn_backend="varlen")
+    model_config = build_model_config(
+        "0.8B", seq_len=256, attn_backend="varlen", parallelism=ParallelismConfig()
+    )
     model_config.local_compile_regions = []
     registry.register_to_vllm(
         model_config,
@@ -304,7 +306,6 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True, initial_load_path=model
         ),
-        override=OverrideConfig(),
     )
     engine = LLMEngine.from_engine_args(
         EngineArgs(

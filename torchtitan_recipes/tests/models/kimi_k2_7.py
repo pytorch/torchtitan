@@ -93,9 +93,14 @@ def _kimi_multimodal_dataloader(
 
 def kimi_k2_5_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    parallelism = ParallelismConfig()
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
+    )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -135,11 +140,14 @@ def kimi_k2_5_debugmodel(
 
 def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
     """Moonlight 16B-A3B: the text-only DeepSeekV3 sibling (no vision tower)."""
-    model_config = build_model_config(
-        "moonlight-16B-A3B", seq_len=seq_len, attn_backend="flex"
-    )
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
+    )
+    model_config = build_model_config(
+        "moonlight-16B-A3B",
+        seq_len=seq_len,
+        attn_backend="flex",
+        parallelism=parallelism,
     )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
@@ -180,11 +188,11 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
 
 def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
     """Kimi-VL A3B: Moonlight text tower + 2D MoonViT vision (image-text)."""
-    model_config = build_model_config(
-        "Kimi-VL-A3B", seq_len=seq_len, attn_backend="flex"
-    )
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
+    )
+    model_config = build_model_config(
+        "Kimi-VL-A3B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
@@ -231,10 +239,12 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
 def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
     """Full Kimi K2.5 (~1T-total / ~32B-active)."""
     # The report uses BF16 compute; its FP8 path only compresses saved activations.
-    model_config = build_model_config("Kimi-K2.5", seq_len=seq_len, attn_backend="flex")
     parallelism = ParallelismConfig(
         pipeline_parallel_schedule="Interleaved1F1B",
         expert_parallel_degree=8,
+    )
+    model_config = build_model_config(
+        "Kimi-K2.5", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(

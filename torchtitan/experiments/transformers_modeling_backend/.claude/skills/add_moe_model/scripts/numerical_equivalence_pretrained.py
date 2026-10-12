@@ -98,7 +98,7 @@ def test_pretrained(model_dir: str, device: torch.device, seed: int = 42) -> dic
     config.comm_backend = "standard"
     params = _probe_hf_moe_block(hf_moe_block, config)
     params["load_balance_coeff"] = None
-    moe_config = _build_moe_config(params, config)
+    moe_config = _build_moe_config(params, enable_sp=False, enable_ep=False)
 
     with torch.device("meta"):
         titan_moe = moe_config.build()

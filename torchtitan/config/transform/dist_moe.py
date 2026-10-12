@@ -22,7 +22,7 @@ from torchtitan.models.common.dist_moe import (
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
-from .base import ModelConfigTransform, ModelConfigTransformContext
+from .base import ModelConfigTransform
 
 
 __all__ = ["DistMoeTransform"]
@@ -134,12 +134,7 @@ class DistMoeTransform(ModelConfigTransform):
                 f"unsupported Dist-MoE expert precision {self.expert_precision!r}"
             )
 
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
+    def transform(self, model: Module.Config) -> Module.Config:
         """Replace each stock routed-expert config with the selected precision."""
         if self.expert_precision == "bf16":
             return _replace_routed_experts(

@@ -16,6 +16,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.hi_mid_lo_linear import (
     _split_into_bf16_pieces,
@@ -193,7 +194,9 @@ def test_lm_head_converter_swaps_only_lm_head():
     from torchtitan.models.qwen3 import MODEL_FLAVORS
 
     build_config, max_context_length = MODEL_FLAVORS["0.6B"]
-    config = build_config(attn_backend="flex", seq_len=max_context_length)
+    config = build_config(
+        attn_backend="flex", seq_len=max_context_length, parallelism=ParallelismConfig()
+    )
     lm_head_before = config.lm_head
 
     LMHeadFP32OutputConverter.Config().build().convert(config)

@@ -55,7 +55,10 @@ def _multimodal_collator_config(
 def qwen38_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -66,6 +69,7 @@ def qwen38_debugmodel(
         tokenizer=MultiModalTokenizer.Config(**QWEN3_8_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
+        parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
@@ -97,7 +101,10 @@ def qwen38_debugmodel_varlen_attn(
 ) -> Trainer.Config:
     config = qwen38_debugmodel(seq_len=seq_len)
     config.model = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        parallelism=config.parallelism,
     )
     config.training.disable_cuda_graphs = True
     return config
@@ -106,7 +113,16 @@ def qwen38_debugmodel_varlen_attn(
 def qwen38_debugmodel_moe(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel_moe", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        pipeline_parallel_degree=2,
+        num_pp_microbatches=2,
+        expert_parallel_degree=4,
+        tensor_parallel_degree=2,
+    )
+    model_config = build_model_config(
+        "debugmodel_moe", seq_len=seq_len, parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -134,20 +150,18 @@ def qwen38_debugmodel_moe(
             steps=10,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=2,
-            pipeline_parallel_degree=2,
-            num_pp_microbatches=2,
-            expert_parallel_degree=4,
-            tensor_parallel_degree=2,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
 
 def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("27B", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=-1,
+        tensor_parallel_degree=4,
+    )
+    model_config = build_model_config("27B", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -173,10 +187,7 @@ def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=4,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
@@ -184,7 +195,14 @@ def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
 
 def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
     """Qwen3.8-2.4T-A95B text-only MoE training config."""
-    model_config = build_model_config("2.4T-A95B", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=-1,
+        tensor_parallel_degree=4,
+        expert_parallel_degree=64,
+    )
+    model_config = build_model_config(
+        "2.4T-A95B", seq_len=seq_len, parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -208,11 +226,7 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=4,
-            expert_parallel_degree=64,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
