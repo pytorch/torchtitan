@@ -419,7 +419,7 @@ def _qwen35_deltanet_config(
         conv_q=_conv(key_dim),
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),
-        inner_gated_delta_net=InnerGDN.Config(
+        inner_attention=InnerGDN.Config(
             conv_kernel_size=conv_kernel_size,
             kernel=GDNKernel.Config(),
             sharding_config=inner_gated_delta_net_sharding_config(),

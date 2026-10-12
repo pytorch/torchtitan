@@ -241,11 +241,9 @@ class Qwen35TransformerBlock(Module):
 
         if self.full_attn:
             self.attn = config.attention.build()  # pyrefly: ignore [missing-attribute]
-            self.attention_metadata_key = type(self.attn.inner_attention)
         else:
             assert config.delta_net is not None
             self.attn = config.delta_net.build()
-            self.attention_metadata_key = type(self.attn.inner_gated_delta_net)
 
         self.moe_enabled = config.moe is not None
         if self.moe_enabled:
@@ -736,7 +734,7 @@ class Qwen35Model(MultimodalModel):
                 x,
                 (
                     attention_metadata.get(
-                        cast(Qwen35TransformerBlock, layer).attention_metadata_key
+                        type(cast(Qwen35TransformerBlock, layer).attn.inner_attention)
                     )
                     if attention_metadata is not None
                     else None

@@ -66,7 +66,7 @@ def _kda_config() -> KDA.Config:
         forget_b=linear(128, projection_dim),
         beta=linear(32, 2),
         output_gate=linear(32, projection_dim),
-        inner_kda=InnerKDA.Config(
+        inner_attention=InnerKDA.Config(
             head_dim=128,
             conv_kernel_size=4,
             kernel=KDAKernel.Config(),

@@ -553,7 +553,7 @@ class TestTransformModel(unittest.TestCase):
             else:
                 assert layer.delta_attention is not None
                 self.assertIsInstance(
-                    layer.delta_attention.inner_kda,
+                    layer.delta_attention.inner_attention,
                     ContextParallelInnerKDA.Config,
                 )
 

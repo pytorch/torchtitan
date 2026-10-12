@@ -192,7 +192,13 @@ class TestGptOssUlysses(unittest.TestCase):
             GptOssModel.parallelize(
                 SimpleNamespace(
                     config=SimpleNamespace(
-                        base_attention_backends=(inner_attention.Config(),)
+                        layers=[
+                            SimpleNamespace(
+                                attention=SimpleNamespace(
+                                    inner_attention=inner_attention.Config()
+                                )
+                            )
+                        ]
                     )
                 ),
                 parallelism_context=SimpleNamespace(cp_enabled=True),

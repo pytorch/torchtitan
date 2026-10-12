@@ -335,7 +335,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         positions = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32)
         full_attention_mask = mock.sentinel.full_attention_mask
         full_attention_backend = next(
-            layer.attention_metadata_key
+            type(layer.attn.inner_attention)
             for layer in model.layers.values()
             if layer.full_attn
         )
@@ -415,7 +415,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             conv_q=conv(key_dim),
             conv_k=conv(key_dim),
             conv_v=conv(value_dim),
-            inner_gated_delta_net=InnerGDN.Config(
+            inner_attention=InnerGDN.Config(
                 conv_kernel_size=conv_kernel_size,
                 kernel=GDNKernel.Config(),
             ),
@@ -431,7 +431,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ),
         ).build()
         if not use_fused:
-            model.inner_gated_delta_net.kernel = ReferenceGatedDeltaKernel()
+            model.inner_attention.kernel = ReferenceGatedDeltaKernel()
 
         model = model.to(device=device, dtype=dtype)
         with torch.no_grad():
@@ -496,7 +496,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             a_TH.float() + model.dt_bias
         )
         update_gate_TH = torch.sigmoid(b_TH)
-        output_THV = model.inner_gated_delta_net.kernel(
+        output_THV = model.inner_attention.kernel(
             query_THK,
             key_THK,
             value_THV,
@@ -598,7 +598,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         ).build()
         masks = flex_model._get_attention_metadata(positions)
         flex_backend = next(
-            layer.attention_metadata_key
+            type(layer.attn.inner_attention)
             for layer in flex_model.layers.values()
             if layer.full_attn
         )
@@ -615,12 +615,12 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         # Each block picks the entry matching its layer type.
         metadata_keys = {
-            layer.attention_metadata_key for layer in flex_model.layers.values()
+            type(layer.attn.inner_attention) for layer in flex_model.layers.values()
         }
         self.assertEqual(metadata_keys, {flex_backend, InnerGDN})
         for layer in flex_model.layers.values():
             self.assertEqual(
-                layer.attention_metadata_key,
+                type(layer.attn.inner_attention),
                 flex_backend if layer.full_attn else InnerGDN,
             )
 
@@ -629,7 +629,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         ).build()
         varlen_masks = varlen_model._get_attention_metadata(positions)
         varlen_backend = next(
-            layer.attention_metadata_key
+            type(layer.attn.inner_attention)
             for layer in varlen_model.layers.values()
             if layer.full_attn
         )

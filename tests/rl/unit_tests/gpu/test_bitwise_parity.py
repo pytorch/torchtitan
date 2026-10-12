@@ -195,7 +195,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
-    attention_backend = gen_config.model.first_base_attention_backend
+    attention_backend = gen_config.model.first_attention.inner_attention
     use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same

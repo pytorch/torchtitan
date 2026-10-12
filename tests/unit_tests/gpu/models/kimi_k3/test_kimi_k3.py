@@ -145,12 +145,12 @@ class TestKimiK3(unittest.TestCase):
         positions = torch.arange(4, dtype=torch.int32)
         attention_metadata = model._get_attention_metadata(positions)
         full_attention_backend = next(
-            layer.attention_metadata_key
+            type(layer.attention.inner_attention)
             for layer in model.layers.values()
             if layer.attention is not None
         )
         kda_backend = next(
-            layer.attention_metadata_key
+            type(layer.delta_attention.inner_attention)
             for layer in model.layers.values()
             if layer.delta_attention is not None
         )
@@ -173,7 +173,7 @@ class TestKimiK3(unittest.TestCase):
         padding_mask[7:] = True
         masks = model._get_attention_metadata(positions, padding_mask=padding_mask)
         kda_backend = next(
-            layer.attention_metadata_key
+            type(layer.delta_attention.inner_attention)
             for layer in model.layers.values()
             if layer.delta_attention is not None
         )

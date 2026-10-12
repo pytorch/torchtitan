@@ -479,7 +479,7 @@ class GatedDeltaNet(Module):
         conv_q: Conv1d.Config
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
-        inner_gated_delta_net: Module.Config
+        inner_attention: Module.Config
         norm: GatedRMSNorm.Config
         out_proj: Linear.Config
 
@@ -506,7 +506,7 @@ class GatedDeltaNet(Module):
 
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
-        self.inner_gated_delta_net = config.inner_gated_delta_net.build()
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
@@ -526,7 +526,7 @@ class GatedDeltaNet(Module):
         b_TH = self.in_proj_b(x_TD)
 
         output_THV = remat.region(
-            self.inner_gated_delta_net,
+            self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(

@@ -35,7 +35,6 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_b
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.observability.logging import warn_once
 from torchtitan.tools.utils import get_cuda_flash_attention_impl
@@ -322,7 +321,6 @@ class VLLMAttentionWrapper(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        attention_metadata_key: type[InnerAttention]
         hidden_size: int
         num_heads: int
         num_kv_heads: int
@@ -334,7 +332,6 @@ class VLLMAttentionWrapper(Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.attention_metadata_key = config.attention_metadata_key
 
         from vllm.config import get_current_vllm_config
 

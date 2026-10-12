@@ -391,7 +391,7 @@ class MTPDecoder(Decoder):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
+                    type(cast(TransformerBlock, layer).attention.inner_attention)
                 )
             )
             h = layer(
@@ -420,7 +420,7 @@ class MTPDecoder(Decoder):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
+                    type(cast(TransformerBlock, layer).attention.inner_attention)
                 )
             )
             with spmd.no_typecheck():

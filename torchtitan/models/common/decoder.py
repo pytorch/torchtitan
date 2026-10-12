@@ -88,13 +88,8 @@ class Decoder(BaseModel):
         enable_weight_tying: bool = False
 
         @property
-        def first_base_attention(self) -> BaseAttention.Config | None:
-            """First ``BaseAttention`` config, else ``None``.
-
-            Hybrid models do not carry a ``BaseAttention`` config on every
-            layer, so callers needing its metadata look up the first such layer
-            rather than assuming ``layers[0]``.
-            """
+        def first_attention(self) -> BaseAttention.Config | None:
+            """First full or sliding-window attention config, skipping linear layers."""
             return next(
                 (
                     layer.attention
@@ -103,20 +98,6 @@ class Decoder(BaseModel):
                 ),
                 None,
             )
-
-        @property
-        def base_attention_backends(self) -> tuple[Module.Config, ...]:
-            """Inner backend configs for all ``BaseAttention`` layers."""
-            return tuple(
-                layer.attention.inner_attention
-                for layer in self.layers
-                if layer.attention is not None
-            )
-
-        @property
-        def first_base_attention_backend(self) -> Module.Config | None:
-            """Inner backend config of the first ``BaseAttention`` layer."""
-            return next(iter(self.base_attention_backends), None)
 
         @property
         def first_feed_forward(self) -> FeedForward.Config | None:
@@ -178,7 +159,7 @@ class Decoder(BaseModel):
         from torchtitan.distributed.spmd_types import spmd_mesh_size, spmd_sparse_mesh
 
         tp = spmd_mesh_size("tp")
-        attention = config.first_base_attention
+        attention = config.first_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -265,7 +246,7 @@ class Decoder(BaseModel):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
+                    type(cast(TransformerBlock, layer).attention.inner_attention)
                 )
             )
             h = layer(
@@ -340,33 +321,27 @@ class Decoder(BaseModel):
     ) -> dict[str, Any]:
         """Prepare attention metadata and shard model inputs for CP."""
         from torchtitan.distributed import context_parallel
-        from torchtitan.models.common.attention.cp_attention import (
-            canonicalize_cp_inner_attention,
-            CPInnerAttention,
-        )
+        from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 
         attention_metadata = input_dict.get("attention_metadata")
         load_balancer_config = parallelism.context_parallel_load_balancer
         selected_attention_metadata = None
         if load_balancer_config is not None and attention_metadata is not None:
-            first_base_attention = self.config.first_base_attention
-            assert first_base_attention is not None
-            first_cp_inner_attention = first_base_attention.inner_attention._owner
-            assert first_cp_inner_attention is not None and issubclass(
-                first_cp_inner_attention, CPInnerAttention
-            )
             # One permutation is shared across layers. Prefer full-attention
             # metadata, falling back to the first quadratic inner attention
             # for models containing only sliding-window attention.
-            full_cp_inner_attention = canonicalize_cp_inner_attention(
-                first_cp_inner_attention
+            attention = next(
+                (
+                    layer.attention
+                    for layer in self.config.layers
+                    if layer.attention is not None
+                    and layer.attention.inner_attention.is_full_attention
+                ),
+                self.config.first_attention,
             )
-            selected_attention_metadata = attention_metadata.get(
-                full_cp_inner_attention
-            )
-            if selected_attention_metadata is None:
+            if attention is not None:
                 selected_attention_metadata = attention_metadata.get(
-                    first_cp_inner_attention
+                    attention.inner_attention._owner
                 )
         load_balancer = (
             # TODO: `attention_metadata` alone cannot determine the load-balancing strategy.

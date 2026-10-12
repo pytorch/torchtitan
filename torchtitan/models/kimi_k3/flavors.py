@@ -329,7 +329,7 @@ def _kda_config(
         forget_b=colwise_linear(head_dim, projection_dim),
         beta=colwise_linear(dim, num_heads),
         output_gate=colwise_linear(dim, projection_dim),
-        inner_kda=InnerKDA.Config(
+        inner_attention=InnerKDA.Config(
             head_dim=head_dim,
             conv_kernel_size=conv_kernel_size,
             kernel=KDAKernel.Config(),

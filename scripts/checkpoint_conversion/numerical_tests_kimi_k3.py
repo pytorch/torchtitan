@@ -83,8 +83,8 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
     kda = next(
         layer.delta_attention for layer in tt_config.layers if layer.delta_attention
     )
-    inner_kda = cast(InnerKDA.Config, kda.inner_kda)
-    kda_kernel = inner_kda.kernel
+    inner_attention = cast(InnerKDA.Config, kda.inner_attention)
+    kda_kernel = inner_attention.kernel
     dense_ffn = next(
         layer.feed_forward for layer in tt_config.layers if layer.feed_forward
     )
