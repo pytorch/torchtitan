@@ -18,6 +18,7 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.common import (
+    BatchWiseLoadBalanceLoss,
     ColumnParallelLinear,
     CosSinRoPE,
     Embedding,
@@ -213,7 +214,7 @@ def _build_gptoss_layers(
     hidden_dim: int,
     num_experts: int,
     top_k: int,
-    load_balance_coeff: float,
+    load_balance_coeff: float | None,
     attn_backend: str = "varlen",
     rope: RoPE.Config,
     enable_sp: bool,
@@ -260,6 +261,9 @@ def _build_gptoss_layers(
                     sharding_config=router_gate_sharding_config(),
                 ),
                 top_k=top_k,
+                aux_loss=BatchWiseLoadBalanceLoss.Config(
+                    coeff=1e-3, num_experts=num_experts
+                ),
                 sharding_config=router_sharding_config(),
             ),
             sharding_config=moe_sharding_config(enable_sp=enable_sp),
@@ -322,7 +326,7 @@ def _debugmodel(
             hidden_dim=hidden_dim,
             num_experts=8,
             top_k=4,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
@@ -381,7 +385,7 @@ def _20b(
             hidden_dim=hidden_dim,
             num_experts=32,
             top_k=4,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
@@ -440,7 +444,7 @@ def _120b(
             hidden_dim=hidden_dim,
             num_experts=128,
             top_k=4,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
