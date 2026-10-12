@@ -97,6 +97,7 @@ class TestDistMuon(DTensorTestBase):
                         shardings_by_mesh_axis={
                             "dp_shard": Owned(),
                         },
+                        compute_dtype=torch.bfloat16,
                     ),
                     local_blocks_fqn: ComputeLayout(
                         shardings_by_mesh_axis={

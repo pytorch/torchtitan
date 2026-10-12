@@ -285,11 +285,20 @@ class DistMuon(Optimizer):
 
         compute_layouts = []
         for group_index, fqn, param in parameters:
+            compute_layout = compute_sharding_by_fqn[fqn]
             resolved_transition = _resolve_storage_to_compute_transition(
                 fqn,
                 param,
-                compute_sharding_by_fqn[fqn],
+                compute_layout,
             )
+            compute_dtype = compute_layout.compute_dtype
+            if compute_dtype is None:
+                compute_dtype = param.dtype
+            elif compute_dtype not in (param.dtype, torch.bfloat16):
+                raise NotImplementedError(
+                    f"compute_dtype {compute_dtype} for {fqn!r}: DistMuon supports "
+                    f"the storage dtype {param.dtype} or torch.bfloat16"
+                )
             compute_layouts.append(
                 _ParameterComputeLayout(
                     fqn=fqn,
@@ -306,6 +315,7 @@ class DistMuon(Optimizer):
                     redistribution_storage_mesh_axis=(
                         resolved_transition.redistribution_storage_mesh_axis
                     ),
+                    compute_dtype=compute_dtype,
                 )
             )
         return tuple(compute_layouts)
@@ -325,7 +335,7 @@ class DistMuon(Optimizer):
                 _resolve_muon_redistribution_plans,
                 ns_steps_by_group=ns_steps_by_group,
             ),
-            compute_dtype=torch.bfloat16,
+            get_compute_dtype=lambda item: item.compute_dtype,
         )
 
         def build_views(
@@ -863,6 +873,7 @@ class _ParameterComputeLayout:
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
     redistribution_storage_mesh_axis: int | None
+    compute_dtype: torch.dtype
 
     @property
     def lr_reference_shape(self) -> tuple[int, ...]:
