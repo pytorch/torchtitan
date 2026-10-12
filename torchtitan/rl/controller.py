@@ -1193,6 +1193,7 @@ class Controller(Configurable):
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
+                    # Empty by value (no threshold): the call sends packed.microbatches; the drop frees nothing.
                     rdma_microbatches: list[list[RDMAMicrobatch]] = []
                     min_bytes = self.config.async_loop.rdma_fast_path_threshold
                     if min_bytes is not None:
