@@ -8,6 +8,7 @@
 
 import json
 from dataclasses import dataclass, replace
+from itertools import islice
 from typing import Any
 from unittest import mock
 
@@ -884,6 +885,58 @@ def test_concat_shards_after_one_global_index_space():
 
     assert [row["value"] for row in rank_0] == [0, 1, 2, 3]
     assert [row["value"] for row in rank_1] == [4, 5, 6, 7]
+
+
+@pytest.mark.parametrize("dp_world_size", [1, 2, 4])
+@pytest.mark.parametrize("shuffle", [False, True])
+@pytest.mark.parametrize("repeat", [False, True])
+@pytest.mark.parametrize("concat", [False, True])
+def test_strided_sharding_preserves_global_index_order(
+    dp_world_size, shuffle, repeat, concat
+):
+    rows = tuple({"value": index} for index in range(11))
+    if concat:
+        config = DatasetConcatConfig(
+            datasets=tuple(
+                SingleDatasetConfig(source=RowsSourceConfig(rows=part))
+                for part in (rows[:5], rows[5:])
+            )
+        )
+    else:
+        config = SingleDatasetConfig(source=RowsSourceConfig(rows=rows))
+
+    policy = dataset_iteration_policy(
+        shuffle=shuffle, repeat=repeat, data_parallel_sharding="strided"
+    )
+    num_rows = 2 * len(rows) if repeat else len(rows)
+    global_rows = list(
+        islice(config.build(context=CONTEXT, dataset_iteration_policy=policy), num_rows)
+    )
+    ranks = [
+        iter(
+            config.build(
+                context=CONTEXT,
+                dataset_iteration_policy=replace(
+                    policy, dp_rank=rank, dp_world_size=dp_world_size
+                ),
+            )
+        )
+        for rank in range(dp_world_size)
+    ]
+    reconstructed = [next(ranks[index % dp_world_size]) for index in range(num_rows)]
+
+    assert reconstructed == global_rows
+
+
+def test_strided_sharding_rejects_streaming_source():
+    config = SingleDatasetConfig(source=StreamingRowsSourceConfig(rows=()))
+    with pytest.raises(ValueError, match="requires an indexed source"):
+        config.build(
+            context=CONTEXT,
+            dataset_iteration_policy=dataset_iteration_policy(
+                data_parallel_sharding="strided"
+            ),
+        )
 
 
 @pytest.mark.parametrize(

@@ -9,7 +9,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import grain.python as grain
 from grain import experimental as grain_experimental
@@ -75,6 +75,8 @@ class GrainDataLoader(BaseDataLoader):
         seed: int = 42
         shuffle: bool = True
         repeat: bool = True
+        data_parallel_sharding: Literal["contiguous", "strided"] = "contiguous"
+        """Indexed row ownership after global ordering; streams use source sharding."""
         streaming_shuffle_buffer_size: int = 1_000
         """Streaming rows retained per rank for approximate shuffling."""
         read_options: grain.ReadOptions = field(default_factory=grain.ReadOptions)
@@ -126,6 +128,7 @@ class GrainDataLoader(BaseDataLoader):
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             streaming_shuffle_buffer_size=config.streaming_shuffle_buffer_size,
+            data_parallel_sharding=config.data_parallel_sharding,
         )
 
         dataset = config.dataset.build(
