@@ -17,6 +17,7 @@ import torch
 import torch_remat as remat
 from torch.multiprocessing.reductions import StorageWeakRef
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.base.module import Module, ModuleDict
@@ -408,7 +409,9 @@ class TestRematRegions(unittest.TestCase):
         from torchtitan.models.llama3 import build_model_config
 
         with torch.device("meta"):
-            model = build_model_config("debugmodel").build()
+            model = build_model_config(
+                "debugmodel", parallelism=ParallelismConfig()
+            ).build()
         state_keys = list(model.state_dict())
 
         RegionAC.Config(save_regions=["attention.*"]).build().apply(model)

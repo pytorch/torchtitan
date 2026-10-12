@@ -67,6 +67,9 @@ def flux_debugmodel() -> FluxTrainer.Config:
     img_size = 256
     max_t5_encoding_len = 256
     training_dataset = _flux_dataset("cc12m-test", img_size=img_size)
+    parallelism = ParallelismConfig(
+        context_parallel_degree=1,
+    )
     return FluxTrainer.Config(
         hf_assets_path=hf_assets_path,
         loss=MSELoss.Config(),
@@ -79,7 +82,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model=build_model_config("flux-debug"),
+        model=build_model_config("flux-debug", parallelism=parallelism),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -101,9 +104,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             collator=FluxCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
-        parallelism=ParallelismConfig(
-            context_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         activation_checkpoint=FullAC.Config(),
         checkpointer=None,
         validator=None,

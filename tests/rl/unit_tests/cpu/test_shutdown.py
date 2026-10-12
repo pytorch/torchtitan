@@ -9,8 +9,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
 import torchtitan.rl.controller as controller_module
+
+from torchtitan.config import OverrideConfig
 from torchtitan.rl import train
 from torchtitan.rl.controller import AsyncLoopConfig
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
@@ -148,10 +149,13 @@ def _make_stub_rl_trainer():
         renderer = SimpleNamespace(
             build=lambda *, tokenizer: SimpleNamespace(get_stop_token_ids=lambda: [])
         )
-        # __init__ reads generator.sampling (a dataclass, for replace) + generator.debug.seed.
+        # __init__ copies each role's model, reads generator.sampling (a dataclass,
+        # for replace) + generator.debug.seed, and applies the (empty) override.
+        trainer = SimpleNamespace(model=None)
         generator = SimpleNamespace(
-            sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
+            model=None, sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
         )
+        override = OverrideConfig()
         rollouter = SimpleNamespace(build=lambda: _StubRollouter())
 
         def to_dict(self):
@@ -285,7 +289,7 @@ def test_router_forwards_session_releases_with_hold_or_kv_offload(
     rl_trainer.config.model = None
     rl_trainer.config.generator_router = InterGeneratorRouter.Config()
     rl_trainer.config.generator = VLLMGenerator.Config(
-        hold_session_kv=hold, kv_offload_gib=offload_gib
+        model=None, hold_session_kv=hold, kv_offload_gib=offload_gib
     )
     rl_trainer._rollouter = SimpleNamespace(
         get_validation_samples=lambda steps: [], setup_async=stop_after_spawn

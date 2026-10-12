@@ -113,7 +113,8 @@ def build_decoder_config_for_backend(
     input), and overflows the fp32 Triton shared-memory limit on large head dims.
 
     For SDPA we build the flex config (a valid backend) and swap each layer's
-    ``inner_attention`` to ``GraphTrainerScaledDotProductInnerAttention.Config()``.
+    ``inner_attention`` to ``GraphTrainerScaledDotProductInnerAttention.Config()``,
+    keeping its sharding.
     The adapter adds a singleton batch around the flat graph-trainer inputs and
     delegates to the common batched SDPA implementation. Production code never
     reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
@@ -125,7 +126,9 @@ def build_decoder_config_for_backend(
         config = config_builder(attn_backend="flex", **builder_kwargs)
         for layer in config.layers:
             layer.attention.inner_attention = (
-                GraphTrainerScaledDotProductInnerAttention.Config()
+                GraphTrainerScaledDotProductInnerAttention.Config(
+                    sharding_config=layer.attention.inner_attention.sharding_config
+                )
             )
     # GraphTrainer traces the backward.
     disable_inplace_wgrad_accum(config)

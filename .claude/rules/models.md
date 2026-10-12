@@ -31,10 +31,11 @@ stale patterns in sibling models.
 
 ## Standard Model Folder Structure
 Each model folder follows a consistent pattern (see `torchtitan/models/README.md`):
-- `flavors.py` -- `MODEL_FLAVORS` and `build_model_config(flavor)` (sizes,
-  hyperparameters)
+- `flavors.py` -- `MODEL_FLAVORS` and `build_model_config(flavor, parallelism=...)`
+  (sizes, hyperparameters, and each component's sharding)
 - `model.py` -- model definition; extra architecture files (e.g. `moe.py`) as needed
-- `sharding.py` -- declarative sharding config (TP/SP/EP placements)
+- `sharding.py` -- model-specific `ShardingConfig` constructors (TP/SP/EP placements),
+  used by `flavors.py`; omitted when the shared ones in `models/common/` suffice
 - `state_dict_adapter.py` -- HF checkpoint mapping
 - `__init__.py` -- re-exports the model class, `MODEL_FLAVORS`, `build_model_config`
 

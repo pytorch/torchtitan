@@ -29,9 +29,9 @@ from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import make_router_config
 from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
+    colwise_sharding_config,
     dense_sequence_parallel_placement,
-    rowwise_config,
+    rowwise_sharding_config,
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
@@ -40,7 +40,6 @@ from torchtitan.models.common.linear import (
     GroupedLinear,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
@@ -93,9 +92,7 @@ def _router_config_for_quantization(dim: int):
     )
 
 
-@pytest.mark.parametrize(
-    "parallel_cls", [InvariantRowParallelLinear, SharedExpertRowParallelLinear]
-)
+@pytest.mark.parametrize("parallel_cls", [InvariantRowParallelLinear])
 def test_quantization_preserves_specialized_row_parallel_linear(parallel_cls):
     config_cls = get_quantized_linear(_ScaledLinear, parallel_cls).Config
     converted = config_cls(in_features=16, out_features=16, bias=True, scale=3.0)
@@ -350,12 +347,16 @@ def test_nvfp4_config_rejects_non_128_dims(in_features, out_features):
     "sharding_config_factory, input_tp",
     [
         pytest.param(
-            lambda: colwise_config(input_layout=dense_sequence_parallel_placement()),
+            lambda: colwise_sharding_config(
+                input_layout=dense_sequence_parallel_placement()
+            ),
             spmd.R,
             id="colwise",
         ),
         pytest.param(
-            lambda: rowwise_config(output_layout=dense_sequence_parallel_placement()),
+            lambda: rowwise_sharding_config(
+                output_layout=dense_sequence_parallel_placement()
+            ),
             spmd.S(-1),
             id="rowwise",
         ),
@@ -397,9 +398,9 @@ def test_nvfp4_parallel_build_preserves_collective_boundary(parallel_cls):
     boundary_layout = dense_sequence_parallel_placement()
     linear_cls = get_quantized_linear(NVFP4Linear, parallel_cls)
     sharding_config = (
-        colwise_config(input_layout=boundary_layout)
+        colwise_sharding_config(input_layout=boundary_layout)
         if parallel_cls is ColumnParallelLinear
-        else rowwise_config(output_layout=boundary_layout)
+        else rowwise_sharding_config(output_layout=boundary_layout)
     )
     module = linear_cls.Config(
         in_features=512,
@@ -693,8 +694,8 @@ def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
         local_stacked_weight._build_operands(local_stacked_weight._tensor)
 
     for sharding_config in (
-        colwise_config(input_layout=dense_sequence_parallel_placement()),
-        rowwise_config(output_layout=dense_sequence_parallel_placement()),
+        colwise_sharding_config(input_layout=dense_sequence_parallel_placement()),
+        rowwise_sharding_config(output_layout=dense_sequence_parallel_placement()),
     ):
         linear = MXFP8Linear.Config(
             in_features=128,

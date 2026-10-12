@@ -10,6 +10,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_5 import build_model_config
+from torchtitan.rl.model import vllm_wrapper
 from torchtitan.rl.model.vllm_wrapper import (
     _replace_vllm_layer_configs,
     VLLMModelWrapper,
@@ -18,9 +19,12 @@ from torchtitan.rl.model.vllm_wrapper import (
 
 def test_vllm_replacement_preserves_attention_sharding() -> None:
     """Pass the trainer attention's sharding config through unchanged."""
-    model_config = build_model_config("debugmodel", attn_backend="flex")
-    model_config.set_sharding_(
-        ParallelismConfig(tensor_parallel_degree=2, enable_sequence_parallel=True)
+    model_config = build_model_config(
+        "debugmodel",
+        attn_backend="flex",
+        parallelism=ParallelismConfig(
+            tensor_parallel_degree=2, enable_sequence_parallel=True
+        ),
     )
     model_config.layers = [
         layer for layer in model_config.layers if layer.attention is not None
@@ -50,13 +54,14 @@ class _Wrapper:
     """Stand-in `self` for VLLMModelWrapper's real weight-sync methods (no vLLM)."""
 
     load_state_dict = VLLMModelWrapper.load_state_dict
-    prepare_for_forward = VLLMModelWrapper.prepare_for_forward
 
     def __init__(self, model: nn.Module):
         self.model = model
 
 
-def test_load_state_dict_allocates_one_fsdp_group_at_a_time(tmp_path) -> None:
+def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
+    tmp_path, monkeypatch
+) -> None:
     """Load new weights with at most two FSDP groups' sharded buffers allocated at once.
 
     Guards that each group's sharded buffers are allocated before its copy, even when
@@ -97,19 +102,23 @@ def test_load_state_dict_allocates_one_fsdp_group_at_a_time(tmp_path) -> None:
         wrapper = _Wrapper(model)
         max_allocated_groups = 0
 
-        def prepare_for_state_dict_load(module) -> None:
+        restore_sharded_params = vllm_wrapper._restore_sharded_params
+
+        def checked_restore_sharded_params(module) -> None:
             nonlocal max_allocated_groups
-            VLLMModelWrapper.prepare_for_state_dict_load(wrapper, module)
+            restore_sharded_params(module)
             # The load copies into these buffers next, so freed ones would be overrun.
             assert all(map(is_allocated, module._get_fsdp_state()._fsdp_param_groups))
             max_allocated_groups = max(
                 max_allocated_groups, sum(map(is_allocated, groups))
             )
 
-        wrapper.prepare_for_state_dict_load = prepare_for_state_dict_load
+        monkeypatch.setattr(
+            vllm_wrapper, "_restore_sharded_params", checked_restore_sharded_params
+        )
         for module in model.modules():  # as after the initial load
             if isinstance(module, FSDPModule):
-                wrapper.prepare_for_forward(module)
+                vllm_wrapper._unshard_and_free_sharded_params(module)
         wrapper.load_state_dict(new_state_dict)
 
         assert max_allocated_groups <= 2

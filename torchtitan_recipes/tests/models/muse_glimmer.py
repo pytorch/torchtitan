@@ -115,8 +115,9 @@ def _muse_glimmer_mm_dataloader(
 def muse_glimmer_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
+    parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="flex"
+        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     # The output soft-cap lives in the SoftCappedLinear lm_head, so it is applied
     # per-chunk inside ChunkedLossWrapper just as it would be in the full model
@@ -150,7 +151,7 @@ def muse_glimmer_debugmodel(
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
@@ -171,8 +172,9 @@ def muse_glimmer_debugmodel_mm(
 
     The integration smoke suite covers the TP+CP+PP+SP path.
     """
+    parallelism = ParallelismConfig()
     mm_model_spec = build_model_config(
-        "debugmodel_mm", seq_len=seq_len, attn_backend="flex"
+        "debugmodel_mm", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -202,14 +204,22 @@ def muse_glimmer_debugmodel_mm(
             steps=10,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
 
 def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("30B", seq_len=seq_len, attn_backend="flex")
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=-1,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+    )
+    model_config = build_model_config(
+        "30B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
@@ -235,19 +245,22 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=1,
-            context_parallel_degree=1,
-            pipeline_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
 
 def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("30B_mm", seq_len=seq_len, attn_backend="flex")
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=-1,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+    )
+    model_config = build_model_config(
+        "30B_mm", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
@@ -273,12 +286,7 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=1,
-            context_parallel_degree=1,
-            pipeline_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )

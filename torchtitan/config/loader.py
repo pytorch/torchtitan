@@ -41,13 +41,13 @@ class ConfigLoader:
         config = self._load_config(namespace.module, namespace.config)
 
         if namespace.override:
-            override_imports = parse_cli_imports(namespace.override)
-            trainer_config = self._trainer_config(config)
-            trainer_config.override.imports.extend(override_imports)
-            generator_config = getattr(config, "generator", None)
-            generator_override = getattr(generator_config, "override", None)
-            if isinstance(generator_override, OverrideConfig):
-                generator_override.imports.extend(override_imports)
+            override_config = getattr(config, "override", None)
+            if not isinstance(override_config, OverrideConfig):
+                raise ValueError(
+                    "--override requires a recipe whose top-level config has an "
+                    f"`override` field; {type(config).__qualname__} has none."
+                )
+            override_config.imports.extend(parse_cli_imports(namespace.override))
 
         self._apply_launch_options(config, namespace)
         self._validate_assets_path(config)
@@ -174,7 +174,7 @@ class ConfigLoader:
         if isinstance(trainer_config, TrainingEngine.Config):
             return trainer_config
         raise ValueError(
-            "--override, --comm-backend and --resume-step require a recipe that "
+            "--comm-backend and --resume-step require a recipe that "
             "is or contains a training-engine config (TrainingEngine.Config)."
         )
 

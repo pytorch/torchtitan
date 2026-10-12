@@ -88,6 +88,7 @@ _trainer_loop
 """
 
 import asyncio
+import copy
 import json
 import logging
 import math
@@ -105,8 +106,7 @@ from monarch.actor import ProcMesh, this_host
 
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import Configurable
-from torchtitan.models.common.decoder import Decoder
+from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.components.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.components.checkpointer import DATALOADER_STATE_KEY
@@ -133,6 +133,7 @@ from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
 from torchtitan.rl.trainer import Trainer
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 logger = logging.getLogger(__name__)
 
@@ -256,9 +257,6 @@ class Controller(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
-        model: Decoder.Config | None = None
-        """Model config shared by the trainer and generator."""
-
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""
 
@@ -287,11 +285,11 @@ class Controller(Configurable):
         """JSONL recorder to save sampled rollouts to disk for further inspection and debugging."""
 
         trainer: Trainer.Config
-        """Trainer config. Controls optimizer, training, parallelism."""
+        """Trainer config. Controls the trainer model, optimizer, training, parallelism."""
 
         # TODO: put generator, num generators and generator router in a separate config
-        generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
-        """VLLMGenerator actor configuration (vLLM engine, sampling)."""
+        generator: VLLMGenerator.Config
+        """VLLMGenerator actor configuration (generator model, vLLM engine, sampling)."""
 
         num_generators: int = 1
         """Number of generator replicas to spawn as separate proc meshes.
@@ -311,6 +309,10 @@ class Controller(Configurable):
             default_factory=m.MetricsProcessor.Config
         )
 
+        override: OverrideConfig = field(default_factory=OverrideConfig)
+        """Registered overrides applied to this whole config tree, including the
+        trainer and generator models, when the controller is constructed."""
+
         def maybe_log(self) -> None:
             debug = self.trainer.debug
             config_dict = self.to_dict()
@@ -327,6 +329,14 @@ class Controller(Configurable):
                 logger.info(f"Saved job configs to {config_file}")
 
         def __post_init__(self):
+            trainer_model_cls = type(self.trainer.model)
+            generator_model_cls = type(self.generator.model)
+            if trainer_model_cls is not generator_model_cls:
+                raise ValueError(
+                    "The trainer and generator must use the same model class, got "
+                    f"{trainer_model_cls.__qualname__} and "
+                    f"{generator_model_cls.__qualname__}."
+                )
             if self.num_generators < 1:
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
@@ -396,6 +406,12 @@ class Controller(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
+        # Copy each model so overrides never write through a model config the
+        # recipe shares between the trainer and generator.
+        config.trainer.model = copy.deepcopy(config.trainer.model)
+        config.generator.model = copy.deepcopy(config.generator.model)
+        if config.override.imports:
+            apply_overrides(config.override, config)
         config.maybe_log()
         self.trainer: Trainer | None = None
         self.generator_router: InterGeneratorRouter | None = None
@@ -599,7 +615,6 @@ class Controller(Configurable):
                 "trainer",
                 TrainerActor,
                 config.trainer,
-                model_config=config.model,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
                 max_num_documents=config.async_loop.batcher.max_num_documents,
@@ -616,7 +631,6 @@ class Controller(Configurable):
                     actor_name,
                     VLLMGeneratorActor,
                     config.generator,
-                    model_config=config.model,
                     model_path=config.hf_assets_path,
                     max_num_seqs=max_num_seqs,
                     output_dir=config.dump_folder,
@@ -783,8 +797,11 @@ class Controller(Configurable):
     async def run(self) -> None:
         """Start every async loop and run until training completes or a stage crashes.
 
-        Producers (_data_input_loop, _rollout_loop[N], _batcher_loop) loop forever; _trainer_loop is the
-        only finite loop -- it runs num_training_steps, then returns, which drives shutdown.
+        Producers (_data_input_loop, _rollout_loop[N], _batcher_loop) loop forever, and
+        _generator_loop waits for the generators' engine loops, which run until close; _trainer_loop is
+        the only finite loop -- it runs num_training_steps, then returns, which drives shutdown.
+        _generator_loop watches the training loop only: an engine loop that dies during pre- or
+        post-training validation shows up as failed validation rollouts.
 
         Shutdown (healthy):  _trainer_loop finishes N steps -> run() finally ->
           group_buffer.close()  (wakes _data_input_loop / _rollout_loop / _batcher_loop blocked on the buffer)
@@ -792,6 +809,12 @@ class Controller(Configurable):
           -> gather(..., return_exceptions=True)
         Shutdown (crash):    any loop raises -> appears in `done` -> run() re-raises -> same finally.
         """
+        # Setup objects (modules, configs, dataset, actor handles) live until exit. Freeze them
+        # so full GCs skip them: ~1M objects, ~0.5 s per full GC (Python 3.12, x86).
+        GarbageCollector.freeze(
+            "Full GC before freezing the controller's setup objects"
+        )
+
         async_loop = self.config.async_loop
         num_training_steps = async_loop.num_training_steps
         logger.info(
@@ -891,12 +914,19 @@ class Controller(Configurable):
             name="trainer",
         )
 
+        # Engine loops run until the generators close, so this ends only if one stops mid-run.
+        # Otherwise a crashed generator would only show up as failed rollouts.
+        generator_task = asyncio.create_task(
+            self._generator_loop(), name="generator_wait_engine_loop"
+        )
+
         # run everything until trainer finishes its number of steps
         # or some other loop breaks
         background_tasks = [
             data_input_task,
             *rollout_tasks,
             batcher_task,
+            generator_task,
         ]
         try:
             done, _ = await asyncio.wait(
@@ -926,6 +956,10 @@ class Controller(Configurable):
         # Post-training validation (held-out eval after the final step).
         post_validation = await self._validate_and_log(step=num_training_steps)
         self._log_reward_delta(pre_validation, post_validation)
+
+    async def _generator_loop(self) -> None:
+        """Wait until every generator's engine loop exits; raise as soon as one crashes."""
+        await self.generator_router.wait_engine_loop.call_one()
 
     async def _validate_and_log(self, *, step: int) -> dict[str, float]:
         """Run one validation pass, log it, and return its aggregated values for the pre/post delta."""
@@ -1026,8 +1060,6 @@ class Controller(Configurable):
             await group_buffer.finalize_work(group)
 
             # Drop both refs (work.rollout_group is the group too): held groups made every full GC slow.
-            # TODO: investigate a better type for the per-token lists in RolloutTurn and TrainingSample:
-            # a full GC walks every entry of a Python list, which is slow. A torch tensor may be better.
             del group, work
 
     async def _batcher_loop(
@@ -1055,9 +1087,11 @@ class Controller(Configurable):
             if rollout_group is None:  # closed and drained
                 logger.info("Buffer drained; batcher loop stopping")
                 break
+            # In a thread, so the event loop keeps running while the group's samples are built
             with sl.log_trace_span("training_sample_builder"):
-                training_sample_group = training_sample_builder.build_from_group(
-                    rollout_group=rollout_group
+                training_sample_group = await asyncio.to_thread(
+                    training_sample_builder.build_from_group,
+                    rollout_group=rollout_group,
                 )
 
             # We put a group in. We may get a batch back

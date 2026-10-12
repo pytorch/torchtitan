@@ -293,7 +293,7 @@ class MuseGlimmerModel(MultimodalModel):
             default_factory=lambda: ["loss", "fused_binary_activation"]
         )
         # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
-        # bundled embedding+norm unit that sharding.py indexes via .embedding/.norm.
+        # bundled embedding+norm unit whose .embedding/.norm children carry the sharding.
         # Dataclass fields are invariant, so pyrefly flags the (intentional) override.
         # pyrefly: ignore [bad-override]
         tok_embeddings: EmbeddingWithNorm.Config
@@ -340,13 +340,6 @@ class MuseGlimmerModel(MultimodalModel):
                     sliding_window_size=attention.window_size,
                 )
             return nparams, 6 * active_nparams + attention_op_flops
-
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_muse_glimmer_sharding_config
-
-            set_muse_glimmer_sharding_config(
-                self, enable_sp=parallelism.enable_sequence_parallel
-            )
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)

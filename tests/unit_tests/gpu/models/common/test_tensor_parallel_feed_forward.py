@@ -25,9 +25,8 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_sequence_parallel_placement,
-    set_dense_ffn_sharding,
+    residual_activation_placement,
 )
-from torchtitan.models.common.moe_sharding import set_shared_moe_sharding_config
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -50,20 +49,12 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                     hidden_dim=hidden_dim,
                     w13_param_init=init,
                     w2_param_init=init,
-                )
-                reference = copy.deepcopy(base_config).build().to(device)
-                parallel_config = copy.deepcopy(base_config)
-                attn_x_layout = (
-                    dense_sequence_parallel_placement()
-                    if enable_sp
-                    else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-                )
-                set_dense_ffn_sharding(
-                    parallel_config,
-                    attn_x_layout=attn_x_layout,
                     enable_sp=enable_sp,
                 )
-                parallel = parallel_config.build().to(device)
+                # The reference is never parallelized, so its sharding is inert.
+                reference = copy.deepcopy(base_config).build().to(device)
+                parallel = copy.deepcopy(base_config).build().to(device)
+                attn_x_layout = residual_activation_placement(enable_sp=enable_sp)
 
                 with torch.no_grad():
                     for reference_weight, parallel_weight in (
@@ -143,14 +134,11 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
             hidden_dim=hidden_dim,
             w13_param_init=init,
             w2_param_init=init,
-        )
-        reference = copy.deepcopy(base_config).build().to(device)
-        parallel_config = copy.deepcopy(base_config)
-        set_shared_moe_sharding_config(
-            parallel_config,
             enable_sp=False,
         )
-        parallel = parallel_config.build().to(device)
+        # The reference is never parallelized, so its sharding is inert.
+        reference = copy.deepcopy(base_config).build().to(device)
+        parallel = copy.deepcopy(base_config).build().to(device)
 
         with torch.no_grad():
             for reference_weight, parallel_weight in (
@@ -221,14 +209,11 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
             hidden_dim=hidden_dim,
             w13_param_init=init,
             w2_param_init=init,
-        )
-        reference = copy.deepcopy(base_config).build().to(device)
-        parallel_config = copy.deepcopy(base_config)
-        set_shared_moe_sharding_config(
-            parallel_config,
             enable_sp=True,
         )
-        parallel = parallel_config.build().to(device)
+        # The reference is never parallelized, so its sharding is inert.
+        reference = copy.deepcopy(base_config).build().to(device)
+        parallel = copy.deepcopy(base_config).build().to(device)
 
         with torch.no_grad():
             for reference_weight, parallel_weight in (
