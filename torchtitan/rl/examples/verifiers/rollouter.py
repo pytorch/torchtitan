@@ -169,11 +169,9 @@ class VerifiersRollouter(Rollouter):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
-        release_session_fn: ReleaseSessionFn | None = None,
     ) -> None:
         """Start the EnvServer and connect it to TorchTitan generation."""
-        # This rollouter's sessions are released with their group (`release_groups`).
-        del tokenizer_config, release_session_fn
+        del tokenizer_config
         if self._verifiers_env_client is not None:
             return
         if not isinstance(renderer_config, RenderersConfigAdapter):
@@ -236,12 +234,15 @@ class VerifiersRollouter(Rollouter):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
+        # TODO: release each rollout's session; until then `max_sessions` evicts them.
+        del release_session_fn
         if self._generation_server is None:
             raise RuntimeError("Verifiers rollouter is not initialized")
         self._generation_server.set_generate_fn(generate_fn)

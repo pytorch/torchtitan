@@ -510,9 +510,9 @@ class Controller(Configurable):
         """Build the rollouter's `ReleaseSessionFn`: tell the generator router a rollout ended."""
         generator_router = self.generator_router
 
-        async def release_session(*, group_id: int, routing_session_id: str) -> None:
+        async def release_session(*, routing_session_id: str) -> None:
             await generator_router.release_session.call_one(
-                group_id=group_id, routing_session_id=routing_session_id
+                routing_session_id=routing_session_id
             )
 
         return release_session
@@ -633,7 +633,6 @@ class Controller(Configurable):
                 tokenizer_config=config.tokenizer,
                 renderer_config=config.renderer,
                 hf_assets_path=config.hf_assets_path,
-                release_session_fn=self._make_release_session_fn(),
             )
 
         # Initialize TorchStore for weight sync between trainer and generator.
@@ -700,11 +699,13 @@ class Controller(Configurable):
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
         generate = self._make_generate_fn(metrics_prefix="validation_generator")
+        release_session_fn = self._make_release_session_fn()
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         group_results = await asyncio.gather(
             *(
                 self._rollouter.run_group_rollouts(
                     generate_fn=generate,
+                    release_session_fn=release_session_fn,
                     sample=sample,
                     # Negative ids keep validation disjoint from training group ids, so their
                     # request_ids can't collide in the shared engine (e.g. post-validation).
@@ -845,6 +846,7 @@ class Controller(Configurable):
 
         # rollout_loop
         generate_fn = self._make_generate_fn(metrics_prefix="generator")
+        release_session_fn = self._make_release_session_fn()
 
         # One rollout worker per active buffer slot: lets generation fill every active slot,
         # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
@@ -854,6 +856,7 @@ class Controller(Configurable):
                 self._rollout_loop(
                     group_buffer=self._group_buffer,
                     generate_fn=generate_fn,
+                    release_session_fn=release_session_fn,
                 ),
                 name=f"rollout_worker_{group_worker_id}",
             )
@@ -969,6 +972,7 @@ class Controller(Configurable):
         *,
         group_buffer: RolloutGroupWorkBuffer,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
     ) -> None:
         """Generate + score one group at a time; a failed group becomes an empty group + a failure metric.
 
@@ -991,6 +995,7 @@ class Controller(Configurable):
                 with sl.log_trace_span("rollout_group"):
                     group = await self._rollouter.run_group_rollouts(
                         generate_fn=generate_fn,
+                        release_session_fn=release_session_fn,
                         sample=work.sample,
                         group_id=work.group_id,
                         group_size=self.config.async_loop.num_samples_per_prompt,
