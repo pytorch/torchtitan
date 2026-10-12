@@ -1070,7 +1070,7 @@ def _build_bucket_plans(
         [tuple[_BucketPlanningContext[_ItemT], ...]],
         Sequence[Sequence[_RedistributionPlan | None]],
     ],
-    get_compute_dtype: Callable[[_ItemT], torch.dtype] | None = None,
+    get_compute_dtype: Callable[[_ItemT], torch.dtype],
 ) -> _BucketPlanningResult[_ItemT]:
     """Build ordered optimizer bucket plans with and without redistribution.
 
@@ -1185,11 +1185,7 @@ def _build_bucket_plans(
             tensor.dtype != dtype or tensor.device != device for tensor in local_tensors
         ):
             raise ValueError(f"bucket {context.name!r} mixes dtype or device")
-        compute_dtypes = (
-            {dtype}
-            if get_compute_dtype is None
-            else {get_compute_dtype(item) for item in redistributed_items}
-        )
+        compute_dtypes = {get_compute_dtype(item) for item in redistributed_items}
         if len(compute_dtypes) != 1:
             raise ValueError(f"bucket {context.name!r} mixes compute dtypes")
 
