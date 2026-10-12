@@ -117,7 +117,10 @@ from torchtitan.rl.components.work_buffer import (
 )
 from torchtitan.rl.distributed.monarch_actors.generator import VLLMGeneratorActor
 from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
-from torchtitan.rl.distributed.rdma_microbatch import RDMAMicrobatch
+from torchtitan.rl.distributed.rdma_microbatch import (
+    create_cuda_context_to_silence_monarch_log,
+    RDMAMicrobatch,
+)
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.distributed.torch_elastic import setup_torch_elastic_env
 from torchtitan.rl.distributed.weight_sync import WeightSyncManager
@@ -696,6 +699,8 @@ class Controller(Configurable):
             )
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
+        if config.async_loop.rdma_fast_path_threshold is not None:
+            create_cuda_context_to_silence_monarch_log()
 
         # Start each generator's engine loop on all ranks once, before any
         # rank-0-only generate / pull (rank 0 drives the followers through this

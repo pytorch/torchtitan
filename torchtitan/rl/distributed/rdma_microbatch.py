@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import dataclasses
+import logging
 from typing import Any
 
 import torch
@@ -17,6 +19,8 @@ from monarch.rdma import RDMAAction, RDMABuffer
 from torch.utils import _pytree as pytree
 
 from torchtitan.rl.components.batcher import TrainingMicrobatch
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -87,3 +91,28 @@ class _TensorRef:
             shape=tensor.shape,
             dtype=tensor.dtype,
         )
+
+
+# The CUDA driver's `CU_LIMIT_STACK_SIZE` (cuda.h).
+_CU_LIMIT_STACK_SIZE = 0
+
+
+def create_cuda_context_to_silence_monarch_log() -> None:
+    """Make a CUDA context current on GPU 0, so Monarch stops logging one line per registered buffer.
+
+    Monarch checks each registered pointer with a CUDA driver call, and prints
+    `[RdmaXcel] No CUDA context ...` each time in a process without a context.
+    """
+    # TODO: this costs ~256 MiB on GPU 0 (H100). Remove it when Monarch prints this line once, not per
+    # buffer (https://github.com/meta-pytorch/monarch/issues/5049; per buffer in torchmonarch 0.7.0).
+    if not torch.cuda.is_available() or torch.version.cuda is None:
+        return
+    try:
+        torch.zeros(1, device="cuda")
+    except RuntimeError as error:  # e.g. GPU 0 is full or in exclusive-process mode
+        logger.warning(
+            f"No CUDA context, so Monarch logs one line per RDMA buffer: {error}"
+        )
+        return
+    # The driver raises the stack limit when a kernel needs more, so 0 halves the context (520 -> 256 MiB).
+    ctypes.CDLL("libcuda.so.1").cuCtxSetLimit(_CU_LIMIT_STACK_SIZE, ctypes.c_size_t(0))
