@@ -386,6 +386,8 @@ def _default_varlen_sdpa_backends() -> list[_VarlenSDPBackendName]:
 class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
+        _requires_document_capacity: ClassVar[bool] = True
+        """Dynamic document offsets need a capacity for fixed-shape graph inputs."""
         sdpa_backends: list[_VarlenSDPBackendName] = field(
             default_factory=_default_varlen_sdpa_backends
         )

@@ -73,7 +73,9 @@ def _generic_validator(loader):
         get_optional_mesh=lambda axes: None,
     )
     validator.dl_config = SimpleNamespace(
-        build=mock.Mock(return_value=loader), max_num_documents=None
+        build=mock.Mock(return_value=loader),
+        max_num_documents=None,
+        _get_attention_document_capacity=lambda **kwargs: validator.dl_config.max_num_documents,
     )
     validator.dp_world_size = 1
     validator.dp_rank = 0
@@ -264,6 +266,7 @@ def test_validation_preprocessing_uses_validation_document_limit(monkeypatch):
         "parallelism_context": validator.parallelism_context,
         "parallelism": validator.parallelism,
         "max_num_documents": 4,
+        "max_context_length": 4,
     }
     torch.testing.assert_close(preprocess.call_args.args[0]["input"], row.input)
 
@@ -389,6 +392,43 @@ def test_flux_validator_keeps_eager_validation_schedule(
     assert not validator._accelerator_graph_enabled
     warned = "Flux validation runs without accelerator graphs" in caplog.text
     assert warned == accelerator_graph_enabled
+
+
+@pytest.mark.parametrize("mask_documents,expected_capacity", [(True, 8), (False, 1)])
+def test_validation_uses_data_policy_capacity(
+    monkeypatch, mask_documents, expected_capacity
+):
+    from torchtitan.components.data import GrainDataLoader
+    from torchtitan_recipes.overrides.dense_causal_sdpa import unmasked_text_rows
+
+    row = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 4),
+        labels=torch.ones(1, 4, dtype=torch.long),
+        positions=torch.arange(4).reshape(1, 4),
+        padding_mask=torch.zeros(1, 4, dtype=torch.bool),
+        loss_token_counts=torch.tensor(4),
+        routing_token_counts=torch.tensor([4]),
+    )
+    loader = _ClosableLoader([row])
+    validator = _generic_validator(loader)
+    validator.dl_config = GrainDataLoader.Config(
+        dataset=mock.Mock(),
+        max_num_documents=8,
+    )
+    if not mask_documents:
+        validator.dl_config = unmasked_text_rows(validator.dl_config)
+    monkeypatch.setattr(GrainDataLoader.Config, "build", lambda *args, **kwargs: loader)
+    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
+    model = _EchoModel()
+    preprocess = mock.Mock(wraps=model.preprocess_inputs)
+    monkeypatch.setattr(model, "preprocess_inputs", preprocess)
+    try:
+        validator.validate([model], step=1)
+        assert preprocess.call_args.kwargs["max_num_documents"] == expected_capacity
+        assert preprocess.call_args.kwargs["max_context_length"] == 4
+        assert validator.dl_config.max_num_documents == (8 if mask_documents else None)
+    finally:
+        validator.close()
 
 
 def _flux_validator(loader):
