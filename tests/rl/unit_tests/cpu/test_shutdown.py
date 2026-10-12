@@ -68,7 +68,9 @@ class _FakeConfig:
     trainer = _FakeTrainerConfig()
     # main() also reads config.generator.parallelism (same stubbing applies).
     generator = SimpleNamespace(
-        parallelism=None, cuda_graph=VLLMCudaGraphConfig(mode="NONE")
+        parallelism=None,
+        cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+        session_kv_offload_gib=0.0,
     )
     num_generators = 1
 
@@ -206,6 +208,41 @@ def test_main_passes_configured_num_generators(monkeypatch, stub_mesh_provisioni
         "generator_mesh_0",
         "generator_mesh_1",
     ]
+
+
+@pytest.mark.parametrize(
+    "offload_gib, generator_env",
+    [
+        (0.0, {}),
+        (
+            16.0,
+            {
+                "PYTORCH_ALLOC_CONF": "expandable_segments:False",
+                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
+            },
+        ),
+    ],
+)
+def test_main_launches_kv_offload_generators_without_expandable_segments(
+    monkeypatch, stub_mesh_provisioning, offload_gib, generator_env
+):
+    """vLLM refuses CPU KV offload under expandable_segments:True, which RL_ENV_DEFAULTS sets."""
+    spawn_kwargs = []
+    monkeypatch.setattr(
+        train,
+        "spawn_proc_mesh",
+        lambda *args, **kwargs: spawn_kwargs.append(kwargs)
+        or ("trainer_mesh", ["generator_mesh_0"]),
+    )
+    _FakeConfigLoader.config = _FakeConfig(
+        generator=SimpleNamespace(parallelism=None, session_kv_offload_gib=offload_gib)
+    )
+    _FakeController.instances = []
+    monkeypatch.setattr(train, "ConfigLoader", _FakeConfigLoader)
+
+    asyncio.run(train.main())
+
+    assert spawn_kwargs[0]["generator_env"] == generator_env
 
 
 def test_main_shuts_down_after_train_failure(monkeypatch, stub_mesh_provisioning):

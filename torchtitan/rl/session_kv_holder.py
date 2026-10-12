@@ -4,12 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Hold each multi-turn session's reusable KV between its turns."""
+"""Hold each multi-turn session's reusable KV between its turns, and evict ended sessions' CPU
+copies first."""
 
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Iterable
 from typing import Any
+
+from vllm.v1.kv_offload.base import make_offload_key, OffloadKey
+from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 
 
 class SessionKVHolder:
@@ -26,6 +31,15 @@ class SessionKVHolder:
     released, the one idle longest first. Every mutating method must run on the engine thread of
     every rank, in the same order, so the schedulers of all TP ranks stay identical.
 
+    With CPU offload, vLLM also copies every computed block to CPU. When a session ends
+    (`release`), its CPU chunks move to the front of the CPU eviction queue, except the chunks a
+    live session also uses:
+
+        CPU eviction queue, evicted first on the left; GRPO siblings s1, s2 share prompt chunk p
+            [churn, p, s1, s2]
+            release(session_ids=["s1"])  ->  [s1, churn, p, s2]   p stays: s2 still uses it
+            release(session_ids=["s2"])  ->  [s2, p, s1, churn]
+
     Example:
 
         holder = SessionKVHolder(scheduler, free_floor_blocks=400)
@@ -39,29 +53,44 @@ class SessionKVHolder:
     Args:
         scheduler: The vLLM v1 scheduler of this rank's in-process engine.
         free_floor_blocks: Release idle sessions while fewer blocks than this are free.
+        hold: Hold sessions' GPU blocks. False only demotes ended sessions' CPU chunks.
+        offload_policy: vLLM's CPU offload eviction policy; None without CPU offload.
     """
 
-    def __init__(self, scheduler: Any, free_floor_blocks: int) -> None:
+    def __init__(
+        self,
+        scheduler: Any,
+        free_floor_blocks: int,
+        hold: bool = True,
+        offload_policy: DemotableLRUCachePolicy | None = None,
+    ) -> None:
         self._scheduler = scheduler
         self._coordinator = scheduler.kv_cache_manager.coordinator
         self._block_pool = scheduler.kv_cache_manager.block_pool
         self.free_floor_blocks = free_floor_blocks
+        self._hold_enabled = hold
+        self._offload_policy = offload_policy
+        self._num_kv_cache_groups = scheduler.kv_cache_manager.num_kv_cache_groups
         # Requests in vLLM: internal request id -> (session, group, prefill seen).
         self._live: dict[str, tuple[str, int, bool]] = {}
         # Held blocks per session, idle longest first.
         self._held: OrderedDict[str, list[Any]] = OrderedDict()
+        # Sessions past their first prefill, until `release`.
         self._session_groups: dict[str, int] = {}
         self._group_sessions: dict[int, set[str]] = {}
+        # With offload: each session's latest block hashes, which cover every turn so far.
+        self._session_hashes: dict[str, list[bytes]] = {}
         # Plain ints, so other threads (e.g. a logging endpoint) can read them safely.
         self.num_sessions = 0
         self.num_evicted = 0
 
     def track(self, internal_request_id: str, session_id: str, group_id: int) -> None:
-        """Hold this request's prefix once its prefill finishes."""
+        """Track this request's session, and hold its prefix, once its prefill finishes."""
         self._live[internal_request_id] = (session_id, group_id, False)
 
     def after_step(self) -> None:
-        """Hold the prefix of requests whose prefill finished; mark sessions whose request left."""
+        """Track sessions whose request finished prefill (and hold their prefix); mark sessions
+        whose request left."""
         for internal_id, (session_id, group_id, held) in list(self._live.items()):
             request = self._scheduler.requests.get(internal_id)
             if request is None:  # finished or aborted: the session is idle from now on
@@ -70,7 +99,13 @@ class SessionKVHolder:
                     self._held.move_to_end(session_id)
             elif not held and request.num_computed_tokens >= request.num_prompt_tokens:
                 self._live[internal_id] = (session_id, group_id, True)
-                self._hold(request, session_id, group_id)
+                self._session_groups[session_id] = group_id
+                self._group_sessions.setdefault(group_id, set()).add(session_id)
+                if self._offload_policy is not None:
+                    # vLLM extends this list in place through decode.
+                    self._session_hashes[session_id] = request.block_hashes
+                if self._hold_enabled:
+                    self._hold(request, session_id)
 
     def evict_until_free(self) -> None:
         """Release sessions with no running request, idle longest first, until enough blocks are free.
@@ -98,15 +133,36 @@ class SessionKVHolder:
             released |= self._group_sessions.pop(group_id, set())
         # Sorted, not set order: string hashes differ per process, and every TP rank must free
         # blocks in the same order.
-        for session_id in sorted(released):
+        released_in_order = sorted(released)
+        for session_id in released_in_order:
             self._release(session_id)
+            group_id = self._session_groups.pop(session_id, None)
+            if group_id is not None:
+                self._group_sessions.get(group_id, set()).discard(session_id)
+        if self._offload_policy is not None:
+            ended_hashes = [
+                block_hash
+                for session_id in released_in_order
+                for block_hash in self._session_hashes.pop(session_id, ())
+            ]
+            # TODO: rebuilt on every release: 0.6 ms for 250 live Qwen3.5 sessions of 16k tokens,
+            # 23 ms with 16-token hash blocks (attention-only models). A per-hash refcount,
+            # caught up as sessions grow, would cost only the released sessions' length.
+            live_hashes = set().union(*self._session_hashes.values())
+            # One key per block and KV cache group; keys vLLM never stored are skipped.
+            self._offload_policy.demote(
+                make_offload_key(block_hash, group_idx)
+                for block_hash in ended_hashes
+                if block_hash not in live_hashes
+                for group_idx in range(self._num_kv_cache_groups)
+            )
         # A request still before its prefill must not re-hold a released session.
         dropped_groups = set(group_ids)
         for internal_id, (session_id, group_id, held) in list(self._live.items()):
             if session_id in released or group_id in dropped_groups:
                 self._live[internal_id] = (session_id, group_id, True)
 
-    def _hold(self, request: Any, session_id: str, group_id: int) -> None:
+    def _hold(self, request: Any, session_id: str) -> None:
         # The prompt's last token is recomputed for its logits, so a continuation hits at most
         # num_prompt_tokens - 1 tokens; the lookup returns the attention blocks and, per GDN
         # group, the state block that ends on that aligned boundary. vLLM returns the oldest
@@ -120,15 +176,50 @@ class SessionKVHolder:
         self._block_pool.touch(blocks)
         self._release(session_id)
         self._held[session_id] = blocks
-        self._session_groups[session_id] = group_id
-        self._group_sessions.setdefault(group_id, set()).add(session_id)
         self.num_sessions += 1
 
     def _release(self, session_id: str) -> None:
         blocks = self._held.pop(session_id, None)
-        group_id = self._session_groups.pop(session_id, None)
-        if group_id is not None:
-            self._group_sessions.get(group_id, set()).discard(session_id)
         if blocks is not None:
             self.num_sessions -= 1
             self._block_pool.free_blocks(reversed(blocks))
+
+
+class DemotableLRUCachePolicy(LRUCachePolicy):
+    """vLLM's LRU over CPU-offloaded KV chunks, plus `demote`: move chunks to the eviction front.
+
+    vLLM builds it by name from ``kv_connector_extra_config["eviction_policy"]``. It uses the LRU's
+    internal ``evictable_chunks`` and ``chunks``, so it is pinned to the vLLM version we run.
+
+    Example:
+
+        evictable, evicted first on the left:  [a, b, c]
+        demote([c, x])                     ->  [c, a, b]   x is not stored: skipped
+        demote([d]) while d is being stored    d goes to the front once its store finishes
+    """
+
+    def __init__(self, cache_capacity: int) -> None:
+        super().__init__(cache_capacity)
+        self._demote_when_stored: set[OffloadKey] = set()
+
+    def demote(self, keys: Iterable[OffloadKey]) -> None:
+        """Move stored `keys` to the eviction front; a key still being stored moves once stored."""
+        for key in keys:
+            if key in self.evictable_chunks:
+                self.evictable_chunks.move_to_end(key, last=False)
+            elif key in self.chunks and not self.chunks[key].is_ready:
+                self._demote_when_stored.add(key)
+
+    def mark_evictable(self, key: OffloadKey) -> None:
+        super().mark_evictable(key)
+        if key in self._demote_when_stored:
+            self._demote_when_stored.remove(key)
+            self.evictable_chunks.move_to_end(key, last=False)
+
+    def remove(self, key: OffloadKey) -> None:
+        super().remove(key)
+        self._demote_when_stored.discard(key)
+
+    def clear(self) -> None:
+        super().clear()
+        self._demote_when_stored.clear()

@@ -50,6 +50,7 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator import VLLMGenerator
 
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,19 @@ class HostMeshes:
     trainer: HostMesh
     generators: list[HostMesh]
     gpus_per_node: int
+
+
+def generator_launch_env(generator_config: VLLMGenerator.Config) -> dict[str, str]:
+    """Env that generator procs need on top of ``RL_ENV_DEFAULTS``.
+
+    vLLM refuses a KV connector, which CPU KV offload is, under ``expandable_segments:True``.
+    """
+    if generator_config.session_kv_offload_gib == 0:
+        return {}
+    return {
+        "PYTORCH_ALLOC_CONF": "expandable_segments:False",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
+    }
 
 
 def _compute_trainer_world_size(p: ParallelismConfig) -> int:
@@ -343,6 +357,7 @@ async def main():
             per_generator_world_size,
             host_meshes=None,
             num_generators=config.num_generators,
+            generator_env=generator_launch_env(config.generator),
         )
         await rl_trainer.setup_async(
             trainer_mesh=trainer_mesh,

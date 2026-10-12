@@ -60,9 +60,11 @@ from torchtitan.rl.model.vllm_worker import (
     TorchTitanGPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.session_kv_holder import DemotableLRUCachePolicy
 from vllm import SamplingParams
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 
 
 class _FakeRenderer:
@@ -507,6 +509,15 @@ def test_hold_session_kv_requires_free_floor_above_watermark():
         )
 
 
+def test_session_kv_offload_needs_tp1():
+    VLLMGenerator.Config(parallelism=_PARALLELISM, session_kv_offload_gib=16)
+    with pytest.raises(ValueError, match="needs tensor_parallel_degree=1, got 2"):
+        VLLMGenerator.Config(
+            parallelism=InferenceParallelismConfig(tensor_parallel_degree=2),
+            session_kv_offload_gib=16,
+        )
+
+
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
@@ -562,6 +573,24 @@ def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
     assert engine_kwargs["scheduling_policy"] == "fcfs"
 
 
+def test_session_kv_offload_sets_vllm_cpu_offload(monkeypatch, tmp_path):
+    engine_kwargs = _build_engine_kwargs(
+        monkeypatch, tmp_path, VLLMGenerator.Config(session_kv_offload_gib=16)
+    )
+    assert engine_kwargs["kv_offloading_size"] == 16
+    assert engine_kwargs["kv_offloading_backend"] == "native"
+    extra_config = engine_kwargs["kv_transfer_config"].kv_connector_extra_config
+    assert extra_config["offload_prompt_only"] is False
+    # vLLM builds the eviction policy from these two keys.
+    policy_cls = CachePolicyFactory.get_cache_policy_cls(
+        extra_config["eviction_policy"], extra_config["cache_policy_module_path"]
+    )
+    assert policy_cls is DemotableLRUCachePolicy
+
+    engine_kwargs = _build_engine_kwargs(monkeypatch, tmp_path, VLLMGenerator.Config())
+    assert not engine_kwargs.keys() & {"kv_offloading_size", "kv_transfer_config"}
+
+
 @pytest.mark.parametrize(
     "key, match",
     [
@@ -573,6 +602,7 @@ def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
             r"use VLLMGenerator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use VLLMGenerator\.Config\.debug\.seed"),
+        ("kv_offloading_size", r"use VLLMGenerator\.Config\.session_kv_offload_gib"),
     ],
 )
 def test_extra_vllm_engine_args_rejects_torchtitan_owned_keys(key, match):
