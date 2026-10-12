@@ -217,6 +217,21 @@ class InterGeneratorRouter(Actor, Configurable):
             return_exceptions=return_exceptions,
         )
 
+    async def _wait_engine_loop(self) -> None:
+        """Wait for every generator rank's engine loop; raise on the first one that crashes.
+
+        ``call()`` returns only once every rank of a mesh has replied, but when one rank's
+        engine loop crashes, its TP peers stay blocked in collectives and may not reply until
+        those time out. ``stream()`` yields each rank's reply as it arrives, so the first
+        crash raises at once.
+        """
+
+        async def wait(generator: _GeneratorHandle) -> None:
+            for reply in generator.actor.wait_engine_loop.stream():
+                await reply
+
+        await asyncio.gather(*(wait(generator) for generator in self._generators))
+
     async def _pull_model_state_dict(self, *, policy_version: int) -> None:
         """Pull the given policy version's state dict into every generator.
 
@@ -288,9 +303,9 @@ class InterGeneratorRouter(Actor, Configurable):
         await self._fanout("start_engine_loop")
 
     @concurrent_endpoint
-    async def wait_engine_loops(self) -> None:
+    async def wait_engine_loop(self) -> None:
         """Wait until every generator rank's engine loop exits; raise as soon as one crashes."""
-        await self._fanout("wait_engine_loop")
+        await self._wait_engine_loop()
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:

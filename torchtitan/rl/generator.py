@@ -26,6 +26,7 @@ from torchstore import RankRole
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
+from vllm.exceptions import VLLMClientError
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -576,12 +577,12 @@ class RequestDispatcher:
             self._result_port.send(completions)
 
     def process_rejected_requests(
-        self, rejected_requests: list[tuple[str, ValueError]]
+        self, rejected_requests: list[tuple[str, ValueError | VLLMClientError]]
     ) -> None:
         """TP rank 0s report the requests their DP replica's engine rejected at admission:
         - global rank 0 fails its own replica's replies locally;
-        - every other TP rank 0 sends them over the port to global rank 0's drain task.
-        - Other ranks rejected the same requests and do nothing.
+        - every other TP rank 0 sends them over the port to global rank 0's drain task;
+        - other ranks rejected the same requests and do nothing.
         """
         if self._tp_rank != 0:
             return
@@ -677,7 +678,7 @@ class RequestDispatcher:
                 self._rank0_dp_router.release(request_id)
 
     def _rank0_fail_generations(
-        self, rejected_requests: list[tuple[str, ValueError]]
+        self, rejected_requests: list[tuple[str, ValueError | VLLMClientError]]
     ) -> None:
         """RANK 0: fail the reply of each rejected request with its error."""
         for request_id, exc in rejected_requests:
@@ -689,6 +690,9 @@ class RequestDispatcher:
         """RANK 0 background task which receives and resolves completions (or rejections) pushed
         by peer TP rank 0s.
         """
+        # TODO: wait_engine_loop does not watch this task. If it raises (e.g. an unknown request
+        # id), later peer replies are never resolved and their generate() calls hang; make its
+        # failure fail the engine loop.
         while True:
             results = await self._rank0_result_receiver.recv()
             if isinstance(results, _RejectedRequests):
@@ -1237,7 +1241,8 @@ class VLLMGenerator(Configurable):
         which carries its own per-generation metrics (`Completion.metrics`) that
         the controller attaches to the rollout turn. If vLLM rejects the request
         when the engine loop admits it (e.g. a prompt that leaves no room for an
-        output token), only this call raises vLLM's `ValueError`.
+        output token), only this call raises vLLM's error (`VLLMValidationError` or
+        `ValueError`).
 
         Args:
             prompt_token_ids: One tokenized prompt `[token_ids]`.
@@ -1375,7 +1380,9 @@ class VLLMGenerator(Configurable):
                     local_requests = decision.requests_per_dp_rank[
                         self._request_dispatcher._dp_rank
                     ]
-                    rejected_requests: list[tuple[str, ValueError]] = []
+                    rejected_requests: list[
+                        tuple[str, ValueError | VLLMClientError]
+                    ] = []
                     for request in local_requests:
                         prompt = {"prompt_token_ids": request.prompt_token_ids}
                         if not self.config.reset_kv_cache_on_weight_sync:
@@ -1383,8 +1390,12 @@ class VLLMGenerator(Configurable):
                             # computed under that version.
                             prompt["cache_salt"] = str(request.min_policy_version)
                         # vLLM validates a request (prompt length, sampling params, token ids) as it
-                        # admits it, and raises before changing engine state. The checks are
-                        # deterministic, so every TP rank of this replica rejects the same requests.
+                        # admits it: render_cmpl and InputProcessor.process_inputs raise
+                        # VLLMClientError (e.g. VLLMValidationError, not a ValueError subclass) or
+                        # ValueError before LLMEngine.add_request registers the request with the
+                        # output processor and engine core, so a rejected request leaves no engine
+                        # state (recheck on a vLLM upgrade). The checks are deterministic, so every TP
+                        # rank of this replica rejects the same requests.
                         try:
                             # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized
                             # prompts); the high-level entry stays resilient to vLLM internals vs
@@ -1395,7 +1406,7 @@ class VLLMGenerator(Configurable):
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
                             )
-                        except ValueError as exc:
+                        except (ValueError, VLLMClientError) as exc:
                             rejected_requests.append((request.request_id, exc))
                     if rejected_requests:
                         self._request_dispatcher.process_rejected_requests(
@@ -1809,7 +1820,7 @@ class OutstandingGeneration:
 class _RejectedRequests:
     """Requests a peer DP replica's engine rejected at admission, sent to rank 0 with each error."""
 
-    requests: list[tuple[str, ValueError]]
+    requests: list[tuple[str, ValueError | VLLMClientError]]
 
 
 class LoopAction(enum.Enum):

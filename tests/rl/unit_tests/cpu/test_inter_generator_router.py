@@ -506,3 +506,50 @@ def test_pull_model_state_dict_pulls_every_generator():
         ]
 
     asyncio.run(_run())
+
+
+class _StreamEndpoint:
+    """An endpoint whose ``stream()`` yields one reply per rank, in arrival order."""
+
+    def __init__(self, *replies):
+        self.replies = replies
+
+    def stream(self):
+        return (reply() for reply in self.replies)
+
+
+def test_wait_engine_loop_raises_when_one_rank_crashes_while_its_peer_hangs():
+    async def _run():
+        peer_blocked = asyncio.Event()
+
+        async def crashed():
+            raise RuntimeError("engine loop crashed")
+
+        async def blocked():
+            # A TP peer of the crashed rank stays in a collective and never replies.
+            await peer_blocked.wait()
+
+        crashing, healthy = _Actor("gen0"), _Actor("gen1")
+        crashing.wait_engine_loop = _StreamEndpoint(crashed, blocked)
+        healthy.wait_engine_loop = _StreamEndpoint(blocked)
+        router = _router([crashing, healthy])
+
+        with pytest.raises(RuntimeError, match="engine loop crashed"):
+            await asyncio.wait_for(router._wait_engine_loop(), timeout=5)
+
+    asyncio.run(_run())
+
+
+def test_wait_engine_loop_returns_once_every_rank_exits():
+    async def _run():
+        async def exited():
+            return None
+
+        actors = [_Actor("gen0"), _Actor("gen1")]
+        for actor in actors:
+            actor.wait_engine_loop = _StreamEndpoint(exited, exited)
+        router = _router(actors)
+
+        await asyncio.wait_for(router._wait_engine_loop(), timeout=5)
+
+    asyncio.run(_run())

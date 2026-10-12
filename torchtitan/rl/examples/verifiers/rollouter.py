@@ -325,13 +325,15 @@ class VerifiersRollouter(Rollouter):
             if trace.stop_condition == "context_length":
                 # The harness builds the first prompt in the env server, so the dataset can't
                 # be filtered for it; flag it here as a data problem, not a policy one.
+                task = sample.verifiers_task_data.get(
+                    "name", sample.verifiers_task_data.get("idx")
+                )
                 logger.warning(
-                    "rollout group=%d/rollout=%d: the first prompt of task %s does not fit "
-                    "the context; marking ERROR",
+                    "rollout group=%d/rollout=%d: the first prompt%s does not fit the "
+                    "context; marking ERROR",
                     group_id,
                     rollout_id,
-                    sample.verifiers_task_data.get("name")
-                    or sample.verifiers_task_data.get("idx"),
+                    "" if task is None else f" of task {task}",
                 )
             status = RolloutStatus.ERROR
         logs = verifiers_rollout_logs(verifiers_episode, trace)
