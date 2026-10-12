@@ -5,13 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
+
+from torchtitan.models.base.model import BaseModel
 
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
@@ -288,6 +291,45 @@ class DeepSeekV3Model(MTPDecoder):
 
     def __init__(self, config: Config):
         super().__init__(config)
+
+    def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
+        """Use the model-owned MTP partition when MTP is enabled."""
+        if not self.num_mtp_layers:
+            return super().pipeline(**kwargs)
+        from .pipeline_dsv3 import pipeline_dsv3
+
+        return pipeline_dsv3(self, **kwargs)
+
+    @classmethod
+    def _synchronize_shared_parameters(
+        cls, model_parts: list[BaseModel], parallelism_context
+    ) -> None:
+        """Synchronize MTP embedding shards on their PP owners."""
+        del parallelism_context
+        from .pipeline_dsv3 import _synchronize_mtp_embeddings
+
+        _synchronize_mtp_embeddings(cast(list[DeepSeekV3Model], model_parts))
+
+    @classmethod
+    def _finalize_shared_gradients(
+        cls, model_parts: list[BaseModel], parallelism_context
+    ) -> None:
+        """Combine MTP embedding gradients before clipping."""
+        del parallelism_context
+        from .pipeline_dsv3 import _finalize_mtp_embedding_gradients
+
+        _finalize_mtp_embedding_gradients(cast(list[DeepSeekV3Model], model_parts))
+
+    def _get_grad_norm_parameters(self) -> Iterator[torch.nn.Parameter]:
+        """Count the canonical embedding once while retaining both updates."""
+        if not self._mtp_pipeline_enabled or self._mtp_pipeline_first_stage:
+            return super()._get_grad_norm_parameters()
+        replica_id = (
+            id(self.tok_embeddings.weight) if self.tok_embeddings is not None else None
+        )
+        return (
+            parameter for parameter in self.parameters() if id(parameter) != replica_id
+        )
 
     @classmethod
     def _register_optimizer_hooks(

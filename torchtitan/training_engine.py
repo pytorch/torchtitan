@@ -747,7 +747,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         *,
         inputs: list[tuple[torch.Tensor, ...]] | None,
-        labels: list[torch.Tensor] | None,
+        labels: list[torch.Tensor | tuple[torch.Tensor, ...]] | None,
         model_kwargs: list[dict[str, Any]],
         loss_kwargs: dict[str, Any],
         finalize_gradients: bool = True,

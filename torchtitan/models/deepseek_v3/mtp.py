@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+from torch.distributed import ProcessGroup
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
@@ -206,6 +207,11 @@ class MTPDecoder(Decoder):
 
     def __init__(self, config: Config):
         super().__init__(config)
+        self.num_mtp_layers = len(config.mtp_layers)
+        self._mtp_pipeline_enabled = False
+        self._mtp_pipeline_first_stage = False
+        self._mtp_embedding_group: ProcessGroup | None = None
+        self._mtp_embedding_src_rank = 0
         if not config.mtp_layers:
             self.mtp_layers = None
             return
@@ -268,14 +274,10 @@ class MTPDecoder(Decoder):
         labels = input_dict["labels"]
         positions = input_dict.get("positions")
         padding_mask = input_dict.get("padding_mask")
-        if self.mtp_layers is not None and positions is None:
+        if self.num_mtp_layers and positions is None:
             raise ValueError("MTP input preprocessing requires positions.")
 
-        depths = (
-            range(1, len(self.mtp_layers) + 1)
-            if self.mtp_layers is not None
-            else range(0)
-        )
+        depths = range(1, self.num_mtp_layers + 1)
         input_shardings = decoder_input_sharding()
         for depth in depths:
             mtp_input_tokens, mtp_input_valid_mask = roll_mtp_sequence(
@@ -324,7 +326,7 @@ class MTPDecoder(Decoder):
         main_tokens = input_dict.pop("input")
         main_labels = input_dict.pop("labels")
         input_dict["aux_loss_denominators"] = None
-        if self.mtp_layers is None:
+        if not self.num_mtp_layers:
             return main_tokens, main_labels, input_dict
 
         input_tokens = (
@@ -338,6 +340,9 @@ class MTPDecoder(Decoder):
         input_dict["mtp_input_valid_masks"] = tuple(
             input_dict.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
         )
+        if self._mtp_pipeline_enabled:
+            input_dict["mtp_input_tokens"] = input_tokens[1:]
+            return main_tokens, loss_labels, input_dict
         return input_tokens, loss_labels, input_dict
 
     def forward(
@@ -349,8 +354,9 @@ class MTPDecoder(Decoder):
         *,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
+        mtp_input_tokens: tuple[torch.Tensor, ...] | None = None,
     ):
-        if self.mtp_layers is None:
+        if not self.num_mtp_layers:
             if not isinstance(tokens, torch.Tensor):
                 raise ValueError("A decoder without MTP expects one token tensor.")
             return super().forward(
@@ -360,26 +366,41 @@ class MTPDecoder(Decoder):
                 padding_mask=padding_mask,
                 aux_loss_denominators=aux_loss_denominators,
             )
-        if self.tok_embeddings is None:
-            raise ValueError("MTP decoder forward requires token embeddings.")
-        if not isinstance(tokens, tuple) or len(tokens) != len(self.mtp_layers) + 1:
+        if self._mtp_pipeline_enabled:
+            if not isinstance(tokens, torch.Tensor):
+                raise ValueError(
+                    "MTP pipeline stages expect one token or hidden tensor."
+                )
+            main_tokens = tokens
+        else:
+            if not isinstance(tokens, tuple) or len(tokens) != self.num_mtp_layers + 1:
+                raise ValueError(
+                    "MTP decoder requires one main token tensor and one prepared "
+                    "token tensor per MTP layer."
+                )
+            main_tokens, *shifted_tokens = tokens
+            mtp_input_tokens = tuple(shifted_tokens)
+        if mtp_input_tokens is None or len(mtp_input_tokens) != self.num_mtp_layers:
             raise ValueError(
-                "MTP decoder requires one main token tensor and one prepared "
-                "token tensor per MTP layer."
+                "MTP decoder requires one prepared token tensor per MTP layer."
             )
-        if mtp_input_valid_masks is None or len(mtp_input_valid_masks) != len(
-            self.mtp_layers
+        if (
+            mtp_input_valid_masks is None
+            or len(mtp_input_valid_masks) != self.num_mtp_layers
         ):
             raise ValueError("MTP decoder requires one validity mask per MTP layer.")
 
-        main_tokens, *mtp_input_tokens = tokens
-
         # Keep this aligned with Decoder.forward(), but preserve the pre-norm
         # hidden state because MTP consumes the last decoder-layer output.
-        h = self.tok_embeddings(main_tokens)
+        embed_main_tokens = (
+            not self._mtp_pipeline_enabled or self._mtp_pipeline_first_stage
+        )
+        if self.tok_embeddings is None and (embed_main_tokens or self.mtp_layers):
+            raise ValueError("MTP decoder forward requires token embeddings.")
+        h = self.tok_embeddings(main_tokens) if embed_main_tokens else main_tokens
         if (
             aux_loss_denominators is not None
-            and aux_loss_denominators.numel() != len(self.mtp_layers) + 1
+            and aux_loss_denominators.numel() != self.num_mtp_layers + 1
         ):
             raise ValueError("Expected one aux-loss denominator per MTP objective.")
         with spmd.no_typecheck():
@@ -402,10 +423,14 @@ class MTPDecoder(Decoder):
                 aux_loss_denominator=main_aux_loss_denominator,
             )
 
+        if self._mtp_pipeline_enabled and not self.mtp_layers:
+            return h
+
         prev_depth_hidden = h
         h = self.norm(h) if self.norm is not None else h
 
         mtp_outputs = []
+        assert self.mtp_layers is not None
         for depth, (layer, depth_tokens, mtp_input_valid_mask) in enumerate(
             zip(
                 self.mtp_layers,
@@ -468,7 +493,7 @@ def apply_fsdp_to_mtp_decoder(
     mtp_layer_keys = []
     try:
         if model.mtp_layers is not None:
-            first_mtp_layer_id = len(model.layers)
+            first_mtp_layer_id = max((int(key) for key in model.layers), default=-1) + 1
             for i, layer in enumerate(model.mtp_layers):
                 key = str(first_mtp_layer_id + i)
                 model.layers[key] = layer
