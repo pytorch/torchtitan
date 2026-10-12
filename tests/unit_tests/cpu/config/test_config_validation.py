@@ -50,6 +50,14 @@ def test_precision_rejects_bf16_storage_with_fp32_compute() -> None:
         PrecisionConfig(dtype="bfloat16", param_dtype="float32")
 
 
+@pytest.mark.parametrize("warmup_steps", [0, -1])
+def test_accelerator_graph_warmup_must_be_positive(warmup_steps) -> None:
+    with pytest.raises(
+        ValueError, match="accelerator_graph_warmup_steps must be positive"
+    ):
+        TrainingConfig(accelerator_graph_warmup_steps=warmup_steps)
+
+
 def test_per_group_accelerator_graph_config_restrictions() -> None:
     with pytest.raises(ValueError, match="require accelerator graphs to be enabled"):
         TrainingEngine.Config(

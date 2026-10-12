@@ -56,6 +56,8 @@ class TrainingConfig:
             )
         if self.num_tokens_per_train_step != -1 and self.num_tokens_per_train_step <= 0:
             raise ValueError("num_tokens_per_train_step must be -1 or greater than 0.")
+        if self.accelerator_graph_warmup_steps < 1:
+            raise ValueError("accelerator_graph_warmup_steps must be positive")
 
     steps: int = 10000
     """How many train steps to run"""
@@ -71,6 +73,11 @@ class TrainingConfig:
     looped and split-backward schedule replay. Accelerator graphs are
     independent of ``torch.compile(mode="reduce-overhead")``, which performs its
     own CUDA graph capture.
+    """
+
+    accelerator_graph_warmup_steps: int = 2
+    """Eager graph-runner calls before capture. Full-step mode counts updates;
+    per-microbatch-group mode counts groups, preserving its existing semantics.
     """
 
     accelerator_graph_per_microbatch_group: bool = False

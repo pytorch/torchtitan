@@ -26,9 +26,41 @@ MXFP8 training can provide substantial training speedups for models where the ma
 
 - NVIDIA B200 (SM100 or SM100a)
 - PyTorch nightly
-- TorchAO 0.18.0 or later, with `nvidia-cutlass-dsl` and `apache-tvm-ffi`
+- TorchAO nightly with the landed [fused dual-axis quantizer](https://github.com/pytorch/ao/pull/4995), plus `nvidia-cutlass-dsl` and `apache-tvm-ffi`
 
 ### How MXFP8 Works
+
+#### Direct blocked activation scales
+
+`MXFP8Linear` automatically uses TorchAO's directly blocked CuTeDSL casts for
+BF16 activation/gradient matrices with positive, 128-aligned axes. When both
+rowwise and columnwise operands are needed, the fused kernel from
+[TorchAO #4995](https://github.com/pytorch/ao/pull/4995) produces both in one
+input read. Single-axis calls reuse TorchAO's corresponding CuTeDSL kernels.
+No standalone scale-rearrangement kernel is needed on this path. Weight
+quantization, FSDP ownership and the chosen backward-save format are unchanged.
+
+This path depends on the landed #4995, which preserves Protonu's original
+[#4895](https://github.com/pytorch/ao/pull/4895) kernel and incorporates the
+current nonfinite and single-axis FakeTensor corrections. It requires no
+separate metadata PR and does not change MXFP8Linear output ownership.
+Activation casts use the shared RCEIL scaling constant. The square weight
+kernel has a fixed RCEIL contract, which the weight helper explicitly enforces.
+
+This requires SM10.x and the CuTeDSL runtime. Construction rejects a missing
+required AO API/runtime with installation guidance. Unsupported matrix shapes
+use the existing CUDA MXFP8 cast and scale rearrangement; missing dependencies
+never cause a silent switch. There is no user-facing backend option and no
+padding to a larger GEMM. Existing 32-row padding remains unchanged.
+
+Selection is per operand, not per module. For example, DSv3's KV-A projection
+has 7168 inputs and 576 outputs. With 128-aligned token rows, its forward input
+uses CuTeDSL, while its output gradient uses CUDA because 576 is not divisible
+by 128. Both paths retain the same MXFP8 numerical and blocked-scale contracts.
+
+The fused API uses `offs=None` for dense matrices, skipping group-offset
+processing and returning compact blocked scales. No endpoint tensor, cache or
+scale-padding trim is needed. Construction requires this dense API contract.
 
 MXFP8 differs from standard Float8 training in its scaling approach:
 
@@ -131,7 +163,7 @@ The built-in policies currently select:
 | Model | Modules saving MXFP8 inputs |
 | --- | --- |
 | Llama 3 | `attention.qkv_linear.wqkv`, `feed_forward.w2` |
-| DeepSeek V3 | `attention.wkv_b`, `feed_forward.w2`, `shared_experts.w2` |
+| DeepSeek V3 | `attention.inner_attention.wkv_b`, `feed_forward.w2`, `shared_experts.w2` |
 | Flux | None |
 
 All other converted linears save BF16 inputs. Trainer and GraphTrainer share

@@ -23,6 +23,7 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.optim import GradientClipper, Optim
 from torchtitan.components.validator import Validator
+from torchtitan.config import TrainingConfig
 from torchtitan.distributed.accelerator_graph import wrap_with_accelerator_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.base.model import BaseModel
@@ -758,7 +759,7 @@ def test_training_engine_configures_gradient_accumulation_accelerator_graph(
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 profiler=profiler,
-                training=SimpleNamespace(
+                training=TrainingConfig(
                     accelerator_graph_per_microbatch_group=False,
                     disable_accelerator_graphs=False,
                 ),
@@ -819,7 +820,7 @@ def test_training_engine_replays_one_accelerator_graph_per_microbatch_group() ->
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 profiler=Profiler.Config(),
-                training=SimpleNamespace(
+                training=TrainingConfig(
                     accelerator_graph_per_microbatch_group=True,
                     disable_accelerator_graphs=False,
                 ),
@@ -983,7 +984,7 @@ def test_initialize_optim_builds_component() -> None:
             config=SimpleNamespace(
                 optim=optim_config,
                 profiler=Profiler.Config(),
-                training=SimpleNamespace(steps=10),
+                training=TrainingConfig(steps=10),
             ),
             model_parts=[MagicMock()],
             pp_has_last_stage=True,
@@ -998,6 +999,7 @@ def test_initialize_optim_builds_component() -> None:
         model_parts=engine.model_parts,
         parallelism_context=engine.parallelism_context,
         training_steps=10,
+        accelerator_graph_warmup_steps=2,
         pp_has_last_stage=True,
         cuda_graph_annotation_config=None,
     )
@@ -1377,7 +1379,7 @@ def test_engine_prepares_pp_metadata_before_accelerator_graph(
         dist_moe_runtime=None,
         sdc_replayer=None,
         profiler=Profiler.Config(),
-        training=SimpleNamespace(
+        training=TrainingConfig(
             disable_accelerator_graphs=disable_accelerator_graphs,
             accelerator_graph_per_microbatch_group=per_group,
             preprocess_microbatch_groups_lazily=False,
@@ -1675,7 +1677,7 @@ def test_accelerator_graph_accumulation_supports_eager_gradient_reduction() -> N
             config=SimpleNamespace(
                 dist_moe_runtime=None,
                 profiler=Profiler.Config(),
-                training=SimpleNamespace(
+                training=TrainingConfig(
                     accelerator_graph_per_microbatch_group=False,
                     disable_accelerator_graphs=False,
                 ),
