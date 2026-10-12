@@ -53,6 +53,11 @@ class RoutingStrategy(Configurable, ABC):
     ) -> RoutingCandidate:
         """Choose one candidate from the (non-empty) candidates."""
 
+    def pinned_candidate(self, routing_ctx: RoutingContext) -> RoutingCandidate | None:
+        """Return the candidate this request's session is pinned to, if any."""
+        del routing_ctx
+        return None
+
     def release_session(self, session_id: str) -> None:
         """Forget a session that makes no more requests."""
         del session_id
@@ -162,18 +167,16 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         Unpinned requests (no ``session_id``) and first-seen sessions defer to
         the fallback strategy; a session's first assignment is then remembered so
         every later request with that key reuses the same candidate. If a
-        session's pinned candidate is no longer available (e.g. a mesh draining
-        for a weight sync), the request falls back and the session is re-pinned to
-        the newly chosen candidate. The map is bounded by ``max_sessions`` and
-        evicts the least-recently-used session.
+        session's pinned candidate is not among the candidates, the request falls
+        back and the session is re-pinned to the newly chosen candidate. The map
+        is bounded by ``max_sessions`` and evicts the least-recently-used session.
         """
 
         # Unpinned request: no affinity, defer entirely to the fallback.
         if routing_ctx.session_id is None:
             return self._fallback_strategy.choose(routing_ctx, candidates)
 
-        # Reuse the pinned candidate, but only while it is still available
-        # (e.g. not draining for a weight sync).
+        # Reuse the pinned candidate, but only while it is still a candidate.
         sticky_candidate = self._sessions.get(routing_ctx.session_id)
         if sticky_candidate is not None:
             if any(h is sticky_candidate for h in candidates):
@@ -192,6 +195,12 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         if len(self._sessions) > self._max_sessions:
             self._sessions.popitem(last=False)
         return chosen
+
+    def pinned_candidate(self, routing_ctx: RoutingContext) -> RoutingCandidate | None:
+        """Return the candidate this request's session is pinned to, if any."""
+        if routing_ctx.session_id is None:
+            return None
+        return self._sessions.get(routing_ctx.session_id)
 
     def release_session(self, session_id: str) -> None:
         """Drop the session's assignment."""
