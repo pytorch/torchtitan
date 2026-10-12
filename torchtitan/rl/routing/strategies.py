@@ -30,7 +30,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from torchtitan.config import Configurable
-from torchtitan.rl.distributed.routing.types import RoutingCandidate, RoutingContext
+from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
 
 
 class RoutingStrategy(Configurable, ABC):

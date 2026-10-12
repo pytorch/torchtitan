@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
-from torchtitan.rl.distributed.routing.strategies import (
+from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
+from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
     RoundRobinRoutingStrategy,
     StickySessionRoutingStrategy,

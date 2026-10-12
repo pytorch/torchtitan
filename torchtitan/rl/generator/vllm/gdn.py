@@ -22,6 +22,17 @@ Decode and prefill update the paged convolution and SSM state pools directly.
 from dataclasses import dataclass
 
 import torch
+from vllm.config import get_current_vllm_config
+from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    is_conv_state_dim_first,
+    MambaStateCopyFuncCalculator,
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
+from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
@@ -37,24 +48,13 @@ from torchtitan.models.common.attn_gym import (
     recurrent_gdn_decode,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.rl.model.linear_attention import (
+from torchtitan.rl.generator.vllm.linear_attention import (
     configure_hybrid_state,
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionBackend,
     TorchTitanLinearAttentionMetadata,
     unique_state_shape,
 )
-from vllm.config import get_current_vllm_config
-from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba_utils import (
-    is_conv_state_dim_first,
-    MambaStateCopyFuncCalculator,
-    MambaStateDtypeCalculator,
-    MambaStateShapeCalculator,
-)
-from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 
 class VLLMInnerGatedDeltaNet(Module, MambaBase):

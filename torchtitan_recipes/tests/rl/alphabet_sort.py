@@ -37,14 +37,22 @@ from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_config
 from torchtitan.models.qwen3 import build_model_config
-from torchtitan.rl.components.batcher import Batcher
-from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
-from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
-from torchtitan.rl.losses import GRPOLoss
+from torchtitan.rl.controller.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
+from torchtitan.rl.generator.generator import (
+    SamplingConfig,
+    VLLMCudaGraphConfig,
+    VLLMGenerator,
+)
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.losses import GRPOLoss
+from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 from torchtitan_recipes.rl.alphabet_sort import (
     _alphabet_sort_rollouter_config,

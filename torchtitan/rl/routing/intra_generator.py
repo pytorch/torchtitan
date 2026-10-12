@@ -11,11 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from torchtitan.config import Configurable
-from torchtitan.rl.distributed.routing.strategies import (
+from torchtitan.rl.routing.strategies import (
     RoutingStrategy,
     StickySessionRoutingStrategy,
 )
-from torchtitan.rl.distributed.routing.types import RoutingCandidate, RoutingContext
+from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
 
 
 @dataclass(kw_only=True, slots=True)

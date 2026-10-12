@@ -15,7 +15,7 @@ trainer actor, generator router, and group buffer (no GPU / Monarch / TorchStore
 import asyncio
 import contextlib
 
-from torchtitan.rl.distributed.weight_sync import WeightSyncManager
+from torchtitan.rl.controller.model_state_dict_sync import WeightSyncManager
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
 GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"

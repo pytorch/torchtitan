@@ -62,8 +62,8 @@ from torchtitan.distributed.batch_invariant import (
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.controller import Controller
-from torchtitan.rl.model.vllm_registry import (
+from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
@@ -210,7 +210,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
             set_batch_invariance(True)
             # The v2 logprob Triton kernel bypasses the aten overrides. Apply the
             # same generator-side patch the production VLLMGenerator does.
-            from torchtitan.rl.model.batch_invariance import (
+            from torchtitan.rl.generator.vllm.batch_invariance import (
                 force_logprobs_fn_for_batch_invariance,
             )
 

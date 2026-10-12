@@ -9,7 +9,6 @@
 from collections.abc import Set
 from contextlib import nullcontext
 
-from torchtitan.rl.model.linear_attention import TorchTitanLinearAttentionBackend
 from vllm.config import CUDAGraphMode, get_layers_from_vllm_config
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -18,6 +17,10 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
+
+from torchtitan.rl.generator.vllm.linear_attention import (
+    TorchTitanLinearAttentionBackend,
+)
 
 
 class TorchTitanCudagraphDispatcher(CudagraphDispatcher):

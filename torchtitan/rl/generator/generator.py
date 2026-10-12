@@ -39,17 +39,22 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
-from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
-from torchtitan.rl.model.vllm_registry import (
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.vllm.batch_invariance import (
+    force_logprobs_fn_for_batch_invariance,
+)
+from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
 )
+from torchtitan.rl.generator.vllm.stat_logger import (
+    StatLoggerContext,
+    VllmOtelStatLogger,
+)
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
 from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)

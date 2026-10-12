@@ -49,7 +49,7 @@ The pipeline has three layers.
 
 **1. Experiment logic.** A `Rollouter` composes training/validation data, a `MessageEnv`, a rubric, and a function to run rollouts. It should be flexible enough to express most custom patterns.
 
-**2. Controller and dataflow.** Independent loops load data, produce rollouts, pack batches, and update the policy. `RolloutGroupWorkBuffer` connects them: `target_offpolicy_steps` sets its depth and so the mean policy age, `windowed_fifo_batches` bounds how far one slow group may exceed it (`None`, the default, leaves it unbounded; `1` is FIFO by batch; see [components/WINDOWED_FIFO.md](components/WINDOWED_FIFO.md)). Set `target_offpolicy_steps=0` for synchronous execution.
+**2. Controller and dataflow.** Independent loops load data, produce rollouts, pack batches, and update the policy. `RolloutGroupWorkBuffer` connects them: `target_offpolicy_steps` sets its depth and so the mean policy age, `windowed_fifo_batches` bounds how far one slow group may exceed it (`None`, the default, leaves it unbounded; `1` is FIFO by batch; see [controller/WINDOWED_FIFO.md](controller/WINDOWED_FIFO.md)). Set `target_offpolicy_steps=0` for synchronous execution.
 
 **3. Distributed execution.** A router sends requests to one or more vLLM generator replicas. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
 
@@ -66,30 +66,35 @@ The distributed layer builds on two core components:
 
 The package is organized by responsibility and dependency boundary:
 
-- `trainer.py` and `generator.py` contain standalone services. They are usable
-  without constructing Monarch actors.
-- `components/` contains configurable RL dataflow components such as batching,
-  training-sample construction, and the bounded work buffer. Each defines the
-  data types it produces (e.g. `TrainingSample` in `training_sample_builder.py`,
-  `TrainerStepBatch` in `batcher.py`).
+- `controller/` contains the controller: the async rollout and training loop,
+  the bounded work buffer, model state dict sync between trainer and
+  generators, and controller metrics.
+- `trainer/` contains the standalone trainer service, its batching,
+  training-sample construction, losses, and the controller state it
+  checkpoints. Each component defines the data types it produces (e.g.
+  `TrainingSample` in `training_sample_builder.py`, `TrainerStepBatch` in
+  `batcher.py`).
+- `generator/` contains the standalone generator service and its inference
+  parallelism; `generator/vllm/` holds the vLLM engine integration and the
+  model-side adapters that run TorchTitan models in vLLM.
 - `rollout/` contains rollout execution (`rollouter.py`), the user extension
   APIs for environments (`message_env.py`, `token_env.py`) and rewards
-  (`rubric.py`), advantages, and the rollout data types including the
-  generation contract (`types.py`: `GenerateFn`, `Completion`). Renderers are
-  shared with SFT and live in core `torchtitan/components/renderer.py`.
-- `distributed/` contains Monarch actor adapters, routing, and TorchStore weight
-  synchronization. Actor wrappers should contain endpoint adaptation rather
-  than domain behavior.
-- `model/` contains model-side adapters required to run TorchTitan models in
-  inference systems such as vLLM.
-- `observability/` contains RL-specific metrics and rollout recording.
+  (`rubric.py`), advantages, data loading, rollout recording, and the rollout
+  data types including the generation contract (`types.py`: `GenerateFn`,
+  `Completion`). Renderers are shared with SFT and live in core
+  `torchtitan/components/renderer.py`.
+- `routing/` contains request routing across and within generators.
+- `actors/` contains actor-framework adapters; `actors/monarch/` holds the
+  Monarch actor wrappers. Actor wrappers should contain endpoint adaptation
+  rather than domain behavior.
+- `observability/` contains the RL metrics library.
 - `examples/` contains datasets, environments, rewards, integrations, and
   complete configuration recipes. Examples should configure reusable
   components directly; they should define subclasses only when behavior is
   actually customized.
 
 Dependencies flow from domain components to standalone services, then to
-distributed adapters and the controller. Rollout domain components must not
+actor adapters and the controller. Rollout domain components must not
 depend on Monarch or TorchStore, standalone services must not depend on
 Monarch, and core TorchTitan must not acquire RL-only optional dependencies.
 
@@ -251,7 +256,7 @@ TitanRL exposes four complementary views of a run:
 - **System timelines.** The structured logger emits per-rank JSONL events. Its Gantt generator turns trace spans into a cross-actor timeline for finding idle time, overlap, and bottlenecks. [Read the structured logger guide](../observability/structured_logger/README.md).
 - **Training curves.** Typed metrics from the rollout, controller, trainer, and loss are reduced once per step and sent to the console. [Read the RL metrics guide](./observability/metrics/README.md).
 - **Inference engine health.** vLLM engine metrics can be written to JSONL or exported to an OTLP collector. [Read the vLLM engine metrics guide](./observability/metrics/README.md#vllm-engine-metrics).
-- **Rollout inspection.** The rollout logger (`RolloutSampleRecorder`) writes selected training and validation rollouts to `rollout_samples.jsonl`. [Inspect the rollout recorder](./observability/rollout_recorder.py).
+- **Rollout inspection.** The rollout logger (`RolloutSampleRecorder`) writes selected training and validation rollouts to `rollout_samples.jsonl`. [Inspect the rollout recorder](./rollout/recorder.py).
 
 Together these answer four different debugging questions: what the distributed system was doing, how the run was learning, how the inference engine was performing, and what the model actually produced.
 
@@ -267,7 +272,7 @@ memory snapshots. Configure it under `config.trainer.profiler` in the recipe.
 
 ### Actor endpoints use `@concurrent_endpoint`
 
-**Every endpoint on a Monarch actor, e.g. `TrainerActor`, `VLLMGeneratorActor`, and `RolloutWorkerActor`, is declared with `@concurrent_endpoint`, not `@endpoint`.** New endpoints follow the same rule. The standalone `Trainer` and `VLLMGenerator` classes contain no Monarch dependency; their actor subclasses are thin transport adapters under `distributed/monarch_actors/`.
+**Every endpoint on a Monarch actor, e.g. `TrainerActor`, `VLLMGeneratorActor`, and `RolloutWorkerActor`, is declared with `@concurrent_endpoint`, not `@endpoint`.** New endpoints follow the same rule. The standalone `Trainer` and `VLLMGenerator` classes contain no Monarch dependency; their actor subclasses are thin transport adapters under `actors/monarch/`.
 
 When messages are sent to an actor, the messages are put on this actor's internal queue first, and then dispatched to the corresponding endpoints sequentially. When a plain `@endpoint` is processing a message, it will block the actor from processing the next next message. `@concurrent_endpoint` on the other hand allows the actor to process messages concurrently. Under the hood, `@concurrent_endpoint` is a wrapper of `@endpoint`, but it runs each message in its own asyncio task, in order to avoid the blocking. The caveat is when an actor has both `@endpoint` and `@concurrent_endpoint` endpoints, `@endpoint` will block all the other endpoints, including `@concurrent_endpoint`. This could lead to surprising behaviors. More details can be found in [Monarch's documentation](https://meta-pytorch.org/monarch/stable/actors.html#concurrent-endpoints).
 

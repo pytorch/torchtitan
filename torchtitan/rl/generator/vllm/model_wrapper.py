@@ -24,6 +24,12 @@ import torch.distributed as dist
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torch.distributed.tensor import DTensor, Replicate
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
+from vllm.utils import torch_utils as _torch_utils
 
 # Registers the "loss" local-compile region. The generator shares the trainer's
 # model config, whose local_compile_regions may name it, but never builds a loss.
@@ -39,13 +45,7 @@ from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_reduce
-from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
-from vllm.utils import torch_utils as _torch_utils
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
 
 logger = init_logger(__name__)
@@ -57,7 +57,7 @@ def _replace_vllm_layer_configs(model_config):
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
     # models do not acquire its vLLM-specific dependencies.
-    from torchtitan.rl.model.attention import (
+    from torchtitan.rl.generator.vllm.attention import (
         get_attention_dimensions,
         VLLMAttentionWrapper,
     )
@@ -98,7 +98,7 @@ def _replace_vllm_layer_configs(model_config):
 
         delta_net_cfg = getattr(layer_cfg, "delta_net", None)
         if delta_net_cfg is not None:
-            from torchtitan.rl.model.gdn import VLLMInnerGatedDeltaNet
+            from torchtitan.rl.generator.vllm.gdn import VLLMInnerGatedDeltaNet
 
             vllm_inner_gdn_cfg = VLLMInnerGatedDeltaNet.Config(
                 layer_idx=layer_idx,
@@ -123,7 +123,7 @@ def _replace_vllm_layer_configs(model_config):
 
         kda_cfg = getattr(layer_cfg, "delta_attention", None)
         if kda_cfg is not None:
-            from torchtitan.rl.model.kda import VLLMInnerKDA
+            from torchtitan.rl.generator.vllm.kda import VLLMInnerKDA
 
             vllm_inner_kda_cfg = VLLMInnerKDA.Config(
                 num_heads=kda_cfg.num_heads,

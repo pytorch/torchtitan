@@ -6,7 +6,7 @@
 
 """Overlap the trainer->generator weight handoff with the next training step.
 
-See ``WEIGHT_SYNC.md`` for the end-to-end ordering and concurrency model.
+See ``MODEL_STATE_DICT_SYNC.md`` for the end-to-end ordering and concurrency model.
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ from typing import TYPE_CHECKING
 
 from torchtitan.observability import structured_logger as sl
 
-from torchtitan.rl.components.work_buffer import RolloutGroupWorkBuffer
+from torchtitan.rl.controller.work_buffer import RolloutGroupWorkBuffer
 from torchtitan.rl.observability import metrics as m
 
 if TYPE_CHECKING:
-    from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
-    from torchtitan.rl.trainer import Trainer
+    from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+    from torchtitan.rl.trainer.trainer import Trainer
 
 # dummy no-op for step 0, used in WeightSyncManager
 async def _noop() -> None:

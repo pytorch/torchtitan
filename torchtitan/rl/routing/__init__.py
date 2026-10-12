@@ -6,15 +6,15 @@
 
 """Routing utilities for RL generation."""
 
-from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
-from torchtitan.rl.distributed.routing.strategies import (
+from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
+from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
     RoundRobinRoutingStrategy,
     RoutingStrategy,
     StickySessionRoutingStrategy,
 )
-from torchtitan.rl.distributed.routing.types import RoutingCandidate, RoutingContext
+from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
 
 __all__ = [
     "InterGeneratorRouter",

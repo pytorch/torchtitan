@@ -25,7 +25,7 @@ Set ``hf_assets_path`` in ``my_rl_configs.py`` to the model checkpoint path.
 
 # Apply process env defaults (e.g. the CUDA allocator config) before anything
 # imports torch; spawned procs re-apply them in ``_preimport_torch``.
-from torchtitan.rl._runtime import apply_env_defaults
+from torchtitan.rl._env import apply_env_defaults
 
 apply_env_defaults()
 
@@ -48,8 +48,8 @@ from torchtitan.config import ConfigLoader
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.controller import Controller
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
 
 logger = logging.getLogger(__name__)

@@ -31,17 +31,14 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import torchtitan.rl.generator as generator_module
+import torchtitan.rl.generator.generator as generator_module
 from torchstore import RankRole
 from torchtitan.components.optim import AdamW
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
-from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrategy
-from torchtitan.rl.generator import (
+from torchtitan.rl.generator.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
     _RejectedRequests,
@@ -55,12 +52,15 @@ from torchtitan.rl.generator import (
     VLLMCudaGraphConfig,
     VLLMGenerator,
 )
-from torchtitan.rl.model.vllm_registry import register_to_vllm
-from torchtitan.rl.model.vllm_worker import (
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.vllm.registry import register_to_vllm
+from torchtitan.rl.generator.vllm.worker import (
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
+from torchtitan.rl.routing.strategies import LeastLoadedRoutingStrategy
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob

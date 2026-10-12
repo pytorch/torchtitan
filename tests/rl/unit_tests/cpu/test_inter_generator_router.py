@@ -8,13 +8,13 @@ import asyncio
 
 import pytest
 
-from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.distributed.routing.strategies import (
+from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
     RoundRobinRoutingStrategy,
     StickySessionRoutingStrategy,
 )
-from torchtitan.rl.distributed.routing.types import RoutingContext
+from torchtitan.rl.routing.types import RoutingContext
 
 
 class _Endpoint:

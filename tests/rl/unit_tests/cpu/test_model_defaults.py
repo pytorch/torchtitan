@@ -17,7 +17,7 @@ from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
 )
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.tools.utils import has_cuda_capability
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 

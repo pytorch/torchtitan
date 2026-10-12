@@ -20,10 +20,10 @@ from torchtitan.components.data.types import (
 from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
-from torchtitan.rl.components.batcher import TrainingMicrobatch
-from torchtitan.rl.components.checkpointer import MirroredState
-from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.actors.monarch.trainer import TrainerActor
+from torchtitan.rl.trainer.batcher import TrainingMicrobatch
+from torchtitan.rl.trainer.controller_state import MirroredState
+from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
@@ -65,7 +65,9 @@ def test_pipeline_parallelism_is_rejected_until_weight_sync_supports_it() -> Non
 def test_initialize_torchstore_client_uses_publisher_role() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
-        with patch("torchtitan.rl.trainer.ts.client", new_callable=AsyncMock) as client:
+        with patch(
+            "torchtitan.rl.trainer.trainer.ts.client", new_callable=AsyncMock
+        ) as client:
             await trainer.initialize_torchstore_client()
 
         client.assert_awaited_once_with(role=RankRole.PUBLISHER)
@@ -91,7 +93,7 @@ def test_push_model_state_dict_reuses_final_dtype_cpu_staging_buffers() -> None:
             return empty_like(*args, **kwargs)
 
         with patch(
-            "torchtitan.rl.trainer.torch.empty_like",
+            "torchtitan.rl.trainer.trainer.torch.empty_like",
             side_effect=allocate_without_pinning,
         ):
             trainer._staging_state_dict = trainer._setup_staging_model_state_dict()
@@ -106,7 +108,7 @@ def test_push_model_state_dict_reuses_final_dtype_cpu_staging_buffers() -> None:
         assert pin_memory_requests == [True, True]
 
         with patch(
-            "torchtitan.rl.trainer.ts.put_state_dict", new_callable=AsyncMock
+            "torchtitan.rl.trainer.trainer.ts.put_state_dict", new_callable=AsyncMock
         ) as put_state_dict:
             await trainer.push_model_state_dict()
             trainer.model.weight.data.fill_(2.0)
@@ -153,7 +155,7 @@ def test_push_model_state_dict_stages_on_dedicated_cuda_stream() -> None:
         staging_complete.synchronize.side_effect = synchronize
 
         with patch(
-            "torchtitan.rl.trainer.ts.put_state_dict",
+            "torchtitan.rl.trainer.trainer.ts.put_state_dict",
             new_callable=AsyncMock,
             side_effect=put_state_dict,
         ) as put:
@@ -191,7 +193,7 @@ def test_push_staging_copies_parameters_already_in_transfer_dtype() -> None:
         return empty_like(*args, **kwargs)
 
     with patch(
-        "torchtitan.rl.trainer.torch.empty_like",
+        "torchtitan.rl.trainer.trainer.torch.empty_like",
         side_effect=allocate_without_pinning,
     ):
         staging = trainer._setup_staging_model_state_dict()
@@ -224,7 +226,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization(
     )
 
     with patch(
-        "torchtitan.rl.trainer.validate_model_training_config",
+        "torchtitan.rl.trainer.trainer.validate_model_training_config",
         side_effect=ValidationReachedError,
     ) as validate:
         with pytest.raises(ValidationReachedError):
@@ -445,13 +447,13 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         trainer._staging_device_module.current_stream.return_value = compute_stream
 
         with (
-            patch("torchtitan.rl.trainer.time.perf_counter", return_value=2.0),
+            patch("torchtitan.rl.trainer.trainer.time.perf_counter", return_value=2.0),
             patch(
-                "torchtitan.rl.trainer.collect_aux_loss_metrics",
+                "torchtitan.rl.trainer.trainer.collect_aux_loss_metrics",
                 return_value={"aux_loss/mean": 0.5},
             ),
             patch(
-                "torchtitan.rl.trainer.compute_training_performance_metrics",
+                "torchtitan.rl.trainer.trainer.compute_training_performance_metrics",
                 return_value={
                     "tokens_per_second": 10.0,
                     "tflops": 2.0,

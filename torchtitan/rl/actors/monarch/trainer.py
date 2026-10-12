@@ -13,9 +13,9 @@ from typing import Any
 import torch
 from monarch.actor import Actor, concurrent_endpoint
 
-from torchtitan.rl.components.batcher import TrainingMicrobatch
+from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 
-from torchtitan.rl.trainer import OptimizerStepOutput, Trainer
+from torchtitan.rl.trainer.trainer import OptimizerStepOutput, Trainer
 
 
 class _TrainerActorEndpoints:

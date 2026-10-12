@@ -7,6 +7,18 @@
 from dataclasses import dataclass
 
 import torch
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import get_current_vllm_config
+from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    is_conv_state_dim_first,
+    MambaStateCopyFuncCalculator,
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
+from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
@@ -22,25 +34,13 @@ from torchtitan.models.common.attn_gym import (
     recurrent_kda_decode,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.rl.model.linear_attention import (
+from torchtitan.rl.generator.vllm.linear_attention import (
     configure_hybrid_state,
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionBackend,
     TorchTitanLinearAttentionMetadata,
     unique_state_shape,
 )
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import get_current_vllm_config
-from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba_utils import (
-    is_conv_state_dim_first,
-    MambaStateCopyFuncCalculator,
-    MambaStateDtypeCalculator,
-    MambaStateShapeCalculator,
-)
-from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 # Shape suffixes:
 # T = packed tokens, C = projection channels, H = attention heads,

@@ -27,9 +27,9 @@ from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
-from torchtitan.rl.components.batcher import TrainingMicrobatch
-from torchtitan.rl.components.checkpointer import CONTROLLER_STATE_KEY, MirroredState
-from torchtitan.rl.observability.controller import combine_microbatch_metrics
+from torchtitan.rl.controller.metrics import combine_microbatch_metrics
+from torchtitan.rl.trainer.batcher import TrainingMicrobatch
+from torchtitan.rl.trainer.controller_state import CONTROLLER_STATE_KEY, MirroredState
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
 

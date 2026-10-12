@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
-from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
 from torchtitan.rl.rollout.types import RolloutTurnID, split_prompt
+
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 _GROUP_ID = "step=1/group=0"
 

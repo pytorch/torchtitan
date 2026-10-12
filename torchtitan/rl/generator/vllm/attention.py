@@ -17,13 +17,6 @@ from torch.nn.attention import (
     current_flash_attention_impl,
 )
 from torch.nn.attention.varlen import AuxRequest
-from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.base.module import Module
-from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common.attention import InnerAttention
-from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.observability.logging import warn_once
-from torchtitan.tools.utils import get_cuda_flash_attention_impl
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType
@@ -38,6 +31,14 @@ from vllm.v1.attention.backends.flash_attn_diffkv import (
     FlashAttentionDiffKVImpl,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
+
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.base.module import Module
+from torchtitan.models.base.sharding import ShardingConfig
+from torchtitan.models.common.attention import InnerAttention
+from torchtitan.models.common.decoder_sharding import dense_param_placement
+from torchtitan.observability.logging import warn_once
+from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
 logger = logging.getLogger(__name__)
 

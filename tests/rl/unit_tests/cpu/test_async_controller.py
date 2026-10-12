@@ -16,25 +16,25 @@ from unittest.mock import AsyncMock, patch
 import numpy as np
 import pytest
 import torch
-
-from torchtitan.rl.components.batcher import Batcher
-from torchtitan.rl.components.training_sample_builder import (
-    TrainingSample,
-    TrainingSampleGroup,
-)
-from torchtitan.rl.components.work_buffer import (
-    RolloutGroupWork,
-    RolloutGroupWorkBuffer,
-)
-from torchtitan.rl.controller import Controller
-from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.observability.controller import (
+from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     MetricsTimer,
 )
+from torchtitan.rl.controller.work_buffer import (
+    RolloutGroupWork,
+    RolloutGroupWorkBuffer,
+)
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.types import RolloutTurnID
+
+from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.training_sample_builder import (
+    TrainingSample,
+    TrainingSampleGroup,
+)
 
 
 def test_controller_config_maybe_log(tmp_path, caplog) -> None:
@@ -46,7 +46,7 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     config.trainer.debug.print_config = True
     config.trainer.debug.save_config_file = "config.json"
 
-    with caplog.at_level(logging.INFO, logger="torchtitan.rl.controller"):
+    with caplog.at_level(logging.INFO, logger="torchtitan.rl.controller.controller"):
         config.maybe_log()
 
     assert "Running with configs:" in caplog.text
@@ -829,7 +829,7 @@ def _run_with_generator_watcher(watcher) -> None:
             _batcher_loop=_block_forever,
             _trainer_loop=_block_forever,
         ),
-        patch("torchtitan.rl.controller.WeightSyncManager"),
+        patch("torchtitan.rl.controller.controller.WeightSyncManager"),
     ):
         asyncio.run(asyncio.wait_for(controller.run(), timeout=10))
 

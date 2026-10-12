@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from monarch.actor import Actor, Channel, concurrent_endpoint, context, current_rank
 
-from torchtitan.rl.generator import SamplingConfig, VLLMGenerator
+from torchtitan.rl.generator.generator import SamplingConfig, VLLMGenerator
 from torchtitan.rl.rollout.types import Completion
 
 

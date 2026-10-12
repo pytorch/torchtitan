@@ -25,15 +25,9 @@ from typing import Any
 
 import pytest
 
-import torchtitan.rl.generator as generator_module
-from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
-from torchtitan.rl.distributed.routing.strategies import (
-    LeastLoadedRoutingStrategy,
-    RoutingStrategy,
-    StickySessionRoutingStrategy,
-)
+import torchtitan.rl.generator.generator as generator_module
 
-from torchtitan.rl.generator import (
+from torchtitan.rl.generator.generator import (
     _RejectedRequests,
     CloseMessage,
     EngineLoopMessage,
@@ -46,6 +40,12 @@ from torchtitan.rl.generator import (
     RequestDispatcher,
     SamplingConfig,
     VLLMGenerator,
+)
+from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
+from torchtitan.rl.routing.strategies import (
+    LeastLoadedRoutingStrategy,
+    RoutingStrategy,
+    StickySessionRoutingStrategy,
 )
 from vllm.logprobs import FlatLogprobs, Logprob
 

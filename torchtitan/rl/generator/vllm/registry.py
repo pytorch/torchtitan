@@ -12,7 +12,7 @@ helper they share. All per-engine torchtitan config (``model_config``,
 ``hf_config`` only carries HF-shaped fields.
 
 Usage:
-    from torchtitan.rl.model.vllm_registry import (
+    from torchtitan.rl.generator.vllm.registry import (
         register_to_vllm,
         TORCHTITAN_CONFIG_FORMAT,
     )
@@ -32,7 +32,7 @@ from typing import Any
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
 # Model-agnostic name used for vLLM model registration.
 VLLM_MODEL_NAME = "TorchTitanCausalLM"
@@ -42,7 +42,7 @@ VLLM_MODEL_NAME = "TorchTitanCausalLM"
 TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 
 # Selects the experiment-owned runner that pads tokens for dense and expert SP.
-TORCHTITAN_WORKER_CLS = "torchtitan.rl.model.vllm_worker.TorchTitanGPUWorker"
+TORCHTITAN_WORKER_CLS = "torchtitan.rl.generator.vllm.worker.TorchTitanGPUWorker"
 
 
 def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
@@ -73,7 +73,7 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     ffn = cfg.first_feed_forward
     moe = cfg.first_moe
 
-    from torchtitan.rl.model.attention import get_attention_dimensions
+    from torchtitan.rl.generator.vllm.attention import get_attention_dimensions
 
     n_heads, n_kv_heads, head_dim, _ = get_attention_dimensions(attn, cfg.dim)
     rope = getattr(attn, "rope", None)
@@ -175,7 +175,6 @@ def register_to_vllm(
         # be contiguous in vLLM's convolution state cache.
         os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
 
-    from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger
     from vllm.model_executor.models.registry import ModelRegistry
 
@@ -186,6 +185,8 @@ def register_to_vllm(
     # disappears with it.
     from vllm.transformers_utils.config import PretrainedConfig, register_config_parser
     from vllm.transformers_utils.config_parser_base import ConfigParserBase
+
+    from torchtitan.rl.generator.vllm.model_wrapper import VLLMModelWrapper
 
     logger = init_logger(__name__)
 
@@ -206,11 +207,11 @@ def register_to_vllm(
     # vLLM needs a model-level state contract to allocate shared attention/GDN
     # cache pages before individual layers are constructed.
     if has_gdn:
-        from torchtitan.rl.model.gdn import maybe_configure_gdn_hybrid_model
+        from torchtitan.rl.generator.vllm.gdn import maybe_configure_gdn_hybrid_model
 
         maybe_configure_gdn_hybrid_model(VLLMModelFromSpec, model_config)
     if has_kda:
-        from torchtitan.rl.model.kda import maybe_configure_kda_hybrid_model
+        from torchtitan.rl.generator.vllm.kda import maybe_configure_kda_hybrid_model
 
         maybe_configure_kda_hybrid_model(VLLMModelFromSpec, model_config)
     ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)

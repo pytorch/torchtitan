@@ -10,8 +10,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.model import vllm_wrapper
-from torchtitan.rl.model.vllm_wrapper import (
+from torchtitan.rl.generator.vllm import model_wrapper
+from torchtitan.rl.generator.vllm.model_wrapper import (
     _replace_vllm_layer_configs,
     VLLMModelWrapper,
 )
@@ -102,7 +102,7 @@ def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
         wrapper = _Wrapper(model)
         max_allocated_groups = 0
 
-        restore_sharded_params = vllm_wrapper._restore_sharded_params
+        restore_sharded_params = model_wrapper._restore_sharded_params
 
         def checked_restore_sharded_params(module) -> None:
             nonlocal max_allocated_groups
@@ -114,11 +114,11 @@ def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
             )
 
         monkeypatch.setattr(
-            vllm_wrapper, "_restore_sharded_params", checked_restore_sharded_params
+            model_wrapper, "_restore_sharded_params", checked_restore_sharded_params
         )
         for module in model.modules():  # as after the initial load
             if isinstance(module, FSDPModule):
-                vllm_wrapper._unshard_and_free_sharded_params(module)
+                model_wrapper._unshard_and_free_sharded_params(module)
         wrapper.load_state_dict(new_state_dict)
 
         assert max_allocated_groups <= 2

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from torchtitan.rl.losses.dapo import DAPOLoss
+from torchtitan.rl.trainer.losses.dapo import DAPOLoss
 
 
 class GRPOLoss(DAPOLoss):

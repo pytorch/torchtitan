@@ -22,7 +22,7 @@ import verifiers.v1 as vf
 
 from torchtitan.config import ConfigLoader
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
-from torchtitan.rl.controller import Controller
+from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.examples.verifiers import env_server
 from torchtitan.rl.examples.verifiers.terminal_bench import taskset
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (

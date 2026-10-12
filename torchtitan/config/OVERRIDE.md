@@ -497,7 +497,7 @@ RoPE is an ordinary component override.
 | `torchtitan/config/__init__.py` | Re-exports the override API. |
 | `torchtitan/models/base/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field and applies recipe-provided overrides before builds. |
-| `torchtitan/rl/controller.py` | Holds the RL `override` field and applies it to the trainer and generator models before spawning actors. |
+| `torchtitan/rl/controller/controller.py` | Holds the RL `override` field and applies it to the trainer and generator models before spawning actors. |
 | `torchtitan_recipes/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
 | `tests/unit_tests/cpu/config/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
 

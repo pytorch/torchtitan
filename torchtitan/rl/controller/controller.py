@@ -108,31 +108,31 @@ from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.observability import structured_logger as sl
-from torchtitan.rl.components.batcher import Batcher, TrainerStepBatch
-from torchtitan.rl.components.checkpointer import DATALOADER_STATE_KEY
-from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
-from torchtitan.rl.components.work_buffer import (
-    RolloutGroupWork,
-    RolloutGroupWorkBuffer,
-)
-from torchtitan.rl.distributed.monarch_actors.generator import VLLMGeneratorActor
-from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
-from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.distributed.torch_elastic import setup_torch_elastic_env
-from torchtitan.rl.distributed.weight_sync import WeightSyncManager
-from torchtitan.rl.generator import SamplingConfig, VLLMGenerator
-from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.observability.controller import (
+from torchtitan.rl.actors.monarch.generator import VLLMGeneratorActor
+from torchtitan.rl.actors.monarch.torch_elastic import setup_torch_elastic_env
+from torchtitan.rl.actors.monarch.trainer import TrainerActor
+from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     compute_rollout_metrics,
     MetricsTimer,
 )
-from torchtitan.rl.observability.rollout_recorder import RolloutSampleRecorder
+from torchtitan.rl.controller.model_state_dict_sync import WeightSyncManager
+from torchtitan.rl.controller.work_buffer import (
+    RolloutGroupWork,
+    RolloutGroupWorkBuffer,
+)
+from torchtitan.rl.generator.generator import SamplingConfig, VLLMGenerator
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
+from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
+from torchtitan.rl.trainer.controller_state import DATALOADER_STATE_KEY
+from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 from torchtitan.tools.garbage_collector import GarbageCollector
 
 logger = logging.getLogger(__name__)
@@ -170,7 +170,7 @@ class AsyncLoopConfig(Configurable.Config):
     target: when rollout generation is the bottleneck, the buffer may not fill
     and observed offpolicy steps will be lower. A finite `windowed_fifo_batches` bounds
     how far a slow group may exceed this target; None leaves it unbounded. See
-    ``torchtitan/rl/components/WINDOWED_FIFO.md`` for details."""
+    ``torchtitan/rl/controller/WINDOWED_FIFO.md`` for details."""
 
     windowed_fifo_batches: int | None = None
     """FIFO look-ahead window in train batches.
@@ -182,7 +182,7 @@ class AsyncLoopConfig(Configurable.Config):
     Set to `n >= 1` to limit consumption to `n * P` group ids from the oldest
     group in the buffer. Maximum policy age is bounded by
     `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
-    ``torchtitan/rl/components/WINDOWED_FIFO.md``."""
+    ``torchtitan/rl/controller/WINDOWED_FIFO.md``."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
