@@ -133,6 +133,7 @@ from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import Completion, GenerateFn
 from torchtitan.rl.trainer import Trainer
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 logger = logging.getLogger(__name__)
 
@@ -788,6 +789,12 @@ class Controller(Configurable):
           -> gather(..., return_exceptions=True)
         Shutdown (crash):    any loop raises -> appears in `done` -> run() re-raises -> same finally.
         """
+        # Setup objects (modules, configs, dataset, actor handles) live until exit. Freeze them
+        # so full GCs skip them: ~1M objects, ~0.5 s per full GC (Python 3.12, x86).
+        GarbageCollector.freeze(
+            "Full GC before freezing the controller's setup objects"
+        )
+
         async_loop = self.config.async_loop
         num_training_steps = async_loop.num_training_steps
         logger.info(
