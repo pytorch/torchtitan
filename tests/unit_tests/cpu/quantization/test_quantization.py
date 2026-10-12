@@ -145,6 +145,60 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
         converter.convert(_router_config_for_quantization(128))
 
 
+@pytest.mark.parametrize("backend", ["cuda", "cutedsl"])
+def test_mxfp8_converter_forwards_activation_backend(monkeypatch, backend):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    import torchtitan.quantization.mxfp8.activation as activation
+
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    calls = []
+    monkeypatch.setattr(
+        activation, "_require_cutedsl_activation_quantizers", lambda: calls.append(True)
+    )
+    converter = MXFP8LinearConverter.Config(
+        activation_quantization_backend=backend
+    ).build()
+    converted = converter.convert(Linear.Config(in_features=128, out_features=128))
+    assert converted.activation_quantization_backend == backend
+    assert calls == ([True] if backend == "cutedsl" else [])
+
+
+def test_mxfp8_rejects_unknown_activation_backend():
+    with pytest.raises(ValueError, match="activation_quantization_backend"):
+        MXFP8Linear.Config(
+            in_features=128, out_features=128, activation_quantization_backend="unknown"
+        )
+    with pytest.raises(ValueError, match="activation_quantization_backend"):
+        MXFP8LinearConverter.Config(activation_quantization_backend="unknown")
+
+
+def test_mxfp8_cutedsl_requires_provider_at_construction(monkeypatch):
+    from torchao.prototype.moe_training.kernels.mxfp8 import quant
+    from torchtitan.quantization.mxfp8.activation import (
+        _require_cutedsl_activation_quantizers,
+    )
+
+    monkeypatch.delattr(quant, "mxfp8_quantize_2d_1x32_32x1_cutedsl")
+    with pytest.raises(ImportError, match="fused dual-axis MXFP8 quantizers"):
+        _require_cutedsl_activation_quantizers()
+
+
+def test_mxfp8_cutedsl_rejects_provider_without_dense_api(monkeypatch):
+    """A required-offset provider cannot silently stand in for dense support."""
+    from torchao.prototype.moe_training.kernels.mxfp8 import quant
+    from torchtitan.quantization.mxfp8.activation import (
+        _require_cutedsl_activation_quantizers,
+    )
+
+    def old_api(x, offs, block_size=32, scaling_mode="rceil"):
+        raise AssertionError("Capability checks must not launch kernels")
+
+    monkeypatch.setattr(quant, "mxfp8_quantize_2d_1x32_32x1_cutedsl", old_api)
+    with pytest.raises(ImportError, match="dense None-offset"):
+        _require_cutedsl_activation_quantizers()
+
+
 @pytest.mark.parametrize(
     ("config_cls", "parallel_cls"),
     [

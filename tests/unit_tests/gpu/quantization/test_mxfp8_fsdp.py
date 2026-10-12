@@ -64,6 +64,7 @@ def _run_reshard_after_forward(
     rank: int,
     world_size: int,
     port: int,
+    activation_quantization_backend: str = "cuda",
 ) -> None:
     """Test RAF=true release and refill of FSDP-managed MXFP8 operands.
 
@@ -82,6 +83,8 @@ def _run_reshard_after_forward(
                 in_features=128,
                 out_features=128,
                 bias=False,
+                activation_quantization_backend=activation_quantization_backend,
+                inplace_wgrad_accum=False,
             )
             .build()
             .cuda()
@@ -102,7 +105,7 @@ def _run_reshard_after_forward(
         )
 
         input_MK = torch.randn(
-            64,
+            128,
             128,
             device="cuda",
             dtype=torch.bfloat16,
@@ -144,6 +147,7 @@ def _run_pp_cache_lifecycle(
     rank: int,
     world_size: int,
     port: int,
+    activation_quantization_backend: str = "cuda",
 ) -> None:
     """Test RAF=false cache reuse across pipeline-parallel microbatches.
 
@@ -172,6 +176,8 @@ def _run_pp_cache_lifecycle(
                 in_features=128,
                 out_features=128,
                 bias=False,
+                activation_quantization_backend=activation_quantization_backend,
+                inplace_wgrad_accum=False,
             )
             .build()
             .cuda()
@@ -192,7 +198,7 @@ def _run_pp_cache_lifecycle(
 
         inputs = [
             torch.randn(
-                64,
+                128,
                 128,
                 device="cuda",
                 dtype=torch.bfloat16,
@@ -275,6 +281,7 @@ def _run_cuda_graph_cache_lifecycle(
     rank: int,
     world_size: int,
     port: int,
+    activation_quantization_backend: str = "cuda",
 ) -> None:
     """Test that the RAF=false MXFP8 cache is safe for CUDA graph replay.
 
@@ -302,6 +309,8 @@ def _run_cuda_graph_cache_lifecycle(
                 in_features=128,
                 out_features=128,
                 bias=False,
+                activation_quantization_backend=activation_quantization_backend,
+                inplace_wgrad_accum=False,
             )
             .build()
             .cuda()
@@ -328,7 +337,7 @@ def _run_cuda_graph_cache_lifecycle(
             return output_MN
 
         input_MK = torch.randn(
-            64,
+            128,
             128,
             device="cuda",
             dtype=torch.bfloat16,
@@ -488,6 +497,19 @@ def test_mxfp8_fsdp_tensor_lifecycle(target):
         nprocs=2,
         join=True,
     )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        _run_reshard_after_forward,
+        _run_pp_cache_lifecycle,
+        _run_cuda_graph_cache_lifecycle,
+    ],
+    ids=["reshard-after-forward", "pp-cache", "cuda-graph-cache"],
+)
+def test_cutedsl_mxfp8_fsdp_tensor_lifecycle(target):
+    mp.spawn(target, args=(2, get_free_port(), "cutedsl"), nprocs=2, join=True)
 
 
 def _build_fully_sharded_mxfp8_linear(mesh, reduce_dtype: torch.dtype) -> MXFP8Linear:
