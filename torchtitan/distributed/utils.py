@@ -556,8 +556,7 @@ def clip_grad_norm_(
             params_by_mesh[mesh].append(p)
 
     norms = []
-    # An empty list yields tensor(0.), e.g. on a PP rank without gradients.
-    for params in params_by_mesh.values() or [[]]:
+    for params in params_by_mesh.values():
         norm = torch.nn.utils.get_total_norm(
             [p.grad for p in params if p.grad is not None],
             norm_type,
@@ -578,6 +577,9 @@ def clip_grad_norm_(
             # If only using PP, norm will be a local tensor.
             norm = norm.full_tensor()
         norms.append(norm)
+    if not norms:
+        # A PP rank without gradients still joins the PP all-reduce below.
+        norms.append(torch.zeros((), device=device_type))
 
     if len(norms) == 1:
         total_norm = norms[0]

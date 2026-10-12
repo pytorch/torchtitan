@@ -334,6 +334,19 @@ class TestLRScheduler(unittest.TestCase):
             )
             lr_scheduler.step()
 
+    def test_no_optimizer_schedules_nothing(self):
+        """A rank with nothing to train has no scheduler and no scheduler state."""
+        empty = MagicMock(spec=OptimizersContainer)
+        empty.__iter__.return_value = iter([])
+        empty.__len__.return_value = 0
+
+        schedulers = LRSchedulersContainer(empty, lambda step: 1.0)
+
+        self.assertEqual(schedulers.schedulers, [])
+        schedulers.step()
+        self.assertEqual(schedulers.state_dict(), {})
+        schedulers.load_state_dict({})
+
     def test_config_rejects_out_of_range_values(self):
         # Each of these used to build silently: a negative min_lr_factor drives
         # the LR below zero, and a negative decay_ratio or warmup_steps distorts
