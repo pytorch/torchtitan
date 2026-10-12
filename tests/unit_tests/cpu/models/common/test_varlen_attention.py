@@ -18,7 +18,6 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import (
-    BatchedVarlenInnerAttention,
     create_varlen_metadata_for_document,
     GQAttention,
     QKVLinear,
@@ -224,30 +223,6 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             logits_TV = model(tokens_T, positions_T, metadata)
 
         self.assertEqual(logits_TV.shape, (num_tokens, 2048))
-
-
-class TestBatchedVarlenInnerAttention(unittest.TestCase):
-    def test_varlen_boundaries_preserve_batch_layout(self):
-        config = BatchedVarlenInnerAttention.Config()
-        self.assertEqual(config.varlen_attention.window_size, (-1, -1))
-        attention = config.build()
-        q, k, v = [torch.randn(2, length, 4, 8) for length in (3, 8, 8)]
-        with patch.object(
-            attention.varlen_attention, "forward", return_value=q.flatten(0, 1)
-        ) as kernel:
-            actual = attention(q, k, v)
-
-        for packed, batched in zip(kernel.call_args.args, (q, k, v)):
-            torch.testing.assert_close(packed, batched.flatten(0, 1))
-        metadata = kernel.call_args.kwargs["attention_metadata"]
-        torch.testing.assert_close(
-            metadata.cu_seq_q, torch.tensor([0, 3, 6], dtype=torch.int32)
-        )
-        torch.testing.assert_close(
-            metadata.cu_seq_k, torch.tensor([0, 8, 16], dtype=torch.int32)
-        )
-        self.assertEqual((metadata.max_q, metadata.max_k), (3, 8))
-        torch.testing.assert_close(actual, q)
 
 
 if __name__ == "__main__":

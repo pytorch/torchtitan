@@ -17,7 +17,7 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 
-from torchtitan.models.common.attention import BatchedVarlenInnerAttention
+from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 
@@ -108,8 +108,9 @@ def _make_double_block_config(
                     param_init=_NORM_INIT,
                 ),
             ),
-            inner_attention=BatchedVarlenInnerAttention.Config(
-                sharding_config=flux_inner_attention_sharding_config()
+            inner_attention=VarlenInnerAttention.Config(
+                window_size=(-1, -1),
+                sharding_config=flux_inner_attention_sharding_config(),
             ),
         ),
         txt_attn=SelfAttention.Config(
@@ -137,8 +138,9 @@ def _make_double_block_config(
                     param_init=_NORM_INIT,
                 ),
             ),
-            inner_attention=BatchedVarlenInnerAttention.Config(
-                sharding_config=flux_inner_attention_sharding_config()
+            inner_attention=VarlenInnerAttention.Config(
+                window_size=(-1, -1),
+                sharding_config=flux_inner_attention_sharding_config(),
             ),
         ),
         img_mlp_in=Linear.Config(
@@ -165,8 +167,8 @@ def _make_double_block_config(
             bias=True,
             param_init=_XAVIER_LINEAR,
         ),
-        inner_attention=BatchedVarlenInnerAttention.Config(
-            sharding_config=flux_inner_attention_sharding_config()
+        inner_attention=VarlenInnerAttention.Config(
+            window_size=(-1, -1), sharding_config=flux_inner_attention_sharding_config()
         ),
     )
 
@@ -214,8 +216,8 @@ def _make_single_block_config(
                 param_init=_NORM_INIT,
             ),
         ),
-        inner_attention=BatchedVarlenInnerAttention.Config(
-            sharding_config=flux_inner_attention_sharding_config()
+        inner_attention=VarlenInnerAttention.Config(
+            window_size=(-1, -1), sharding_config=flux_inner_attention_sharding_config()
         ),
     )
 

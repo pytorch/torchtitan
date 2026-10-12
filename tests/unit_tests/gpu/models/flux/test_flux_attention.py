@@ -18,8 +18,13 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.common.attention import BatchedVarlenInnerAttention
-from torchtitan.models.flux.sharding import flux_inner_attention_sharding_config
+from torchtitan.models.common.attention import VarlenInnerAttention
+from torchtitan.models.flux.layers import local_pack, local_unpack
+from torchtitan.models.flux.sharding import (
+    create_flux_attention_metadata,
+    flux_inner_attention_sharding_config,
+    gather_flux_kv,
+)
 
 
 def _reference_attention(q, k, v):
@@ -48,8 +53,8 @@ class TestFluxVarlenContextParallel(DTensorTestBase):
             world_size=2,
             enable_sequence_parallel=False,
         )
-        config = BatchedVarlenInnerAttention.Config(
-            sharding_config=flux_inner_attention_sharding_config()
+        config = VarlenInnerAttention.Config(
+            window_size=(-1, -1), sharding_config=flux_inner_attention_sharding_config()
         )
         attention = config.build()
         with parallelism_context.activate_spmd():
@@ -71,7 +76,13 @@ class TestFluxVarlenContextParallel(DTensorTestBase):
         with parallelism_context.activate_spmd(), typecheck(local=False):
             for x in local_inputs:
                 spmd.assert_type(x, {"dp": spmd.S(0), "cp": spmd.S(1)})
-            actual = attention(*local_inputs)
+            q_THK, k_THK, v_THV = (
+                local_pack(x.flatten(2)).unflatten(1, (4, 64)) for x in local_inputs
+            )
+            metadata = create_flux_attention_metadata(2, 16, device=q_THK.device)
+            k_THK, v_THV = gather_flux_kv(k_THK, v_THV, batch_size=2)
+            actual_THV = attention(q_THK, k_THK, v_THV, attention_metadata=metadata)
+            actual = local_unpack(actual_THV.flatten(1), 2).unflatten(2, (4, 64))
             actual[0].float().square().sum().backward()
 
         self.assertEqual(

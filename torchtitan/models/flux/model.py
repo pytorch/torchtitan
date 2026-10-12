@@ -4,10 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Shape suffixes: B = batch, T = packed tokens, D = feature dimension.
+
 from dataclasses import dataclass, field
 from typing import Any, cast, Self
 
-import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn, Tensor
@@ -30,13 +31,17 @@ from torchtitan.models.flux.layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
+    local_concat_text_image,
+    local_pack,
     local_split_text_image,
+    local_unpack,
     MLPEmbedder,
     SingleStreamBlock,
     timestep_embedding,
 )
 from torchtitan.models.flux.sharding import (
     annotate_flux_forward_inputs,
+    create_flux_attention_metadata,
     flux_input_sharding,
 )
 from torchtitan.models.flux.utils import (
@@ -381,35 +386,37 @@ class FluxModel(BaseModel):
             timesteps=timesteps,
         )
 
-        @spmd.local_map(
-            in_types=(
-                spmd.PartitionSpec("dp", "cp", None),
-                spmd.PartitionSpec("dp", "cp", None),
-            ),
-            out_types=spmd.PartitionSpec("dp", "cp", None),
-        )
-        def _local_concat_text_image(text: Tensor, image: Tensor) -> Tensor:
-            return torch.cat((text, image), dim=1)
-
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
+        if img.shape[0] != txt.shape[0]:
+            raise ValueError(
+                "Input img and txt tensors must have matching batch sizes."
+            )
 
-        # running on sequences img
-        img = self.img_in(img)
-        vec = self.time_in(timestep_embedding(timesteps, 256))
-        vec = vec + self.vector_in(y)
-        txt = self.txt_in(txt)
-
-        ids = _local_concat_text_image(txt_ids, img_ids)
-        pe = self.pe_embedder(ids)
+        batch_size, text_seq_len = txt.shape[:2]
+        attention_metadata = create_flux_attention_metadata(
+            batch_size, img.shape[1] + text_seq_len, device=img.device
+        )
+        img_TD = self.img_in(local_pack(img))
+        txt_TD = self.txt_in(local_pack(txt))
+        vec_BD = self.time_in(timestep_embedding(timesteps, 256))
+        vec_BD = vec_BD + self.vector_in(y)
+        ids_TD = local_concat_text_image(
+            local_pack(txt_ids), local_pack(img_ids), batch_size
+        )
+        pe = self.pe_embedder(ids_TD)
 
         for block in self.double_blocks:
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+            img_TD, txt_TD = block(
+                img_TD, txt_TD, vec_BD, pe, attention_metadata=attention_metadata
+            )
 
-        img = _local_concat_text_image(txt, img)
+        combined_TD = local_concat_text_image(txt_TD, img_TD, batch_size)
         for block in self.single_blocks:
-            img = block(img, vec=vec, pe=pe)
-        _, img = local_split_text_image(img, txt.shape[1])
+            combined_TD = block(
+                combined_TD, vec_BD, pe, attention_metadata=attention_metadata
+            )
+        _, img_TD = local_split_text_image(combined_TD, text_seq_len, batch_size)
 
-        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
-        return img
+        img_TD = self.final_layer(img_TD, vec_BD)
+        return local_unpack(img_TD, batch_size)
