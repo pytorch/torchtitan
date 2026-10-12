@@ -506,11 +506,9 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     )
 
 
-def llama3_debugmodel_ulysses_cp2_varlen(
-    *, parallelism: ParallelismConfig | None = None
-) -> Trainer.Config:
+def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
     """Llama 3 with varlen Ulysses CP."""
-    config = llama3_debugmodel(parallelism=parallelism)
+    config = llama3_debugmodel()
     # Packed varlen metadata lacks SPMD annotations.
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.context_parallel_degree = 2
@@ -531,17 +529,16 @@ def llama3_debugmodel_ulysses_cp2_varlen(
 
 
 def llama3_debugmodel_fsdp2_ulysses_cp2_varlen() -> Trainer.Config:
-    return llama3_debugmodel_ulysses_cp2_varlen(
-        parallelism=ParallelismConfig(data_parallel_shard_degree=2)
-    )
+    config = llama3_debugmodel_ulysses_cp2_varlen()
+    config.parallelism.data_parallel_shard_degree = 2
+    return config
 
 
 def llama3_debugmodel_fsdp2_tp2_ulysses_cp2_varlen() -> Trainer.Config:
-    return llama3_debugmodel_ulysses_cp2_varlen(
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=2, tensor_parallel_degree=2
-        )
-    )
+    config = llama3_debugmodel_ulysses_cp2_varlen()
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    return config
 
 
 def llama3_debugmodel_hsdp2x2_tp2() -> Trainer.Config:

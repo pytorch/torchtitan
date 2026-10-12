@@ -24,6 +24,8 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 def _llama3_torchft_config(*, replica_id: int) -> FaultTolerantTrainer.Config:
     parallelism = ParallelismConfig(data_parallel_shard_degree=4)
@@ -58,7 +60,7 @@ def _llama3_torchft_config(*, replica_id: int) -> FaultTolerantTrainer.Config:
             steps=100,
         ),
         dataloader=GrainDataLoader.Config(
-            max_num_documents=64,
+            max_num_documents=c4_document_capacity(8 * model_config.max_context_length),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         checkpointer=None,

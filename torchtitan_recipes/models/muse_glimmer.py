@@ -150,8 +150,6 @@ def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
     config.model = build_model_config(
         "30B", attn_backend="varlen", parallelism=config.parallelism
     )
-    assert isinstance(config.dataloader, GrainDataLoader.Config)
-    config.dataloader.max_num_documents = 64
     return apply_transforms(
         config,
         [
