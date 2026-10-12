@@ -45,7 +45,13 @@ _DispatcherConfig = MoriTokenDispatcher.Config | AllToAllTokenDispatcher.Config
 
 
 class _MoEBlock(Module):
-    def __init__(self, num_experts: int, dispatcher: _DispatcherConfig):
+    def __init__(
+        self,
+        num_experts: int,
+        dispatcher: _DispatcherConfig,
+        *,
+        route_to_first_rank: bool = False,
+    ):
         super().__init__()
         # RoutedExperts.forward runs after EP has selected this rank's local
         # expert-weight shard. This test bypasses parallelization, so construct
@@ -70,6 +76,8 @@ class _MoEBlock(Module):
         self.gate = torch.nn.Linear(_MODEL_DIM, num_experts, bias=False)
         self.routed_experts = routed_experts
         self.num_experts = num_experts
+        self.num_local_experts = num_local_experts
+        self.route_to_first_rank = route_to_first_rank
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         # Each token picks _TOP_K distinct experts spread over the EP ranks, so
@@ -78,6 +86,10 @@ class _MoEBlock(Module):
         token_ids_T1 = torch.arange(num_tokens, device=x_TD.device).unsqueeze(-1)
         offsets_1K = 3 * torch.arange(_TOP_K, device=x_TD.device).unsqueeze(0)
         expert_ids_TK = (token_ids_T1 + offsets_1K) % self.num_experts
+        if self.route_to_first_rank:
+            # Every token picks experts on EP rank 0, so the other ranks
+            # receive no tokens.
+            expert_ids_TK = expert_ids_TK % self.num_local_experts
         # Scores depend on the gate, so the router gets a gradient too.
         scores_TK = torch.sigmoid(self.gate(x_TD)).gather(1, expert_ids_TK)
         num_tokens_per_expert_E = torch.bincount(
@@ -124,7 +136,12 @@ def _assert_close_bf16(actual: torch.Tensor, expected: torch.Tensor) -> None:
     near zero; the relative norm error stays at bf16 resolution (~1e-3), while
     a routing error (a wrong or missing token) makes it O(1).
     """
-    error = (actual.float() - expected.float()).norm() / expected.float().norm()
+    expected_norm = expected.float().norm()
+    if expected_norm == 0:
+        # E.g. the expert weights of a rank that received no tokens.
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        return
+    error = (actual.float() - expected.float()).norm() / expected_norm
     assert error < 1e-2, f"relative error {error.item():.3e}"
 
 
@@ -141,11 +158,14 @@ class TestMoriTokenDispatcher(DTensorTestBase):
         set_spmd_meshes(dense_mesh=mesh, sparse_mesh=mesh, dense_sp_enabled=False)
         return mesh
 
-    def _build(self, dispatcher, num_experts: int) -> Module:
+    def _build(
+        self, dispatcher, num_experts: int, *, route_to_first_rank: bool = False
+    ) -> Module:
         torch.manual_seed(42)
-        model = _Model(_MoEBlock(num_experts, dispatcher)).to(
-            self.device_type, torch.bfloat16
+        block = _MoEBlock(
+            num_experts, dispatcher, route_to_first_rank=route_to_first_rank
         )
+        model = _Model(block).to(self.device_type, torch.bfloat16)
         with torch.no_grad():
             for parameter in model.parameters():
                 parameter.normal_(std=0.05)
@@ -159,6 +179,15 @@ class TestMoriTokenDispatcher(DTensorTestBase):
 
     @with_comms
     def test_matches_all_to_all(self):
+        self._check_matches_all_to_all(route_to_first_rank=False)
+
+    @with_comms
+    def test_ranks_without_received_tokens(self):
+        # Ranks that receive no tokens still take part in dispatch and combine,
+        # and their source tokens still get routing-score gradients.
+        self._check_matches_all_to_all(route_to_first_rank=True)
+
+    def _check_matches_all_to_all(self, *, route_to_first_rank: bool) -> None:
         # MORI sends each token once per destination rank and sums the per-rank
         # partials on the source; the all-to-all sends it once per expert. Both
         # compute the same MoE output and gradients, up to bf16 summation order.
@@ -175,6 +204,7 @@ class TestMoriTokenDispatcher(DTensorTestBase):
                         num_experts=num_experts, top_k=_TOP_K
                     ),
                     num_experts,
+                    route_to_first_rank=route_to_first_rank,
                 )
                 mori_model = self._build(
                     MoriTokenDispatcher.Config(
@@ -185,6 +215,7 @@ class TestMoriTokenDispatcher(DTensorTestBase):
                         pad_multiple=pad_multiple,
                     ),
                     num_experts,
+                    route_to_first_rank=route_to_first_rank,
                 )
                 mori_model.layers["0"].routed_experts.token_dispatcher.init_buffer()
 

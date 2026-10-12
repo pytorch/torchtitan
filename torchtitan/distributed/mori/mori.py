@@ -197,6 +197,10 @@ def _dispatch_backward_op_impl(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # The last user of the handle.
     routing = _get_routing(handle_id, pop=True)
+    # MORI treats an empty weights tensor as no weights and then returns no
+    # weight gradients, so a rank that received no tokens passes one zero row.
+    if grad_recv_scores.shape[0] == 0:
+        grad_recv_scores = grad_recv_scores.new_zeros(1, grad_recv_scores.shape[1])
     grad_x, grad_scores = _get_op().combine(
         grad_recv_x.contiguous(),
         grad_recv_scores.contiguous(),
