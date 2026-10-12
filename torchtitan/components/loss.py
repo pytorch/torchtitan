@@ -7,7 +7,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias
+from typing import Any, cast, Literal, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -321,6 +321,23 @@ class BaseLoss(ABC, Configurable):
             loss = loss / global_loss_token_counts
         return loss, {}
 
+    def _compute_loss_with_lm_head(
+        self,
+        hidden_states: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
+        lm_head: nn.Module,
+        global_loss_token_counts: torch.Tensor | None,
+        **loss_inputs: Any,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Project one validation term and compute its existing objective."""
+        if not isinstance(hidden_states, torch.Tensor) or not isinstance(
+            labels, torch.Tensor
+        ):
+            raise ValueError("This loss requires one hidden-state/labels tensor pair")
+        return self(
+            lm_head(hidden_states), labels, global_loss_token_counts, **loss_inputs
+        )
+
 
 class CrossEntropyLoss(BaseLoss):
     """Cross-entropy loss with sum reduction for token-based normalization."""
@@ -553,8 +570,12 @@ class ChunkedLossWrapper(BaseLoss):
         loss_fn: BaseLoss.Config = field(default_factory=CrossEntropyLoss.Config)
         """Loss applied to each chunk's logits."""
 
+        validation_only: bool = False
+        """Keep training logits unchanged and project hidden states only in eval."""
+
     def __init__(self, config: Config):
         self.num_chunks = config.num_chunks
+        self.validation_only = config.validation_only
         self.loss_fn: BaseLoss = config.loss_fn.build()
         self.lm_head: nn.Module | None = None
 
@@ -590,6 +611,12 @@ class ChunkedLossWrapper(BaseLoss):
         num_chunks = self.num_chunks
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
+        if self.validation_only and lm_head.training:
+            inner_loss = cast(
+                Callable[..., tuple[torch.Tensor, dict[str, torch.Tensor]]],
+                self.loss_fn,
+            )
+            return inner_loss(pred, labels, global_loss_token_counts, **loss_inputs)
         if isinstance(pred, torch.Tensor) and isinstance(labels, torch.Tensor):
             is_multi_output = False
             pred = (pred,)
@@ -676,9 +703,10 @@ class ChunkedLossWrapper(BaseLoss):
             # gradient synchronization into one reduce-scatter at the final chunk
             # by disabling it for chunks 0..N-2.
             if fsdp_enabled:
-                lm_head.set_reshard_after_forward(False)
-                lm_head.set_reshard_after_backward(False)
-                lm_head.set_requires_gradient_sync(False, recurse=False)
+                if not self.validation_only:
+                    lm_head.set_reshard_after_forward(False)
+                    lm_head.set_reshard_after_backward(False)
+                    lm_head.set_requires_gradient_sync(False, recurse=False)
                 # An implicit unshard stores an all-gather event in FSDP's shared
                 # all_gather_state for the next FSDP module to consume. Since
                 # lm_head is the final FSDP forward in this loop, eager warmup
@@ -689,7 +717,11 @@ class ChunkedLossWrapper(BaseLoss):
                     lm_head.unshard()
 
             for chunk_index in range(num_chunks):
-                if fsdp_enabled and chunk_index == num_chunks - 1:
+                if (
+                    fsdp_enabled
+                    and not self.validation_only
+                    and chunk_index == num_chunks - 1
+                ):
                     lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
                         True, recurse=False
                     )
@@ -709,18 +741,27 @@ class ChunkedLossWrapper(BaseLoss):
                 # Qwen3-8B chunk. Blocked: compiling HiMidLoLinear rounds grad_weight to bf16
                 # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
                 # fails at lm_head's hooks, which can't be traced.
-                logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
-                if not is_multi_output:
-                    logits = logits[0]
-                    label_chunks = label_chunks[0]
-                chunk_loss, chunk_metrics = self.loss_fn(
-                    logits,  # pyrefly: ignore[bad-argument-type]
-                    label_chunks,  # pyrefly: ignore[bad-argument-type]
-                    global_loss_token_counts,
-                    **loss_inputs,
-                )
-                # Free logits before backward.
-                del logits
+                if self.validation_only:
+                    chunk_loss, chunk_metrics = self.loss_fn._compute_loss_with_lm_head(
+                        h_chunks if is_multi_output else h_chunks[0],
+                        label_chunks if is_multi_output else label_chunks[0],
+                        lm_head,
+                        global_loss_token_counts,
+                        **loss_inputs,
+                    )
+                else:
+                    logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
+                    if not is_multi_output:
+                        logits = logits[0]
+                        label_chunks = label_chunks[0]
+                    chunk_loss, chunk_metrics = self.loss_fn(
+                        logits,  # pyrefly: ignore[bad-argument-type]
+                        label_chunks,  # pyrefly: ignore[bad-argument-type]
+                        global_loss_token_counts,
+                        **loss_inputs,
+                    )
+                    # Free logits before backward.
+                    del logits
                 metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
                 total_loss = total_loss + chunk_loss.detach()
 
@@ -736,8 +777,9 @@ class ChunkedLossWrapper(BaseLoss):
                                 h_chunk.grad = None
 
             if fsdp_enabled:
-                lm_head.set_reshard_after_forward(True)
-                lm_head.set_reshard_after_backward(True)
+                if not self.validation_only:
+                    lm_head.set_reshard_after_forward(True)
+                    lm_head.set_reshard_after_backward(True)
                 lm_head.reshard()
             if not decoder_requires_grad:
                 # Scaling this leaf cannot rescale already accumulated head gradients.

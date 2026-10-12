@@ -122,11 +122,36 @@ def deepseek_v3_debugmodel_mtp(
         parallelism=config.parallelism,
     )
     config.dataloader.num_mtp_layers = num_mtp_layers
+    from torchtitan.models.deepseek_v3.pipeline import MTPGradientClipper
+
+    config.optim.gradient_clipper = MTPGradientClipper.Config()
     config.loss = ChunkedLossWrapper.Config(
         loss_fn=MTPLoss.Config(
             global_vocab_size=decoder_vocab_size(config.model),
         ),
     )
+    return config
+
+
+def deepseek_v3_debugmodel_mtp_pp2_dp2_ep2() -> Trainer.Config:
+    """Four-GPU eager MTP1 integration recipe using real PP/DP/EP collectives."""
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        num_pp_microbatches=4,
+        data_parallel_shard_degree=2,
+        expert_parallel_degree=2,
+    )
+    config = deepseek_v3_debugmodel_mtp(seq_len=128, parallelism=parallelism)
+    config.loss = MTPLoss.Config(
+        global_vocab_size=decoder_vocab_size(config.model), mtp_scale=0.1
+    )
+    config.training.disable_cuda_graphs = True
+    config.training.num_tokens_per_microbatch_per_dp_rank = 128
+    config.training.num_tokens_per_train_step = 1024
+    config.training.steps = 10
+    config.debug.seed = 42
+    config.debug.deterministic = True
     return config
 
 
