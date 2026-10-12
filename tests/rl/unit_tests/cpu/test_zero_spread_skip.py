@@ -10,6 +10,7 @@ import threading
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from torchtitan.rl.rollout.data import (
@@ -181,7 +182,7 @@ def test_skip_needs_a_dataset_with_sample_key() -> None:
 
 
 def _rollout(reward, status=RolloutStatus.COMPLETED, completion=(1,)):
-    turn = SimpleNamespace(completion_token_ids=list(completion))
+    turn = SimpleNamespace(completion_token_ids=np.asarray(completion, dtype=np.int64))
     return SimpleNamespace(status=status, reward=reward, turns=[turn])
 
 

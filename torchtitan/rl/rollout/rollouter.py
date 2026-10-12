@@ -175,7 +175,7 @@ class Rollouter(Configurable):
         if len(rollouts) < 2 or any(
             rollout.status.is_error()
             or rollout.reward is None
-            or not any(turn.completion_token_ids for turn in rollout.turns)
+            or not any(len(turn.completion_token_ids) for turn in rollout.turns)
             for rollout in rollouts
         ):
             return
