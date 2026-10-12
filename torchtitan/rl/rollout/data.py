@@ -96,7 +96,8 @@ class GroupOutcome:
 class ZeroSpreadSkip:
     """Skip tasks whose last training group had zero reward spread: every rollout got the same
     reward, so the group trained nothing. On a cycling dataset such a task tends to come back
-    the same, so skipping it saves its whole group of rollouts.
+    the same, so skipping it saves its whole group of rollouts. By default only all-pass groups
+    (the same positive reward) are skipped; all-fail tasks keep coming back.
 
     Example:
         IterableRLDataLoader.Config(
@@ -104,6 +105,10 @@ class ZeroSpreadSkip:
             zero_spread_skip=ZeroSpreadSkip(),  # 1,600 tasks: a skipped task comes back ~4 epochs later
         )
     """
+
+    skip_all_fail: bool = False
+    """Also skip tasks whose group got the same non-positive reward on every rollout. Off:
+    a task the policy fails today may be learned from its neighbors, so it stays in the mix."""
 
     recheck_after_skips: int = 4
     """Yield a skipped task again once it has been skipped this many times (about this many
@@ -216,7 +221,7 @@ class IterableRLDataLoader(RLDataLoader):
         return key
 
     def record_group_outcomes(self, outcomes: Mapping[int, GroupOutcome]) -> None:
-        """Mark the tasks of zero-spread groups as skipped and unmark the tasks of mixed ones."""
+        """Mark the tasks of skippable zero-spread groups as skipped and unmark the others."""
         if self._zero_spread_skip is None:
             return
         for index, outcome in outcomes.items():
@@ -226,8 +231,11 @@ class IterableRLDataLoader(RLDataLoader):
             self._skipped.pop(key, None)
             if not outcome.zero_spread:
                 continue
+            all_pass = outcome.mean_reward > 0
+            if not all_pass and not self._zero_spread_skip.skip_all_fail:
+                continue
             self._skipped[key] = 0  # re-inserted last: the newest skip
-            direction = "all_pass" if outcome.mean_reward > 0 else "all_fail"
+            direction = "all_pass" if all_pass else "all_fail"
             self._step_counts[f"marked_{direction}"] += 1
         max_skipped = int(
             (1.0 - self._zero_spread_skip.min_active_frac) * len(self._seen_keys)

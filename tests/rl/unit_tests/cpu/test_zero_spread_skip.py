@@ -101,7 +101,7 @@ def test_skip_off_iterates_and_saves_like_before() -> None:
 
 
 def test_zero_spread_tasks_are_skipped_then_rechecked() -> None:
-    loader = _loader(recheck_after_skips=2, min_active_frac=0.1)
+    loader = _loader(recheck_after_skips=2, min_active_frac=0.1, skip_all_fail=True)
     # t0 all pass, t1 all fail, t2 mixed, t3 no usable outcome (e.g. a rollout errored).
     _finish(loader, _draw(loader, 4), {"t0": ALL_PASS, "t1": ALL_FAIL, "t2": MIXED})
 
@@ -113,6 +113,22 @@ def test_zero_spread_tasks_are_skipped_then_rechecked() -> None:
     assert metrics["data/zero_spread_skip/rechecks"] == 2
     assert metrics["data/zero_spread_skip/marked_all_pass"] == 1
     assert metrics["data/zero_spread_skip/marked_all_fail"] == 1
+
+
+def test_all_fail_tasks_are_not_skipped_by_default() -> None:
+    loader = _loader(recheck_after_skips=2, min_active_frac=0.1)
+    # A truncation penalty can make an all-fail group's shared reward negative: still not skipped.
+    all_fail_penalized = GroupOutcome(mean_reward=-0.2, zero_spread=True)
+    _finish(
+        loader,
+        _draw(loader, 4),
+        {"t0": ALL_PASS, "t1": ALL_FAIL, "t2": all_fail_penalized, "t3": MIXED},
+    )
+    assert [task for _, task in _draw(loader, 3)] == ["t1", "t2", "t3"]
+    metrics = {metric.key: metric.value.value for metric in loader.metrics()}
+    assert metrics["data/zero_spread_skip/marked_all_pass"] == 1
+    assert metrics["data/zero_spread_skip/marked_all_fail"] == 0
+    assert metrics["data/zero_spread_skip/skipped_tasks"] == 1
 
 
 def test_a_mixed_group_brings_a_task_back() -> None:
@@ -223,7 +239,7 @@ def test_outcomes_are_in_the_state_saved_right_after_acknowledgement() -> None:
     drawn = _draw(loader, 4)
     rollouter.record_group_outcome(_group(0, _rollout(1.0), _rollout(1.0)))
     # Group 1 was dropped by the buffer as too old: it was scored, so it still marks its task.
-    rollouter.record_group_outcome(_group(1, _rollout(0.0), _rollout(0.0)))
+    rollouter.record_group_outcome(_group(1, _rollout(1.0), _rollout(1.0)))
     rollouter.acknowledge_training_sample_ids(index for index, _ in drawn)
     assert dict(loader.state_dict()["zero_spread_skip"]["skipped"]) == {"t0": 0, "t1": 0}
 
