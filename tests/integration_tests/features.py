@@ -514,8 +514,6 @@ def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     # Ulysses does not support token reordering.
     config.parallelism.context_parallel_load_balancer = None
-    config.debug.seed = 42
-    config.debug.deterministic = True
     return apply_transforms(
         config,
         [

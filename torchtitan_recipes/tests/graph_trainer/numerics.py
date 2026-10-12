@@ -116,12 +116,14 @@ def llama3_graph_hsdp_pp_numerics():
 def deepseek_v3_eager_numerics():
     config = deepseek_v3_debugmodel(
         seq_len=2048,
+        attn_backend="flex",
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=4,
             tensor_parallel_degree=2,
             expert_parallel_degree=2,
         ),
     )
+    config.dataloader.max_num_documents = None
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     # The numerics baselines keep CUDA graphs on.
     config.training.disable_cuda_graphs = False
@@ -150,6 +152,7 @@ def _pp_ep_parallelism() -> ParallelismConfig:
 def _deepseek_v3_pp_numerics(config, *, schedule: str):
     """Configure PP numerics on a config built with ``_pp_ep_parallelism()``."""
     config.training.disable_cuda_graphs = True
+    config.dataloader.max_num_documents = None
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.max_norm = float("inf")
     config.parallelism.pipeline_parallel_degree = 2
@@ -163,7 +166,9 @@ def _deepseek_v3_pp_numerics(config, *, schedule: str):
 def deepseek_v3_eager_pp_numerics():
     return _without_inplace_wgrad_accum(
         _deepseek_v3_pp_numerics(
-            deepseek_v3_debugmodel(seq_len=2048, parallelism=_pp_ep_parallelism()),
+            deepseek_v3_debugmodel(
+                seq_len=2048, attn_backend="flex", parallelism=_pp_ep_parallelism()
+            ),
             schedule="Interleaved1F1B",
         )
     )
@@ -266,12 +271,14 @@ def qwen3_graph_numerics():
 def qwen3_moe_eager_numerics():
     config = qwen3_moe_debug(
         seq_len=2048,
+        attn_backend="flex",
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=4,
             tensor_parallel_degree=2,
             expert_parallel_degree=2,
         ),
     )
+    config.dataloader.max_num_documents = None
     # Match GraphTrainer, which captures model and loss in one eager FX graph.
     config.model.local_compile_regions = []
     config.training.disable_cuda_graphs = True

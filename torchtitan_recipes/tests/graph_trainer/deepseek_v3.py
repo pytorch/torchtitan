@@ -46,9 +46,10 @@ def graph_trainer_deepseek_v3_debugmodel(
     *, parallelism: ParallelismConfig | None = None
 ) -> GraphTrainer.Config:
     config = to_graph_trainer_config(
-        deepseek_v3_debugmodel(parallelism=parallelism),
+        deepseek_v3_debugmodel(attn_backend="flex", parallelism=parallelism),
         GraphTrainerDeepSeekV3Model.Config,
     )
+    config.dataloader.max_num_documents = None
     config.compile = GraphTrainerCompileConfig()
     return config
 
@@ -74,14 +75,16 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     base = deepseek_v3_debugmodel(
-        parallelism=ParallelismConfig(expert_parallel_degree=2)
+        attn_backend="flex", parallelism=ParallelismConfig(expert_parallel_degree=2)
     )
     base.model = build_model_config(
         "debugmodel",
+        attn_backend="flex",
         seq_len=base.training.max_context_length,
         parallelism=base.parallelism,
     )
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
+    config.dataloader.max_num_documents = None
     config.compile = GraphTrainerCompileConfig()
     # HybridEP's non-blocking dispatch has no CPU sync, so CUDA graphs stay on.
     config.training.disable_cuda_graphs = False

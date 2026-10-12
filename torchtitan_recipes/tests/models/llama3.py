@@ -46,7 +46,7 @@ from torchtitan.observability.profiler import Profiler
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
-from torchtitan_recipes.data import c4_document_capacity, sft_document_capacity
+from torchtitan_recipes.data import c4_document_capacity
 
 from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_converter_config
 
@@ -357,10 +357,9 @@ def sft_debugmodel(
 
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
 
-    num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -382,14 +381,11 @@ def sft_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
-            max_num_documents=sft_document_capacity(
-                num_tokens_per_microbatch_per_dp_rank
-            ),
             dataset=FirstFitPackingConfig(
                 dataset=SingleDatasetConfig(
                     source=HuggingFaceRandomAccessSource.Config(

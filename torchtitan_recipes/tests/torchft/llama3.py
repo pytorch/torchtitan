@@ -28,6 +28,8 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 def llama3_torchft_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -36,6 +38,7 @@ def llama3_torchft_debugmodel(
     model_config = build_model_config(
         "debugmodel", seq_len=seq_len, parallelism=parallelism
     )
+    num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
     return FaultTolerantTrainer.Config(
         loss=CrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
@@ -62,12 +65,14 @@ def llama3_torchft_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=100,
         ),
         dataloader=GrainDataLoader.Config(
-            max_num_documents=64,
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         checkpointer=None,

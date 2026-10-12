@@ -164,7 +164,6 @@ def test_varlen_cp_combinations_require_real_collectives(
     assert config.parallelism.context_parallel_degree == 2
     assert config.parallelism.tensor_parallel_degree == tp_degree
     assert config.parallelism.context_parallel_load_balancer is None
-    assert config.debug.seed == 42 and config.debug.deterministic
     assert not config.training.disable_cuda_graphs
     assert config.dataloader.max_num_documents is not None
     assert all(
