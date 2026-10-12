@@ -52,6 +52,7 @@ def muse_glimmer_30b(
     model_config = build_model_config(
         "30B", seq_len=seq_len, attn_backend=attn_backend, parallelism=parallelism
     )
+    num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -62,7 +63,9 @@ def muse_glimmer_30b(
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
-            max_num_documents=c4_document_capacity(model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
@@ -71,7 +74,7 @@ def muse_glimmer_30b(
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),

@@ -227,6 +227,7 @@ def qwen3_debugmodel_flex_flash(
 def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config("0.6B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = 4 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -238,7 +239,9 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(4 * model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -248,7 +251,7 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
@@ -260,6 +263,7 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
 def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config("1.7B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = 4 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -270,7 +274,9 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(4 * model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -280,7 +286,7 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=100,
         ),
@@ -381,6 +387,7 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         pipeline_parallel_degree=1,
     )
     model_config = build_model_config("14B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = 4 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -390,7 +397,9 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-14B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(4 * model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -400,7 +409,7 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=3000,
         ),
@@ -420,6 +429,7 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
     model_config = build_model_config(
         "30B-A3B", seq_len=seq_len, parallelism=parallelism
     )
+    num_tokens_per_microbatch_per_dp_rank = 2 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -429,7 +439,9 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-30B-A3B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(2 * model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -439,7 +451,7 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=3000,
         ),
@@ -457,6 +469,7 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
         pipeline_parallel_degree=1,
     )
     model_config = build_model_config("32B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = 2 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -466,7 +479,9 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-32B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(2 * model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -476,7 +491,7 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=3000,
         ),

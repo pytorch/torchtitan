@@ -231,6 +231,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         pipeline_parallel_degree=1,
     )
     model_config = build_model_config("30B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
@@ -243,7 +244,9 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(1 * model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -253,7 +256,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),

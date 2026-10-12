@@ -52,7 +52,7 @@ def qwen36_debugmodel(
 ) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -66,7 +66,6 @@ def qwen36_debugmodel(
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=64,
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
             streaming_shuffle_buffer_size=128,
@@ -130,7 +129,6 @@ def qwen36_debugmodel_moe(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=64,
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
             streaming_shuffle_buffer_size=128,
@@ -158,7 +156,9 @@ def qwen36_27b(seq_len: int | None = None) -> Trainer.Config:
         data_parallel_shard_degree=-1,
         tensor_parallel_degree=4,
     )
-    model_config = build_model_config("27B", seq_len=seq_len, parallelism=parallelism)
+    model_config = build_model_config(
+        "27B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -169,7 +169,6 @@ def qwen36_27b(seq_len: int | None = None) -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_6_SPECIAL_TOKENS),
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=64,
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
             streaming_shuffle_buffer_size=128,
@@ -198,7 +197,7 @@ def qwen36_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
         expert_parallel_degree=8,
     )
     model_config = build_model_config(
-        "35B-A3B", seq_len=seq_len, parallelism=parallelism
+        "35B-A3B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -210,7 +209,6 @@ def qwen36_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_6_SPECIAL_TOKENS),
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=64,
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
             streaming_shuffle_buffer_size=128,

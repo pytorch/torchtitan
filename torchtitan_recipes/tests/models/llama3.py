@@ -228,6 +228,7 @@ def llama3_debugmodel_ce_loss(
 def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config("8B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -250,12 +251,14 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             )
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(1 * model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpointer=None,
@@ -302,6 +305,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
         tensor_parallel_degree=8,
     )
     model_config = build_model_config("70B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -323,12 +327,14 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             )
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(8 * model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         parallelism=parallelism,
@@ -354,6 +360,7 @@ def sft_debugmodel(
         "debugmodel", seq_len=seq_len, parallelism=parallelism
     )
 
+    num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -375,13 +382,13 @@ def sft_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
             max_num_documents=sft_document_capacity(
-                8 * model_config.max_context_length
+                num_tokens_per_microbatch_per_dp_rank
             ),
             dataset=FirstFitPackingConfig(
                 dataset=SingleDatasetConfig(

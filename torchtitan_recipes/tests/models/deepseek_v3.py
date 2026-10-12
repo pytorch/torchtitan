@@ -185,6 +185,7 @@ def deepseek_v3_16b(
             expert_parallel_degree=8,
         )
     model_config = build_model_config("16B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = 4 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -194,7 +195,9 @@ def deepseek_v3_16b(
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(4 * model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -208,7 +211,7 @@ def deepseek_v3_16b(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
@@ -404,6 +407,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         seq_len=seq_len,
         parallelism=parallelism,
     )
+    num_tokens_per_microbatch_per_dp_rank = 4 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -413,7 +417,9 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(4 * model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -428,7 +434,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=10000,
             disable_cuda_graphs=True,

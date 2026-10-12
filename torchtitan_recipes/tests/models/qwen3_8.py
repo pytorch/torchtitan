@@ -165,7 +165,9 @@ def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
         data_parallel_shard_degree=-1,
         tensor_parallel_degree=4,
     )
-    model_config = build_model_config("27B", seq_len=seq_len, parallelism=parallelism)
+    model_config = build_model_config(
+        "27B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -176,7 +178,6 @@ def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_8_SPECIAL_TOKENS),
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=64,
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
             streaming_shuffle_buffer_size=128,
@@ -208,6 +209,7 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
     model_config = build_model_config(
         "2.4T-A95B", seq_len=seq_len, parallelism=parallelism
     )
+    num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -217,7 +219,9 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.8-2.4T-A95B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(model_config.max_context_length),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -227,7 +231,7 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
