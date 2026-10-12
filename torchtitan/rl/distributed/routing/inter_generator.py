@@ -190,6 +190,10 @@ class InterGeneratorRouter(Actor, Configurable):
         finally:
             self._release(h, routing_ctx.estimated_cost)
 
+    def _release_session(self, session_id: str) -> None:
+        """Drop a session's affinity."""
+        self._strategy.release_session(session_id)
+
     async def _fanout(
         self,
         method: str,
@@ -292,6 +296,11 @@ class InterGeneratorRouter(Actor, Configurable):
         """Set the step counter in this process and in every generator rank."""
         sl.set_step(step)
         await self._fanout("sync_log_step", step)
+
+    @concurrent_endpoint
+    async def release_session(self, routing_session_id: str) -> None:
+        """Forget a routing session after its rollout's last generation call."""
+        self._release_session(routing_session_id)
 
     @concurrent_endpoint
     async def release_groups(self, group_ids: list[int]) -> None:

@@ -39,6 +39,7 @@ from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
     GenerateFn,
+    ReleaseSessionFn,
     Rollout,
     RolloutGroup,
     RolloutStatus,
@@ -235,12 +236,15 @@ class VerifiersRollouter(Rollouter):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
+        # TODO: release each rollout's session; until then `max_sessions` evicts them.
+        del release_session_fn
         if self._generation_server is None:
             raise RuntimeError("Verifiers rollouter is not initialized")
         self._generation_server.set_generate_fn(generate_fn)

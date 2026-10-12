@@ -334,6 +334,29 @@ def test_sticky_session_respects_max_sessions():
     asyncio.run(_run())
 
 
+async def _generate(router, *, group_id: int, session_id: str):
+    return await router._route(
+        "generate", group_id=group_id, routing_ctx=RoutingContext(session_id=session_id)
+    )
+
+
+def test_sticky_session_release_drops_its_assignment():
+    async def _run():
+        actors = [_Actor("gen0", wait_generate=True), _Actor("gen1")]
+        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
+        first = asyncio.create_task(_generate(router, group_id=0, session_id="s0"))
+        await actors[0].generate.started.wait()
+
+        router._release_session(session_id="s0")
+        # Released, s0 is a new session: least-loaded picks idle gen1 over busy gen0.
+        assert await _generate(router, group_id=0, session_id="s0") == "gen1"
+
+        actors[0].generate.release.set()
+        assert await first == "gen0"
+
+    asyncio.run(_run())
+
+
 def test_sticky_session_rejects_non_positive_max_sessions():
     with pytest.raises(ValueError, match="max_sessions must be positive"):
         StickySessionRoutingStrategy.Config(max_sessions=0).build()
