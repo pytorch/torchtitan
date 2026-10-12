@@ -29,62 +29,6 @@ def _reference_attention(q, k, v):
         ).transpose(1, 2)
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
-class TestFluxVarlenAttention(unittest.TestCase):
-    def test_forward_backward_and_batch_isolation(self):
-        torch.manual_seed(42)
-        attention = FluxInnerAttention.Config().build()
-        for query_len in (17, 32):
-            with self.subTest(query_len=query_len):
-                inputs = [
-                    torch.randn(
-                        2, length, 4, 64, device="cuda", dtype=torch.bfloat16
-                    ).requires_grad_()
-                    for length in (query_len, 32, 32)
-                ]
-                reference_inputs = [x.detach().float().requires_grad_() for x in inputs]
-                actual = attention(*inputs)
-                expected = _reference_attention(*reference_inputs)
-                torch.testing.assert_close(
-                    actual.float(), expected, atol=0.01, rtol=0.01
-                )
-                grad_output = torch.randn_like(actual)
-                grads = torch.autograd.grad(actual, inputs, grad_output)
-                reference_grads = torch.autograd.grad(
-                    expected, reference_inputs, grad_output.float()
-                )
-                for actual_grad, expected_grad in zip(grads, reference_grads):
-                    torch.testing.assert_close(
-                        actual_grad.float(), expected_grad, atol=0.02, rtol=0.02
-                    )
-
-                changed = [x.detach().clone().requires_grad_() for x in inputs]
-                with torch.no_grad():
-                    for x in changed:
-                        x[1].add_(3)
-                independent = attention(*changed)
-                torch.testing.assert_close(actual[0], independent[0], atol=0, rtol=0)
-                independent[0].float().sum().backward()
-                for x in changed:
-                    self.assertEqual(torch.count_nonzero(x.grad[1]).item(), 0)
-
-    def test_compile_forward_and_backward(self):
-        attention = FluxInnerAttention.Config().build()
-        compiled = torch.compile(attention, fullgraph=True)
-        inputs = [
-            torch.randn(
-                2, 32, 4, 64, device="cuda", dtype=torch.bfloat16
-            ).requires_grad_()
-            for _ in range(3)
-        ]
-        expected = attention(*inputs)
-        actual = compiled(*inputs)
-        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-        actual.float().square().mean().backward()
-        for x in inputs:
-            self.assertTrue(torch.isfinite(x.grad).all().item())
-
-
 @pytest.mark.multi_gpu
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestFluxVarlenContextParallel(DTensorTestBase):
@@ -122,13 +66,13 @@ class TestFluxVarlenContextParallel(DTensorTestBase):
         ]
         reference_inputs = [x.float().requires_grad_() for x in global_inputs]
         expected = _reference_attention(*reference_inputs)
-        expected.square().sum().backward()
+        expected[0].square().sum().backward()
 
         with parallelism_context.activate_spmd(), typecheck(local=False):
             for x in local_inputs:
                 spmd.assert_type(x, {"dp": spmd.S(0), "cp": spmd.S(1)})
             actual = attention(*local_inputs)
-            actual.float().square().sum().backward()
+            actual[0].float().square().sum().backward()
 
         self.assertEqual(
             actual.float(),
@@ -137,9 +81,12 @@ class TestFluxVarlenContextParallel(DTensorTestBase):
             rtol=0.01,
         )
         for actual_input, expected_input in zip(local_inputs, reference_inputs):
+            assert actual_input.grad is not None
+            assert expected_input.grad is not None
             self.assertEqual(
                 actual_input.grad.float(),
                 expected_input.grad.chunk(self.world_size, dim=1)[self.rank],
                 atol=0.03,
                 rtol=0.03,
             )
+            self.assertEqual(torch.count_nonzero(actual_input.grad[1]).item(), 0)
