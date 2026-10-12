@@ -49,7 +49,9 @@ from torchtitan.rl.generator import (
 )
 from vllm.logprobs import FlatLogprobs, Logprob
 
-_TIMEOUT_S = 5
+# Upper bound only: a pull's gc.collect() takes ~0.7 s in the full suite's heap, and a busy host
+# pushed it past 5 s once.
+_TIMEOUT_S = 30
 
 
 @pytest.fixture
