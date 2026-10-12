@@ -59,7 +59,7 @@ def qwen38_debugmodel(
 ) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -73,7 +73,6 @@ def qwen38_debugmodel(
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=64,
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
             streaming_shuffle_buffer_size=128,
@@ -124,7 +123,7 @@ def qwen38_debugmodel_moe(
         tensor_parallel_degree=2,
     )
     model_config = build_model_config(
-        "debugmodel_moe", seq_len=seq_len, parallelism=parallelism
+        "debugmodel_moe", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -137,7 +136,6 @@ def qwen38_debugmodel_moe(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=64,
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
             streaming_shuffle_buffer_size=128,
