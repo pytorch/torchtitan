@@ -235,8 +235,8 @@ def test_encode_turn_covers_all_rollout_turn_fields(tmp_path) -> None:
     recorder = _recorder(tmp_path, log_tensors=True, log_logprobs=True)
     encoded = recorder._encode_turn(_turn(completion_logprobs=[-0.5, -1.5]))
 
-    # rollout_id is flattened to turn_id; metrics is not JSON-serializable.
-    dropped_or_flattened = {"metrics", "rollout_id"}
+    # rollout_id is flattened to turn_id; metrics and routed_expert_ids are not logged.
+    dropped_or_flattened = {"metrics", "rollout_id", "routed_expert_ids"}
     for field in dataclasses.fields(RolloutTurn):
         if field.name in dropped_or_flattened:
             continue

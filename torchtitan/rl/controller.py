@@ -1155,6 +1155,9 @@ class Controller(Configurable):
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
+                    # TODO: every trainer rank receives the whole [num_microbatches][dp_degree] grid.
+                    # Router replay grows it 38 -> 422 B/token on Qwen3-30B-A3B: +270 ms per step on
+                    # a 4-rank, 8 x 10k-token grid. Sending each rank its own column: 75 ms.
                     fwd_bwd_metrics = self._get_rank_0_value(
                         await self.trainer.forward_backward.call(
                             packed.microbatches,

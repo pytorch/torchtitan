@@ -130,6 +130,7 @@ def register_to_vllm(
     parallelism: InferenceParallelismConfig,
     checkpointer_config: CheckpointManager.Config | None,
     dist_moe_runtime: DistMoeRuntime.Config | None = None,
+    return_routed_experts: bool = False,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -162,6 +163,8 @@ def register_to_vllm(
             weights arrive from TorchStore.
         dist_moe_runtime: ``DistMoeRuntime.Config(inference=True)`` for models
             with Dist-MoE routed experts; ``None`` otherwise.
+        return_routed_experts: Hook every MoE router into vLLM's routed-experts capture;
+            pair it with ``EngineArgs.enable_return_routed_experts``.
     """
     has_gdn = any(
         getattr(layer, "delta_net", None) is not None for layer in model_config.layers
@@ -199,6 +202,7 @@ def register_to_vllm(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 dist_moe_runtime=dist_moe_runtime,
+                return_routed_experts=return_routed_experts,
             )
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME

@@ -609,6 +609,7 @@ class RequestDispatcher:
                         token_ids=list(completion_output.token_ids),
                         token_logprobs=token_logprobs,
                         finish_reason=completion_output.finish_reason,
+                        routed_expert_ids=completion_output.routed_experts,
                     ),
                     _extract_request_metrics_inputs(request_output),
                 )
@@ -833,6 +834,10 @@ class VLLMGenerator(Configurable):
         vllm_stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
+        return_routed_experts: bool = False
+        """MoE router replay: return each token's experts with its completion
+        (`Completion.routed_expert_ids`), and the trainer routes those tokens to them."""
+
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -900,6 +905,7 @@ class VLLMGenerator(Configurable):
             parallelism=config.parallelism,
             checkpointer_config=config.checkpointer,
             dist_moe_runtime=config.dist_moe_runtime,
+            return_routed_experts=config.return_routed_experts,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
@@ -970,6 +976,10 @@ class VLLMGenerator(Configurable):
         # returns the raw model's logprobs, before temperature.
         engine_kwargs["logprobs_mode"] = "processed_logprobs"
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
+        if config.return_routed_experts:
+            # TODO: vLLM after 0b7f11a1ee (2026-09-21) captures routed experts only under Model
+            # Runner V2 (forced off above); the router hook works unchanged there.
+            engine_kwargs["enable_return_routed_experts"] = True
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
         # Continuous batching requires FCFS scheduling: admission order must equal the
