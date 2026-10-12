@@ -221,6 +221,7 @@ def test_main_passes_configured_num_generators(monkeypatch, stub_mesh_provisioni
             {
                 "PYTORCH_ALLOC_CONF": "expandable_segments:False",
                 "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False,max_split_size_mb:512",
+                "PYTHONHASHSEED": "0",
             },
         ),
     ],
@@ -228,7 +229,7 @@ def test_main_passes_configured_num_generators(monkeypatch, stub_mesh_provisioni
 def test_main_launches_kv_offload_generators_without_expandable_segments(
     monkeypatch, stub_mesh_provisioning, offload_gib, generator_env
 ):
-    """vLLM refuses CPU KV offload under expandable_segments:True; other allocator options stay."""
+    """Offload needs expandable_segments off (other allocator options stay) and PYTHONHASHSEED=0."""
     monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:True")
     monkeypatch.setenv(
         "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:512"

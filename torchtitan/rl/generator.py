@@ -10,12 +10,14 @@ import asyncio
 import concurrent.futures
 import enum
 import gc
+import itertools
 import logging
 import math
 import os
+import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, TypeVar
 
 import cloudpickle
@@ -92,6 +94,86 @@ def add_extra_vllm_engine_args(
             f"extra_vllm_engine_args cannot set EngineArgs that TorchTitan controls: {details}"
         )
     engine_kwargs.update(extra_vllm_engine_args)
+
+
+def _enable_multi_worker_kv_offload(engine: Any) -> None:
+    """Make CPU KV offload work with TP > 1 or DP > 1 under external_launcher.
+
+    vLLM's offload marks a CPU load or store done once every worker of its scheduler has finished
+    it, and only its multiprocess executor merges the workers' finished transfers. Here each rank
+    runs its own scheduler with one worker, so:
+
+    1. Each scheduler waits for its own TP group only (vLLM's world size also counts DP).
+    2. With TP > 1, each engine step all-gathers the TP ranks' finished transfers before the
+       scheduler reads them, and merges them as the multiprocess executor does:
+
+           step s    rank 0: load 7 done   rank 1: -            both schedulers: 1 of 2
+           step s+1  rank 0: -             rank 1: load 7 done  both schedulers: done
+
+    3. The TP ranks' schedulers must stay identical. Request ids get a counter suffix instead of
+       vLLM's random one, generator procs run with PYTHONHASHSEED=0 (vLLM iterates sets), and
+       each step's gather compares a scheduler fingerprint across ranks.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+    from vllm.distributed.parallel_state import get_tp_group
+
+    scheduler = engine.engine_core.engine_core.scheduler
+    connector_scheduler = scheduler.connector.connector_scheduler
+    tp_group = get_tp_group()
+    connector_scheduler.config = connector_scheduler.config._replace(
+        num_workers=tp_group.world_size
+    )
+    if tp_group.world_size == 1:
+        return
+    if sys.flags.hash_randomization:
+        raise ValueError(
+            "kv_offload_gib with tensor_parallel_degree > 1 needs PYTHONHASHSEED=0 in generator "
+            "procs (train.py sets it): TP ranks iterate the same sets and must agree on the order"
+        )
+
+    request_counter = itertools.count()
+
+    def assign_request_id(request) -> None:
+        # Replaces vLLM's "<request_id>-<8 random chars>", which differs per rank.
+        request.external_req_id = request.request_id
+        request.request_id = f"{request.request_id}-{next(request_counter)}"
+
+    engine.input_processor.assign_request_id = assign_request_id
+
+    aggregator = KVOutputAggregator(expected_finished_count=tp_group.world_size)
+    update_from_output = scheduler.update_from_output
+
+    def update_from_merged_output(scheduler_output, model_runner_output):
+        # Every rank gathers on every step, even with nothing finished, or the ranks deadlock.
+        fingerprint = (
+            scheduler_output.total_num_scheduled_tokens,
+            len(scheduler.requests),
+            connector_scheduler._job_counter,
+        )
+        gathered: list[Any] = [None] * tp_group.world_size
+        dist.all_gather_object(
+            gathered,
+            (fingerprint, model_runner_output.kv_connector_output),
+            group=tp_group.cpu_group,
+        )
+        fingerprints = [rank_fingerprint for rank_fingerprint, _ in gathered]
+        if any(rank_fingerprint != fingerprint for rank_fingerprint in fingerprints):
+            raise RuntimeError(
+                "TP ranks' vLLM schedulers diverged; (scheduled tokens, requests, offload jobs) "
+                f"per rank: {fingerprints}"
+            )
+        # A copy per rank: aggregate() writes into its output_rank entry, and steps without work
+        # share vLLM's EMPTY_MODEL_RUNNER_OUTPUT.
+        merged = aggregator.aggregate(
+            [
+                replace(model_runner_output, kv_connector_output=kv_connector_output)
+                for _, kv_connector_output in gathered
+            ],
+            output_rank=tp_group.rank_in_group,
+        )
+        return update_from_output(scheduler_output, merged)
+
+    scheduler.update_from_output = update_from_merged_output
 
 
 @dataclass(kw_only=True, slots=True)
@@ -846,11 +928,12 @@ class VLLMGenerator(Configurable):
         fewer than ``watermark`` are free."""
 
         kv_offload_gib: float = 0.0
-        """Host RAM (GiB) for vLLM's native CPU KV offload; 0 disables it.
+        """Host RAM (GiB) per generator for vLLM's native CPU KV offload, split across its DP x TP
+        ranks; 0 disables it.
         - vLLM copies every computed KV block to CPU; a turn whose history left the GPU reloads it.
         - Ended sessions' chunks are evicted first (see `SessionKVHolder`).
-        - Needs a one-GPU generator (TP=1, DP=1), launched without ``expandable_segments:True``
-          (``train.py`` does that)."""
+        - Generator procs need ``expandable_segments:False`` and ``PYTHONHASHSEED=0``
+          (``train.py`` sets both)."""
 
         def __post_init__(self):
             if self.hold_session_kv and self.reset_kv_cache_on_weight_sync:
@@ -869,6 +952,12 @@ class VLLMGenerator(Configurable):
             if self.kv_offload_gib < 0:
                 raise ValueError(
                     f"kv_offload_gib must be >= 0, got {self.kv_offload_gib}"
+                )
+            if self.kv_offload_gib > 0 and self.reset_kv_cache_on_weight_sync:
+                raise ValueError(
+                    "kv_offload_gib needs reset_kv_cache_on_weight_sync=False: vLLM cannot reset "
+                    "the prefix cache while a request waits on a CPU load, so batch_invariant "
+                    "(which needs the reset) does not work with offload"
                 )
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -1124,17 +1213,8 @@ class VLLMGenerator(Configurable):
                 f"({self._dp_rank}) != vLLM data_parallel_rank "
                 f"({vllm_parallel_config.data_parallel_rank})"
             )
-        # vLLM marks a CPU offload load or store done once all of its workers report it, but under
-        # external_launcher each worker's scheduler hears only its own worker.
-        # TODO: all-gather the finished transfers across workers each step, as vLLM's
-        # multiprocess executor merges them; it also needs equal request ids on every worker
-        # (a prototype used a deprecated vLLM env for that).
-        if config.kv_offload_gib > 0 and vllm_parallel_config.world_size > 1:
-            raise ValueError(
-                "kv_offload_gib needs a one-GPU generator, but vLLM has "
-                f"{vllm_parallel_config.world_size} workers (TP x DP x PP x prefill CP): their "
-                "finished CPU transfers are never merged, so loads and stores never complete"
-            )
+        if config.kv_offload_gib > 0:
+            _enable_multi_worker_kv_offload(self._engine)
 
         self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the
@@ -1451,7 +1531,7 @@ class VLLMGenerator(Configurable):
                         for request, engine_input in zip(
                             local_requests, engine_inputs, strict=True
                         ):
-                            # vLLM appends a random suffix to the id; the scheduler knows only that one.
+                            # vLLM appends a suffix to the id; the scheduler knows only that one.
                             internal_request_id = self._engine.add_request(
                                 request_id=request.request_id,
                                 prompt=engine_input,
@@ -1712,10 +1792,8 @@ class VLLMGenerator(Configurable):
             # Always reset running requests too: the only reason to reset is a strict
             # recompute under the new weights. Keeping running requests' KV while hiding
             # old KV from new requests is already what the default (no reset) does via the salt.
-            # reset_connector also clears the CPU offload tier (a no-op without one).
             self._engine.reset_prefix_cache(
                 reset_running_requests=True,
-                reset_connector=True,
             )
         gc.collect()
 

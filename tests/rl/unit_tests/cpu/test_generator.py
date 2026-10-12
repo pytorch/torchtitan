@@ -23,15 +23,17 @@ import os
 import shutil
 import tempfile
 from contextlib import nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from typing import Any, cast, NamedTuple
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import torch
 import torch.distributed as dist
 
 import torchtitan.rl.generator as generator_module
+import vllm.distributed.parallel_state as vllm_parallel_state
 from torchstore import RankRole
 from torchtitan.components.optim import AdamW
 from torchtitan.config import CommConfig, DebugConfig
@@ -61,8 +63,12 @@ from torchtitan.rl.model.vllm_worker import (
 )
 from torchtitan.rl.observability import metrics as m
 from vllm import SamplingParams
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingWorkerMetadata,
+)
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 
 
 class _FakeRenderer:
@@ -420,12 +426,7 @@ def test_weight_sync_reset_kv_cache_flag_controls_cache_reset(
         await generator._pull_model_state_dict(version=8)
 
         assert generator.policy_version == 8
-        # reset_connector also clears the CPU offload tier, whose KV is from the old weights.
-        expected = (
-            [((), {"reset_running_requests": True, "reset_connector": True})]
-            if reset_kv_cache
-            else []
-        )
+        expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
         assert engine.reset_prefix_cache_calls == expected
 
     asyncio.run(run())
@@ -512,6 +513,15 @@ def test_hold_session_kv_requires_free_floor_above_watermark():
         )
 
 
+def test_kv_offload_rejects_kv_cache_reset_on_weight_sync():
+    with pytest.raises(ValueError, match="needs reset_kv_cache_on_weight_sync=False"):
+        VLLMGenerator.Config(
+            parallelism=_PARALLELISM,
+            kv_offload_gib=16,
+            reset_kv_cache_on_weight_sync=True,
+        )
+
+
 def test_kv_offload_gib_rejects_negative_sizes():
     with pytest.raises(ValueError, match="kv_offload_gib must be >= 0, got -1"):
         VLLMGenerator.Config(parallelism=_PARALLELISM, kv_offload_gib=-1)
@@ -587,45 +597,6 @@ def test_kv_offload_sets_vllm_cpu_offload(monkeypatch, tmp_path):
     assert not engine_kwargs.keys() & {"kv_offloading_size", "kv_transfer_config"}
 
 
-def test_kv_offload_needs_a_one_gpu_generator(monkeypatch, tmp_path):
-    """Each vLLM worker hears only its own finished CPU transfers, so with 2 none complete."""
-    # e.g. pipeline_parallel_size=2 through extra_vllm_engine_args
-    parallel_config = SimpleNamespace(
-        data_parallel_size=1, data_parallel_rank=0, world_size=2
-    )
-    engine = SimpleNamespace(
-        vllm_config=SimpleNamespace(parallel_config=parallel_config)
-    )
-    monkeypatch.setattr(generator_module, "EngineArgs", Mock())
-    monkeypatch.setattr(
-        generator_module,
-        "LLMEngine",
-        SimpleNamespace(from_engine_args=lambda engine_args, stat_loggers: engine),
-    )
-    monkeypatch.setattr(generator_module, "register_to_vllm", Mock())
-    monkeypatch.setattr(generator_module, "init_logger", Mock())
-    monkeypatch.setattr(generator_module, "sl", MagicMock())
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
-    monkeypatch.setattr(torch.cuda, "set_device", lambda device: None)
-    monkeypatch.setattr(dist, "get_rank", lambda: 0)
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    model_config: Any = SimpleNamespace(
-        first_base_attention_backend=VarlenInnerAttention.Config(),
-        max_context_length=1024,
-    )
-    with pytest.raises(
-        ValueError, match="needs a one-GPU generator, but vLLM has 2 workers"
-    ):
-        VLLMGenerator(
-            VLLMGenerator.Config(kv_offload_gib=16),
-            model_config=model_config,
-            model_path="unused",
-            max_num_seqs=8,
-            output_dir=str(tmp_path),
-            rank=0,
-        )
-
-
 @pytest.mark.parametrize(
     "key, match",
     [
@@ -645,6 +616,139 @@ def test_extra_vllm_engine_args_rejects_torchtitan_owned_keys(key, match):
     with pytest.raises(ValueError, match=match):
         add_extra_vllm_engine_args(engine_kwargs, {key: 1})
     assert engine_kwargs == {"scheduling_policy": "fcfs"}
+
+
+# --- CPU KV offload with several vLLM workers (_enable_multi_worker_kv_offload) ---
+
+
+class _ConnectorConfig(NamedTuple):
+    num_workers: int
+
+
+def _multi_worker_engine(
+    monkeypatch, *, tp_size: int, peer_entry: Any = None, hash_randomization: int = 0
+):
+    """A fake engine set up by `_enable_multi_worker_kv_offload` as TP rank 0 of DP=2 x TP.
+
+    `peer_entry(own_entry)` returns TP rank 1's part of each all-gather. Returns the engine, what
+    the scheduler's `update_from_output` received, and what this rank contributed to each gather.
+    """
+    received, gathers = [], []
+    connector_scheduler = SimpleNamespace(
+        config=_ConnectorConfig(num_workers=2 * tp_size), _job_counter=0
+    )
+    scheduler = SimpleNamespace(
+        connector=SimpleNamespace(connector_scheduler=connector_scheduler),
+        requests={},
+        update_from_output=lambda scheduler_output, output: received.append(output),
+    )
+    engine = SimpleNamespace(
+        engine_core=SimpleNamespace(engine_core=SimpleNamespace(scheduler=scheduler)),
+        input_processor=SimpleNamespace(),
+    )
+    tp_group = SimpleNamespace(world_size=tp_size, rank_in_group=0, cpu_group=None)
+    monkeypatch.setattr(vllm_parallel_state, "get_tp_group", lambda: tp_group)
+    flags = SimpleNamespace(hash_randomization=hash_randomization)
+    monkeypatch.setattr(generator_module, "sys", SimpleNamespace(flags=flags))
+
+    def all_gather_object(gathered, own_entry, group):
+        gathers.append(own_entry)
+        gathered[0], gathered[1] = own_entry, peer_entry(own_entry)
+
+    monkeypatch.setattr(dist, "all_gather_object", all_gather_object)
+    generator_module._enable_multi_worker_kv_offload(cast(Any, engine))
+    return engine, received, gathers
+
+
+def _finished(job_id: int, request_id: str | None = None) -> KVConnectorOutput:
+    """One worker's finished transfers in a step: a load (of `request_id`) or a store."""
+    meta = OffloadingWorkerMetadata()
+    meta.mark_completed(job_id)
+    return KVConnectorOutput(
+        kv_connector_worker_meta=meta,
+        finished_recving={request_id} if request_id else None,
+    )
+
+
+def test_multi_worker_kv_offload_finishes_a_load_once_every_tp_rank_did(monkeypatch):
+    peer_outputs = iter([None, _finished(7, "r-0")])  # TP rank 1 finishes a step later
+    engine, received, _ = _multi_worker_engine(
+        monkeypatch, tp_size=2, peer_entry=lambda own: (own[0], next(peer_outputs))
+    )
+    scheduler = engine.engine_core.engine_core.scheduler
+    step = SimpleNamespace(total_num_scheduled_tokens=8)
+
+    own_output = replace(
+        EMPTY_MODEL_RUNNER_OUTPUT, kv_connector_output=_finished(7, "r-0")
+    )
+    scheduler.update_from_output(step, own_output)
+    scheduler.update_from_output(step, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    # vLLM's connector adds up these counts and finishes job 7 at 2 of 2.
+    first, second = (output.kv_connector_output for output in received)
+    assert first.kv_connector_worker_meta.completed_jobs == {7: 1}
+    assert not first.finished_recving
+    assert second.kv_connector_worker_meta.completed_jobs == {7: 1}
+    assert second.finished_recving == {"r-0"}
+    # 4 (DP=2 x TP=2) before: each scheduler waits for its own TP group only.
+    assert scheduler.connector.connector_scheduler.config.num_workers == 2
+
+
+def test_multi_worker_kv_offload_gathers_on_empty_steps_and_keeps_vllms_shared_output(
+    monkeypatch,
+):
+    engine, received, gathers = _multi_worker_engine(
+        monkeypatch, tp_size=2, peer_entry=lambda own: (own[0], _finished(7))
+    )
+
+    engine.engine_core.engine_core.scheduler.update_from_output(
+        SimpleNamespace(total_num_scheduled_tokens=0), EMPTY_MODEL_RUNNER_OUTPUT
+    )
+
+    assert (
+        len(gathers) == 1 and gathers[0][1] is None
+    )  # nothing finished here, still gathered
+    assert EMPTY_MODEL_RUNNER_OUTPUT.kv_connector_output is None
+    assert received[0].kv_connector_output.kv_connector_worker_meta.completed_jobs == {
+        7: 1
+    }
+
+
+def test_multi_worker_kv_offload_raises_when_tp_ranks_diverge(monkeypatch):
+    engine, _, _ = _multi_worker_engine(
+        monkeypatch, tp_size=2, peer_entry=lambda own: ((9, *own[0][1:]), None)
+    )
+    with pytest.raises(RuntimeError, match="schedulers diverged"):
+        engine.engine_core.engine_core.scheduler.update_from_output(
+            SimpleNamespace(total_num_scheduled_tokens=8), EMPTY_MODEL_RUNNER_OUTPUT
+        )
+
+
+def test_multi_worker_kv_offload_gives_every_tp_rank_the_same_request_ids(monkeypatch):
+    internal_ids = []
+    for _ in range(2):  # two TP ranks admit the same requests in the same order
+        engine, _, _ = _multi_worker_engine(monkeypatch, tp_size=2)
+        requests = [SimpleNamespace(request_id=request_id) for request_id in "aba"]
+        for request in requests:
+            engine.input_processor.assign_request_id(request)
+        internal_ids.append([(r.request_id, r.external_req_id) for r in requests])
+    assert (
+        internal_ids[0] == internal_ids[1] == [("a-0", "a"), ("b-1", "b"), ("a-2", "a")]
+    )
+
+
+def test_multi_worker_kv_offload_with_tp1_only_sets_the_expected_count(monkeypatch):
+    engine, _, _ = _multi_worker_engine(monkeypatch, tp_size=1)
+    connector_scheduler = (
+        engine.engine_core.engine_core.scheduler.connector.connector_scheduler
+    )
+    assert connector_scheduler.config.num_workers == 1  # 2 (DP=2) before
+    assert not hasattr(engine.input_processor, "assign_request_id")
+
+
+def test_multi_worker_kv_offload_needs_pythonhashseed_0(monkeypatch):
+    with pytest.raises(ValueError, match="needs PYTHONHASHSEED=0"):
+        _multi_worker_engine(monkeypatch, tp_size=2, hash_randomization=1)
 
 
 # --- CUDA graph config (VLLMCudaGraphConfig.get_vllm_compilation_config) ---

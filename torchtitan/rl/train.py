@@ -140,13 +140,16 @@ class HostMeshes:
 
 
 def generator_launch_env(generator_config: VLLMGenerator.Config) -> dict[str, str]:
-    """Allocator env for generator procs: vLLM refuses CPU KV offload (a KV connector) under
-    ``expandable_segments:True``, which ``RL_ENV_DEFAULTS`` sets. Other options are kept.
+    """Env generator procs need for CPU KV offload (``kv_offload_gib``), on top of ``RL_ENV_DEFAULTS``:
+    - ``expandable_segments:False``: vLLM refuses a KV connector under ``expandable_segments:True``;
+      other allocator options are kept.
+    - ``PYTHONHASHSEED=0``: TP ranks must iterate vLLM's sets in the same order.
 
     Example:
 
         this proc:        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
         generator procs:  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False,max_split_size_mb:512
+                          PYTHONHASHSEED=0
     """
     launch_env = {}
     if generator_config.kv_offload_gib > 0:
@@ -154,6 +157,7 @@ def generator_launch_env(generator_config: VLLMGenerator.Config) -> dict[str, st
             launch_env[key] = os.environ.get(key, "").replace(
                 "expandable_segments:True", "expandable_segments:False"
             )
+        launch_env["PYTHONHASHSEED"] = "0"
     return launch_env
 
 
