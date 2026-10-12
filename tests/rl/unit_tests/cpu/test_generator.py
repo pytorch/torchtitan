@@ -351,12 +351,12 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
     return rejected_requests
 
 
-def _engine_request(request_id: str, *, min_policy_version: int):
+def _engine_request(request_id: str, *, min_policy_version: int, group_id: int = 3):
     request = EngineRequest(
         request_id=request_id,
         prompt_token_ids=[1, 2],
         sampling=SamplingConfig(),
-        group_id=3,
+        group_id=group_id,
         routing_session_id="group=3/rollout=0",
         arrival_time=1.5,
     )
@@ -365,17 +365,19 @@ def _engine_request(request_id: str, *, min_policy_version: int):
 
 
 def test_admission_passes_group_id_as_priority_and_arrival_time(monkeypatch):
-    # Priority is the group id (3), not the pinned version (6); arrival_time is passed through.
+    # Priority is the group id (3), not the pinned version (6); every validation id shares -1.
     generator = _generator()
     engine = cast(_FakeEngine, generator._engine)
+    requests = [
+        _engine_request("train", min_policy_version=6, group_id=3),
+        _engine_request("val_1", min_policy_version=6, group_id=-1),
+        _engine_request("val_5", min_policy_version=6, group_id=-5),
+    ]
 
-    _admit_through_engine_loop(
-        monkeypatch, generator, [_engine_request("r0", min_policy_version=6)]
-    )
+    _admit_through_engine_loop(monkeypatch, generator, requests)
 
-    _, kwargs = engine.add_requests[0]
-    assert kwargs["priority"] == 3
-    assert kwargs["arrival_time"] == 1.5
+    assert [kwargs["priority"] for _, kwargs in engine.add_requests] == [3, -1, -1]
+    assert [kwargs["arrival_time"] for _, kwargs in engine.add_requests] == [1.5] * 3
 
 
 def test_admission_salts_prompt_with_min_policy_version(monkeypatch):

@@ -1007,9 +1007,9 @@ class VLLMGenerator(Configurable):
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
-        # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`,
-        # so older groups have higher priority (see its docstring).
-        # TODO: validation's negative ids put validation first. Revisit once it overlaps training.
+        # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
+        # (-1 for all validation), so older groups have higher priority (see its docstring).
+        # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.
         engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.
@@ -1250,8 +1250,8 @@ class VLLMGenerator(Configurable):
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
             group_id: Rollout group id. Requests of one group share a prefix cache
-                salt; `release_groups` drops it. Also the vLLM priority: lower ids run
-                first; see `EngineRequest.group_id`.
+                salt; `release_groups` drops it. Also sets the vLLM priority; see
+                `EngineRequest.group_id`.
             routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
@@ -1410,7 +1410,7 @@ class VLLMGenerator(Configurable):
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
                                 arrival_time=request.arrival_time,
-                                priority=request.group_id,
+                                priority=max(request.group_id, -1),
                             )
                         except (ValueError, VLLMClientError) as exc:
                             rejected_requests.append((request.request_id, exc))
@@ -1710,12 +1710,14 @@ class EngineRequest:
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
     group_id: int
-    """Rollout group id, and its vLLM priority: lower is admitted first and preempted last.
-    Training ids grow as groups start; validation ids are negative, so validation goes first.
+    """Rollout group id. Sets the vLLM priority: lower is admitted first and preempted last.
+    Training ids grow as groups start. Validation ids count down (-1, -2, ...) and restart every run,
+    so all validation gets priority -1: it runs in arrival order (not newest first), before training.
 
-        waiting, in arrival order:  g7 turn 1   g9 turn 1   g4 turn 2   validation (id -1)
-        vLLM admits:                validation  g4 turn 2   g7 turn 1   g9 turn 1
-                                                ^ g4 started before g7
+        waiting, in arrival order:  g7 turn 1   g9 turn 1   g4 turn 2   val -1      val -2
+        priority:                   7           9           4           -1          -1
+        vLLM admits:                val -1      val -2      g4 turn 2   g7 turn 1   g9 turn 1
+                                                            ^ g4 started before g7
     """
     routing_session_id: str
     arrival_time: float
