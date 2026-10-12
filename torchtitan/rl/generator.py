@@ -758,7 +758,7 @@ class VLLMGenerator(Configurable):
     dispatcher) live on a dedicated engine thread, which runs its own event loop. The endpoints run on the
     actor's event loop and reach the engine loop only through the thread-safe queue and the
     `concurrent.futures.Future`s it resolves, so the actor's loop stays free to take calls while the engine steps.
-    Two endpoints are exceptions. `release_groups` pops per-group state directly: each pop, like the engine loop's
+    Two endpoints are exceptions. `release_groups` pops cache-salt pins directly: each pop, like the engine loop's
     `setdefault`, is a single dict operation, atomic under the GIL. `prefetch_model_state_dict` writes the staging
     buffers the engine loop reads on a pull: the router awaits it before `pull_model_state_dict`, and the
     controller awaits that pull before the next weight sync, so the two never overlap.
@@ -1007,8 +1007,8 @@ class VLLMGenerator(Configurable):
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
-        # Priority = the group's start order (`EngineRequest.priority`), lower first: requests of older
-        # groups are admitted first from the queue, and preempted last when the KV cache is full.
+        # Priority = `EngineRequest.group_id`; see its docstring.
+        # TODO: validation's negative ids put it ahead of training. Revisit once it overlaps training.
         engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.
@@ -1121,10 +1121,6 @@ class VLLMGenerator(Configurable):
         # a group makes no more generation calls, so entries live until it calls
         # `release_groups`.
         self._group_min_policy_versions: dict[int, int] = {}
-        # RANK 0: vLLM priority of each validation group (negative id), fixed at its first admission
-        # and kept until `release_groups`; see `EngineRequest.priority`.
-        self._validation_group_priorities: dict[int, int] = {}
-        self._newest_training_group_id = -1  # none admitted yet
         model = self._get_model()
         self._prefetched_model_state_dict = model._prefetched_model_state_dict
 
@@ -1253,8 +1249,8 @@ class VLLMGenerator(Configurable):
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
             group_id: Rollout group id. Requests of one group share a prefix cache
-                salt and a vLLM priority; `release_groups` drops them. Training ids (>= 0) should grow
-                as groups start, lower served first; see `EngineRequest.priority`.
+                salt; `release_groups` drops it. Also the vLLM priority, lower first;
+                see `EngineRequest.group_id`.
             routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
@@ -1412,7 +1408,7 @@ class VLLMGenerator(Configurable):
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
                                 arrival_time=request.arrival_time,
-                                priority=request.priority,
+                                priority=request.group_id,
                             )
                         except (ValueError, VLLMClientError) as exc:
                             rejected_requests.append((request.request_id, exc))
@@ -1526,15 +1522,6 @@ class VLLMGenerator(Configurable):
                 request.min_policy_version = self._group_min_policy_versions.setdefault(
                     request.group_id, self.policy_version
                 )
-            if request.group_id >= 0:
-                self._newest_training_group_id = max(
-                    self._newest_training_group_id, request.group_id
-                )
-                request.priority = request.group_id
-            else:
-                request.priority = self._validation_group_priorities.setdefault(
-                    request.group_id, self._newest_training_group_id
-                )
             request.arrival_time = time.time()
         requests_per_dp_rank = self._request_dispatcher.rank0_route(
             pending_engine_requests
@@ -1582,17 +1569,16 @@ class VLLMGenerator(Configurable):
         )
 
     async def release_groups(self, group_ids: list[int]) -> None:
-        """Drop the pinned cache salts and validation priorities of finished rollout groups.
+        """Drop the pinned cache salts of finished rollout groups.
 
         Args:
             group_ids: Groups with no more generation calls.
         """
         # A pop can land partway through `_decide_next_action`'s stamping loop, so requests of a
-        # released group in one batch can get different versions or priorities. If every batch must see one
+        # released group in one batch can get different versions. If every batch must see one
         # consistent snapshot of the pins, send releases through the queue instead.
         for group_id in group_ids:
             self._group_min_policy_versions.pop(group_id, None)
-            self._validation_group_priorities.pop(group_id, None)
 
     async def initialize_torchstore_client(self, requester_index: int) -> None:
         """Initialize this process as a TorchStore routing requester.
@@ -1723,20 +1709,18 @@ class EngineRequest:
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
     group_id: int
+    """Rollout group id, and its vLLM priority: lower is admitted first and preempted last.
+    Training ids grow as groups start; validation ids are negative, so validation goes first.
+
+        waiting, in arrival order:  g7 turn 1   g9 turn 1   g4 turn 2   validation (id -1)
+        vLLM admits:                validation  g4 turn 2   g7 turn 1   g9 turn 1
+                                                ^ g4 started before g7
+    """
     routing_session_id: str
     min_policy_version: int = field(init=False)
     """Oldest policy version this request's KV can come from; rank 0 sets it at admission.
     Without a KV reset on weight sync it is the group's pinned version and salts the
     prefix cache."""
-    priority: int = field(init=False)
-    """vLLM priority, lower served first; rank 0 sets it, and all requests of a group share it.
-    - training group: its id, which grows as groups start.
-    - validation group (negative id): the newest training id this generator had seen at the group's first
-      admission, so it runs behind the groups that started before it, not ahead of all training.
-
-        admitted:  g4 turn 1   g7 turn 1   validation turn 1   g9 turn 1   g4 turn 2   validation turn 2
-        priority:  4           7           7                   9           4           7
-    """
     arrival_time: float = field(init=False)
     """Rank 0's `time.time()` at admission; vLLM breaks priority ties by it. TP ranks pass rank 0's
     value, so one rank's clock jumping back cannot make it schedule a different batch."""
