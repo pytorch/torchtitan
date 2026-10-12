@@ -1045,7 +1045,7 @@ class Controller(Configurable):
             if rollout_group is None:  # closed and drained
                 logger.info("Buffer drained; batcher loop stopping")
                 break
-            # In a thread, so the event loop keeps running: the build walks every token of the group
+            # In a thread, so the event loop keeps running while the group's samples are built
             with sl.log_trace_span("training_sample_builder"):
                 training_sample_group = await asyncio.to_thread(
                     training_sample_builder.build_from_group,

@@ -26,8 +26,8 @@ class TrainingSample:
 
     Per-token fields are numpy arrays, like `RolloutTurn`'s:
     - not lists: a full GC walks every entry of a list, but doesn't track numpy arrays;
-    - not tensors: a sample is one `np.concatenate` of its turns' arrays, and the batcher converts once,
-      into the trainer's tensors.
+    - not tensors: the turns are already numpy, so a sample is built with no conversion; the batcher
+      converts once, into the trainer's tensors.
 
     Example:
         # Turn 0: prompt P0 -> assistant A0 -> env reply E0
@@ -81,7 +81,8 @@ def _has_valid_loss_token(training_sample: TrainingSample) -> bool:
 
 @dataclass(kw_only=True, slots=True)
 class _SampleInProgress:
-    """A training_sample being built: the turns' numpy chunks, concatenated once by `to_training_sample`."""
+    """A training_sample being built: per field, a list of chunks that `to_training_sample` concatenates
+    once, e.g. token_ids = [prompt0, completion0, prompt_delta1, completion1]."""
 
     rollout_id: RolloutTurnID
     min_policy_version: int
@@ -141,7 +142,7 @@ class TrainingSampleBuilder(Configurable):
 
         # Untrainable: any sibling with no completion tokens -> drop the whole group
         if any(
-            not any(len(turn.completion_token_ids) for turn in rollout.turns)
+            not any(len(turn.completion_token_ids) > 0 for turn in rollout.turns)
             for rollout in rollout_group.rollouts
         ):
             metrics.append(
@@ -181,7 +182,10 @@ class TrainingSampleBuilder(Configurable):
         for rollout in rollout_group.rollouts:
             # A later turn with no completion (e.g. a request aborted before its first token): drop the
             # rollout, so `rollout_to_training_samples` doesn't raise and stop the run.
-            if any(not len(rollout_turn.completion_token_ids) for rollout_turn in rollout.turns[1:]):
+            if any(
+                len(rollout_turn.completion_token_ids) == 0
+                for rollout_turn in rollout.turns[1:]
+            ):
                 num_rollouts_dropped_empty_completion += 1
                 continue
 
@@ -286,8 +290,8 @@ class TrainingSampleBuilder(Configurable):
                 "must fill it (via its advantage estimator) before training_samples are built."
             )
         training_samples: list[TrainingSample] = []
-        # The training_sample later turns may still extend
-        open_sample: _SampleInProgress | None = None
+        # The training_sample that later turns may still extend; None until the first trained turn
+        sample_in_progress: _SampleInProgress | None = None
         # Length of the previous turn's prompt + completion
         prev_len = 0
 
@@ -295,7 +299,7 @@ class TrainingSampleBuilder(Configurable):
         # long in the first turn, before any generation. We keep these rollouts for debugging.
         # TODO(async-rl): confirm this signal actually reaches the rollout_recorder.
         for turn_idx, rollout_turn in enumerate(rollout.turns):
-            if not len(rollout_turn.completion_token_ids):
+            if len(rollout_turn.completion_token_ids) == 0:
                 if len(rollout.turns) == 1:
 
                     continue
@@ -320,11 +324,13 @@ class TrainingSampleBuilder(Configurable):
             # True when this prompt continues the previous one (prefix-preserving);
             # False when the env edited history -> open a new training_sample (branch).
             extends_prev = prompt_prefix_len == prev_len
-            if open_sample is None or not extends_prev:
-                # The open training_sample is complete: finish it. Its token_ids are exactly the
-                # previous turn's prompt + completion, since each turn appends to it.
-                if open_sample is not None:
-                    training_samples.append(open_sample.to_training_sample())
+            if sample_in_progress is not None and not extends_prev:
+                training_samples.append(sample_in_progress.to_training_sample())
+                sample_in_progress = None
+
+            if sample_in_progress is None:
+                # Each turn appended to the last training_sample, so its token_ids are exactly the
+                # previous turn's prompt + completion.
                 prev_prompt_and_completion = (
                     training_samples[-1].token_ids
                     if training_samples
@@ -348,18 +354,21 @@ class TrainingSampleBuilder(Configurable):
                     )
 
                 # Start a new training_sample; its RolloutTurnID marks the turn the segment begins at.
-                open_sample = _SampleInProgress(
-                        min_policy_version=rollout_turn.min_policy_version,
-                        max_policy_version=rollout_turn.max_policy_version,
-                        rollout_id=RolloutTurnID(
-                            group_id=rollout.group_id,
-                            rollout_id=rollout.rollout_id,
-                            turn_id=turn_idx,
+                sample_in_progress = _SampleInProgress(
+                    min_policy_version=rollout_turn.min_policy_version,
+                    max_policy_version=rollout_turn.max_policy_version,
+                    rollout_id=RolloutTurnID(
+                        group_id=rollout.group_id,
+                        rollout_id=rollout.rollout_id,
+                        turn_id=turn_idx,
                     ),
                 )
                 # A new training_sample needs the full prompt: the shared prefix + the delta.
                 prompt_delta = np.concatenate(
-                    [prev_prompt_and_completion[:prompt_prefix_len], prompt_delta_token_ids]
+                    [
+                        prev_prompt_and_completion[:prompt_prefix_len],
+                        prompt_delta_token_ids,
+                    ]
                 )
             else:
                 prompt_delta = prompt_delta_token_ids
@@ -367,25 +376,29 @@ class TrainingSampleBuilder(Configurable):
             # Append this turn's chunks: prompt delta (untrained) + completion (trained).
             num_delta = len(prompt_delta)
             num_completion = len(rollout_turn.completion_token_ids)
-            open_sample.token_ids += [prompt_delta, rollout_turn.completion_token_ids]
-            open_sample.loss_mask += [
+            sample_in_progress.token_ids += [
+                prompt_delta,
+                rollout_turn.completion_token_ids,
+            ]
+            sample_in_progress.loss_mask += [
                 np.zeros(num_delta, dtype=bool),
                 np.ones(num_completion, dtype=bool),
             ]
-            open_sample.logprobs += [
+            sample_in_progress.logprobs += [
                 np.zeros(num_delta, dtype=np.float32),
                 rollout_turn.completion_logprobs,
             ]
-            open_sample.advantage += [
+            sample_in_progress.advantage += [
                 np.zeros(num_delta, dtype=np.float32),
                 np.full(num_completion, rollout_advantage, dtype=np.float32),
             ]
             # Widen the segment's version span to include this turn (the min stays the opening turn's).
-            open_sample.max_policy_version = max(
-                open_sample.max_policy_version, rollout_turn.max_policy_version
+            sample_in_progress.max_policy_version = max(
+                sample_in_progress.max_policy_version, rollout_turn.max_policy_version
             )
+
             prev_len = rollout_turn.num_prompt_tokens + num_completion
 
-        if open_sample is not None:
-            training_samples.append(open_sample.to_training_sample())
+        if sample_in_progress is not None:
+            training_samples.append(sample_in_progress.to_training_sample())
         return training_samples

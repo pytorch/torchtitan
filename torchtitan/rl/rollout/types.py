@@ -155,8 +155,8 @@ class RolloutTurn:
         [0, 1, 2, 3, 4, 5]   4                  [4, 5]                  # continues
         [0, 1, 9, 3]         2                  [9, 3]                  # edited 2 -> 9: 3 is stored again
 
-    Per-token fields are numpy arrays (int32 tokens, float32 logprobs): they pickle as raw bytes from
-    the rollout worker to the controller, and the GC doesn't track them.
+    Per-token fields are numpy arrays, not lists: a group pickles as raw bytes from the rollout worker
+    to the controller, and the GC doesn't track them.
     """
 
     # TODO: add a `logs` field (raw prompt/response text, finish_reason, timings)
