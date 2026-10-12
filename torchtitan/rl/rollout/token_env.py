@@ -10,6 +10,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
+import numpy as np
 from renderers import Message, Renderer, ToolSpec
 
 from torchtitan.config import Configurable
@@ -52,9 +53,10 @@ class TokenEnvOutput:
     can be used by the rubric to compute the final rollout reward."""
 
     @property
-    def next_prompt_delta_token_ids(self) -> list[int]:
+    def next_prompt_delta_token_ids(self) -> np.ndarray:
         """The next prompt after its first `next_prompt_prefix_len` tokens."""
-        return (self.next_prompt_token_ids or [])[self.next_prompt_prefix_len :]
+        delta = (self.next_prompt_token_ids or [])[self.next_prompt_prefix_len :]
+        return np.asarray(delta, dtype=np.int32)
 
 
 class TokenEnv(Configurable):

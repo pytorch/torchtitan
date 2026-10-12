@@ -11,6 +11,7 @@ No GPU, no retrieval server: the retrieval call is monkeypatched.
 
 import asyncio
 
+import numpy as np
 from renderers.base import ParsedToolCall
 
 from torchtitan.rl.examples.search_r1 import (
@@ -85,9 +86,9 @@ def _rollout(*, answer: str | None, tool_results: list[str] | None = None) -> Ro
             RolloutTurn(
                 rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=len(turns)),
                 prompt_prefix_len=0,
-                prompt_delta_token_ids=[1],
-                completion_token_ids=[2],
-                completion_logprobs=[-0.1],
+                prompt_delta_token_ids=np.array([1], dtype=np.int32),
+                completion_token_ids=np.array([2], dtype=np.int32),
+                completion_logprobs=np.array([-0.1], dtype=np.float32),
                 completion_message={
                     "role": "assistant",
                     "tool_calls": [_search_call("q")],
@@ -104,9 +105,9 @@ def _rollout(*, answer: str | None, tool_results: list[str] | None = None) -> Ro
         RolloutTurn(
             rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=len(turns)),
             prompt_prefix_len=0,
-            prompt_delta_token_ids=[3],
-            completion_token_ids=[4],
-            completion_logprobs=[-0.1],
+            prompt_delta_token_ids=np.array([3], dtype=np.int32),
+            completion_token_ids=np.array([4], dtype=np.int32),
+            completion_logprobs=np.array([-0.1], dtype=np.float32),
             completion_message=final,
         )
     )

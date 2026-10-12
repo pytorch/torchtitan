@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
 from verifiers.v1.configs.client import TrainClientConfig as VerifiersTrainClientConfig
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.dialects.chat import message_to_wire
@@ -412,11 +413,11 @@ class VerifiersRollouter(Rollouter):
                             ),
                             prompt_prefix_len=prompt_prefix_len,
                             prompt_delta_token_ids=prompt_delta_token_ids,
-                            completion_token_ids=list(
-                                token_ids[absolute_start:absolute_end]
+                            completion_token_ids=np.asarray(
+                                token_ids[absolute_start:absolute_end], dtype=np.int32
                             ),
-                            completion_logprobs=list(
-                                logprobs[absolute_start:absolute_end]
+                            completion_logprobs=np.asarray(
+                                logprobs[absolute_start:absolute_end], dtype=np.float32
                             ),
                             min_policy_version=generation_metadata.min_policy_version,
                             max_policy_version=generation_metadata.max_policy_version,

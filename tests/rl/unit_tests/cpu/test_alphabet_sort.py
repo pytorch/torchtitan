@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
+import numpy as np
 import pytest
 from renderers import Qwen3RendererConfig
 
@@ -91,9 +92,9 @@ def _assistant_turn(content: str) -> RolloutTurn:
     return RolloutTurn(
         rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
         prompt_prefix_len=0,
-        prompt_delta_token_ids=[],
-        completion_token_ids=[],
-        completion_logprobs=[],
+        prompt_delta_token_ids=np.array([], dtype=np.int32),
+        completion_token_ids=np.array([], dtype=np.int32),
+        completion_logprobs=np.array([], dtype=np.float32),
         min_policy_version=0,
         completion_message={"role": "assistant", "content": content},
     )

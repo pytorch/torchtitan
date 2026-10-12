@@ -1018,8 +1018,6 @@ class Controller(Configurable):
             await group_buffer.finalize_work(group)
 
             # Drop both refs (work.rollout_group is the group too): held groups made every full GC slow.
-            # TODO: investigate a better type for the per-token lists in RolloutTurn and TrainingSample:
-            # a full GC walks every entry of a Python list, which is slow. A torch tensor may be better.
             del group, work
 
     async def _batcher_loop(
@@ -1047,9 +1045,11 @@ class Controller(Configurable):
             if rollout_group is None:  # closed and drained
                 logger.info("Buffer drained; batcher loop stopping")
                 break
+            # In a thread, so the event loop keeps running while the group's samples are built
             with sl.log_trace_span("training_sample_builder"):
-                training_sample_group = training_sample_builder.build_from_group(
-                    rollout_group=rollout_group
+                training_sample_group = await asyncio.to_thread(
+                    training_sample_builder.build_from_group,
+                    rollout_group=rollout_group,
                 )
 
             # We put a group in. We may get a batch back
