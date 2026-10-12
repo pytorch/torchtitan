@@ -6,13 +6,15 @@
 
 from __future__ import annotations
 
-"""HuggingFace checkpoint adapter for unquantized Kimi K3 weights."""
+"""HuggingFace checkpoint adapter for Kimi K3 weights."""
 
 import re
 from typing import Any, TYPE_CHECKING
 
 import torch
-from torch.distributed.tensor import DTensor
+from torch.distributed.checkpoint import HuggingFaceStorageReader
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor, Placement, Replicate
 
 from torchtitan.models.common.moe_state_dict_adapter import MoEStateDictAdapter
 
@@ -115,9 +117,39 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             "language_model.model.layers.{}.self_attn.dt_bias": "layers.{}.delta_attention.dt_bias",
         }
 
-        # The released index contains MXFP4 packed/scale FQNs, while this
-        # adapter exports unquantized weights.
-        self.fqn_to_index_mapping = None
+        # fqn_to_index_mapping always uses unquantized names: only HF saves read
+        # it, and they write unquantized routed experts. hf_assets_path may hold the
+        # released MXFP4 index, so X.weight_packed is saved as X.weight and
+        # X.weight_scale is not saved.
+        if self.fqn_to_index_mapping is not None:
+            self.fqn_to_index_mapping = {
+                key.removesuffix("_packed"): index
+                for key, index in self.fqn_to_index_mapping.items()
+                if not key.endswith(".weight_scale")
+            }
+        self._kda_parameter_layouts: dict[
+            str,
+            tuple[DeviceMesh, tuple[Placement, ...]],
+        ] = {}
+
+    def get_hf_storage_reader(
+        self,
+        path: str,
+        from_quantized: bool = False,
+        *,
+        thread_count: int | None = None,
+    ) -> HuggingFaceStorageReader:
+        if from_quantized:
+            from torch.distributed.checkpoint.quantized_hf_storage import (
+                QuantizedHuggingFaceStorageReader,
+            )
+
+            return QuantizedHuggingFaceStorageReader(
+                path=path,
+                thread_count=4 if thread_count is None else thread_count,
+                target_dtype=torch.bfloat16,
+            )
+        return super().get_hf_storage_reader(path, thread_count=thread_count)
 
     def _map_from_hf_layer_key(
         self,
@@ -136,8 +168,14 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         )
         return attention_map.get(abstract_key)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Convert a TorchTitan state dict to unquantized HuggingFace format."""
+    def to_hf(
+        self, state_dict: dict[str, Any], from_quantized: bool = False
+    ) -> dict[str, Any]:
+        """Convert a TorchTitan state dict to HuggingFace format.
+
+        With ``from_quantized``, routed experts use the compressed-tensors MXFP4
+        names (``weight_packed``) so the quantized reader can dequantize them.
+        """
         state_dict = self._native_fused_linears_to_hf(
             state_dict,
             split_routed_experts=True,
@@ -215,8 +253,32 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 if hf_abstract_key is None:
                     unmapped.append(key)
                     continue
-                if abstract_key == "layers.{}.delta_attention.dt_bias":
-                    value = value.reshape(-1)
+                if abstract_key in {
+                    "layers.{}.delta_attention.A_log",
+                    "layers.{}.delta_attention.dt_bias",
+                }:
+                    if isinstance(value, DTensor):
+                        self._kda_parameter_layouts[key] = (
+                            value.device_mesh,
+                            value.placements,
+                        )
+                        value = value.redistribute(
+                            placements=(Replicate(),) * value.device_mesh.ndim
+                        )
+                    if abstract_key == "layers.{}.delta_attention.A_log":
+                        delta_config = self.kimi_config.layers[
+                            int(layer_num)
+                        ].delta_attention
+                        if delta_config is None:
+                            raise ValueError(f"TT key '{key}' targets a non-KDA layer.")
+                        # Released checkpoints pad A_log to head_dim. Match that
+                        # shape for DCP planning and remove it in from_hf().
+                        value = torch.nn.functional.pad(
+                            value,
+                            (0, delta_config.head_dim - delta_config.num_heads),
+                        )
+                    else:
+                        value = value.reshape(-1)
                 hf_state_dict[hf_abstract_key.format(layer_num)] = value
                 continue
 
@@ -269,10 +331,25 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 "KimiK3StateDictAdapter found TorchTitan keys without a "
                 f"mapping: {unmapped}."
             )
+        if from_quantized:
+            hf_state_dict = {
+                (
+                    key.removesuffix(".weight") + ".weight_packed"
+                    if ".block_sparse_moe.experts." in key
+                    else key
+                ): value
+                for key, value in hf_state_dict.items()
+            }
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Convert an unquantized HuggingFace state dict to TorchTitan."""
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], from_quantized: bool = False
+    ) -> dict[str, Any]:
+        """Convert a HuggingFace state dict to TorchTitan.
+
+        With ``from_quantized``, routed experts must use the ``weight_packed``
+        names from ``to_hf(..., from_quantized=True)``.
+        """
         state_dict: dict[str, Any] = {}
         expert_weights_by_layer: dict[str, dict[str, dict[int, torch.Tensor]]] = {}
         unmapped: list[str] = []
@@ -291,6 +368,11 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 continue
 
             if "block_sparse_moe.experts" in key:
+                if from_quantized:
+                    if not key.endswith(".weight_packed"):
+                        unmapped.append(key)
+                        continue
+                    key = key.removesuffix("_packed")
                 abstract_key = re.sub(
                     r"(?<=\.)\d+(?=\.)",
                     "{}",
@@ -358,16 +440,31 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 if new_abstract_key is None:
                     unmapped.append(key)
                     continue
-                if new_abstract_key == "layers.{}.delta_attention.dt_bias":
+                if new_abstract_key in {
+                    "layers.{}.delta_attention.A_log",
+                    "layers.{}.delta_attention.dt_bias",
+                }:
                     delta_config = self.kimi_config.layers[
                         int(layer_num)
                     ].delta_attention
                     if delta_config is None:
                         raise ValueError(f"HF key '{key}' targets a non-KDA layer.")
-                    value = value.reshape(
-                        delta_config.num_heads,
-                        delta_config.head_dim,
+                    if new_abstract_key == "layers.{}.delta_attention.A_log":
+                        value = value[: delta_config.num_heads]
+                    else:
+                        value = value.reshape(
+                            delta_config.num_heads,
+                            delta_config.head_dim,
+                        )
+                    layout = self._kda_parameter_layouts.get(
+                        new_abstract_key.format(layer_num)
                     )
+                    if layout is not None:
+                        assert isinstance(value, DTensor)
+                        value = value.redistribute(
+                            device_mesh=layout[0],
+                            placements=layout[1],
+                        )
                 state_dict[new_abstract_key.format(layer_num)] = value
                 continue
 

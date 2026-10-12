@@ -166,7 +166,9 @@ class FluxStateDictAdapter(StateDictAdapter):
         new_weight = torch.cat([scale, shift], dim=0)
         return new_weight
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], from_quantized: bool = False
+    ) -> dict[str, Any]:
         """Convert TorchTitan DCP state dict to HuggingFace safetensors format."""
         state_dict = self._native_fused_linears_to_hf(state_dict)
 
@@ -244,7 +246,9 @@ class FluxStateDictAdapter(StateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], from_quantized: bool = False
+    ) -> dict[str, Any]:
         """Convert HuggingFace safetensors state dict to TorchTitan DCP format."""
         state_dict = {}
 
