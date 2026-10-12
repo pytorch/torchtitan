@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from torchtitan.components.optim import GradientClipper, Optim
+from torchtitan.distributed.utils import clip_grad_norm_
 
 
 @dataclass
@@ -33,6 +34,10 @@ class _TestGradientClipper(GradientClipper):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self.calls = []
+
+    def bind_model_parts(self, model_parts) -> None:
+        """Prove binding does not require changing the config-only constructor."""
+        self.model_parts = model_parts
 
     def clip_grad_norm_(
         self,
@@ -77,6 +82,21 @@ def test_default_gradient_clipper_uses_distributed_clip_grad_norm() -> None:
 def test_optim_config_rejects_negative_max_norm() -> None:
     with pytest.raises(ValueError, match="max_norm"):
         Optim.Config(max_norm=-1)
+
+
+def test_logical_norm_counts_one_copy_but_clips_both() -> None:
+    canonical = torch.nn.Parameter(torch.zeros(2))
+    replica = torch.nn.Parameter(torch.zeros(2))
+    canonical.grad = torch.tensor([3.0, 4.0])
+    replica.grad = canonical.grad.clone()
+
+    norm = clip_grad_norm_(
+        [canonical, replica], 1.0, norm_parameters=[canonical], foreach=True
+    )
+
+    torch.testing.assert_close(norm, torch.tensor(5.0))
+    torch.testing.assert_close(canonical.grad, torch.tensor([0.6, 0.8]))
+    torch.testing.assert_close(replica.grad, canonical.grad)
 
 
 @pytest.mark.parametrize("enable_cuda_graph", [False, True])
@@ -131,6 +151,7 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
     )
     config.ema.build.assert_called_once_with(model_parts=[model])
     gradient_clipper_config.build.assert_called_once_with()
+    gradient_clipper.bind_model_parts.assert_called_once_with([model])
     assert optim.gradient_clipper is gradient_clipper
     assert optim._is_first_step_call
     if enable_cuda_graph:
@@ -212,6 +233,7 @@ def test_optim_builds_configured_grad_clip() -> None:
     )
 
     assert isinstance(optim.gradient_clipper, _TestGradientClipper)
+    assert optim.gradient_clipper.model_parts == [model]
     assert optim.gradient_clipper.config.grad_norm == 3.0
 
 

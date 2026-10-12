@@ -47,6 +47,15 @@ class BaseModel(Module, ABC):
         buffer_device = kwargs.get("buffer_device")
         self.init_states(buffer_device=buffer_device)
 
+    @classmethod
+    def _synchronize_shared_parameters(
+        cls,
+        model_parts: list[BaseModel],
+        parallelism_context: ParallelismContext,
+    ) -> None:
+        """Synchronize model-owned replicas after initialization or checkpoint load."""
+        del model_parts, parallelism_context
+
     def preprocess_inputs(
         self,
         input_dict: dict[str, Any],
