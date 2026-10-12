@@ -138,28 +138,32 @@ def _enable_multi_worker_kv_offload(engine: Any) -> None:
         request.external_req_id = request.request_id
         request.request_id = f"{request.request_id}-{next(request_counter)}"
 
+    if not hasattr(engine.input_processor, "assign_request_id"):
+        raise RuntimeError(
+            "vLLM's InputProcessor has no assign_request_id to replace; update "
+            "_enable_multi_worker_kv_offload for this vLLM version"
+        )
     engine.input_processor.assign_request_id = assign_request_id
 
     aggregator = KVOutputAggregator(expected_finished_count=tp_group.world_size)
     update_from_output = scheduler.update_from_output
 
     def update_from_merged_output(scheduler_output, model_runner_output):
-        # Every rank gathers on every step, even with nothing finished, or the ranks deadlock.
         fingerprint = (
-            scheduler_output.total_num_scheduled_tokens,
-            len(scheduler.requests),
+            hash(tuple(scheduler_output.num_scheduled_tokens.items())),
             connector_scheduler._job_counter,
         )
         gathered: list[Any] = [None] * tp_group.world_size
+        # Every rank gathers on every step, even with nothing finished, or the ranks deadlock.
         dist.all_gather_object(
             gathered,
             (fingerprint, model_runner_output.kv_connector_output),
             group=tp_group.cpu_group,
         )
-        fingerprints = [rank_fingerprint for rank_fingerprint, _ in gathered]
+        fingerprints, kv_connector_outputs = zip(*gathered)
         if any(rank_fingerprint != fingerprint for rank_fingerprint in fingerprints):
             raise RuntimeError(
-                "TP ranks' vLLM schedulers diverged; (scheduled tokens, requests, offload jobs) "
+                "TP ranks' vLLM schedulers diverged; (scheduled requests hash, offload jobs) "
                 f"per rank: {fingerprints}"
             )
         # A copy per rank: aggregate() writes into its output_rank entry, and steps without work
@@ -167,7 +171,7 @@ def _enable_multi_worker_kv_offload(engine: Any) -> None:
         merged = aggregator.aggregate(
             [
                 replace(model_runner_output, kv_connector_output=kv_connector_output)
-                for _, kv_connector_output in gathered
+                for kv_connector_output in kv_connector_outputs
             ],
             output_rank=tp_group.rank_in_group,
         )
@@ -955,9 +959,9 @@ class VLLMGenerator(Configurable):
                 )
             if self.kv_offload_gib > 0 and self.reset_kv_cache_on_weight_sync:
                 raise ValueError(
-                    "kv_offload_gib needs reset_kv_cache_on_weight_sync=False: vLLM cannot reset "
-                    "the prefix cache while a request waits on a CPU load, so batch_invariant "
-                    "(which needs the reset) does not work with offload"
+                    "kv_offload_gib needs reset_kv_cache_on_weight_sync=False (so no "
+                    "batch_invariant): vLLM cannot reset the prefix cache while a request waits "
+                    "on a CPU load"
                 )
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal

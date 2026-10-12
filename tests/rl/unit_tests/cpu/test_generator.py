@@ -625,8 +625,17 @@ class _ConnectorConfig(NamedTuple):
     num_workers: int
 
 
+def _vllm_assign_request_id(request) -> None:
+    """Stands in for vLLM's InputProcessor.assign_request_id."""
+
+
 def _multi_worker_engine(
-    monkeypatch, *, tp_size: int, peer_entry: Any = None, hash_randomization: int = 0
+    monkeypatch,
+    *,
+    tp_size: int,
+    peer_entry: Any = None,
+    hash_randomization: int = 0,
+    input_processor: Any = None,
 ):
     """A fake engine set up by `_enable_multi_worker_kv_offload` as TP rank 0 of DP=2 x TP.
 
@@ -644,7 +653,8 @@ def _multi_worker_engine(
     )
     engine = SimpleNamespace(
         engine_core=SimpleNamespace(engine_core=SimpleNamespace(scheduler=scheduler)),
-        input_processor=SimpleNamespace(),
+        input_processor=input_processor
+        or SimpleNamespace(assign_request_id=_vllm_assign_request_id),
     )
     tp_group = SimpleNamespace(world_size=tp_size, rank_in_group=0, cpu_group=None)
     monkeypatch.setattr(vllm_parallel_state, "get_tp_group", lambda: tp_group)
@@ -676,7 +686,7 @@ def test_multi_worker_kv_offload_finishes_a_load_once_every_tp_rank_did(monkeypa
         monkeypatch, tp_size=2, peer_entry=lambda own: (own[0], next(peer_outputs))
     )
     scheduler = engine.engine_core.engine_core.scheduler
-    step = SimpleNamespace(total_num_scheduled_tokens=8)
+    step = SimpleNamespace(num_scheduled_tokens={"r-0": 8})
 
     own_output = replace(
         EMPTY_MODEL_RUNNER_OUTPUT, kv_connector_output=_finished(7, "r-0")
@@ -690,37 +700,27 @@ def test_multi_worker_kv_offload_finishes_a_load_once_every_tp_rank_did(monkeypa
     assert not first.finished_recving
     assert second.kv_connector_worker_meta.completed_jobs == {7: 1}
     assert second.finished_recving == {"r-0"}
+    # The second step's own output was vLLM's shared EMPTY_MODEL_RUNNER_OUTPUT.
+    assert EMPTY_MODEL_RUNNER_OUTPUT.kv_connector_output is None
     # 4 (DP=2 x TP=2) before: each scheduler waits for its own TP group only.
     assert scheduler.connector.connector_scheduler.config.num_workers == 2
 
 
-def test_multi_worker_kv_offload_gathers_on_empty_steps_and_keeps_vllms_shared_output(
-    monkeypatch,
-):
-    engine, received, gathers = _multi_worker_engine(
-        monkeypatch, tp_size=2, peer_entry=lambda own: (own[0], _finished(7))
-    )
-
-    engine.engine_core.engine_core.scheduler.update_from_output(
-        SimpleNamespace(total_num_scheduled_tokens=0), EMPTY_MODEL_RUNNER_OUTPUT
-    )
-
-    assert (
-        len(gathers) == 1 and gathers[0][1] is None
-    )  # nothing finished here, still gathered
-    assert EMPTY_MODEL_RUNNER_OUTPUT.kv_connector_output is None
-    assert received[0].kv_connector_output.kv_connector_worker_meta.completed_jobs == {
-        7: 1
-    }
-
-
 def test_multi_worker_kv_offload_raises_when_tp_ranks_diverge(monkeypatch):
-    engine, _, _ = _multi_worker_engine(
-        monkeypatch, tp_size=2, peer_entry=lambda own: ((9, *own[0][1:]), None)
+    peer = {"entry": None}
+    engine, _, gathers = _multi_worker_engine(
+        monkeypatch, tp_size=2, peer_entry=lambda own: peer["entry"] or own
     )
+    update_from_output = engine.engine_core.engine_core.scheduler.update_from_output
+    # TP rank 1 schedules another request with the same token count.
+    update_from_output(
+        SimpleNamespace(num_scheduled_tokens={"r-1": 8}), EMPTY_MODEL_RUNNER_OUTPUT
+    )
+    peer["entry"] = gathers[-1]
+
     with pytest.raises(RuntimeError, match="schedulers diverged"):
-        engine.engine_core.engine_core.scheduler.update_from_output(
-            SimpleNamespace(total_num_scheduled_tokens=8), EMPTY_MODEL_RUNNER_OUTPUT
+        update_from_output(
+            SimpleNamespace(num_scheduled_tokens={"r-0": 8}), EMPTY_MODEL_RUNNER_OUTPUT
         )
 
 
@@ -731,7 +731,9 @@ def test_multi_worker_kv_offload_gives_every_tp_rank_the_same_request_ids(monkey
         requests = [SimpleNamespace(request_id=request_id) for request_id in "aba"]
         for request in requests:
             engine.input_processor.assign_request_id(request)
-        internal_ids.append([(r.request_id, r.external_req_id) for r in requests])
+        internal_ids.append(
+            [(request.request_id, request.external_req_id) for request in requests]
+        )
     assert (
         internal_ids[0] == internal_ids[1] == [("a-0", "a"), ("b-1", "b"), ("a-2", "a")]
     )
@@ -743,12 +745,18 @@ def test_multi_worker_kv_offload_with_tp1_only_sets_the_expected_count(monkeypat
         engine.engine_core.engine_core.scheduler.connector.connector_scheduler
     )
     assert connector_scheduler.config.num_workers == 1  # 2 (DP=2) before
-    assert not hasattr(engine.input_processor, "assign_request_id")
+    assert engine.input_processor.assign_request_id is _vllm_assign_request_id
 
 
 def test_multi_worker_kv_offload_needs_pythonhashseed_0(monkeypatch):
     with pytest.raises(ValueError, match="needs PYTHONHASHSEED=0"):
         _multi_worker_engine(monkeypatch, tp_size=2, hash_randomization=1)
+
+
+def test_multi_worker_kv_offload_needs_vllms_assign_request_id(monkeypatch):
+    """A vLLM that renamed it would keep random ids, and the first TP reload would hang."""
+    with pytest.raises(RuntimeError, match="no assign_request_id to replace"):
+        _multi_worker_engine(monkeypatch, tp_size=2, input_processor=SimpleNamespace())
 
 
 # --- CUDA graph config (VLLMCudaGraphConfig.get_vllm_compilation_config) ---
