@@ -27,6 +27,7 @@ from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
+from torchtitan.rl.components.batcher import TrainingMicrobatch
 from torchtitan.rl.components.checkpointer import CONTROLLER_STATE_KEY, MirroredState
 from torchtitan.rl.distributed.rdma_microbatch import MicrobatchStream, RDMAMicrobatch
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
@@ -239,16 +240,16 @@ class Trainer(Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[list[RDMAMicrobatch]],
+        training_data: list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
-            training_data: Microbatch-major grid of `RDMAMicrobatch`es,
-                ``[num_microbatches][dp_degree]``; this rank reads its column, a few
-                microbatches ahead of training.
+            training_data: Microbatch-major grid with shape
+                ``[num_microbatches][dp_degree]``; `RDMAMicrobatch`es with the RDMA fast path,
+                read a few microbatches ahead of training.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -263,16 +264,18 @@ class Trainer(Configurable):
         )
         engine = self.engine
         self._step_compute_start = time.perf_counter()
+        microbatches = [rank_batches[self.dp_rank] for rank_batches in training_data]
         # The batcher pads every microbatch to the same token count.
         self._step_num_tokens_per_dp_rank = (
-            len(training_data)
+            len(microbatches)
             * self.config.training.num_tokens_per_microbatch_per_dp_rank
         )
-        # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
-        # and broadcast it, to cut the batcher's reads by cp * tp. Needs a per-replica group.
-        microbatch_groups = MicrobatchStream(
-            [rank_batches[self.dp_rank] for rank_batches in training_data]
-        )
+        uses_rdma = bool(microbatches) and isinstance(microbatches[0], RDMAMicrobatch)
+        microbatch_groups = [[microbatch] for microbatch in microbatches]
+        if uses_rdma:
+            # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
+            # and broadcast it, to cut the batcher's reads by cp * tp. Needs a per-replica group.
+            microbatch_groups = MicrobatchStream(microbatches)
         result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,
@@ -296,18 +299,19 @@ class Trainer(Configurable):
             )
 
         metrics = combine_microbatch_metrics(microbatch_metrics)
-        # The slowest rank's total read time this step, hidden or not (max over the loss mesh).
-        read_microbatches_s = torch.tensor(
-            microbatch_groups.read_s, device=engine.device
-        )
-        metrics.update(
-            self._reduce_forward_backward_metrics(
-                sum_reduced_metrics={},
-                max_reduced_metrics={
-                    "timing/trainer/read_microbatches/max": read_microbatches_s
-                },
+        if uses_rdma:
+            # The slowest rank's total read time this step, hidden or not (max over the loss mesh).
+            read_microbatches_s = torch.tensor(
+                microbatch_groups.read_s, device=engine.device
             )
-        )
+            metrics.update(
+                self._reduce_forward_backward_metrics(
+                    sum_reduced_metrics={},
+                    max_reduced_metrics={
+                        "timing/trainer/read_microbatches/max": read_microbatches_s
+                    },
+                )
+            )
         return metrics
 
     @sl.log_trace_span("optim_step")
