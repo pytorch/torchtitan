@@ -330,7 +330,8 @@ def test_get_controller_state_returns_restored_state() -> None:
     asyncio.run(run())
 
 
-def test_forward_backward_accumulates_microbatch_metrics() -> None:
+@pytest.mark.parametrize("rdma", [False, True])
+def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         engine = SimpleNamespace(
@@ -379,8 +380,12 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             advantages=torch.tensor([1.0]),
         )
 
-        # This rank's column.
-        microbatch = MagicMock(spec=RDMAMicrobatch, read=AsyncMock(return_value=batch))
+        # This rank's column; with the RDMA fast path the trainer reads it.
+        microbatch = (
+            MagicMock(spec=RDMAMicrobatch, read=AsyncMock(return_value=batch))
+            if rdma
+            else batch
+        )
 
         result = await Trainer.forward_backward(
             trainer,
@@ -394,14 +399,17 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             global_loss_token_counts=torch.tensor([3]),
             global_routing_token_counts=torch.tensor([2]),
         )
+        # The RDMA fast path reads through the stream; by value, the column is passed as is.
         groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
-        assert isinstance(groups, MicrobatchStream)
+        assert isinstance(groups, MicrobatchStream) == rdma
         assert list(groups) == [[batch], [batch]]
         assert trainer._step_num_tokens_per_dp_rank == (
             2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
         )
-        assert trainer._reduce_forward_backward_metrics.call_count == 3
-        assert result.pop("timing/trainer/read_microbatches/max") >= 0
+        if rdma:
+            # The read time is reported only when there was a read.
+            assert result.pop("timing/trainer/read_microbatches/max") >= 0
+        assert trainer._reduce_forward_backward_metrics.call_count == (3 if rdma else 2)
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}
 
     asyncio.run(run())

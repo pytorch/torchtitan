@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections import deque
-from typing import Any, Literal
+from typing import Any
 
 from monarch.actor import Actor, endpoint
 
@@ -20,7 +20,7 @@ from torchtitan.observability.logging import init_logger
 from torchtitan.rl.components.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.distributed.rdma_microbatch import (
-    init_rdma_microbatch_owner,
+    create_cuda_context_to_silence_monarch_log,
     RDMAMicrobatch,
 )
 from torchtitan.rl.rollout.types import RolloutGroup
@@ -29,8 +29,9 @@ from torchtitan.rl.rollout.types import RolloutGroup
 class BatcherActor(Actor):
     """Turns finished rollout groups into training batches, in its own process.
 
-    Keeps each batch's tensors until `release_oldest_batch` and returns `RDMAMicrobatch`es, so
-    trainer ranks read from this process.
+    With `rdma_fast_path_threshold` set, keeps each batch's tensors until `release_oldest_batch` and
+    returns `RDMAMicrobatch`es, so trainer ranks read from this process. Without it, returns the batch
+    by value.
 
     Why not build and pack in the controller, whose busy event loop holds the GIL:
         on the loop thread:      blocks every rollout while it runs
@@ -40,7 +41,7 @@ class BatcherActor(Actor):
         training_sample_builder_config: Built in this process.
         batcher_config: Built in this process with `batcher_kwargs`.
         batcher_kwargs: Runtime kwargs for `batcher_config.build`, e.g. `dp_degree` and `pad_id`.
-        microbatch_rdma_transport: See `AsyncLoopConfig.microbatch_rdma_transport`.
+        rdma_fast_path_threshold: See `AsyncLoopConfig.rdma_fast_path_threshold`.
         output_dir: Where the structured logger writes this process's spans.
         enable_structured_logging: Whether to write those spans.
 
@@ -51,7 +52,7 @@ class BatcherActor(Actor):
             training_sample_builder_config=TrainingSampleBuilder.Config(),
             batcher_config=Batcher.Config(),
             batcher_kwargs=dict(num_prompts_per_train_step=2, dp_degree=1, ...),
-            microbatch_rdma_transport="tcp",
+            rdma_fast_path_threshold=1024,
             output_dir="outputs",
             enable_structured_logging=False,
         )
@@ -66,7 +67,7 @@ class BatcherActor(Actor):
         training_sample_builder_config: TrainingSampleBuilder.Config,
         batcher_config: Batcher.Config,
         batcher_kwargs: dict[str, Any],
-        microbatch_rdma_transport: Literal["tcp", "ibverbs"],
+        rdma_fast_path_threshold: int | None,
         output_dir: str,
         enable_structured_logging: bool,
     ) -> None:
@@ -79,7 +80,9 @@ class BatcherActor(Actor):
         )
         self._training_sample_builder = training_sample_builder_config.build()
         self._batcher = batcher_config.build(**batcher_kwargs)
-        init_rdma_microbatch_owner(transport=microbatch_rdma_transport)
+        self._rdma_fast_path_threshold = rdma_fast_path_threshold
+        if rdma_fast_path_threshold is not None:
+            create_cuda_context_to_silence_monarch_log()
         # Batches trainer ranks may still read, oldest first. Each buffer keeps its tensor's
         # storage alive until drop().
         self._batches_being_read: deque[list[list[RDMAMicrobatch]]] = deque()
@@ -102,12 +105,17 @@ class BatcherActor(Actor):
             batch, group_is_trainable = self._batcher.add_training_samples(
                 training_sample_group=training_sample_group
             )
-        if batch is None:
+        if batch is None or self._rdma_fast_path_threshold is None:
             return batch, group_is_trainable
         # The reply carries RDMAMicrobatches, not large tensors: trainer ranks read their columns here.
         with sl.log_trace_span("register_rdma_microbatches"):
             rdma_microbatches = [
-                [RDMAMicrobatch.register(microbatch) for microbatch in row]
+                [
+                    RDMAMicrobatch.register(
+                        microbatch, min_bytes=self._rdma_fast_path_threshold
+                    )
+                    for microbatch in row
+                ]
                 for row in batch.microbatches
             ]
         self._batches_being_read.append(rdma_microbatches)

@@ -95,7 +95,6 @@ import os
 import time
 import warnings
 from dataclasses import dataclass, field, replace
-from typing import Literal
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
@@ -185,12 +184,15 @@ class AsyncLoopConfig(Configurable.Config):
     `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
     ``torchtitan/rl/components/WINDOWED_FIFO.md``."""
 
-    microbatch_rdma_transport: Literal["tcp", "ibverbs"] = "tcp"
-    """How trainer ranks read their microbatches' Monarch RDMA buffers (weight sync has TorchStore's switch):
-        "tcp" (default): Monarch's TCP transport; 1.3 GB/s reading 256 MiB on one host.
-        "ibverbs": RDMA hardware; 25 GB/s on the same read. Falls back to TCP, with a warning, on hosts
-            without ibverbs. A host that lists ibverbs devices it can't use fails instead.
-    MONARCH_RDMA_DISABLE_IBVERBS=1 forces "tcp"."""
+    rdma_fast_path_threshold: int | None = None
+    """Trainer microbatches travel in Monarch RPC messages. With a value, tensors of at least that many
+    bytes go as Monarch RDMA buffers instead, and each trainer rank reads only its own microbatches:
+        None (default): no RDMA; every tensor in the message.
+        e.g. 1024: tensors of 1 KiB or more stay in the sender; token counts (8 B) and empty tensors
+            stay in the message.
+    Monarch uses ibverbs where the host has it, else TCP. A host that lists ibverbs devices it can't
+    use fails instead of falling back; MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process,
+    weight sync included."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -214,6 +216,14 @@ class AsyncLoopConfig(Configurable.Config):
         if self.windowed_fifo_batches is not None and self.windowed_fifo_batches < 1:
             raise ValueError(
                 f"windowed_fifo_batches must be None or >= 1, got {self.windowed_fifo_batches}"
+            )
+        if (
+            self.rdma_fast_path_threshold is not None
+            and self.rdma_fast_path_threshold < 1
+        ):
+            raise ValueError(
+                "rdma_fast_path_threshold must be None or >= 1 (RDMABuffer rejects empty tensors), "
+                f"got {self.rdma_fast_path_threshold}"
             )
 
     @property
@@ -676,7 +686,7 @@ class Controller(Configurable):
                     pad_id=self.tokenizer.eos_id,
                     temperature=self._sampling.temperature,
                 ),
-                microbatch_rdma_transport=async_loop.microbatch_rdma_transport,
+                rdma_fast_path_threshold=async_loop.rdma_fast_path_threshold,
                 output_dir=config.dump_folder,
                 enable_structured_logging=config.trainer.debug.enable_structured_logging,
             )
@@ -1225,9 +1235,10 @@ class Controller(Configurable):
                         )
                         fwd_bwd_metrics = self._get_rank_0_value(fwd_bwd_results[0])
                     finally:
-                        # Every rank has read its column from the batcher, or the step failed.
-                        # Not awaited: it would wait behind an in-flight add_group.
-                        self.batcher.release_oldest_batch.broadcast()
+                        if self.config.async_loop.rdma_fast_path_threshold is not None:
+                            # Every rank has read its column from the batcher, or the step failed.
+                            # Not awaited: it would wait behind an in-flight add_group.
+                            self.batcher.release_oldest_batch.broadcast()
 
                     if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                         logger.error("Loss is NaN/Inf; training diverged")

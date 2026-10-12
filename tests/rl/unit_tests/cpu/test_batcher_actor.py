@@ -63,7 +63,9 @@ def _group(group_id: int, rewards: list[float]) -> RolloutGroup:
     return RolloutGroup(group_id=group_id, rollouts=rollouts)
 
 
-def test_batcher_actor_returns_the_in_process_batch(tmp_path) -> None:
+def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> None:
+    # TCP, not ibverbs: works on any CI host. The batcher process inherits the env var.
+    monkeypatch.setenv("MONARCH_RDMA_DISABLE_IBVERBS", "1")
     # Batch A after group 2, batch B after group 4. Group 1 has zero reward spread, so the
     # builder drops it: it rides along but isn't trainable.
     groups = [
@@ -83,21 +85,31 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path) -> None:
         for group in groups
     ]
 
-    async def run() -> tuple[list, list]:
+    async def run() -> tuple[list, list, list]:
         mesh = this_host().spawn_procs(per_host={"cpus": 1})
         try:
-            actor = mesh.spawn(
-                "batcher",
-                BatcherActor,
+            spawn_kwargs = dict(
                 training_sample_builder_config=TrainingSampleBuilder.Config(),
                 batcher_config=Batcher.Config(),
                 batcher_kwargs=_BATCHER_KWARGS,
-                microbatch_rdma_transport="tcp",
                 output_dir=str(tmp_path),
                 enable_structured_logging=False,
             )
+            actor = mesh.spawn(
+                "batcher", BatcherActor, rdma_fast_path_threshold=1024, **spawn_kwargs
+            )
+            by_value = mesh.spawn(
+                "batcher_by_value",
+                BatcherActor,
+                rdma_fast_path_threshold=None,
+                **spawn_kwargs,
+            )
             results = [
                 await actor.add_group.call_one(rollout_group=group) for group in groups
+            ]
+            by_value_results = [
+                await by_value.add_group.call_one(rollout_group=group)
+                for group in groups
             ]
             # Release A once: B, still held, must read back exactly, as a trainer rank reads it.
             await actor.release_oldest_batch.call_one()
@@ -110,11 +122,11 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path) -> None:
             no_advantage.rollouts[0].advantage = None
             with pytest.raises(ActorError, match="has no advantage"):
                 await actor.add_group.call_one(rollout_group=no_advantage)
-            return results, microbatches_b
+            return results, by_value_results, microbatches_b
         finally:
             await mesh.stop()
 
-    results, microbatches_b = asyncio.run(run())
+    results, by_value_results, microbatches_b = asyncio.run(run())
 
     assert [(batch is None, trainable) for batch, trainable in results] == [
         (True, True),
@@ -141,3 +153,12 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path) -> None:
         rtol=0,
         atol=0,
     )
+    # Without the threshold, the batches come back by value and match the in-process ones.
+    assert [batch is None for batch, _ in by_value_results] == [
+        batch is None for batch, _ in expected
+    ]
+    for (batch, _), (expected_batch, _) in zip(by_value_results, expected, strict=True):
+        if expected_batch is not None:
+            torch.testing.assert_close(
+                comparable(batch), comparable(expected_batch), rtol=0, atol=0
+            )
