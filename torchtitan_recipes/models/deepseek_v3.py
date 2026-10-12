@@ -94,7 +94,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     model_config = build_model_config(
         "671B",
         seq_len=seq_len,
-        attn_backend="flex",
+        attn_backend="varlen",
         parallelism=parallelism,
     )
     return Trainer.Config(
@@ -237,7 +237,7 @@ def deepseek_v3_671b_nvfp4_ffn_mxfp8_attn(
     config.model = build_model_config(
         "671B",
         seq_len=seq_len,
-        attn_backend="flex",
+        attn_backend="varlen",
         parallelism=config.parallelism,
         converters=[
             NVFP4LinearConverter.Config(

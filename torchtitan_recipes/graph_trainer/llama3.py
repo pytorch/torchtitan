@@ -29,6 +29,7 @@ def graph_trainer_llama3_8b(*, seq_len: int = 8192) -> GraphTrainer.Config:
 def graph_trainer_llama3_8b_c4_test() -> GraphTrainer.Config:
     config = graph_trainer_llama3_8b()
     config.dataloader = GrainDataLoader.Config(
+        max_num_documents=1024,
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
     )
     return config

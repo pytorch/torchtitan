@@ -224,6 +224,14 @@ class VarlenInnerAttention(InnerAttention):
             attention_metadata, VarlenAttentionMetadata
         ), f"attention_metadata must be instance of VarlenAttentionMetadata but got {type(attention_metadata)}"
 
+        # Q/K normalization can upcast under AMP; V retains the projection dtype.
+        attn_dtype = v_THV.dtype
+        if attn_dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(
+                "Varlen attention requires FP16 or BF16 values, "
+                f"got {attn_dtype}. Use FP16/BF16 mixed precision."
+            )
+
         cu_seq_q = attention_metadata.cu_seq_q
         cu_seq_k = attention_metadata.cu_seq_k
         max_q = attention_metadata.max_q
@@ -251,9 +259,9 @@ class VarlenInnerAttention(InnerAttention):
         varlen_attn_fn = varlen_attn if out_transform is None else varlen_attn_with_lse
 
         result = varlen_attn_fn(
-            q_THK.to(torch.bfloat16),
-            k_THK.to(torch.bfloat16),
-            v_THV.to(torch.bfloat16),
+            q_THK.to(attn_dtype),
+            k_THK.to(attn_dtype),
+            v_THV,
             cu_seq_q,
             cu_seq_k,
             max_q,

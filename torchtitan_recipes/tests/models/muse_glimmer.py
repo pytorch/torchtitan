@@ -114,10 +114,15 @@ def _muse_glimmer_mm_dataloader(
 
 def muse_glimmer_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
     # The output soft-cap lives in the SoftCappedLinear lm_head, so it is applied
     # per-chunk inside ChunkedLossWrapper just as it would be in the full model
@@ -132,6 +137,7 @@ def muse_glimmer_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=64,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
@@ -159,6 +165,8 @@ def muse_glimmer_debugmodel(
 
 def muse_glimmer_debugmodel_mm(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     """Multimodal debug training config.
 
@@ -174,7 +182,10 @@ def muse_glimmer_debugmodel_mm(
     """
     parallelism = ParallelismConfig()
     mm_model_spec = build_model_config(
-        "debugmodel_mm", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "debugmodel_mm",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -218,7 +229,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         pipeline_parallel_degree=1,
     )
     model_config = build_model_config(
-        "30B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "30B", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
     )
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
@@ -232,6 +243,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -259,7 +271,7 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
         pipeline_parallel_degree=1,
     )
     model_config = build_model_config(
-        "30B_mm", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "30B_mm", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
     )
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;

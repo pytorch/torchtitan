@@ -474,7 +474,7 @@ def llama3_debugmodel_hsdp2x2() -> Trainer.Config:
 
 
 def llama3_debugmodel_cp4() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+    config = llama3_debugmodel(seq_len=2048, attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.context_parallel_degree = 4
     return apply_transforms(
@@ -491,7 +491,7 @@ def llama3_debugmodel_cp4() -> Trainer.Config:
 
 def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     """Attention reshards the CP axis onto the head dimension."""
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.context_parallel_degree = 2
     # Head-sharded attention has no per-rank sequence imbalance to balance.
@@ -533,7 +533,7 @@ def llama3_debugmodel_hsdp2x2_tp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+    config = llama3_debugmodel(seq_len=2048, attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -550,7 +550,7 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+    config = llama3_debugmodel(seq_len=2048, attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.data_parallel_replicate_degree = 2
@@ -568,8 +568,10 @@ def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
-    config = llama3_debugmodel_hsdp2x2()
-    config.debug.spmd_typechecking = False
+    config = llama3_debugmodel(seq_len=2048, attn_backend="flex")
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
@@ -658,7 +660,7 @@ def muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction() -> Trainer.Confi
 
 
 def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+    config = llama3_debugmodel(seq_len=2048, attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=False)
     assert isinstance(config.dataloader, GrainDataLoader.Config)
     config.validator = Validator.Config(

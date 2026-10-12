@@ -91,12 +91,16 @@ def kimi_k3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
     *,
     parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     """Debugmodel with per-head Muon for all logical 2D matrices."""
     if parallelism is None:
         parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
     return _KimiK3TrainerConfig(
         loss=ChunkedLossWrapper.Config(

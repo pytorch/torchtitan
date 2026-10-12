@@ -114,6 +114,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         self.parallelism_context = self.enterContext(
             single_device_parallelism_context()
         )
+        if self.attn_backend == "varlen":
+            self.enterContext(torch.autocast("cuda", dtype=torch.bfloat16))
 
         # Disable max_autotune for FlexInnerAttention to ensure bitwise-identical
         # results between eager (torch.compile) and traced (regional_inductor)

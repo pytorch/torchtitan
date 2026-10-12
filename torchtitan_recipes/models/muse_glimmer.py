@@ -43,10 +43,12 @@ from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.trainer import Trainer
 
 
-def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
+def muse_glimmer_30b(
+    seq_len: int | None = None, *, attn_backend: str = "varlen"
+) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "30B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "30B", seq_len=seq_len, attn_backend=attn_backend, parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -58,6 +60,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            max_num_documents=1024,
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
@@ -94,7 +97,8 @@ def _muse_glimmer_30b_cp(
     cp_degree: int,
     load_balancer: ContextParallelLoadBalancer.Config | None,
 ) -> Trainer.Config:
-    config = muse_glimmer_30b()
+    # These CP recipes use Flex-specific kernels and load balancers.
+    config = muse_glimmer_30b(attn_backend="flex")
     config.parallelism.context_parallel_degree = cp_degree
     config.parallelism.context_parallel_load_balancer = load_balancer
     return apply_transforms(

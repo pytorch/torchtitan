@@ -35,6 +35,7 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-14B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(

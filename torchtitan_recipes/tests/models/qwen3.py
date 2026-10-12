@@ -52,11 +52,15 @@ def qwen3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
     *,
     parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     if parallelism is None:
         parallelism = ParallelismConfig(enable_sequence_parallel=True)
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -68,6 +72,7 @@ def qwen3_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=64,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
@@ -140,8 +145,11 @@ def qwen3_debugmodel_moe_param_groups(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
     *,
     parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
-    config = qwen3_moe_debug(seq_len=seq_len, parallelism=parallelism)
+    config = qwen3_moe_debug(
+        seq_len=seq_len, attn_backend=attn_backend, parallelism=parallelism
+    )
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[
             AdamW.Config(
@@ -228,6 +236,7 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -259,6 +268,7 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -381,6 +391,7 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-14B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -419,6 +430,7 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-30B-A3B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -455,6 +467,7 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-32B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -478,13 +491,17 @@ def qwen3_moe_debug(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
     *,
     parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     if parallelism is None:
         parallelism = ParallelismConfig(
             expert_parallel_degree=1,
         )
     model_config = build_model_config(
-        "debugmodel_moe", seq_len=seq_len, parallelism=parallelism
+        "debugmodel_moe",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -496,6 +513,7 @@ def qwen3_moe_debug(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=64,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
@@ -551,6 +569,7 @@ def qwen3_moe_deepep(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=64,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         optim=Optim.Config(

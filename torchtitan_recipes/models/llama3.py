@@ -56,6 +56,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpointer=None,
@@ -88,6 +89,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         parallelism=parallelism,

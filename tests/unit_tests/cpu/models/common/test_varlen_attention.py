@@ -107,6 +107,52 @@ class TestPackedVarlenAttentionMetadata(unittest.TestCase):
 
 
 class TestPackedVarlenInnerAttention(unittest.TestCase):
+    def test_preserves_fp16_and_bfloat16_inputs(self):
+        attention = VarlenInnerAttention.Config().build()
+        metadata = create_varlen_metadata_for_document(torch.arange(4))
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                inputs = [torch.randn(4, 2, 8, dtype=dtype) for _ in range(3)]
+                with patch(
+                    "torchtitan.models.common.attention.attention._varlen_attn",
+                    return_value=inputs[2],
+                ) as kernel:
+                    output = attention(*inputs, attention_metadata=metadata)
+
+                for actual, expected in zip(kernel.call_args.args[:3], inputs):
+                    self.assertIs(actual, expected)
+                self.assertIs(output, inputs[2])
+
+    def test_upcast_queries_and_keys_use_value_dtype(self):
+        attention = VarlenInnerAttention.Config().build()
+        metadata = create_varlen_metadata_for_document(torch.arange(4))
+        q_THK, k_THK = [torch.randn(4, 2, 8) for _ in range(2)]
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                v_THV = torch.randn(4, 2, 8, dtype=dtype)
+                with patch(
+                    "torchtitan.models.common.attention.attention._varlen_attn",
+                    return_value=v_THV,
+                ) as kernel:
+                    output = attention(q_THK, k_THK, v_THV, attention_metadata=metadata)
+
+                actual_q, actual_k, actual_v = kernel.call_args.args[:3]
+                torch.testing.assert_close(actual_q, q_THK.to(dtype))
+                torch.testing.assert_close(actual_k, k_THK.to(dtype))
+                self.assertIs(actual_v, v_THV)
+                self.assertEqual(output.dtype, q_THK.dtype)
+
+    def test_fp32_values_are_rejected_before_dispatch(self):
+        attention = VarlenInnerAttention.Config().build()
+        metadata = create_varlen_metadata_for_document(torch.arange(4))
+        inputs = [torch.randn(4, 2, 8) for _ in range(3)]
+        with patch(
+            "torchtitan.models.common.attention.attention._varlen_attn"
+        ) as kernel:
+            with self.assertRaisesRegex(ValueError, "requires FP16 or BF16 values"):
+                attention(*inputs, attention_metadata=metadata)
+        kernel.assert_not_called()
+
     def test_gqa_preserves_td_shape(self):
         torch.manual_seed(42)
         num_tokens, dim, num_heads, head_dim = 6, 8, 2, 4
@@ -125,7 +171,8 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             inner_attention=VarlenInnerAttention.Config(),
             rope=ComplexRoPE.Config(dim=head_dim, max_context_length=num_tokens),
         ).build()
-        x_TD = torch.randn(num_tokens, dim)
+        attention.bfloat16()
+        x_TD = torch.randn(num_tokens, dim, dtype=torch.bfloat16)
         positions_T = torch.tensor([0, 1, 0, 1, 2, 3])
         metadata = create_varlen_metadata_for_document(positions_T)
 
@@ -193,7 +240,7 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             out_THV = inner_attention(
                 q_THK,
                 q_THK,
-                q_THK,
+                q_THK.bfloat16(),
                 attention_metadata=metadata,
                 out_transform=_check_shapes,
             )
@@ -207,6 +254,7 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
         model = build_config(
             "varlen", seq_len=max_context_length, parallelism=ParallelismConfig()
         ).build()
+        model.bfloat16()
         model.init_states()
         num_tokens = 6
         tokens_T = torch.randint(0, 2048, (num_tokens,))

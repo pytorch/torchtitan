@@ -67,6 +67,7 @@ def llama3_torchft_debugmodel(
             steps=100,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=64,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         checkpointer=None,

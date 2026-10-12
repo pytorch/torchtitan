@@ -53,10 +53,15 @@ def _multimodal_collator_config(
 
 def qwen35_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -70,6 +75,7 @@ def qwen35_debugmodel(
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=64,
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
             streaming_shuffle_buffer_size=128,
@@ -150,6 +156,7 @@ def qwen35_debugmodel_moe(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=64,
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
             streaming_shuffle_buffer_size=128,

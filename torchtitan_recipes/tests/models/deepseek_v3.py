@@ -49,11 +49,15 @@ def deepseek_v3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
     *,
     parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     if parallelism is None:
         parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -65,6 +69,7 @@ def deepseek_v3_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=64,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         optim=Optim.Config(
@@ -96,12 +101,16 @@ def deepseek_v3_debugmodel_mtp(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
     *,
     parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     num_mtp_layers = 1
-    config = deepseek_v3_debugmodel(seq_len=seq_len, parallelism=parallelism)
+    config = deepseek_v3_debugmodel(
+        seq_len=seq_len, attn_backend=attn_backend, parallelism=parallelism
+    )
     config.model = build_model_config(
         "debugmodel",
         seq_len=seq_len,
+        attn_backend=attn_backend,
         num_mtp_layers=num_mtp_layers,
         parallelism=config.parallelism,
     )
@@ -174,7 +183,7 @@ def deepseek_v3_16b(
             expert_parallel_degree=8,
         )
     model_config = build_model_config(
-        "16B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "16B", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -185,6 +194,7 @@ def deepseek_v3_16b(
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -214,7 +224,7 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
     config.model = build_model_config(
         "16B",
         seq_len=seq_len,
-        attn_backend="flex",
+        attn_backend="varlen",
         parallelism=config.parallelism,
     )
     config.training.disable_cuda_graphs = False
@@ -397,7 +407,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     model_config = build_model_config(
         "671B",
         seq_len=seq_len,
-        attn_backend="flex",
+        attn_backend="varlen",
         parallelism=parallelism,
     )
     return Trainer.Config(
@@ -409,6 +419,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -477,7 +488,7 @@ def deepseek_v3_16b_nvfp4_ffn_mxfp8_attn(
     config.model = build_model_config(
         "16B",
         seq_len=seq_len,
-        attn_backend="flex",
+        attn_backend="varlen",
         parallelism=config.parallelism,
         converters=[
             NVFP4LinearConverter.Config(

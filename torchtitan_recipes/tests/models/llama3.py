@@ -53,11 +53,15 @@ def llama3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
     *,
     parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     if parallelism is None:
         parallelism = ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B")
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
     packed = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
     return Trainer.Config(
@@ -85,6 +89,7 @@ def llama3_debugmodel(
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=64,
             dataset=packed,
             shuffle=False,
         ),
@@ -248,6 +253,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpointer=None,
@@ -320,6 +326,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=1024,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         parallelism=parallelism,
@@ -342,7 +349,7 @@ def sft_debugmodel(
 
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "debugmodel", seq_len=seq_len, attn_backend="varlen", parallelism=parallelism
     )
 
     return Trainer.Config(
@@ -371,6 +378,7 @@ def sft_debugmodel(
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=64,
             dataset=FirstFitPackingConfig(
                 dataset=SingleDatasetConfig(
                     source=HuggingFaceRandomAccessSource.Config(
