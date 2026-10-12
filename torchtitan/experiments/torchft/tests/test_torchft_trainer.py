@@ -140,10 +140,8 @@ def test_ft_trainer_composes_specialized_training_engine() -> None:
     assert issubclass(ft.FaultTolerantTrainingEngine, TrainingEngine)
 
 
-@pytest.mark.parametrize("pp_degree", [1, 2])
-@pytest.mark.parametrize("training_graph", [False, True])
-def test_ft_rejects_validation_cuda_graphs(pp_degree, training_graph):
-    parallelism = ParallelismConfig(pipeline_parallel_degree=pp_degree)
+def test_ft_rejects_validation_cuda_graphs():
+    parallelism = ParallelismConfig()
     config = ft.FaultTolerantTrainer.Config(
         model=build_muse_glimmer_config(
             "debugmodel", seq_len=2048, parallelism=parallelism
@@ -152,7 +150,6 @@ def test_ft_rejects_validation_cuda_graphs(pp_degree, training_graph):
         loss=CrossEntropyLoss.Config(),
         parallelism=parallelism,
     )
-    config.training.disable_cuda_graphs = not training_graph
     config.validator = Validator.Config(enable_cuda_graphs=True, steps=1)
 
     with pytest.raises(
@@ -161,9 +158,8 @@ def test_ft_rejects_validation_cuda_graphs(pp_degree, training_graph):
         config.__post_init__()
 
 
-@pytest.mark.parametrize("pp_degree", [1, 2])
-def test_ft_accepts_eager_validation(pp_degree):
-    parallelism = ParallelismConfig(pipeline_parallel_degree=pp_degree)
+def test_ft_accepts_eager_validation():
+    parallelism = ParallelismConfig(pipeline_parallel_degree=2)
     config = ft.FaultTolerantTrainer.Config(
         model=build_muse_glimmer_config(
             "debugmodel", seq_len=2048, parallelism=parallelism

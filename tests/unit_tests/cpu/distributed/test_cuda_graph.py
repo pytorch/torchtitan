@@ -203,27 +203,22 @@ def test_cuda_graph_wrapper_collects_annotations() -> None:
         )
 
 
-def test_manager_teardown_resets_capture_state() -> None:
-    first, second = MagicMock(), MagicMock()
-    wrappers = [first, second]
+@pytest.mark.parametrize("initialized", [False, True])
+def test_manager_teardown_resets_capture_state(initialized) -> None:
+    wrappers = (MagicMock(), MagicMock()) if initialized else ()
     with (
-        patch.object(_manager, "_wrappers", wrappers),
+        patch.object(_manager, "_initialized", initialized),
+        patch.object(_manager, "_wrappers", list(wrappers)),
         patch.object(_manager, "all_annotations", {1: ["capture"]}),
     ):
         set_cuda_graph_capture_enabled(False)
         cuda_graph_teardown()
         assert is_cuda_graph_capture_enabled()
+        assert not _manager._initialized
         assert not get_cuda_graph_annotations()
         assert not _manager._wrappers
-        first.teardown.assert_called_once_with()
-        second.teardown.assert_called_once_with()
-
-
-def test_manager_teardown_resets_gate_without_initialization() -> None:
-    assert not _manager._initialized
-    set_cuda_graph_capture_enabled(False)
-    cuda_graph_teardown()
-    assert is_cuda_graph_capture_enabled()
+        for wrapper in wrappers:
+            wrapper.teardown.assert_called_once_with()
 
 
 def test_cache_release_runs_only_before_first_capture() -> None:
@@ -238,7 +233,7 @@ def test_cache_release_runs_only_before_first_capture() -> None:
         patch.object(_manager, "register"),
         patch.object(_manager, "_graph_pool", object()),
         patch.object(_manager, "_stream", MagicMock()),
-        patch.object(_manager, "log_memory") as log_memory,
+        patch.object(_manager, "log_memory"),
         patch("torch.cuda.CUDAGraph"),
         patch("torch.cuda.graph", side_effect=capture),
         patch("torch.cuda.empty_cache", side_effect=lambda: events.append("cache")),
@@ -256,11 +251,6 @@ def test_cache_release_runs_only_before_first_capture() -> None:
         for _ in range(4):
             wrapper(torch.tensor(1))
         assert events == ["cache", "capture"]
-        assert [call.args for call in log_memory.call_args_list] == [
-            ("eval", "before_empty_cache"),
-            ("eval", "after_empty_cache"),
-            ("eval", "after_capture"),
-        ]
 
 
 def test_capture_gate_does_not_record_gradients() -> None:

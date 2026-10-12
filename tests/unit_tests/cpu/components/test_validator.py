@@ -97,24 +97,27 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch):
         loss_token_counts=torch.tensor(1),
         routing_token_counts=torch.tensor([1]),
     )
-    validator = _generic_validator(_ClosableLoader([row]))
+    loader = _ClosableLoader([row])
+    validator = _generic_validator(loader)
     validator._cuda_graph_enabled = True
     set_cuda_graph_capture_enabled(False)
     model = _EchoModel()
     model.register_buffer("counter", torch.tensor(0))
     calls = []
 
-    def body(parts, prepared):
-        assert not parts[0].training
+    def forward(inputs):
+        assert not model.training
         assert not torch.is_grad_enabled()
-        calls.append(prepared)
-        parts[0].counter.add_(1)
-        return torch.tensor(float(parts[0].counter))
+        calls.append(inputs)
+        model.counter.add_(1)
+        torch.rand(())
+        return inputs * model.counter
 
-    validator._evaluate_body = body
+    monkeypatch.setattr(model, "forward", forward)
     wrap = mock.Mock(side_effect=lambda fn, **kwargs: fn)
     monkeypatch.setattr(validator_module, "wrap_with_cuda_graph", wrap)
     monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
+    rng_before = torch.random.get_rng_state()
     validator.validate([model], step=1)
     assert len(calls) == 1
     validator.metrics_processor.log_validation.assert_called_once_with(loss=1.0, step=1)
@@ -122,9 +125,11 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch):
     validator.validate([model], step=2)
     assert len(calls) == 2
     validator.metrics_processor.log_validation.assert_called_with(loss=2.0, step=2)
-    torch.testing.assert_close(calls[-1][0][0], row.input, rtol=0, atol=0)
+    torch.testing.assert_close(calls[-1], row.input, rtol=0, atol=0)
     assert model.training
     assert model.counter.item() == 2
+    assert loader.closed
+    assert not torch.equal(torch.random.get_rng_state(), rng_before)
     wrap.assert_called_once()
     assert wrap.call_args.kwargs == {
         "num_warmup_iterations": 1,
@@ -157,43 +162,6 @@ def test_validation_preprocessing_uses_validation_document_limit(monkeypatch):
         "max_context_length": validator.seq_len,
     }
     torch.testing.assert_close(preprocess.call_args.args[0]["input"], row.input)
-
-
-def test_real_eval_keeps_buffers_and_rng_and_reports_loss(monkeypatch):
-    rows = [
-        TokenizedTrainingMicrobatch(
-            input=torch.ones(1, 1),
-            labels=torch.ones(1, 1, dtype=torch.long),
-            positions=torch.zeros(1, 1, dtype=torch.long),
-            padding_mask=torch.zeros(1, 1, dtype=torch.bool),
-            loss_token_counts=torch.tensor(1),
-            routing_token_counts=torch.tensor([1]),
-        )
-    ]
-    loader = _ClosableLoader(rows)
-    validator = _generic_validator(loader)
-    validator._cuda_graph_enabled = True
-    monkeypatch.setattr(
-        validator_module, "wrap_with_cuda_graph", lambda fn, **kwargs: fn
-    )
-    model = _EchoModel()
-    model.register_buffer("counter", torch.tensor(0))
-
-    def forward(inputs):
-        model.counter.add_(1)
-        torch.rand(())
-        return inputs
-
-    monkeypatch.setattr(model, "forward", forward)
-    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
-    rng_before = torch.random.get_rng_state()
-    validator.validate([model], step=2)
-    assert loader.closed
-    assert model.training
-    assert model.counter.item() == 1
-    assert not torch.equal(torch.random.get_rng_state(), rng_before)
-    validator.metrics_processor.reset.assert_called_once()
-    validator.metrics_processor.log_validation.assert_called_once_with(loss=1.0, step=2)
 
 
 @pytest.mark.parametrize("raises", [False, True])

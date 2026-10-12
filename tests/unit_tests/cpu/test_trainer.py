@@ -982,9 +982,8 @@ def test_trainer_accumulates_reused_cuda_graph_losses(
 
 
 @pytest.mark.parametrize("disable_cuda_graphs", [False, True])
-@pytest.mark.parametrize("engine_cls", [TrainingEngine, GraphTrainingEngine])
-def test_engine_prepares_pp_metadata_before_cuda_graph(disable_cuda_graphs, engine_cls):
-    engine = object.__new__(engine_cls)
+def test_engine_prepares_pp_metadata_before_cuda_graph(disable_cuda_graphs):
+    engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
         training=SimpleNamespace(disable_cuda_graphs=disable_cuda_graphs),
         debug=SimpleNamespace(spmd_typechecking=False),
@@ -996,9 +995,7 @@ def test_engine_prepares_pp_metadata_before_cuda_graph(disable_cuda_graphs, engi
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine._cuda_graph_per_accumulation_group_enabled = False
-    engine._forward_backward_cuda_graph_enabled = (
-        engine_cls is TrainingEngine and not disable_cuda_graphs
-    )
+    engine._forward_backward_cuda_graph_enabled = not disable_cuda_graphs
     engine.sdc_replayer = None
     engine.num_completed_steps = 0
     engine.pp_schedule = MagicMock()

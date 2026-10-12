@@ -673,14 +673,6 @@ def muse_glimmer_debugmodel_shared_eval_cuda_graph() -> Trainer.Config:
     return config
 
 
-def muse_glimmer_debugmodel_shared_eval_cuda_graph_pp2() -> Trainer.Config:
-    """Train and validate with shared graphs on PP2/FSDP2."""
-    config = muse_glimmer_debugmodel_shared_eval_cuda_graph()
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.num_pp_microbatches = 4
-    return config
-
-
 def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)

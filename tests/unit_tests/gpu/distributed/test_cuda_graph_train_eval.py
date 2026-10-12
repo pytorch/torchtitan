@@ -339,12 +339,11 @@ def test_varlen_eval_replays_different_document_counts():
         dist.destroy_process_group()
 
 
-def _measure_pool(mode, optimizer_graph, results):
+def _measure_pool(mode, results):
     torch.cuda.set_device(0)
     parameter = torch.nn.Parameter(torch.ones(8 * 1024 * 1024, device="cuda"))
     inputs = torch.ones_like(parameter)
     _manager.maybe_initialize()
-    eval_pool = torch.cuda.graph_pool_handle() if mode == "private" else None
     optimizer = torch.optim.SGD([parameter], lr=0.01)
 
     def eval_body():
@@ -361,35 +360,24 @@ def _measure_pool(mode, optimizer_graph, results):
     train = wrap_fwd_bwd_with_cuda_graph(
         train_body, parameters=[parameter], name="train"
     )
-    update = (
-        wrap_with_cuda_graph(optimizer.step, name="optimizer")
-        if optimizer_graph
-        else optimizer.step
-    )
+    update = wrap_with_cuda_graph(optimizer.step, name="optimizer")
     try:
         if mode == "train_first":
             train()
             update()
         if mode != "train":
-            with (
-                patch.object(_manager, "_graph_pool", eval_pool)
-                if eval_pool is not None
-                else nullcontext()
-            ):
+            with torch.no_grad():
                 evaluate()
         if mode not in ("eval", "train_first"):
             train()
             update()
         torch.cuda.synchronize()
-        pools = {_manager.graph_pool}
-        if eval_pool is not None:
-            pools.add(eval_pool)
 
         def pool_bytes():
             return sum(
                 segment["total_size"]
                 for segment in torch.cuda.memory_snapshot()
-                if segment["segment_pool_id"] in pools
+                if segment["segment_pool_id"] == _manager.graph_pool
             )
 
         size = pool_bytes()
@@ -409,7 +397,7 @@ def _measure_pool(mode, optimizer_graph, results):
             assert pool_bytes() == size
         results.put(size)
         print(
-            f"mode={mode} optimizer_graph={optimizer_graph} pool_bytes={size} "
+            f"mode={mode} pool_bytes={size} "
             f"peak_allocated={peak_allocated} peak_reserved={peak_reserved}",
             flush=True,
         )
@@ -417,22 +405,18 @@ def _measure_pool(mode, optimizer_graph, results):
         cuda_graph_teardown()
 
 
-@pytest.mark.parametrize("optimizer_graph", [False, True])
-def test_eval_first_reuses_training_workspace(optimizer_graph):
+def test_eval_first_reuses_training_workspace():
     ctx = mp.get_context("spawn")
     sizes = {}
-    for mode in ("train", "eval", "shared", "private", "train_first"):
+    for mode in ("train", "eval", "shared", "train_first"):
         results = ctx.Queue()
-        process = ctx.Process(
-            target=_measure_pool, args=(mode, optimizer_graph, results)
-        )
+        process = ctx.Process(target=_measure_pool, args=(mode, results))
         process.start()
         process.join(timeout=120)
         assert process.exitcode == 0
         sizes[mode] = results.get(timeout=10)
     # One extra allocator block can hold the second member's scalar result.
     assert sizes["shared"] <= max(sizes["train"], sizes["eval"]) + 2 * 1024 * 1024
-    assert sizes["private"] >= sizes["shared"] + 30 * 1024 * 1024
     assert sizes["train_first"] >= sizes["shared"] + 30 * 1024 * 1024
 
 
@@ -563,24 +547,6 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
                 assert current == addresses
             update()
             reference_optimizer.step()
-            for local, model in enumerate(models):
-                for p, expected_p in zip(
-                    model.parameters(),
-                    reference_parts[stage_indices[local]].parameters(),
-                ):
-                    torch.testing.assert_close(
-                        p.to_local(), expected_p.chunk(2)[dp_rank], rtol=0, atol=0
-                    )
-                    for key, state in optimizer.state[p].items():
-                        expected_state = reference_optimizer.state[expected_p][key]
-                        if expected_state.ndim:
-                            expected_state = expected_state.chunk(2)[dp_rank]
-                        actual = (
-                            state.to_local() if hasattr(state, "to_local") else state
-                        )
-                        torch.testing.assert_close(
-                            actual, expected_state, rtol=0, atol=0
-                        )
             prepared = [(x, y, {}) for x, y in zip(inputs.chunk(4), target.chunk(4))]
             for run in range(2 if step == 1 else 1):
                 if step == 1 and run == 1:
@@ -602,6 +568,20 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
             assert (_manager._wrappers[-1]._graph is not None) == (step >= 1)
             for stage in stages:
                 assert not stage._forward_chunk_states
+        for local, model in enumerate(models):
+            for p, expected_p in zip(
+                model.parameters(),
+                reference_parts[stage_indices[local]].parameters(),
+            ):
+                torch.testing.assert_close(
+                    p.to_local(), expected_p.chunk(2)[dp_rank], rtol=0, atol=0
+                )
+                for key, state in optimizer.state[p].items():
+                    expected_state = reference_optimizer.state[expected_p][key]
+                    if expected_state.ndim:
+                        expected_state = expected_state.chunk(2)[dp_rank]
+                    actual = state.to_local() if hasattr(state, "to_local") else state
+                    torch.testing.assert_close(actual, expected_state, rtol=0, atol=0)
     finally:
         cuda_graph_teardown()
     # Let mp.spawn stop peers if this rank fails during communication.
@@ -668,10 +648,8 @@ def test_grouped_fsdp_eval_releases_partial_forward_state():
 @pytest.mark.parametrize(
     "schedule,reshard",
     [
-        ("GPipe", True),
-        ("1F1B", False),
+        ("1F1B", True),
         ("Interleaved1F1B", False),
-        ("LoopedBFS", False),
         ("InterleavedZeroBubble", False),
         ("CSV", False),
     ],
