@@ -24,10 +24,10 @@ from torchtitan.rl.rollout.types import RolloutTurnID
 class TrainingSample:
     """A trainable token sequence from a rollout.
 
-    Per-token fields are numpy arrays:
+    Per-token fields are numpy arrays, like `RolloutTurn`'s:
     - not lists: a full GC walks every entry of a list, but doesn't track numpy arrays;
-    - not tensors: `np.asarray` builds them from lists faster (`build_from_group`: 218 vs 321 ms, 1.6M tokens).
-    The batcher concatenates them into the trainer's tensors.
+    - not tensors: a sample is one `np.concatenate` of its turns' arrays, and the batcher converts once,
+      into the trainer's tensors.
 
     Example:
         # Turn 0: prompt P0 -> assistant A0 -> env reply E0
