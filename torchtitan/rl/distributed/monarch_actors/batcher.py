@@ -29,9 +29,10 @@ from torchtitan.rl.rollout.types import RolloutGroup
 class BatcherActor(Actor):
     """Turns finished rollout groups into training batches, in its own process.
 
-    With `rdma_fast_path_threshold` set, keeps each batch's tensors until `release_oldest_batch` and
-    returns `RDMAMicrobatch`es, so trainer ranks read from this process. Without it, returns the batch
-    by value.
+    What `add_group` returns:
+        rdma_fast_path_threshold=None:  the batch by value
+        rdma_fast_path_threshold=1024:  `RDMAMicrobatch`es; this process keeps their tensors until
+                                        `release_oldest_batch`, and trainer ranks read from it
 
     Why not build and pack in the controller, whose busy event loop holds the GIL:
         on the loop thread:      blocks every rollout while it runs
