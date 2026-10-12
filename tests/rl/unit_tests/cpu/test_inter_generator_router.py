@@ -183,7 +183,9 @@ def test_sticky_session_reuses_generator_for_same_session():
             _Actor("gen0", wait_generate=True),
             _Actor("gen1", wait_generate=True),
         ]
-        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
+        router = _router(
+            actors, strategy=StickySessionRoutingStrategy.Config(repin_load_ratio=None)
+        )
 
         first = asyncio.create_task(
             router._route(
@@ -264,16 +266,14 @@ def test_sticky_session_waits_for_its_syncing_generator():
 def test_sticky_session_repins_off_an_overloaded_generator():
     async def _run():
         actors = [_Actor("gen0"), _Actor("gen1")]
-        router = _router(
-            actors, strategy=StickySessionRoutingStrategy.Config(repin_load_ratio=1.5)
-        )
+        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
 
         assert (
             await router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
             == "gen0"
         )
 
-        # gen0 piles up 3 in-flight calls vs 0 on gen1: 3 > 1.5 * mean load 1.5.
+        # gen0 piles up 3 in-flight calls vs 0 on gen1: 3 > default ratio 1.5 * mean load 1.5.
         router._generators[0].reserved_load = 3
         assert (
             await router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
@@ -416,6 +416,11 @@ def test_session_release_reaches_only_its_pinned_generator():
 def test_sticky_session_rejects_non_positive_max_sessions():
     with pytest.raises(ValueError, match="max_sessions must be positive"):
         StickySessionRoutingStrategy.Config(max_sessions=0).build()
+
+
+def test_sticky_session_rejects_repin_load_ratio_at_most_one():
+    with pytest.raises(ValueError, match="repin_load_ratio must be > 1"):
+        StickySessionRoutingStrategy.Config(repin_load_ratio=1.0)
 
 
 def test_drain_excludes_syncing_generator_from_routes():
