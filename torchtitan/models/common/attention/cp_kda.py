@@ -18,7 +18,7 @@ from torchtitan.models.common.attn_gym import (
     ContextParallelRouting,
 )
 
-from .cp_attention import CPInnerAttention
+from .cp_attention import ContextParallelInnerAttention
 from .cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
     prepare_linear_attention_cp_metadata,
@@ -28,7 +28,7 @@ from .linear_attention import LinearAttentionMetadata
 
 
 class ContextParallelInnerKDA(
-    CPInnerAttention[
+    ContextParallelInnerAttention[
         LinearAttentionMetadata,
         ContextParallelLinearAttentionMetadata,
     ],
@@ -37,7 +37,7 @@ class ContextParallelInnerKDA(
     """Inner KDA with distributed convolution and recurrent-state plumbing."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CPInnerAttention.Config, InnerKDA.Config):
+    class Config(ContextParallelInnerAttention.Config, InnerKDA.Config):
         pass
 
     @staticmethod
