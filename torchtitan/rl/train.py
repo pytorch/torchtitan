@@ -50,7 +50,7 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator import VLLMGenerator
+from torchtitan.rl.generator import GENERATOR_PROCS_ON_HOST_ENV, VLLMGenerator
 
 
 logger = logging.getLogger(__name__)
@@ -139,17 +139,22 @@ class HostMeshes:
     gpus_per_node: int
 
 
-def generator_launch_env(generator_config: VLLMGenerator.Config) -> dict[str, str]:
+def generator_launch_env(
+    generator_config: VLLMGenerator.Config, *, generator_procs_on_host: int
+) -> dict[str, str]:
     """Env generator procs need for CPU KV offload (``kv_offload_gib``), on top of ``RL_ENV_DEFAULTS``:
     - ``expandable_segments:False``: vLLM refuses a KV connector under ``expandable_segments:True``;
       other allocator options are kept.
     - ``PYTHONHASHSEED=0``: TP ranks must iterate vLLM's sets in the same order.
+    - ``TORCHTITAN_GENERATOR_PROCS_ON_HOST``: the most generator procs on any one host. They share
+      its ``/dev/shm``, where vLLM pins each one's CPU KV tier.
 
     Example:
 
         this proc:        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
         generator procs:  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False,max_split_size_mb:512
                           PYTHONHASHSEED=0
+                          TORCHTITAN_GENERATOR_PROCS_ON_HOST=4
     """
     launch_env = {}
     if generator_config.kv_offload_gib > 0:
@@ -158,6 +163,7 @@ def generator_launch_env(generator_config: VLLMGenerator.Config) -> dict[str, st
                 "expandable_segments:True", "expandable_segments:False"
             )
         launch_env["PYTHONHASHSEED"] = "0"
+        launch_env[GENERATOR_PROCS_ON_HOST_ENV] = str(generator_procs_on_host)
     return launch_env
 
 
@@ -366,7 +372,12 @@ async def main():
             per_generator_world_size,
             host_meshes=None,
             num_generators=config.num_generators,
-            generator_env=generator_launch_env(config.generator),
+            # Single node: every generator proc shares this host.
+            generator_env=generator_launch_env(
+                config.generator,
+                generator_procs_on_host=config.num_generators
+                * per_generator_world_size,
+            ),
         )
         await rl_trainer.setup_async(
             trainer_mesh=trainer_mesh,

@@ -14,6 +14,7 @@ import itertools
 import logging
 import math
 import os
+import shutil
 import sys
 import threading
 from collections.abc import Callable
@@ -179,6 +180,35 @@ def _enable_multi_worker_kv_offload(engine: Any) -> None:
         return update_from_output(scheduler_output, merged)
 
     scheduler.update_from_output = update_from_merged_output
+
+
+# The most generator procs on one host, set by `train.generator_launch_env` for the /dev/shm check.
+GENERATOR_PROCS_ON_HOST_ENV = "TORCHTITAN_GENERATOR_PROCS_ON_HOST"
+
+
+def _check_kv_offload_fits_in_dev_shm(
+    kv_offload_gib: float, generator_world_size: int
+) -> None:
+    """Raise if the CPU KV tiers of this host's generator procs add up to more than `/dev/shm`.
+
+    vLLM checks one tier at a time against free space, but a host's generators start together and
+    each rank fills its share of its generator's `kv_offload_gib`:
+
+        4 generators x 1 proc,  128 GiB each, /dev/shm 445 GiB  -> 512 GiB          raises
+        4 generators x 1 proc,   96 GiB each, /dev/shm 445 GiB  -> 384 GiB          passes
+        1 generator x 8 procs over 2 hosts, 128 GiB             ->  64 GiB per host
+    """
+    procs_on_host = int(
+        os.environ.get(GENERATOR_PROCS_ON_HOST_ENV, generator_world_size)
+    )
+    needed_gib = kv_offload_gib / generator_world_size * procs_on_host
+    shm_gib = shutil.disk_usage("/dev/shm").total / (1 << 30)
+    if needed_gib > shm_gib:
+        raise ValueError(
+            f"{procs_on_host} generator procs on this host pin {needed_gib:.0f} GiB of /dev/shm "
+            f"(kv_offload_gib={kv_offload_gib:g} per {generator_world_size}-proc generator), "
+            f"but /dev/shm is {shm_gib:.0f} GiB: lower kv_offload_gib"
+        )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -965,6 +995,8 @@ class VLLMGenerator(Configurable):
         ranks; 0 disables it.
         - vLLM copies every computed KV block to CPU; a turn whose history left the GPU reloads it.
         - Ended sessions' chunks are evicted first (see `SessionKVHolder`).
+        - vLLM pins it in ``/dev/shm``: ``kv_offload_gib`` x generators per host must fit in its
+          size (checked at engine build).
         - Generator procs need ``expandable_segments:False`` and ``PYTHONHASHSEED=0``
           (``train.py`` sets both)."""
 
@@ -1162,6 +1194,10 @@ class VLLMGenerator(Configurable):
             )
         add_extra_vllm_engine_args(engine_kwargs, config.extra_vllm_engine_args)
         engine_args = EngineArgs(**engine_kwargs)
+        if config.kv_offload_gib > 0:
+            _check_kv_offload_fits_in_dev_shm(
+                config.kv_offload_gib, self._dp_degree * tp_degree
+            )
 
         with sl.log_trace_span("vllm_init"):
             logger.info("Initializing LLMEngine from EngineArgs...")

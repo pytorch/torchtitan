@@ -594,6 +594,37 @@ def test_kv_offload_gib_rejects_negative_sizes():
         )
 
 
+@pytest.mark.parametrize(
+    "kv_offload_gib, generator_world_size, procs_on_host, raises",
+    [
+        (128, 1, "4", True),  # 4 one-proc generators: 512 GiB
+        (96, 1, "4", False),  # 384 GiB
+        (128, 8, "4", False),  # half of an 8-proc generator: 64 GiB
+        (512, 1, None, True),  # no launcher value: this generator alone
+    ],
+)
+def test_kv_offload_must_fit_in_dev_shm_with_the_hosts_other_generators(
+    monkeypatch, kv_offload_gib, generator_world_size, procs_on_host, raises
+):
+    monkeypatch.setattr(
+        generator_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(total=445 * (1 << 30)),
+    )
+    if procs_on_host is None:
+        monkeypatch.delenv(generator_module.GENERATOR_PROCS_ON_HOST_ENV, raising=False)
+    else:
+        monkeypatch.setenv(generator_module.GENERATOR_PROCS_ON_HOST_ENV, procs_on_host)
+    with (
+        pytest.raises(ValueError, match="but /dev/shm is 445 GiB: lower kv_offload_gib")
+        if raises
+        else nullcontext()
+    ):
+        generator_module._check_kv_offload_fits_in_dev_shm(
+            kv_offload_gib, generator_world_size
+        )
+
+
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
@@ -633,6 +664,26 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: VLLMGenerator.Config) ->
             rank=0,
         )
     return engine_args.call_args.kwargs
+
+
+def test_kv_offload_checks_dev_shm_before_the_engine_build(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        generator_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(total=8 * (1 << 30)),
+    )
+    monkeypatch.setattr(generator_module, "EngineArgs", Mock())
+    monkeypatch.setattr(generator_module, "register_to_vllm", Mock())
+    monkeypatch.setattr(generator_module, "init_logger", Mock())
+    monkeypatch.setattr(generator_module, "sl", Mock())
+    with pytest.raises(ValueError, match="but /dev/shm is 8 GiB: lower kv_offload_gib"):
+        VLLMGenerator(
+            VLLMGenerator.Config(model=_MODEL_CONFIG, kv_offload_gib=16),
+            model_path="unused",
+            max_num_seqs=8,
+            output_dir=str(tmp_path),
+            rank=0,
+        )
 
 
 def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
