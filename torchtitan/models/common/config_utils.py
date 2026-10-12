@@ -94,8 +94,7 @@ def get_attention_config(
 
     Language models always use block_causal masking (the dataloaders always
     emit per-document positions), so every backend here is a masked attention
-    backend. SDPA only supports a boolean ``is_causal`` flag and cannot consume
-    per-document positions, so it is not a valid language-model backend.
+    backend.
     """
     if backend == "flex":
         return FlexInnerAttention.Config()
