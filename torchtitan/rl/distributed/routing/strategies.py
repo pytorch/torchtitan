@@ -137,9 +137,9 @@ class StickySessionRoutingStrategy(RoutingStrategy):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         max_sessions: int = 262144
-        """Maximum session assignments kept; past it the least-recently-used one is
-        evicted. Rollouts release their session when they end, so keep it above the
-        rollouts in flight, or live sessions lose their cached KV."""
+        """Maximum session assignments kept (~150 B each; 262144 is ~35 MiB); past it
+        the least-recently-used one is evicted. Rollouts release their session when they
+        end, so keep it above the rollouts in flight, or live sessions lose their cached KV."""
 
         fallback_strategy: RoutingStrategy.Config = field(
             default_factory=LeastLoadedRoutingStrategy.Config
@@ -204,8 +204,8 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         self._sessions[routing_ctx.session_id] = chosen
         # End of the dict means it's the most-recently-used session.
         self._sessions.move_to_end(routing_ctx.session_id)
-        # Evict the least-recently-used session past max_sessions. Rollouts release
-        # their sessions when they end, so finished sessions rarely get here.
+        # Evict the least-recently-used session past max_sessions. `RolloutWorker` releases
+        # each rollout's session when it ends, so its finished sessions rarely get here.
         if len(self._sessions) > self._max_sessions:
             self._sessions.popitem(last=False)
         return chosen

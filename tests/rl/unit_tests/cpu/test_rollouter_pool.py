@@ -150,7 +150,6 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
                 "tokenizer_config": "tokenizer_config",
                 "renderer_config": "renderer_config",
                 "hf_assets_path": "hf_assets_path",
-                "release_session_fn": None,
             }
         ]
         await rollouter.close()
@@ -169,6 +168,7 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
         dispatch = asyncio.create_task(
             rollouter.run_group_rollouts(
                 generate_fn="generate_fn",
+                release_session_fn="release_session_fn",
                 sample="sample",
                 group_id=1,
                 group_size=2,
@@ -179,6 +179,7 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
         assert actor_mesh.run_group.calls == [
             {
                 "generate_fn": "generate_fn",
+                "release_session_fn": "release_session_fn",
                 "sample": "sample",
                 "group_id": 1,
                 "group_size": 2,

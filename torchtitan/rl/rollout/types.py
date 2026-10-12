@@ -121,11 +121,10 @@ class ReleaseSessionFn(Protocol):
     session's affinity.
     """
 
-    async def __call__(self, *, group_id: int, routing_session_id: str) -> None:
+    async def __call__(self, *, routing_session_id: str) -> None:
         """Release one routing session.
 
         Args:
-            group_id: Rollout group of the session.
             routing_session_id: The `routing_session_id` the rollout passed to `GenerateFn`.
         """
 
