@@ -15,8 +15,8 @@ from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.flux.layers import (
     _prepare_flux_attention_inputs,
+    _unpack_flux_attention_output,
     local_split_text_image,
-    unpack_flux_attention_output,
 )
 from torchtitan.models.flux.model import (
     _get_attention_metadata,
@@ -51,7 +51,7 @@ class TestFluxSharding(unittest.TestCase):
         packed = _prepare_flux_attention_inputs(qkv, qkv, qkv)
         for tensor in packed:
             torch.testing.assert_close(tensor, qkv.flatten(0, 1))
-        torch.testing.assert_close(unpack_flux_attention_output(packed[0], 2), qkv)
+        torch.testing.assert_close(_unpack_flux_attention_output(packed[0], 2), qkv)
         with patch("torchtitan.models.flux.model.spmd_mesh_size", return_value=2):
             metadata = _get_attention_metadata(
                 VarlenInnerAttention.Config(window_size=(-1, -1)),

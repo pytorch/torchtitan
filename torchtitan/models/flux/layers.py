@@ -87,7 +87,7 @@ def _prepare_flux_attention_inputs(
     in_types=(spmd.PartitionSpec((DP, CP), None, None), None),
     out_types=spmd.PartitionSpec(DP, CP, None, None),
 )
-def unpack_flux_attention_output(
+def _unpack_flux_attention_output(
     out_THV: torch.Tensor, batch_size: int
 ) -> torch.Tensor:
     return out_THV.unflatten(0, (batch_size, -1))
@@ -105,7 +105,7 @@ def _varlen_attention(
     out_THV = inner_attention(
         q_THK, k_THK, v_THV, attention_metadata=attention_metadata
     )
-    return unpack_flux_attention_output(out_THV, q_BLHK.shape[0])
+    return _unpack_flux_attention_output(out_THV, q_BLHK.shape[0])
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
