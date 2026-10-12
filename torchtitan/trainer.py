@@ -468,9 +468,36 @@ class Trainer(Configurable):
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = engine.ntokens_seen
 
+            reported_loss_metrics = {}
+            if owns_loss and forward_backward_result.loss_metrics:
+                names = sorted(forward_backward_result.loss_metrics[0])
+                if any(
+                    set(metrics) != set(names)
+                    for metrics in forward_backward_result.loss_metrics
+                ):
+                    raise ValueError(
+                        "Loss metric names must remain constant across an optimizer step."
+                    )
+                if names:
+                    values = torch.stack(
+                        [
+                            torch.stack([metrics[name] for name in names])
+                            for metrics in forward_backward_result.loss_metrics
+                        ]
+                    ).sum(0)
+                    if parallelism_context.dp_cp_enabled:
+                        values = dist_utils.dist_sum_tensor(
+                            values, parallelism_context.get_optional_mesh("loss")
+                        )
+                    reported_loss_metrics = {
+                        name.removesuffix("_mean"): value
+                        for name, value in zip(names, values.tolist(), strict=True)
+                    }
+
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
+            **reported_loss_metrics,
             **collect_aux_loss_metrics(parallelism_context),
         }
         self.metrics_processor.log(

@@ -423,10 +423,12 @@ def _build_pipeline_schedule(
             "Use a concrete single-stage schedule such as GPipe or 1F1B."
         )
 
-    # Pipeline schedules expect a bare scalar loss tensor.
-    def _scalar_loss_fn(*args: object, **kwargs: object) -> torch.Tensor:
-        loss, _ = loss_fn(*args, **kwargs)
-        return loss
+    def _pipeline_loss_fn(
+        *args: object, **kwargs: object
+    ) -> torch.Tensor | dict[str, Any]:
+        """Preserve named model loss metrics through the pipeline result API."""
+        loss, metrics = loss_fn(*args, **kwargs)
+        return {"loss": loss, "metrics": metrics} if metrics else loss
 
     if looped_schedule:
         schedule_kwargs: dict[str, Any] = {
@@ -443,7 +445,7 @@ def _build_pipeline_schedule(
         schedule = cast(Any, schedule_class)(
             stages,
             n_microbatches=num_microbatches,
-            loss_fn=_scalar_loss_fn,
+            loss_fn=_pipeline_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
             **schedule_kwargs,
@@ -457,7 +459,7 @@ def _build_pipeline_schedule(
         schedule = cast(Any, schedule_class)(
             stages[0],
             n_microbatches=num_microbatches,
-            loss_fn=_scalar_loss_fn,
+            loss_fn=_pipeline_loss_fn,
             scale_grads=False,
         )
     logger.info(

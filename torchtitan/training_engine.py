@@ -761,11 +761,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             typechecking=self.config.debug.spmd_typechecking,
         ):
             losses = [] if self.pp_has_last_stage else None
+            loss_results = [] if self.pp_has_last_stage else None
             self.pp_schedule.step(
                 arg_mbs=inputs,
                 kwarg_mbs=model_kwargs,
                 target_mbs=labels,
                 losses=losses,
+                loss_results=loss_results,
                 loss_kwargs=loss_kwargs,
                 return_outputs=False,
                 finalize_gradients=finalize_gradients,
@@ -773,6 +775,24 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         if self.pp_has_last_stage:
             assert losses is not None
+            assert loss_results is not None
+            if len(loss_results) != len(model_kwargs):
+                raise RuntimeError(
+                    "Expected one loss_results entry per microbatch; use the required PyTorch structured-loss API."
+                )
+            names = loss_results[0]["metrics"].keys() if loss_results else ()
+            if any(result["metrics"].keys() != names for result in loss_results):
+                raise ValueError(
+                    "Loss metric names must remain constant across an optimizer step."
+                )
+            if loss_results:
+                self.loss_metrics = {
+                    key: torch.stack(
+                        [result["metrics"][key] for result in loss_results]
+                    ).sum()
+                    for key in names
+                }
+            loss_results.clear()
             detached_losses = [loss.detach() for loss in losses]
             losses.clear()
             return torch.sum(torch.stack(detached_losses)).to(self.device)
