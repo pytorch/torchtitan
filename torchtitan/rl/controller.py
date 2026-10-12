@@ -793,8 +793,11 @@ class Controller(Configurable):
     async def run(self) -> None:
         """Start every async loop and run until training completes or a stage crashes.
 
-        Producers (_data_input_loop, _rollout_loop[N], _batcher_loop) loop forever; _trainer_loop is the
-        only finite loop -- it runs num_training_steps, then returns, which drives shutdown.
+        Producers (_data_input_loop, _rollout_loop[N], _batcher_loop) loop forever, and
+        _generator_loop waits for the generators' engine loops, which run until close; _trainer_loop is
+        the only finite loop -- it runs num_training_steps, then returns, which drives shutdown.
+        _generator_loop watches the training loop only: an engine loop that dies during pre- or
+        post-training validation shows up as failed validation rollouts.
 
         Shutdown (healthy):  _trainer_loop finishes N steps -> run() finally ->
           group_buffer.close()  (wakes _data_input_loop / _rollout_loop / _batcher_loop blocked on the buffer)
@@ -907,12 +910,19 @@ class Controller(Configurable):
             name="trainer",
         )
 
+        # Engine loops run until the generators close, so this ends only if one stops mid-run.
+        # Otherwise a crashed generator would only show up as failed rollouts.
+        generator_task = asyncio.create_task(
+            self._generator_loop(), name="generator_wait_engine_loop"
+        )
+
         # run everything until trainer finishes its number of steps
         # or some other loop breaks
         background_tasks = [
             data_input_task,
             *rollout_tasks,
             batcher_task,
+            generator_task,
         ]
         try:
             done, _ = await asyncio.wait(
@@ -942,6 +952,10 @@ class Controller(Configurable):
         # Post-training validation (held-out eval after the final step).
         post_validation = await self._validate_and_log(step=num_training_steps)
         self._log_reward_delta(pre_validation, post_validation)
+
+    async def _generator_loop(self) -> None:
+        """Wait until every generator's engine loop exits; raise as soon as one crashes."""
+        await self.generator_router.wait_engine_loop.call_one()
 
     async def _validate_and_log(self, *, step: int) -> dict[str, float]:
         """Run one validation pass, log it, and return its aggregated values for the pre/post delta."""
