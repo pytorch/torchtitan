@@ -559,6 +559,35 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
     assert "first prompt of task huge-task does not fit" in caplog.text
 
 
+def test_a_failing_rollout_fails_its_group_only_after_every_sibling_finished() -> None:
+    """The caller releases the group once this raises; no sibling may still be generating."""
+
+    async def run_test() -> list[int]:
+        finished = []
+
+        async def run_single_rollout(*, rollout_id: int, **kwargs) -> None:
+            if rollout_id == 0:
+                raise RuntimeError("rollout 0 failed")
+            await asyncio.sleep(0.01)
+            finished.append(rollout_id)
+
+        rollouter = object.__new__(VerifiersRollouter)
+        rollouter._generation_server = SimpleNamespace(set_generate_fn=lambda fn: None)
+        rollouter._run_single_rollout = run_single_rollout
+        with pytest.raises(RuntimeError, match="rollout 0 failed"):
+            await rollouter.run_group_rollouts(
+                generate_fn=AsyncMock(),
+                release_session_fn=AsyncMock(),
+                sample=None,
+                group_id=1,
+                group_size=2,
+                sampling=SamplingConfig(),
+            )
+        return finished
+
+    assert asyncio.run(run_test()) == [1]
+
+
 def test_parse_sampling_config_requires_stop_token_ids() -> None:
     with pytest.raises(ValueError, match="stop_token_ids"):
         _parse_sampling_config({"temperature": 1.0})

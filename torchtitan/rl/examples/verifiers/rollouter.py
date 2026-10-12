@@ -248,7 +248,7 @@ class VerifiersRollouter(Rollouter):
         if self._generation_server is None:
             raise RuntimeError("Verifiers rollouter is not initialized")
         self._generation_server.set_generate_fn(generate_fn)
-        rollouts = await asyncio.gather(
+        results = await asyncio.gather(
             *(
                 self._run_single_rollout(
                     sample=sample,
@@ -261,8 +261,14 @@ class VerifiersRollouter(Rollouter):
                     rollout_id=rollout_id,
                 )
                 for rollout_id in range(group_size)
-            )
+            ),
+            return_exceptions=True,
         )
+        # Raise only once every sibling finished: the caller releases the group right after.
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        rollouts = results
 
         outputs = await self._rubric.score_group(rollouts, sample)
         for rollout, output in zip(rollouts, outputs, strict=True):
