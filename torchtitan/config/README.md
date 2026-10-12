@@ -84,6 +84,15 @@ keyword arguments to PyTorch optimizers. Add a typed field to the corresponding
 optimizer config when a further upstream option is needed; this keeps recipes
 validated and makes their supported behavior explicit.
 
+Custom `GradientClipper` implementations keep their config-only constructor.
+The optimizer calls `bind_model_parts(model_parts)` once after construction.
+A model-specific clipper can bind shared parameter replicas there and finalize
+their gradients immediately before norm
+calculation inside the optimizer update (including CUDA graph replay). The
+default binding hook is a no-op and retains the distributed clipping math.
+Configure the implementation with `Optim.Config.gradient_clipper`; runtime
+parameters and process groups must not be stored in serialized configs.
+
 ### Transforming model configs
 
 [Model config transforms](transform/README.md) are one supported way to modify
