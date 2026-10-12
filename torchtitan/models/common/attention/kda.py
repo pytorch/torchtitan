@@ -13,34 +13,30 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.attn_gym import (
     _ChunkKDA,
-    _ConfiguredShortConv,
     _FusedGate,
-    _L2Norm,
     _MaskRows,
     _MissingKernel,
-    _ShortConv,
     bound_gate,
     causal_conv1d,
     chunk_kda,
     ChunkKdaCudnn,
     ContextParallelRouting,
-    KernelOptions,
     l2norm,
     require_attn_gym,
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
-from torchtitan.protocols.module import Module
 
-from .attention import (
-    create_varlen_metadata_for_document,
-    InnerAttention,
-    local_head_split,
-    VarlenAttentionMetadata,
+from .attention import InnerAttention, local_head_split
+from .linear_attention import (
+    build_linear_attention_metadata,
+    chunk_kernel_options,
+    LinearAttentionMetadata,
 )
 
 # Shape suffixes:
@@ -49,49 +45,9 @@ from .attention import (
 # W = convolution kernel width.
 
 
-@dataclass(frozen=True, slots=True)
-class LinearAttentionMetadata:
-    """Sequence metadata shared by convolutional linear-attention backends."""
-
-    varlen: VarlenAttentionMetadata | None
-    num_conv_history_tokens: int
-
-    def annotate_spmd_types(self) -> None:
-        """Annotate sequence offsets."""
-        if self.varlen is not None:
-            self.varlen.annotate_spmd_types()
-
-
-def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:
-    """Attention Gym chunk-kernel options: cuDNN where it runs, fused elsewhere.
-
-    The cuDNN chunk kernels take packed (batch 1) fp16/bf16 inputs on SM100/SM103, where
-    they are 2.3-3.9x faster than the fused ones (Qwen3.5-27B GDN fwd+bwd on GB300).
-    Fused stays in deterministic mode (cuDNN's backward is not checked for
-    determinism) and in batch-invariant mode (paged KDA replay requires fused).
-    """
-    use_cudnn = (
-        q.is_cuda
-        and not torch.are_deterministic_algorithms_enabled()
-        and not is_in_batch_invariant_mode()
-        and q.shape[0] == 1
-        and q.dtype in (torch.float16, torch.bfloat16)
-        and torch.cuda.get_device_capability(q.device) in ((10, 0), (10, 3))
-    )
-    return KernelOptions(backend="cudnn" if use_cudnn else "fused")
-
-
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
 # SPMD region.
-for _kernel_function in (
-    _ShortConv,
-    _ConfiguredShortConv,
-    _FusedGate,
-    _L2Norm,
-    _ChunkKDA,
-    ChunkKdaCudnn,
-    _MaskRows,
-):
+for _kernel_function in (_FusedGate, _ChunkKDA, ChunkKdaCudnn, _MaskRows):
     if _kernel_function is not _MissingKernel:
         spmd.register_local_autograd_function(_kernel_function)
 
@@ -201,14 +157,12 @@ class InnerKDA(InnerAttention):
             max_context_length: int | None = None,
         ) -> LinearAttentionMetadata:
             """Build packed-sequence metadata consumed by KDA."""
-            return LinearAttentionMetadata(
-                varlen=create_varlen_metadata_for_document(
-                    positions,
-                    padding_mask=padding_mask,
-                    max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
-                ),
-                num_conv_history_tokens=self.conv_kernel_size - 1,
+            return build_linear_attention_metadata(
+                positions,
+                conv_kernel_size=self.conv_kernel_size,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
             )
 
     def __init__(self, config: Config):

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from torchtitan.rl.examples.dapo_math.data import DapoMathSample
 from torchtitan.rl.examples.dapo_math.math_verify_pool import MathVerifyPool
 from torchtitan.rl.rollout import Rollout
-from torchtitan.rl.rubric import RewardFn
+from torchtitan.rl.rollout.rubric import RewardFn
 
 
 class RewardMathVerify(RewardFn):

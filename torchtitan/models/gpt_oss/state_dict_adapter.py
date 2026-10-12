@@ -12,8 +12,9 @@ from typing import Any, TYPE_CHECKING
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
+from torchtitan.models.common.moe_state_dict_adapter import MoEStateDictAdapter
+
 from torchtitan.models.common.rope import CosSinRoPE
-from torchtitan.models.utils import MoEStateDictAdapter
 
 if TYPE_CHECKING:
     from .model import GptOssModel

@@ -26,12 +26,12 @@ import torch.nn as nn
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
 )
-from torchtitan.protocols.sharding import ShardingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def _hf_sequence_parallel_placement() -> SpmdType:
     )
 
 
-def _hf_colwise_config() -> ShardingConfig:
+def _hf_colwise_sharding_config() -> ShardingConfig:
     """Column-shard a linear whose output retains HF's batch dimension."""
     return ShardingConfig(
         state_shardings={
@@ -68,7 +68,7 @@ def _hf_colwise_config() -> ShardingConfig:
     )
 
 
-def _hf_rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
+def _hf_rowwise_sharding_config(*, output_sp: bool = False) -> ShardingConfig:
     """Row-shard a linear whose output retains HF's batch dimension."""
     out_dst = (
         _hf_sequence_parallel_placement()
@@ -132,7 +132,7 @@ def set_hf_sharding_configs(
         )
 
     if model.norm is not None and not isinstance(model.norm, nn.Identity):
-        model.norm._sharding_config = _hf_norm_config(enable_sp=enable_sp)
+        model.norm._sharding_config = _hf_norm_sharding_config(enable_sp=enable_sp)
 
     if model.lm_head is not None and not isinstance(model.lm_head, nn.Identity):
         lm_head_input = (
@@ -164,7 +164,7 @@ def set_hf_sharding_configs(
     # compose through apply_rotary_pos_emb.
     if hasattr(model, "rotary_emb") and not isinstance(model.rotary_emb, nn.Identity):
         rope = model.rotary_emb
-        rope._sharding_config = _rope_config(rope, enable_sp=enable_sp)
+        rope._sharding_config = _rope_sharding_config(rope, enable_sp=enable_sp)
 
     # Per-layer modules
     for transformer_block in model.layers:
@@ -244,17 +244,19 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
     """
     # --- Norms ---
     if hasattr(layer, "input_layernorm"):
-        layer.input_layernorm._sharding_config = _hf_norm_config(enable_sp=enable_sp)
+        layer.input_layernorm._sharding_config = _hf_norm_sharding_config(
+            enable_sp=enable_sp
+        )
     if hasattr(layer, "post_attention_layernorm"):
-        layer.post_attention_layernorm._sharding_config = _hf_norm_config(
+        layer.post_attention_layernorm._sharding_config = _hf_norm_sharding_config(
             enable_sp=enable_sp
         )
     if hasattr(layer, "pre_feedforward_layernorm"):
-        layer.pre_feedforward_layernorm._sharding_config = _hf_norm_config(
+        layer.pre_feedforward_layernorm._sharding_config = _hf_norm_sharding_config(
             enable_sp=enable_sp
         )
     if hasattr(layer, "post_feedforward_layernorm"):
-        layer.post_feedforward_layernorm._sharding_config = _hf_norm_config(
+        layer.post_feedforward_layernorm._sharding_config = _hf_norm_sharding_config(
             enable_sp=enable_sp
         )
 
@@ -282,11 +284,11 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
         for name in ("q_a_proj", "q_a_layernorm"):
             mod = getattr(attn, name, None)
             if mod is not None:
-                mod._sharding_config = _replicate_config(mod)
+                mod._sharding_config = _replicate_sharding_config(mod)
         if hasattr(attn, "q_b_proj"):
-            attn.q_b_proj._sharding_config = _hf_colwise_config()
+            attn.q_b_proj._sharding_config = _hf_colwise_sharding_config()
     elif hasattr(attn, "q_proj"):
-        attn.q_proj._sharding_config = _hf_colwise_config()
+        attn.q_proj._sharding_config = _hf_colwise_sharding_config()
     else:
         raise ValueError(
             f"{type(attn).__name__}: no recognized query projection "
@@ -302,12 +304,12 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
         for name in ("kv_a_proj_with_mqa", "kv_a_layernorm"):
             mod = getattr(attn, name, None)
             if mod is not None:
-                mod._sharding_config = _replicate_config(mod)
+                mod._sharding_config = _replicate_sharding_config(mod)
         if hasattr(attn, "kv_b_proj"):
-            attn.kv_b_proj._sharding_config = _hf_colwise_config()
+            attn.kv_b_proj._sharding_config = _hf_colwise_sharding_config()
     elif hasattr(attn, "k_proj") and hasattr(attn, "v_proj"):
-        attn.k_proj._sharding_config = _hf_colwise_config()
-        attn.v_proj._sharding_config = _hf_colwise_config()
+        attn.k_proj._sharding_config = _hf_colwise_sharding_config()
+        attn.v_proj._sharding_config = _hf_colwise_sharding_config()
     else:
         raise ValueError(
             f"{type(attn).__name__}: no recognized key/value projection "
@@ -317,7 +319,7 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
 
     # O projection
     o_proj_name = "o_proj" if hasattr(attn, "o_proj") else "dense"
-    getattr(attn, o_proj_name)._sharding_config = _hf_rowwise_config(
+    getattr(attn, o_proj_name)._sharding_config = _hf_rowwise_sharding_config(
         output_sp=enable_sp
     )
 
@@ -325,13 +327,13 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
     for norm_name in ("q_norm", "k_norm"):
         norm = getattr(attn, norm_name, None)
         if norm is not None:
-            norm._sharding_config = _replicate_config(norm)
+            norm._sharding_config = _replicate_sharding_config(norm)
 
     _set_dsa_indexer_sharding(attn, enable_sp=enable_sp)
 
     # V-norm (Gemma4) — parameter-free RMSNorm applied per-head
     if hasattr(attn, "v_norm"):
-        attn.v_norm._sharding_config = _replicate_config(attn.v_norm)
+        attn.v_norm._sharding_config = _replicate_sharding_config(attn.v_norm)
 
     # --- Dense MLP (non-MoE layers only) ---
     if not getattr(layer, "moe_enabled", False):
@@ -344,13 +346,13 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
         )
 
         gate_name = "gate_proj" if hasattr(mlp, "gate_proj") else "fc1"
-        getattr(mlp, gate_name)._sharding_config = _hf_colwise_config()
+        getattr(mlp, gate_name)._sharding_config = _hf_colwise_sharding_config()
 
         if hasattr(mlp, "up_proj"):
-            mlp.up_proj._sharding_config = _hf_colwise_config()
+            mlp.up_proj._sharding_config = _hf_colwise_sharding_config()
 
         down_name = "down_proj" if hasattr(mlp, "down_proj") else "fc2"
-        getattr(mlp, down_name)._sharding_config = _hf_rowwise_config(
+        getattr(mlp, down_name)._sharding_config = _hf_rowwise_sharding_config(
             output_sp=enable_sp
         )
 
@@ -363,7 +365,7 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
         next(layer.named_parameters(recurse=False), None) is not None
         or next(layer.named_buffers(recurse=False), None) is not None
     ):
-        layer._sharding_config = _replicate_config(layer)
+        layer._sharding_config = _replicate_sharding_config(layer)
 
 
 # ---------------------------------------------------------------------------
@@ -381,10 +383,10 @@ def _set_dsa_indexer_sharding(attn: nn.Module, *, enable_sp: bool) -> None:
             "tensor parallelism. Use FSDP/EP without TP."
         )
     for sub in attn.indexer.modules():
-        sub._sharding_config = _replicate_config(sub)
+        sub._sharding_config = _replicate_sharding_config(sub)
 
 
-def _hf_norm_config(*, enable_sp: bool) -> ShardingConfig:
+def _hf_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Norm sharding using HF's ``hidden_states`` arg name."""
     state = {
         "weight": dense_param_placement(tp=spmd.R),
@@ -402,7 +404,7 @@ def _hf_norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def _replicate_config(module: nn.Module) -> ShardingConfig:
+def _replicate_sharding_config(module: nn.Module) -> ShardingConfig:
     """Replicate all params and buffers on the dense SPMD mesh.
 
     Dynamically enumerates the module's own parameters and buffers to avoid
@@ -416,7 +418,7 @@ def _replicate_config(module: nn.Module) -> ShardingConfig:
     return ShardingConfig(state_shardings=state_shardings)
 
 
-def _rope_config(module: nn.Module, *, enable_sp: bool) -> ShardingConfig:
+def _rope_sharding_config(module: nn.Module, *, enable_sp: bool) -> ShardingConfig:
     """Sharding config for a rotary embedding module.
 
     The rotary embedding's forward receives the hidden-states activation (first
@@ -501,6 +503,6 @@ def _assert_all_states_sharded(
         raise ValueError(
             f"Unsharded modules with no _sharding_config: {missing}. "
             "Every parameter/buffer-bearing module on the dense path needs a "
-            "sharding config (shard it, or use _replicate_config). Add a case in "
+            "sharding config (shard it, or use _replicate_sharding_config). Add a case in "
             "set_hf_sharding_configs / _set_layer_sharding_configs (hf_sharding.py)."
         )

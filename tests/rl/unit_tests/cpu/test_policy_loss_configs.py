@@ -60,7 +60,7 @@ def test_policy_loss_vocab_size_matches_model_and_mode(module_name, factory_name
         loss_config = loss_config.loss_fn
     assert isinstance(loss_config, (DAPOLoss.Config, GRPOLoss.Config))
 
-    assert loss_config.global_vocab_size == decoder_vocab_size(config.model)
+    assert loss_config.global_vocab_size == decoder_vocab_size(config.trainer.model)
 
 
 @pytest.mark.parametrize(
@@ -75,4 +75,5 @@ def test_batch_invariant_configs_disable_local_compile(module_name, factory_name
     factory = getattr(importlib.import_module(module_name), factory_name)
     config = factory()
 
-    assert config.model.local_compile_regions == []
+    assert config.trainer.model.local_compile_regions == []
+    assert config.generator.model.local_compile_regions == []

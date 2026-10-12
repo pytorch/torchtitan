@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch_remat as remat
 
 from torchtitan.config import Configurable
-from torchtitan.protocols.module import Module
+from torchtitan.models.base.module import Module
 
 
 logger = logging.getLogger(__name__)
@@ -121,7 +121,7 @@ class RegionAC(ActivationCheckpointing):
         compression, or logging of retained activations. The pair sees the
         block's inputs and the tensors retained by its save regions;
         ``torch_remat.current_saved_tensor_info().kind`` tells ``pack`` which
-        one it is handling. See docs/remat.md and
+        one it is handling. See torchtitan/distributed/REMAT.md and
         https://github.com/meta-pytorch/remat/blob/main/docs/offloading.md.
 
         Called once per block when it is wrapped, so each block can own its

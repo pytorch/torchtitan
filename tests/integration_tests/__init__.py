@@ -12,10 +12,17 @@ from torchtitan.config import Configurable
 from torchtitan.trainer import Trainer
 
 __all__ = [
+    "DEFAULT_ENTRYPOINT",
     "IntegrationTestDefinition",
+    "SELF_LAUNCHING_ENTRYPOINTS",
     "get_importable_config_module",
     "validate_fake_pg_compatibility",
 ]
+
+
+DEFAULT_ENTRYPOINT = "torchtitan.train"
+# RL launches its trainer and generator processes itself with Monarch.
+SELF_LAUNCHING_ENTRYPOINTS = frozenset({"torchtitan.rl.train"})
 
 
 @dataclass
@@ -40,10 +47,26 @@ class IntegrationTestDefinition:
     """Whether the test requires communication semantics from a real PG."""
     configs: Sequence[Callable[[], Configurable.Config]] = ()
     """One complete configuration per run, selected by module and function."""
+    entrypoints: Sequence[str] = ()
+    """Module launched for each config, parallel to ``configs``.
+
+    Empty means ``torchtitan.train`` for every config. Entrypoints in
+    ``SELF_LAUNCHING_ENTRYPOINTS`` start their own processes and run with
+    ``python -m``; all others run under ``run_train.sh`` (torchrun).
+    """
 
     def __post_init__(self):
         if not self.configs:
             raise ValueError(f"{self.test_name} must define at least one config")
+        if self.entrypoints and len(self.entrypoints) != len(self.configs):
+            raise ValueError(
+                f"{self.test_name} defines {len(self.entrypoints)} entrypoints "
+                f"for {len(self.configs)} configs"
+            )
+
+    def entrypoint(self, index: int) -> str:
+        """Return the module launched for ``configs[index]``."""
+        return self.entrypoints[index] if self.entrypoints else DEFAULT_ENTRYPOINT
 
     def __repr__(self):
         return self.test_descr

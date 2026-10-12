@@ -8,10 +8,12 @@
 
 import random
 
+import numpy as np
 import torch
 
 from torchtitan.rl.components.batcher import Batcher
-from torchtitan.rl.types import RolloutTurnID, TrainingSample
+from torchtitan.rl.components.training_sample_builder import TrainingSample
+from torchtitan.rl.rollout.types import RolloutTurnID
 
 
 def _make_samples(lengths: list[int]) -> list[TrainingSample]:
@@ -20,10 +22,10 @@ def _make_samples(lengths: list[int]) -> list[TrainingSample]:
             min_policy_version=0,
             max_policy_version=0,
             rollout_id=RolloutTurnID(group_id=0, rollout_id=index, turn_id=0),
-            token_ids=list(range(length + 1)),
-            loss_mask=[False] + [True] * length,
-            logprobs=[0.0] * (length + 1),
-            advantage=[0.0] * (length + 1),
+            token_ids=np.arange(length + 1),
+            loss_mask=np.array([False] + [True] * length),
+            logprobs=np.zeros(length + 1, dtype=np.float32),
+            advantage=np.zeros(length + 1, dtype=np.float32),
         )
         for index, length in enumerate(lengths)
     ]

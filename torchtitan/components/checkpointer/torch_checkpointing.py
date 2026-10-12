@@ -52,8 +52,8 @@ from torchtitan.components.optim import (  # noqa: N811
     OptimizersContainer,
 )
 from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.observability import structured_logger as sl
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
 from torchtitan.tools.garbage_collector import GarbageCollector
 

@@ -9,47 +9,22 @@ authors = [
     { name = "PyTorch Team", email = "packages@pytorch.org" },
 ]
 keywords = ["pytorch", "training", "llm"]
-dependencies = [
-    # Stateful Dataloader
-    "grain==0.2.18",
-
-    # Checkpointing
-    "torch_checkpointing>=0.1.0",
-
-    # Hugging Face integrations
-    "datasets>=3.6.0,<4.8.0",
-    "tokenizers>=0.15.0",
-    "renderers==0.1.11",
-    "safetensors",
-
-    # Miscellaneous
-    "tensorboard",
-    "wandb",
-    "einops",
-    "pillow",
-    "spmd_types @ git+https://github.com/meta-pytorch/spmd_types.git@2ae49fce3e0175b76aa55361e415fa1be0aabebb",
-    "attn-gym[linear,cudnn]==0.0.16",
-    # Keep this commit pin in sync with requirements.txt.
-    "torch_remat @ git+https://github.com/meta-pytorch/remat.git@4fd000acba6dc66762b7f3217ecadb8e07243dd4",
-]
-dynamic = ["version"]
+# Dependencies are read from the requirement files so pip, uv, CI and the
+# Docker image (whose build context is .ci/docker) share one source of truth.
+dynamic = ["version", "dependencies", "optional-dependencies"]
 
 [project.urls]
 GitHub = "https://github.com/pytorch/torchtitan"
 Documentation = "https://github.com/pytorch/torchtitan/tree/main/docs"
 Issues = "https://github.com/pytorch/torchtitan/issues"
 
-[project.optional-dependencies]
-dev = [
-    "pre-commit",
-    "pytest",
-    "pytest-cov",
-    "expecttest", # test_tokenizer
-    "pyrefly==0.45.1",
-]
-
 [tool.setuptools.dynamic]
 version = {file = "assets/version.txt"}
+dependencies = {file = ["requirements.txt"]}
+optional-dependencies.dev = {file = ["requirements-dev.txt"]}
+optional-dependencies.rl = {file = [".ci/docker/requirements-rl.txt"]}
+optional-dependencies.vlm = {file = [".ci/docker/requirements-vlm.txt"]}
+optional-dependencies.flux = {file = [".ci/docker/requirements-flux.txt"]}
 
 [tool.codespell]
 skip = ["*.json"]

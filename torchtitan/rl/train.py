@@ -23,12 +23,26 @@ python3 -m torchtitan.rl.train \
 Set ``hf_assets_path`` in ``my_rl_configs.py`` to the model checkpoint path.
 """
 
+# Apply process env defaults (e.g. the CUDA allocator config) before anything
+# imports torch; spawned procs re-apply them in ``_preimport_torch``.
+from torchtitan.rl._runtime import apply_env_defaults
+
+apply_env_defaults()
+
 import asyncio
 import logging
+import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from monarch.actor import default_bootstrap_cmd, HostMesh, ProcMesh, this_host
+from monarch.actor import (
+    default_bootstrap_cmd,
+    HostMesh,
+    ProcMesh,
+    shutdown_context,
+    this_host,
+)
 
 from torchtitan.config import ConfigLoader
 from torchtitan.config.parallelism import ParallelismConfig
@@ -43,6 +57,8 @@ logger = logging.getLogger(__name__)
 
 def _preimport_torch() -> None:
     """``bootstrap`` setup callable: pre-import torch on the spawned proc."""
+    # Env defaults must be set before torch initializes CUDA in this proc.
+    apply_env_defaults()
     # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
     import torch  # noqa: F401
 
@@ -342,3 +358,14 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    # The run finished and every actor is closed. Shut down the Monarch client
+    # (normally an atexit hook), flush logs, then exit without interpreter
+    # finalization: before CPython 3.14, finalization ends Monarch's daemon
+    # threads with pthread_exit while they are inside PyO3 calls, and PyO3
+    # swallowing that forced unwind aborts the process (exit 134). Errors
+    # raised above still take the normal exit path.
+    shutdown_context().get()
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

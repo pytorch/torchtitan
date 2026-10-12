@@ -20,13 +20,11 @@ import torch_remat as remat
 from torch import nn
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.base.module import Module
 
 from torchtitan.models.common.attn_gym import (
     _ChunkGDN,
-    _ConfiguredShortConv,
-    _L2Norm,
     _MissingKernel,
-    _ShortConv,
     causal_conv1d,
     chunk_gdn,
     ChunkGdnCudnnPacked,
@@ -38,24 +36,17 @@ from torchtitan.models.common.attn_gym import (
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
-from torchtitan.protocols.module import Module
-from .attention import (
-    create_varlen_metadata_for_document,
-    InnerAttention,
-    local_head_split,
+from .attention import InnerAttention, local_head_split
+from .linear_attention import (
+    build_linear_attention_metadata,
+    chunk_kernel_options,
+    LinearAttentionMetadata,
 )
-from .kda import chunk_kernel_options, LinearAttentionMetadata
 
 # The Attention Gym kernels run on rank-local heads inside local SPMD regions.
 # ContextParallelInnerGDN handles cross-rank sequence dependencies
 # before invoking them.
-for _kernel_function in (
-    _ShortConv,
-    _ConfiguredShortConv,
-    _L2Norm,
-    _ChunkGDN,
-    ChunkGdnCudnnPacked,
-):
+for _kernel_function in (_ChunkGDN, ChunkGdnCudnnPacked):
     if _kernel_function is not _MissingKernel:
         spmd.register_local_autograd_function(_kernel_function)
 
@@ -76,7 +67,7 @@ def _causal_conv1d_varlen(
     """Depthwise causal conv with per-document resets (CUDA-only).
 
     A pure-torch per-document reference lives in
-    ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
+    ``tests/unit_tests/gpu/models/qwen3_5/test_qwen3_5_deltanet.py``.
     """
     out_BTD = causal_conv1d(
         x_TD.unsqueeze(0),
@@ -217,7 +208,7 @@ class GDNKernel(Module):
 
     This module provides a local SPMD boundary for the sharding code. A
     pure-torch reference implementation lives in
-    ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
+    ``tests/unit_tests/gpu/models/qwen3_5/test_qwen3_5_deltanet.py``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -292,14 +283,12 @@ class InnerGDN(InnerAttention):
             max_context_length: int | None = None,
         ) -> LinearAttentionMetadata:
             """Build packed-sequence metadata consumed by Gated DeltaNet."""
-            return LinearAttentionMetadata(
-                varlen=create_varlen_metadata_for_document(
-                    positions,
-                    padding_mask=padding_mask,
-                    max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
-                ),
-                num_conv_history_tokens=self.conv_kernel_size - 1,
+            return build_linear_attention_metadata(
+                positions,
+                conv_kernel_size=self.conv_kernel_size,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
             )
 
     def __init__(self, config: Config):

@@ -25,8 +25,9 @@ from torch.utils.tensorboard import SummaryWriter
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelismContext
+from torchtitan.observability.logging import Color, NoColor
 from torchtitan.tools import utils
-from torchtitan.tools.utils import Color, device_module, device_type, NoColor
+from torchtitan.tools.utils import device_module, device_type
 
 # named tuple for passing device memory stats for logging
 logger = logging.getLogger(__name__)
@@ -353,7 +354,7 @@ class MetricsProcessor(Configurable):
     logger: BaseLogger
     parallelism_context: ParallelismContext
     device_memory_monitor: DeviceMemoryMonitor
-    color: utils.NoColor | utils.Color
+    color: NoColor | Color
 
     gpu_peak_flops: float
     ntokens_since_last_log: int
@@ -394,7 +395,7 @@ class MetricsProcessor(Configurable):
         self.config = config
         self.device_memory_monitor = device_memory_monitor
         # used for colorful printing
-        self.color = utils.NoColor() if config.disable_color_printing else utils.Color()
+        self.color = NoColor() if config.disable_color_printing else Color()
 
         self.gpu_peak_flops = utils.get_peak_flops(
             self.device_memory_monitor.device_name

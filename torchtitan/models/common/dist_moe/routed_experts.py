@@ -21,8 +21,9 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.protocols.module import Module
 
 from . import _dist_moe as dist_moe
 from .runtime import DistMoeRuntime
