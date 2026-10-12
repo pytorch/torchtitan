@@ -9,8 +9,12 @@ import unittest.mock
 
 import spmd_types as spmd
 import torch
+import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.spmd_types import set_spmd_meshes
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
@@ -27,6 +31,28 @@ class TestTokenDispatcherModule(unittest.TestCase):
 
         self.assertIsInstance(dispatcher, torch.nn.Module)
         self.assertEqual(list(dispatcher.state_dict()), [])
+
+    def test_ep_mesh_is_sliced_once_per_sparse_mesh(self):
+        dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=8)
+        self.addCleanup(dist.destroy_process_group)
+        self.addCleanup(
+            set_spmd_meshes, dense_mesh=None, sparse_mesh=None, dense_sp_enabled=False
+        )
+        dispatcher = AllToAllTokenDispatcher.Config(num_experts=8, top_k=1).build()
+
+        first_mesh = init_device_mesh("cpu", (2, 4), mesh_dim_names=("dp", "ep"))
+        set_spmd_meshes(
+            dense_mesh=first_mesh, sparse_mesh=first_mesh, dense_sp_enabled=False
+        )
+        ep_mesh = dispatcher.ep_mesh
+        self.assertEqual(ep_mesh.mesh_dim_names, ("ep",))
+        self.assertIs(dispatcher.ep_mesh, ep_mesh)
+
+        second_mesh = init_device_mesh("cpu", (2, 4), mesh_dim_names=("dp", "ep"))
+        set_spmd_meshes(
+            dense_mesh=second_mesh, sparse_mesh=second_mesh, dense_sp_enabled=False
+        )
+        self.assertIsNot(dispatcher.ep_mesh, ep_mesh)
 
 
 class TestExpertParallelConfigValidation(unittest.TestCase):

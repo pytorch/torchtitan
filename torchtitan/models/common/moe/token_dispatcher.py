@@ -192,14 +192,22 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
 
     def __init__(self, config: Config):
         super().__init__(config)
+        self._ep_mesh: DeviceMesh | None = None
+        self._ep_mesh_parent: DeviceMesh | None = None
 
     @property
     def ep_mesh(self) -> DeviceMesh | None:
         """Return the active one-dimensional EP mesh, if EP is enabled."""
-        with spmd.no_typecheck():
-            # weirdly, accessing ep PG hits DeviceMesh internals that expects type annotations
-            mesh = spmd_sparse_mesh()
-            return None if mesh is None else mesh["ep"]
+        mesh = spmd_sparse_mesh()
+        if mesh is None:
+            return None
+        # mesh["ep"] builds a new DeviceMesh on every call, about 0.4 ms of CPU each.
+        if self._ep_mesh_parent is not mesh:
+            with spmd.no_typecheck():
+                # weirdly, accessing ep PG hits DeviceMesh internals that expects type annotations
+                self._ep_mesh = mesh["ep"]
+            self._ep_mesh_parent = mesh
+        return self._ep_mesh
 
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
