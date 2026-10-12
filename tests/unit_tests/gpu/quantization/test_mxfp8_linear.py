@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Literal
+
 import pytest
 import torch
 import torch.nn as nn
@@ -15,6 +17,7 @@ pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
 
 import torchtitan.quantization.mxfp8.linear as mxfp8_linear  # noqa: E402
 from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
+from torchtitan.quantization.mxfp8.activation import _quantize_activation  # noqa: E402
 from torchtitan.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
 from torchtitan.quantization.mxfp8.tensor import (  # noqa: E402
     _LinearShardedTensorWithMXFP8Compute,
@@ -36,6 +39,8 @@ def _make_sharded_mxfp8_linear(
     *,
     bias: bool = True,
     input_activation_format_for_backward: str = "bf16",
+    activation_quantization_backend: Literal["cuda", "cutedsl"] = "cuda",
+    inplace_wgrad_accum: bool = True,
 ) -> MXFP8Linear:
     """Build a layer in its as-constructed state, before any unshard."""
     return (
@@ -44,6 +49,8 @@ def _make_sharded_mxfp8_linear(
             out_features=out_features,
             bias=bias,
             input_activation_format_for_backward=input_activation_format_for_backward,
+            activation_quantization_backend=activation_quantization_backend,
+            inplace_wgrad_accum=inplace_wgrad_accum,
         )
         .build()
         .cuda()
@@ -57,6 +64,8 @@ def _make_mxfp8_linear(
     *,
     bias: bool = True,
     input_activation_format_for_backward: str = "bf16",
+    activation_quantization_backend: Literal["cuda", "cutedsl"] = "cuda",
+    inplace_wgrad_accum: bool = True,
 ) -> MXFP8Linear:
     """Build a layer that is ready to run forward.
 
@@ -71,6 +80,8 @@ def _make_mxfp8_linear(
             out_features,
             bias=bias,
             input_activation_format_for_backward=input_activation_format_for_backward,
+            activation_quantization_backend=activation_quantization_backend,
+            inplace_wgrad_accum=inplace_wgrad_accum,
         )
     )
 
@@ -102,6 +113,98 @@ def _install_unsharded_weight(linear: MXFP8Linear) -> MXFP8Linear:
         requires_grad=sharded_weight.requires_grad,
     )
     return linear
+
+
+@pytest.mark.parametrize(
+    "rowwise,colwise", [(True, False), (False, True), (True, True)]
+)
+def test_cutedsl_activation_operands_match_cuda(rowwise, colwise, monkeypatch):
+    from torchao.prototype.moe_training.kernels.mxfp8 import quant
+
+    kernel_name = (
+        "mxfp8_quantize_2d_1x32_32x1_cutedsl"
+        if rowwise and colwise
+        else "mxfp8_quantize_2d_1x32_cutedsl"
+        if rowwise
+        else "mxfp8_quantize_2d_32x1_cutedsl"
+    )
+    original = getattr(quant, kernel_name)
+
+    def quantize(*args, **kwargs):
+        """Validate the policy while executing the actual provider kernel."""
+        assert kwargs.get("scaling_mode") == "rceil", "TorchTitan must pin RCEIL"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(quant, kernel_name, quantize)
+    torch.manual_seed(42)
+    x = torch.randn(256, 1536, device="cuda", dtype=torch.bfloat16)
+    expected = _quantize_activation(x, rowwise=rowwise, colwise=colwise, backend="cuda")
+    actual = _quantize_activation(
+        x, rowwise=rowwise, colwise=colwise, backend="cutedsl"
+    )
+    for left, right in zip(expected, actual, strict=True):
+        assert torch.equal(
+            left.contiguous().view(torch.uint8).flatten(),
+            right.contiguous().view(torch.uint8).flatten(),
+        )
+
+
+def test_cutedsl_activation_rejects_incompatible_shape():
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="divisible by 128"):
+        _quantize_activation(x, rowwise=True, colwise=True, backend="cutedsl")
+
+
+def test_cutedsl_fake_trace_does_not_poison_real_endpoint_cache():
+    from torch._subclasses.fake_tensor import FakeTensorMode, is_fake
+
+    x = torch.randn(384, 128, device="cuda", dtype=torch.bfloat16)
+    with FakeTensorMode() as mode:
+        fake = _quantize_activation(
+            mode.from_tensor(x), rowwise=True, colwise=True, backend="cutedsl"
+        )
+        assert all(is_fake(value) for value in fake)
+    actual = _quantize_activation(x, rowwise=True, colwise=True, backend="cutedsl")
+    expected = _quantize_activation(x, rowwise=True, colwise=True, backend="cuda")
+    assert all(not is_fake(value) for value in actual)
+    for left, right in zip(actual, expected, strict=True):
+        assert torch.equal(
+            left.contiguous().view(torch.uint8).flatten(),
+            right.contiguous().view(torch.uint8).flatten(),
+        )
+
+
+@pytest.mark.parametrize("save_format", ["bf16", "mxfp8"])
+def test_cutedsl_linear_matches_cuda_backward(save_format):
+    torch.manual_seed(42)
+    expected = _make_sharded_mxfp8_linear(
+        in_features=128,
+        out_features=128,
+        input_activation_format_for_backward=save_format,
+    )
+    actual = _make_sharded_mxfp8_linear(
+        in_features=128,
+        out_features=128,
+        input_activation_format_for_backward=save_format,
+        activation_quantization_backend="cutedsl",
+    )
+    actual.load_state_dict(expected.state_dict())
+    expected, actual = _install_unsharded_weight(expected), _install_unsharded_weight(
+        actual
+    )
+    x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
+    grad = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
+    left, right = x.clone().requires_grad_(), x.clone().requires_grad_()
+    for _ in range(2):
+        out_left, out_right = expected(left), actual(right)
+        out_left.backward(grad)
+        out_right.backward(grad)
+    assert torch.equal(out_left, out_right)
+    assert torch.equal(left.grad, right.grad)
+    for param, reference in zip(
+        actual.parameters(), expected.parameters(), strict=True
+    ):
+        assert torch.equal(param.grad, reference.grad)
 
 
 @pytest.mark.parametrize("input_activation_format_for_backward", ["bf16", "mxfp8"])
@@ -173,14 +276,14 @@ def test_mxfp8_input_activation_format_for_backward_controls_quantization_work(
     input_activation_format_for_backward,
     expected_quantize_calls,
 ):
-    original_quantize = mxfp8_linear.mxfp8_quantize_cuda
+    original_quantize = mxfp8_linear._quantize_activation
     quantize_calls = []
 
     def record_quantize(*args, **kwargs):
         quantize_calls.append((kwargs["rowwise"], kwargs["colwise"]))
         return original_quantize(*args, **kwargs)
 
-    monkeypatch.setattr(mxfp8_linear, "mxfp8_quantize_cuda", record_quantize)
+    monkeypatch.setattr(mxfp8_linear, "_quantize_activation", record_quantize)
     linear = _make_mxfp8_linear(
         bias=False,
         input_activation_format_for_backward=input_activation_format_for_backward,
@@ -336,6 +439,7 @@ def test_mxfp8_linear_runs_outside_plain_eager(
     linear = _make_mxfp8_linear(
         bias=False,
         input_activation_format_for_backward=input_activation_format_for_backward,
+        inplace_wgrad_accum=execution_mode != "compile",
     )
     x = torch.randn(
         64,

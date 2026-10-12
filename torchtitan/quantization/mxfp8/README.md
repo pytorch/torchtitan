@@ -30,6 +30,32 @@ MXFP8 training can provide substantial training speedups for models where the ma
 
 ### How MXFP8 Works
 
+#### Direct blocked activation scales
+
+Set `MXFP8LinearConverter.Config(activation_quantization_backend="cutedsl")`
+to opt into TorchAO's directly blocked activation/gradient casts. When both
+rowwise and columnwise operands are needed, the fused kernel from
+[TorchAO #4995](https://github.com/pytorch/ao/pull/4995) produces both in one
+input read. Single-axis calls reuse TorchAO's corresponding CuTeDSL kernels.
+No standalone scale-rearrangement kernel is needed on this path. Weight
+quantization, FSDP ownership and the chosen backward-save format are unchanged.
+
+The opted-in backend depends on #4995, which preserves Protonu's original
+[#4895](https://github.com/pytorch/ao/pull/4895) kernel and incorporates the
+current nonfinite and single-axis FakeTensor corrections. It requires no
+separate metadata PR and does not change MXFP8Linear output ownership.
+All casts explicitly request RCEIL to match the weight-scale policy.
+
+This requires BF16 matrices with both axes divisible by 128, SM10.x and the
+CuTeDSL runtime. Construction rejects a missing required AO API/runtime;
+execution rejects incompatible shapes rather than padding activations to a
+larger GEMM or silently selecting another backend. The default `"cuda"` keeps
+the existing dependency and 32-row padding contracts.
+
+The fused API's single-group column scales have a small unused allocation tail.
+TorchTitan takes a view of the valid blocked prefix, without copying it. The
+immutable group endpoint is cached for stable CUDA-graph capture/replay.
+
 MXFP8 differs from standard Float8 training in its scaling approach:
 
 - **Granular scaling factor**: Instead of using a single scale factor per tensor (tensorwise) or per row/column (rowwise), MXFP8 uses a more granular, block-based scaling with a default block size of 1x32 elements. Each block of 32 elements shares a common scale factor. The data dtype is `torch.float8_e4m3fn`, and the scale factor dtype is `torch.float8_e8mfnu`.
