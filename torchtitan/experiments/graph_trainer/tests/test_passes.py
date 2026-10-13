@@ -166,6 +166,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 loss=loss,
                 model=SimpleNamespace(layers=[0, 1], mtp_layers=[object()]),
                 parallelism=SimpleNamespace(),
+                training=SimpleNamespace(disable_cuda_graphs=False),
             )
 
         traced_result = SimpleNamespace(
@@ -206,6 +207,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 fsdp_reshard_after_forward="always",
                 pipeline_parallel_degree=1,
             ),
+            training=TrainingConfig(disable_cuda_graphs=True),
         )
         traced_result = SimpleNamespace(state_fqns=[])
 
@@ -259,6 +261,44 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 ("expert_dp_replicate", 2, "edp_shard"),
             ),
         )
+
+    def test_compile_time_passes_follow_core_cuda_graph_config(self):
+        from torchtitan.components.loss import CrossEntropyLoss
+        from torchtitan.experiments.graph_trainer.cuda_graph import (
+            cuda_graph_pass,
+            insert_kernel_annotations_pass,
+        )
+
+        def make_config(*, disable_cuda_graphs):
+            return SimpleNamespace(
+                compile=GraphTrainerCompileConfig(inductor_compilation="regional"),
+                loss=CrossEntropyLoss.Config(),
+                model=SimpleNamespace(layers=[0, 1]),
+                parallelism=SimpleNamespace(),
+                training=SimpleNamespace(disable_cuda_graphs=disable_cuda_graphs),
+            )
+
+        traced_result = SimpleNamespace(
+            state_fqns=[],
+            graph_state=GraphStateSpec(),
+        )
+        with patch(
+            "torchtitan.experiments.graph_trainer.common_utils."
+            "get_default_transformer_block_buckets",
+            return_value=[],
+        ):
+            with_cuda_graph = compile_time_passes(
+                traced_result,
+                make_config(disable_cuda_graphs=False),
+            )
+            without_cuda_graph = compile_time_passes(
+                traced_result,
+                make_config(disable_cuda_graphs=True),
+            )
+
+        self.assertEqual(with_cuda_graph.count(insert_kernel_annotations_pass), 1)
+        self.assertNotIn(insert_kernel_annotations_pass, without_cuda_graph)
+        self.assertNotIn(cuda_graph_pass, with_cuda_graph)
 
 
 class TestFSDPUnshardDedupPass(TestCase):
@@ -3841,6 +3881,7 @@ class TestChunkPasses(TestCase):
                 fsdp_reshard_after_forward="default",
                 pipeline_parallel_degree=1,
             ),
+            training=SimpleNamespace(disable_cuda_graphs=False),
             compile=GraphTrainerCompileConfig(
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
@@ -3867,10 +3908,7 @@ class TestChunkPasses(TestCase):
             )
 
         return [
-            pass_name(pass_fn)
-            for pass_fn in compile_time_passes(
-                traced_result, config, use_cuda_graph=False
-            )
+            pass_name(pass_fn) for pass_fn in compile_time_passes(traced_result, config)
         ]
 
     def test_ep_overlap_pass_pipeline_order(self):
