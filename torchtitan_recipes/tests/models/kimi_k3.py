@@ -9,6 +9,7 @@
 from dataclasses import dataclass, replace
 from typing import cast
 
+import torch
 from torch.distributed.tensor import Shard
 
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
@@ -159,6 +160,7 @@ def _dist_muon_optimizer(
             MeshAxisName.DP_SHARD.value: Owned(),
             f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Owned(),
         },
+        compute_dtype=torch.bfloat16,
     )
 
     def blocks_of(*num_rows: int) -> ComputeLayout:
@@ -170,6 +172,7 @@ def _dist_muon_optimizer(
                     dim=0, block_sizes=num_rows
                 ),
             },
+            compute_dtype=torch.bfloat16,
         )
 
     # MLA fuses several projections into one parameter; Kimi runs Newton-Schulz
@@ -204,6 +207,7 @@ def _dist_muon_optimizer(
                 MeshAxisName.DP_SHARD.value: Shard(0),
                 f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Shard(0),
             },
+            compute_dtype=torch.bfloat16,
         ),
         "w2": owned,
     }
