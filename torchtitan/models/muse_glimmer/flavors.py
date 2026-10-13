@@ -706,7 +706,7 @@ def build_model_config(
     *,
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> MuseGlimmerModel.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
