@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -22,6 +24,35 @@ from torchtitan.rl.generator.vllm.model_wrapper import (
     _replace_vllm_layer_configs,
     VLLMModelWrapper,
 )
+
+
+@pytest.mark.parametrize(
+    "model_name, expected_scale",
+    [
+        ("gpt_oss", 0.22665755425493697),
+        ("deepseek_v3", 0.11425195291833387),
+        ("qwen3", None),
+    ],
+)
+def test_vllm_replacement_preserves_attention_scale(model_name, expected_scale):
+    """Preserve YaRN scaling as well as the backend's default scale."""
+    model_config = importlib.import_module(
+        f"torchtitan.models.{model_name}"
+    ).build_model_config("debugmodel", seq_len=128, parallelism=ParallelismConfig())
+    vllm_config = _replace_vllm_layer_configs(model_config)
+
+    for model_layer, vllm_layer in zip(
+        model_config.layers, vllm_config.layers, strict=True
+    ):
+        attention_config = model_layer.attention
+        scale = vllm_layer.attention.inner_attention.scale
+        if expected_scale is None:
+            assert scale is None
+        else:
+            assert scale == pytest.approx(expected_scale)
+            with torch.device("meta"):
+                attention = attention_config.build()
+            assert scale == attention.softmax_scale
 
 
 @pytest.mark.parametrize(

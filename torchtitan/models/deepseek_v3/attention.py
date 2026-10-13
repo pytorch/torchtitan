@@ -54,6 +54,15 @@ class DeepSeekMLAAttention(Attention):
         )
         mscale: float = 1.0
 
+        @property
+        def softmax_scale(self) -> float:
+            qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+            scale = qk_head_dim**-0.5
+            if self.rope.scaling == "yarn" and self.rope.rope_factor > 1.0:
+                mscale = 0.1 * self.mscale * math.log(self.rope.rope_factor) + 1.0
+                scale = scale * mscale * mscale
+            return scale
+
     def __init__(self, config: Config):
         super().__init__()
         self.dim = config.dim
@@ -82,11 +91,7 @@ class DeepSeekMLAAttention(Attention):
         self.kv_norm = config.kv_norm.build()
         self.wkv_b = config.wkv_b.build()
         self.wo = config.wo.build()
-        self.softmax_scale = self.qk_head_dim**-0.5
-
-        if config.rope.scaling == "yarn" and config.rope.rope_factor > 1.0:
-            mscale = 0.1 * config.mscale * math.log(config.rope.rope_factor) + 1.0
-            self.softmax_scale = self.softmax_scale * mscale * mscale
+        self.softmax_scale = config.softmax_scale
 
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
