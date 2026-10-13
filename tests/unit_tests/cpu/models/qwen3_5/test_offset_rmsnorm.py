@@ -20,4 +20,5 @@ def test_qwen35_architecture_enables_offset_rmsnorm_local_compile() -> None:
             "partial_rope",
             "shared_expert_gate",
             "fp32_to_bf16_split",
+            "moe_combine",
         ]
