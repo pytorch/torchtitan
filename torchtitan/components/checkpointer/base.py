@@ -25,8 +25,8 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import Configurable, Function
+from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.observability import structured_logger as sl
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
 from torchtitan.tools.garbage_collector import GarbageCollector
 

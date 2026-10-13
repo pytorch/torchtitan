@@ -22,12 +22,11 @@ from .attention import (  # noqa: F401
     InnerAttention,
     local_head_split,
     QKVLinear,
-    ScaledDotProductInnerAttention,
     SlidingWindowFlexInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from .kda import LinearAttentionMetadata
+from .linear_attention import LinearAttentionMetadata
 
 AttentionMetadata = (
     FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata

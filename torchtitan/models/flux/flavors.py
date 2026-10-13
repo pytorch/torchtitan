@@ -11,17 +11,19 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
 
+from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 
-from .model.autoencoder import AutoEncoder
-from .model.hf_embedder import FluxEmbedder
-from .model.layers import (
+from .autoencoder import AutoEncoder
+from .hf_embedder import FluxEmbedder
+from .layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
@@ -31,7 +33,8 @@ from .model.layers import (
     SelfAttention,
     SingleStreamBlock,
 )
-from .model.model import FluxModel
+from .model import FluxModel
+from .sharding import flux_inner_attention_sharding_config
 
 __all__ = [
     "FluxModel",
@@ -105,6 +108,10 @@ def _make_double_block_config(
                     param_init=_NORM_INIT,
                 ),
             ),
+            inner_attention=VarlenInnerAttention.Config(
+                window_size=(-1, -1),
+                sharding_config=flux_inner_attention_sharding_config(),
+            ),
         ),
         txt_attn=SelfAttention.Config(
             num_heads=num_heads,
@@ -131,6 +138,10 @@ def _make_double_block_config(
                     param_init=_NORM_INIT,
                 ),
             ),
+            inner_attention=VarlenInnerAttention.Config(
+                window_size=(-1, -1),
+                sharding_config=flux_inner_attention_sharding_config(),
+            ),
         ),
         img_mlp_in=Linear.Config(
             in_features=hs,
@@ -155,6 +166,9 @@ def _make_double_block_config(
             out_features=hs,
             bias=True,
             param_init=_XAVIER_LINEAR,
+        ),
+        inner_attention=VarlenInnerAttention.Config(
+            window_size=(-1, -1), sharding_config=flux_inner_attention_sharding_config()
         ),
     )
 
@@ -201,6 +215,9 @@ def _make_single_block_config(
                 normalized_shape=head_dim,
                 param_init=_NORM_INIT,
             ),
+        ),
+        inner_attention=VarlenInnerAttention.Config(
+            window_size=(-1, -1), sharding_config=flux_inner_attention_sharding_config()
         ),
     )
 
@@ -559,7 +576,12 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     converters: list[ModelConfigConverter.Config] | None = None,
+    *,
+    parallelism: ParallelismConfig,
 ) -> FluxModel.Config:
+    # Flux only declares CP sharding, which does not depend on the
+    # parallelism settings; the argument keeps the builder API uniform.
+    del parallelism
     config = MODEL_FLAVORS[flavor]()
     if converters is not None:
         validate_converter_compatibility(converters)

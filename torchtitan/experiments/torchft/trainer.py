@@ -28,12 +28,12 @@ from torchtitan.experiments.torchft.optimizer import (
     TorchFTOptim,
     TorchFTOptimizersContainer,
 )
+from torchtitan.models.base import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
     ensure_pp_loss_visible,
 )
-from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -88,6 +88,15 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
         )
         self.ft_manager = self.fault_tolerance.build()
+        if self.fault_tolerance.enable:
+            # TORCHFT_TIMEOUT_SEC overrides fault_tolerance.timeout_ms.
+            ft_timeout = self.ft_manager.manager._timeout.total_seconds()
+            if ft_timeout >= config.comm.train_timeout_seconds:
+                logger.warning(
+                    f"torchft manager timeout ({ft_timeout} s) should be below "
+                    f"comm.train_timeout_seconds ({config.comm.train_timeout_seconds}); "
+                    "a slow process group reconfiguration can otherwise abort the replica."
+                )
         self.parallelism_context = ParallelismContext.from_config(
             config.parallelism, topology, dump_folder=self.output_dir
         )
@@ -151,9 +160,7 @@ class FaultTolerantTrainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        model_config = copy.deepcopy(config.model)
-        model_config.set_sharding_(config.parallelism)
-        config.model = model_config
+        config.model = copy.deepcopy(config.model)
         if config.override.imports:
             apply_overrides(config.override, config)
         model_config = config.model

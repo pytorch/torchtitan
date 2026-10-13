@@ -24,6 +24,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_dense_sp_enabled,
     spmd_mesh_group,
 )
+from torchtitan.models.base.module import ModuleList
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
@@ -33,7 +34,6 @@ from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.protocols.module import ModuleList
 
 
 def roll_mtp_sequence(

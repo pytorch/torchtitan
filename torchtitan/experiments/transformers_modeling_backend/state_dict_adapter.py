@@ -27,7 +27,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch
 
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+from torchtitan.models.base.state_dict_adapter import StateDictAdapter
 
 if TYPE_CHECKING:
     from .model import HFTransformerModel

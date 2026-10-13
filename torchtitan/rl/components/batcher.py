@@ -14,23 +14,73 @@ import logging
 import math
 from dataclasses import dataclass, replace
 
+import numpy as np
 import torch
+
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 
 from torchtitan.config import Configurable
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
-from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.types import (
-    TrainerStepBatch,
-    TrainingMicrobatch,
+from torchtitan.rl.components.training_sample_builder import (
     TrainingSample,
     TrainingSampleGroup,
 )
+from torchtitan.rl.observability import metrics as m
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass(kw_only=True, slots=True)
+class TrainingMicrobatch(TokenizedTrainingMicrobatch):
+    """Packed training microbatch for the RL trainer.
+
+    Each training_sample's raw tokens (length N) are split into
+    ``token_ids = raw[:-1]`` and ``labels = raw[1:]`` (both length
+    N-1), matching the pre-training dataloader convention.
+    """
+
+    generator_logprobs: torch.Tensor  # [T]
+    temperature: torch.Tensor  # [T]
+    loss_mask: torch.Tensor  # [T]
+    advantages: torch.Tensor  # [T]
+
+    def loss_kwargs(self) -> dict[str, torch.Tensor]:
+        return {
+            "generator_logprobs": self.generator_logprobs,
+            "temperature": self.temperature,
+            "loss_mask": self.loss_mask,
+            "advantages": self.advantages,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TrainerStepBatch:
+    """Packed microbatches for one optimizer step.
+
+    Example:
+        # 5 training samples, effective length 5 each; 2 rows/rank, dp_degree=1
+        # next-fit rows -> [[s5, s5], [s5, s5], [s5]] = 3 rows; rows_per_microbatch = 2 * 1 = 2
+        # -> 2 microbatches (3 rows padded to 4 with one pad-only row):
+        #    microbatches = [[TrainingMicrobatch(input=[20])],
+        #                    [TrainingMicrobatch(input=[20])]]
+        # The second microbatch contains one real row and one pad row.
+        # global_loss_token_counts = per-objective loss-token counts
+        # global_routing_token_counts = per-depth non-padding token counts
+    """
+
+    microbatches: list[list[TrainingMicrobatch]]  # [num_microbatches][dp_degree]
+    global_loss_token_counts: torch.Tensor
+    global_routing_token_counts: torch.Tensor
+    metrics: list[m.Metric]
+    group_ids: list[int]
+    """Every consumed rollout group, including metric-only groups."""
+    # one per packed training_sample; trainer computes policy_age at consume time
+    min_policy_versions: list[int]
+
+
 _MAX_CONSECUTIVE_UNTRAINABLE_BATCHES = 10
 
-# Per-field pad values + tensor dtypes for a packed row.
+# Per-field pad values + dtypes for a packed row.
 _PAD_VALUES: dict[str, int | float | bool] = {
     "input_ids": 0,  # overwritten with pad_id in __init__-bound builds
     "labels": 0,
@@ -38,12 +88,12 @@ _PAD_VALUES: dict[str, int | float | bool] = {
     "loss_mask": False,
     "advantages": 0.0,
 }
-_DTYPES: dict[str, torch.dtype] = {
-    "input_ids": torch.long,
-    "labels": torch.long,
-    "generator_logprobs": torch.float,
-    "loss_mask": torch.bool,
-    "advantages": torch.float,
+_DTYPES: dict[str, type[np.generic]] = {
+    "input_ids": np.int64,
+    "labels": np.int64,
+    "generator_logprobs": np.float32,
+    "loss_mask": np.bool_,
+    "advantages": np.float32,
 }
 
 
@@ -660,9 +710,12 @@ class Batcher(Configurable):
         """
         pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
         keys = list(pad_values)
-        packed_fields: dict[str, list] = {key: [] for key in keys}
-        positions: list[int] = []
-        padding_mask: list[bool] = []
+        packed_fields: dict[str, list[np.ndarray]] = {key: [] for key in keys}
+        positions: list[np.ndarray] = []
+        padding_mask: list[np.ndarray] = []
+
+        def pad(key: str, num_tokens: int) -> np.ndarray:
+            return np.full(num_tokens, pad_values[key], dtype=_DTYPES[key])
 
         # Shift labels/logits and pad to per_sample_pad_multiple.
         for training_sample in training_samples:
@@ -679,36 +732,33 @@ class Batcher(Configurable):
             # pad to multiple
             if self._per_sample_pad_multiple:
                 align = self._per_sample_pad_multiple
-                padded_len = ((sample_len + align - 1) // align) * align
-                for key in keys:
-                    sample[key] = sample[key] + [pad_values[key]] * (
-                        padded_len - sample_len
-                    )
-                sample_len = padded_len
+                sample_len = ((sample_len + align - 1) // align) * align
 
             # extend row
             for key in keys:
-                packed_fields[key].extend(sample[key])
-            positions.extend(range(sample_len))
-            padding_mask.extend([False] * unpadded_len)
-            padding_mask.extend([True] * (sample_len - unpadded_len))
+                packed_fields[key] += [sample[key], pad(key, sample_len - unpadded_len)]
+            positions.append(np.arange(sample_len, dtype=np.int64))
+            padding_mask.append(np.arange(sample_len) >= unpadded_len)
 
         num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
-        pad_len = num_tokens_per_rank - len(positions)
+        pad_len = num_tokens_per_rank - sum(map(len, positions))
         assert pad_len >= 0
         if pad_len > 0:
             for key in keys:
-                packed_fields[key].extend([pad_values[key]] * pad_len)
-            positions.extend(index % self.seq_len for index in range(pad_len))
-            padding_mask.extend([True] * pad_len)
+                packed_fields[key].append(pad(key, pad_len))
+            positions.append(np.arange(pad_len, dtype=np.int64) % self.seq_len)
+            padding_mask.append(np.ones(pad_len, dtype=bool))
 
-        generator_logprobs = torch.tensor(
-            packed_fields["generator_logprobs"], dtype=_DTYPES["generator_logprobs"]
-        )
-        loss_mask = torch.tensor(packed_fields["loss_mask"], dtype=_DTYPES["loss_mask"])
+        # Concatenate into the packed dtype (e.g. float64 logprobs -> float32); torch.from_numpy doesn't copy
+        packed = {
+            key: torch.from_numpy(np.concatenate(arrays, dtype=_DTYPES[key]))
+            for key, arrays in packed_fields.items()
+        }
+        generator_logprobs = packed["generator_logprobs"]
+        loss_mask = packed["loss_mask"]
         target_mask = loss_mask & torch.isfinite(generator_logprobs)
-        positions_tensor = torch.tensor(positions, dtype=torch.long)
-        padding_mask_tensor = torch.tensor(padding_mask, dtype=torch.bool)
+        positions_tensor = torch.from_numpy(np.concatenate(positions))
+        padding_mask_tensor = torch.from_numpy(np.concatenate(padding_mask))
         loss_token_counts, routing_token_counts = get_mtp_token_counts(
             target_mask=target_mask,
             positions=positions_tensor,
@@ -716,17 +766,15 @@ class Batcher(Configurable):
             num_mtp_layers=self._num_mtp_layers,
         )
         return TrainingMicrobatch(
-            input=torch.tensor(packed_fields["input_ids"], dtype=_DTYPES["input_ids"]),
-            labels=torch.tensor(packed_fields["labels"], dtype=_DTYPES["labels"]),
+            input=packed["input_ids"],
+            labels=packed["labels"],
             positions=positions_tensor,
             generator_logprobs=generator_logprobs,
             # TODO: support per-turn temperature: record it on each RolloutTurn and carry it
             # per token like generator_logprobs, instead of the run's sampling temperature.
             temperature=torch.full_like(generator_logprobs, self._temperature),
             loss_mask=loss_mask,
-            advantages=torch.tensor(
-                packed_fields["advantages"], dtype=_DTYPES["advantages"]
-            ),
+            advantages=packed["advantages"],
             padding_mask=padding_mask_tensor,
             loss_token_counts=loss_token_counts,
             routing_token_counts=routing_token_counts,

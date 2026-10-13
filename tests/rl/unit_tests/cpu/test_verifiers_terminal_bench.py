@@ -8,6 +8,7 @@
 
 import asyncio
 import json
+import pickle
 import subprocess
 import sys
 from pathlib import PurePosixPath
@@ -22,6 +23,7 @@ import verifiers.v1 as vf
 from torchtitan.config import ConfigLoader
 from torchtitan.distributed.activation_checkpoint import FullActivationRematConfig
 from torchtitan.rl.controller import Controller
+from torchtitan.rl.examples.verifiers import env_server
 from torchtitan.rl.examples.verifiers.terminal_bench import taskset
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarness,
@@ -136,8 +138,8 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert config.generation_server.max_rollout_tokens == MAX_CONTEXT_LENGTH
     assert environment.agent.max_turns == MAX_TURNS
     assert environment.agent.timeout.rollout == 7200
-    assert environment.taskset == config.train_dataset.verifiers_taskset
-    assert config.train_dataset.verifiers_taskset.dataset == TRAIN_DATASET
+    assert environment.taskset == config.training_dataloader.dataset.verifiers_taskset
+    assert config.training_dataloader.dataset.verifiers_taskset.dataset == TRAIN_DATASET
     assert config.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
     assert config.verifiers_env_server.local_taskset_module == taskset.__name__
     worker_config = resolve_env_config(env_config_data(environment))
@@ -176,6 +178,46 @@ print(type(load_harness(env_config.agent.harness)).__name__)
     assert result.stdout.strip().endswith("TerminalBenchTerminusHarness")
 
 
+def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
+    """A pool worker loads the broker's ``__main__``, the pickled ``log_setup``
+    and the taskset module. None of them may import torch, vLLM or Monarch.
+    """
+    captured = {}
+
+    def serve_env(**kwargs) -> None:
+        captured["main"] = sys.modules["__main__"]
+        captured["log_setup"] = pickle.dumps(kwargs["log_setup"])
+
+    monkeypatch.setattr(env_server, "serve_env", serve_env)
+    # _run_env_server_process replaces __main__ and edits no_proxy; restore both after the test.
+    monkeypatch.setitem(sys.modules, "__main__", sys.modules["__main__"])
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setenv("NO_PROXY", "")
+    config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET).verifiers_env_server
+    env_server._run_env_server_process(
+        environment=env_config_data(config.environment),
+        serve=config.serve,
+        local_taskset_module=config.local_taskset_module,
+        address_queue=None,
+        death_pipe=None,
+    )
+
+    # Spawn re-runs __main__ in each worker if it has a module name or a file.
+    assert captured["main"].__spec__ is None
+    assert not hasattr(captured["main"], "__file__")
+    worker = f"""
+import pickle, sys
+pickle.loads({captured["log_setup"]!r})
+import {taskset.__name__}
+print([name for name in ("torch", "vllm", "monarch") if name in sys.modules])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", worker], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.strip() == "[]"
+
+
 def test_training_cannot_read_benchmark_as_training_data() -> None:
     with pytest.raises(ValueError, match="different datasets"):
         _rollouter_config(EVAL_DATASET, EVAL_DATASET)
@@ -210,7 +252,10 @@ def test_training_recipe_uses_separate_datasets() -> None:
     assert config.generator.cuda_graph.mode == "FULL_DECODE_ONLY"
     assert config.num_generators == 8
     assert config.generator.parallelism.data_parallel_degree == 1
-    assert config.rollouter.train_dataset.verifiers_taskset.dataset == TRAIN_DATASET
+    assert (
+        config.rollouter.training_dataloader.dataset.verifiers_taskset.dataset
+        == TRAIN_DATASET
+    )
     assert config.rollouter.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
 
 
@@ -254,8 +299,8 @@ def test_recipe_layouts_fit_the_model(
     config = _terminal_bench_config(name)
     trainer = config.trainer.parallelism
     generator = config.generator.parallelism
-    num_kv_heads = _num_kv_heads(config.model)
-    num_experts = _num_experts(config.model)
+    num_kv_heads = _num_kv_heads(config.generator.model)
+    num_experts = _num_experts(config.generator.model)
 
     assert (
         trainer.data_parallel_replicate_degree

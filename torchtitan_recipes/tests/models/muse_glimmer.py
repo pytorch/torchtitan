@@ -9,6 +9,7 @@
 from dataclasses import replace
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -23,7 +24,6 @@ from torchtitan.distributed.activation_checkpoint import (
     DefaultActivationRematConfig,
     FullActivationRematConfig,
 )
-from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -63,19 +63,19 @@ def _muse_glimmer_mm_dataloader(
 
     NOTE: the multimodal dataloader imports (``MultiModalCollator`` /
     ``resize_to_pixel_budget``) are done lazily here because they pull in
-    ``torchvision`` (via ``torchtitan.hf_datasets.multimodal.utils.image``).
+    ``torchvision`` (via ``torchtitan.components.data.multimodal.utils.image``).
     ``torchvision`` is an optional dependency (not in requirements.txt /
     pyproject.toml), so importing it at module top level breaks the text-only
     configs (``muse_glimmer_debugmodel`` / ``muse_glimmer_30b``) for users who
     have not installed it. Keeping these imports inside the multimodal-only path
     lets the text configs load without torchvision.
     """
-    from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-    from torchtitan.hf_datasets.multimodal.mm_datasets import (
+    from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+    from torchtitan.components.data.multimodal.mm_datasets import (
         MM_DATASETS,
         VisionProcessor,
     )
-    from torchtitan.hf_datasets.multimodal.utils.image import resize_to_pixel_budget
+    from torchtitan.components.data.multimodal.utils.image import resize_to_pixel_budget
 
     encoder = model_config.vision_encoder
     if encoder is None:
@@ -118,8 +118,9 @@ def _muse_glimmer_mm_dataloader(
 def muse_glimmer_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
+    parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="flex"
+        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     # The output soft-cap lives in the SoftCappedLinear lm_head, so it is applied
     # per-chunk inside ChunkedLossWrapper just as it would be in the full model
@@ -153,7 +154,7 @@ def muse_glimmer_debugmodel(
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=DefaultActivationRematConfig(),
     )
@@ -174,8 +175,9 @@ def muse_glimmer_debugmodel_mm(
 
     The integration smoke suite covers the TP+CP+PP+SP path.
     """
+    parallelism = ParallelismConfig()
     mm_model_spec = build_model_config(
-        "debugmodel_mm", seq_len=seq_len, attn_backend="flex"
+        "debugmodel_mm", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -205,14 +207,22 @@ def muse_glimmer_debugmodel_mm(
             steps=10,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
 def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("30B", seq_len=seq_len, attn_backend="flex")
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=-1,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+    )
+    model_config = build_model_config(
+        "30B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
@@ -238,19 +248,22 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=1,
-            context_parallel_degree=1,
-            pipeline_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullActivationRematConfig(),
     )
 
 
 def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("30B_mm", seq_len=seq_len, attn_backend="flex")
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=-1,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+    )
+    model_config = build_model_config(
+        "30B_mm", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
@@ -276,12 +289,7 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=1,
-            context_parallel_degree=1,
-            pipeline_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullActivationRematConfig(),
     )

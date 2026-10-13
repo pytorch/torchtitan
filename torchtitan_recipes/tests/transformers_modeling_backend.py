@@ -13,6 +13,7 @@ from torchtitan.components.data import (
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
 )
+from torchtitan.components.data.text_datasets import ChatProcessor, DATASETS
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -28,7 +29,6 @@ from torchtitan.experiments.transformers_modeling_backend import build_model_con
 from torchtitan.experiments.transformers_modeling_backend.tokenizer import (
     HFBackendTokenizer,
 )
-from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler

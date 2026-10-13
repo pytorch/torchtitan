@@ -22,6 +22,7 @@ from torchtitan.components.data.types import (
 from torchtitan.components.optim import Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
@@ -587,7 +588,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
@@ -644,7 +645,7 @@ def test_training_engine_replays_one_cuda_graph_per_accumulation_group() -> None
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
@@ -698,7 +699,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
@@ -856,6 +857,21 @@ def test_optim_step_waits_for_checkpoint() -> None:
     assert engine.num_completed_steps == 3
 
 
+@pytest.fixture
+def no_registered_aux_losses():
+    """Hide aux-loss metric groups registered by models built in earlier tests.
+
+    ``AuxLoss._group_counts`` is process-global and never shrinks, so groups from
+    an MoE model built elsewhere would make this mock-model step try to log
+    them.
+    """
+    saved_group_counts = dict(AuxLoss._group_counts)
+    AuxLoss._group_counts.clear()
+    yield
+    AuxLoss._group_counts.clear()
+    AuxLoss._group_counts.update(saved_group_counts)
+
+
 @pytest.mark.parametrize(
     ("loss_token_counts", "routing_token_counts"),
     (
@@ -863,6 +879,7 @@ def test_optim_step_waits_for_checkpoint() -> None:
         (torch.tensor([1, 1]), torch.tensor([1, 1])),
     ),
 )
+@pytest.mark.usefixtures("no_registered_aux_losses")
 def test_trainer_accumulates_reused_cuda_graph_losses(
     loss_token_counts, routing_token_counts
 ):
@@ -1157,7 +1174,7 @@ def test_cuda_graph_accumulation_supports_eager_gradient_reduction() -> None:
         SimpleNamespace(
             parallelism_context=SimpleNamespace(pp_enabled=False),
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 training=SimpleNamespace(
                     cuda_graph_per_accumulation_group=False,
                     disable_cuda_graphs=False,
@@ -1201,7 +1218,7 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 training=SimpleNamespace(
                     cuda_graph_per_accumulation_group=False,
                     disable_cuda_graphs=True,

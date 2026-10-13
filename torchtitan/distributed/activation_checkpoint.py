@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch_remat as remat
 
-from torchtitan.protocols.module import Module
+from torchtitan.models.base.module import Module
 
 
 logger = logging.getLogger(__name__)
@@ -173,7 +173,7 @@ def apply_activation_remat(
             which one it is handling. Called once per block, so each block can
             own its hook state (e.g. an offload buffer). torch_remat rejects
             the pair under ``torch.compile`` around the block. See
-            docs/remat.md and
+            torchtitan/distributed/REMAT.md and
             https://github.com/meta-pytorch/remat/blob/main/docs/offloading.md.
     """
     layers = model.get_submodule("layers")
