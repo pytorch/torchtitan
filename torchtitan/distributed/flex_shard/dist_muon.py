@@ -13,7 +13,7 @@ import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, cast, NoReturn, overload
+from typing import Any, cast, Literal, NoReturn, overload
 
 import torch
 from torch import Tensor
@@ -158,6 +158,12 @@ class DistMuon(Optimizer):
     same mathematical update as ``torch.optim.Muon`` running one matrix at a
     time, but bitwise equality across the two kernel schedules is not part of
     the contract.
+
+    ``ns_device`` is the device the Newton-Schulz iteration runs on; ``None``
+    runs it wherever the compute view lives. A compute view that lives
+    elsewhere (e.g. on the host under CPU offload) is staged onto it and the
+    direction copied back; momentum, parameters and redistribution buffers
+    stay where they are.
     """
 
     _specs: tuple[_BucketSpec, ...]
@@ -179,7 +185,9 @@ class DistMuon(Optimizer):
         eps: float = 1e-7,
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
+        ns_device: Literal["cuda", "cpu"] | None = None,
     ) -> None:
+        self._ns_device = self._resolve_ns_device(ns_device)
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -200,6 +208,24 @@ class DistMuon(Optimizer):
             compute_sharding_by_fqn=compute_sharding_by_fqn,
             bucket_configs=bucket_configs,
         )
+
+    @staticmethod
+    def _resolve_ns_device(ns_device: str | None) -> torch.device | None:
+        """Return the Newton-Schulz device, or ``None`` to run in place."""
+        if ns_device is None:
+            return None
+        if ns_device == "cpu":
+            return torch.device("cpu")
+        if ns_device != "cuda":
+            raise ValueError(
+                f"ns_device must be 'cuda' or 'cpu', got {ns_device!r}"
+            )
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "ns_device='cuda' but no CUDA device is visible. Use ns_device='cpu' "
+                "to run the iteration on the host instead."
+            )
+        return torch.device("cuda", torch.cuda.current_device())
 
     @overload
     def step(self, closure: None = None) -> None:
@@ -554,9 +580,18 @@ class DistMuon(Optimizer):
     def _compute_update(
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
     ) -> None:
+        if compute.numel() == 0:
+            return
         group = self._group(compute_layout)
+        # Stage onto the Newton-Schulz device only when the compute view lives
+        # elsewhere, e.g. on the host under CPU offload.
+        staged = (
+            compute
+            if self._ns_device is None or compute.device == self._ns_device
+            else compute.to(self._ns_device, non_blocking=False)
+        )
         _compute_muon_direction(
-            compute,
+            staged,
             matrix_views=self._matrix_views_by_fqn[compute_layout.fqn],
             lr_reference_shape=compute_layout.lr_reference_shape,
             adjust_lr_fn=group["adjust_lr_fn"],
@@ -564,6 +599,8 @@ class DistMuon(Optimizer):
             ns_steps=group["ns_steps"],
             eps=group["eps"],
         )
+        if staged is not compute:
+            compute.copy_(staged, non_blocking=False)
 
     def _apply_update(
         self, compute_layout: _ParameterComputeLayout, direction: Tensor
