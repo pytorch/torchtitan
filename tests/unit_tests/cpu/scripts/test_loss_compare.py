@@ -86,5 +86,43 @@ class TestLossCompareCommitResolution(unittest.TestCase):
         self.assertEqual(_git(self.repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
 
 
+class TestLossCompareTensorBoard(unittest.TestCase):
+    def test_retains_all_recorded_scalar_steps(self):
+        from tensorboard.compat.proto import event_pb2, summary_pb2
+        from tensorboard.summary.writer.event_file_writer import EventFileWriter
+
+        num_steps = 10_001
+        with tempfile.TemporaryDirectory() as dump_folder:
+            event_dir = os.path.join(dump_folder, "tb", "run")
+            writer = EventFileWriter(event_dir)
+            try:
+                for step in range(num_steps):
+                    writer.add_event(
+                        event_pb2.Event(
+                            step=step,
+                            summary=summary_pb2.Summary(
+                                value=[
+                                    summary_pb2.Summary.Value(
+                                        tag=tag, simple_value=float(step)
+                                    )
+                                    for tag in loss_compare.TB_TAGS.values()
+                                ]
+                            ),
+                        )
+                    )
+            finally:
+                writer.close()
+
+            metrics = loss_compare.extract_metrics_from_tensorboard(
+                dump_folder, "tb", tuple(loss_compare.TB_TAGS)
+            )
+
+            expected = {step: float(step) for step in range(num_steps)}
+            for name, values in metrics.items():
+                with self.subTest(metric=name):
+                    self.assertEqual(len(values), num_steps)
+                    self.assertEqual(values, expected)
+
+
 if __name__ == "__main__":
     unittest.main()
