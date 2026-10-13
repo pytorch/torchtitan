@@ -949,15 +949,15 @@ def _resolve_muon_redistribution_plans(
             participants,
             (0,) * len(participants),
         )
-        owner_ranks, cumulative_loads = _assign_balanced_owner_ranks(
+        placements, cumulative_loads = _assign_balanced_compute_placements(
             context.items,
-            participants=participants,
+            group=context.group,
             cumulative_loads=initial_loads,
             ns_steps_by_group=ns_steps_by_group,
         )
         cumulative_loads_by_participants[participants] = cumulative_loads
         bucket_specs = []
-        for layout, owner_rank in zip(context.items, owner_ranks, strict=True):
+        for layout, placement in zip(context.items, placements, strict=True):
             if layout.storage_is_compute_ready:
                 bucket_specs.append(None)
                 continue
@@ -969,10 +969,10 @@ def _resolve_muon_redistribution_plans(
                 context.group.participants,
                 context.group.mesh_axis_participants,
                 layout.compute_sharding,
-                owner_rank,
+                placement,
             )
             bucket_specs.append(spec)
-            unique_specs.setdefault(spec, (layout, context.group, owner_rank))
+            unique_specs.setdefault(spec, (layout, context.group, placement))
         specs_by_bucket.append(bucket_specs)
 
     plans_by_spec = {
@@ -985,45 +985,197 @@ def _resolve_muon_redistribution_plans(
     )
 
 
-def _assign_balanced_owner_ranks(
+@dataclass(frozen=True, slots=True)
+class _ComputePlacement:
+    """Where one redistributed parameter computes."""
+
+    owner_rank: int | None
+    shard_participants: tuple[int, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ComputeJob:
+    """One unit of assignable compute: a whole tensor or one dim-0 chunk."""
+
+    cost: int
+    num_bytes: int
+    item_index: int
+    unit_index: int | None
+    stable_key: tuple[str, int]
+
+
+def _compute_unit_shapes(
+    compute_layout: _ParameterComputeLayout,
+    logical_shape: tuple[int, ...],
+) -> tuple[tuple[int, ...], ...]:
+    """Shape of each dim-0 chunk a sharded compute layout distributes."""
+    compute_sharding = compute_layout.compute_sharding
+    if type(compute_sharding) is BlockShard:
+        num_rows, columns = logical_shape
+        return tuple(
+            (block_rows, columns)
+            for block_rows in _block_row_sizes(
+                compute_sharding, compute_sharding.num_blocks(num_rows)
+            )
+        )
+    assert type(compute_sharding) is Shard
+    return (tuple(logical_shape[1:]),) * logical_shape[0]
+
+
+def _block_row_sizes(block_shard: BlockShard, num_blocks: int) -> tuple[int, ...]:
+    sizes = block_shard.block_sizes
+    return tuple(sizes[index % len(sizes)] for index in range(num_blocks))
+
+
+def _compute_ready_costs(
+    compute_layout: _ParameterComputeLayout,
+    participants: tuple[int, ...],
+    ns_steps: int,
+) -> dict[int, int]:
+    """Newton-Schulz cost of a compute-ready parameter on each participant."""
+    param = compute_layout.param
+    compute_sharding = compute_layout.compute_sharding
+    costs = {}
+    for participant in participants:
+        try:
+            region = _dtensor_storage_region_for_participant(param, participant)
+        except RuntimeError:
+            return {}
+        if type(compute_sharding) is BlockShard:
+            views = _matrix_batch_views_from_shape(
+                torch.Size(region.shape),
+                matrix_row_sizes=compute_sharding.block_sizes,
+                logical_row_start=region.offsets[0],
+            )
+            costs[participant] = sum(
+                _estimate_muon_compute_cost(view.shape, ns_steps) for view in views
+            )
+        elif math.prod(region.shape):
+            costs[participant] = _estimate_muon_compute_cost(
+                torch.Size(region.shape), ns_steps
+            )
+    return costs
+
+
+def _assign_balanced_compute_placements(
     compute_layouts: Sequence[_ParameterComputeLayout],
     *,
-    participants: tuple[int, ...],
+    group: _RedistributionGroup,
     cumulative_loads: Sequence[int],
     ns_steps_by_group: Sequence[int],
-) -> tuple[tuple[int | None, ...], tuple[int, ...]]:
-    """Balance temporary compute ownership within and across ordered buckets."""
-    assignments: list[int | None] = [None] * len(compute_layouts)
-    candidates = tuple(
-        (index, layout)
-        for index, layout in enumerate(compute_layouts)
-        if type(layout.compute_sharding) is Owned
-    )
-    candidate_partitions, updated_cumulative_loads = _balance_loads_across_partitions(
-        tuple(
-            (
-                _estimate_muon_compute_cost(
-                    layout.param.shape,
-                    ns_steps_by_group[layout.group_index],
-                ),
-                layout.param.numel() * layout.param.element_size(),
-                layout.fqn,
+) -> tuple[tuple[_ComputePlacement | None, ...], tuple[int, ...]]:
+    """Balance temporary compute within and across ordered buckets."""
+    participants = group.participants
+    num_participants = len(participants)
+    position_of = {
+        participant: position for position, participant in enumerate(participants)
+    }
+    bucket_loads = [0] * num_participants
+    jobs: list[_ComputeJob] = []
+    placements: list[_ComputePlacement | None] = [None] * len(compute_layouts)
+    unit_shapes_by_item: dict[int, tuple[tuple[int, ...], ...]] = {}
+
+    for index, layout in enumerate(compute_layouts):
+        ns_steps = ns_steps_by_group[layout.group_index]
+        element_size = layout.param.element_size()
+        if layout.storage_is_compute_ready:
+            for participant, cost in _compute_ready_costs(
+                layout, participants, ns_steps
+            ).items():
+                bucket_loads[position_of[participant]] += cost
+            continue
+        if type(layout.compute_sharding) is Owned:
+            jobs.append(
+                _ComputeJob(
+                    cost=_estimate_muon_compute_cost(layout.param.shape, ns_steps),
+                    num_bytes=layout.param.numel() * element_size,
+                    item_index=index,
+                    unit_index=None,
+                    stable_key=(layout.fqn, 0),
+                )
             )
-            for _index, layout in candidates
-        ),
-        initial_cumulative_primary_loads=cumulative_loads,
-    )
-    for (index, _layout), partition in zip(
-        candidates,
-        candidate_partitions,
-        strict=True,
+            continue
+        logical_shape, _regions = _dtensor_storage_regions(
+            layout.param,
+            participants,
+            required_storage_mesh_axis=layout.redistribution_storage_mesh_axis,
+        )
+        unit_shapes = _compute_unit_shapes(layout, logical_shape)
+        if len(unit_shapes) < num_participants:
+            unit_shapes_by_item[index] = unit_shapes
+            for unit_index, unit_shape in enumerate(unit_shapes):
+                jobs.append(
+                    _ComputeJob(
+                        cost=_estimate_muon_compute_cost(unit_shape, ns_steps),
+                        num_bytes=math.prod(unit_shape) * element_size,
+                        item_index=index,
+                        unit_index=unit_index,
+                        stable_key=(layout.fqn, unit_index),
+                    )
+                )
+            continue
+        placements[index] = _ComputePlacement(None, group.mesh_axis_participants)
+        for position, participant in enumerate(group.mesh_axis_participants):
+            num_units, unit_offset = Shard.local_shard_size_and_offset(
+                len(unit_shapes), num_participants, position
+            )
+            bucket_loads[position_of[participant]] += sum(
+                _estimate_muon_compute_cost(unit_shape, ns_steps)
+                for unit_shape in unit_shapes[unit_offset : unit_offset + num_units]
+            )
+
+    heap = [
+        (bucket_loads[position], 0, cumulative_loads[position], position)
+        for position in range(num_participants)
+    ]
+    heapq.heapify(heap)
+    unit_owners: dict[int, dict[int, int]] = {}
+    for job in sorted(
+        jobs, key=lambda entry: (-entry.cost, -entry.num_bytes, entry.stable_key)
     ):
-        assignments[index] = participants[partition]
-    return tuple(assignments), updated_cumulative_loads
+        taken = set(unit_owners.get(job.item_index, {}).values())
+        skipped = []
+        while True:
+            load, num_bytes, cumulative, position = heapq.heappop(heap)
+            if position not in taken:
+                break
+            skipped.append((load, num_bytes, cumulative, position))
+        for entry in skipped:
+            heapq.heappush(heap, entry)
+        heapq.heappush(
+            heap,
+            (
+                load + job.cost,
+                num_bytes + job.num_bytes,
+                cumulative + job.cost,
+                position,
+            ),
+        )
+        if job.unit_index is None:
+            placements[job.item_index] = _ComputePlacement(participants[position], None)
+        else:
+            unit_owners.setdefault(job.item_index, {})[job.unit_index] = position
+
+    for item_index, owners in unit_owners.items():
+        leading = tuple(
+            participants[owners[unit]]
+            for unit in range(len(unit_shapes_by_item[item_index]))
+        )
+        trailing = tuple(
+            participant
+            for participant in group.mesh_axis_participants
+            if participant not in leading
+        )
+        placements[item_index] = _ComputePlacement(None, leading + trailing)
+
+    updated_cumulative_loads = [0] * num_participants
+    for _load, _num_bytes, cumulative, position in heap:
+        updated_cumulative_loads[position] = cumulative
+    return tuple(placements), tuple(updated_cumulative_loads)
 
 
 def _estimate_muon_compute_cost(
-    matrix_shape: torch.Size,
+    matrix_shape: torch.Size | tuple[int, ...],
     ns_steps: int,
 ) -> int:
     *batch_shape, rows, columns = matrix_shape
@@ -1033,66 +1185,16 @@ def _estimate_muon_compute_cost(
     return num_matrices * ns_steps * short_dim * short_dim * (2 * long_dim + short_dim)
 
 
-def _balance_loads_across_partitions(
-    loads: Sequence[tuple[int, int, str]],
-    *,
-    initial_cumulative_primary_loads: Sequence[int],
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """Balance keyed loads with a deterministic LPT heuristic.
-
-    Each load is ``(primary, secondary, stable_key)``. Assignments are
-    partition indices aligned with those loads. Each call balances its primary
-    and then secondary loads before cumulative primary load. Stable keys make
-    ordering deterministic. This is not an exact partition optimum.
-    """
-    num_partitions = len(initial_cumulative_primary_loads)
-    assignments = [0] * len(loads)
-    partition_loads = [
-        (0, 0, cumulative_load, partition)
-        for partition, cumulative_load in enumerate(initial_cumulative_primary_loads)
-    ]
-    heapq.heapify(partition_loads)
-    ordered_loads = sorted(
-        enumerate(loads),
-        key=lambda indexed_load: (
-            -indexed_load[1][0],
-            -indexed_load[1][1],
-            indexed_load[1][2],
-        ),
-    )
-    for load_index, (primary, secondary, _stable_key) in ordered_loads:
-        (
-            current_primary,
-            current_secondary,
-            cumulative_primary,
-            partition,
-        ) = heapq.heappop(partition_loads)
-        assignments[load_index] = partition
-        heapq.heappush(
-            partition_loads,
-            (
-                current_primary + primary,
-                current_secondary + secondary,
-                cumulative_primary + primary,
-                partition,
-            ),
-        )
-
-    updated_cumulative_primary_loads = [0] * num_partitions
-    for _primary, _secondary, cumulative_primary, partition in partition_loads:
-        updated_cumulative_primary_loads[partition] = cumulative_primary
-    return tuple(assignments), tuple(updated_cumulative_primary_loads)
-
-
 def _build_parameter_redistribution_plan(
     compute_layout: _ParameterComputeLayout,
     group: _RedistributionGroup,
-    owner_rank: int | None,
+    placement: _ComputePlacement | None,
 ) -> _RedistributionPlan | None:
     transition = compute_layout.storage_to_compute_transition
     if isinstance(transition, _NoRedistributionTransition):
         return None
     assert isinstance(transition, _RedistributionTransition)
+    assert placement is not None
 
     group_local_storage_shape, storage_regions = _dtensor_storage_regions(
         compute_layout.param,
@@ -1101,21 +1203,21 @@ def _build_parameter_redistribution_plan(
     )
     compute_sharding = compute_layout.compute_sharding
     if type(compute_sharding) is Owned:
-        assert owner_rank is not None
-        assert owner_rank in group.participants
+        assert placement.owner_rank is not None
+        assert placement.owner_rank in group.participants
         return _build_owned_redistribution_plan(
             storage_regions,
             participants=group.participants,
-            owner_rank=owner_rank,
+            owner_rank=placement.owner_rank,
             logical_shape=tuple(compute_layout.param.shape),
         )
 
-    assert owner_rank is None
+    assert placement.shard_participants is not None
     if type(compute_sharding) is Shard:
         return _build_dim0_shard_redistribution_plan(
             storage_regions,
             participants=group.participants,
-            shard_participants=group.mesh_axis_participants,
+            shard_participants=placement.shard_participants,
             logical_shape=group_local_storage_shape,
         )
 
@@ -1123,7 +1225,7 @@ def _build_parameter_redistribution_plan(
     return _build_batched_matrix_redistribution_plan(
         storage_regions,
         participants=group.participants,
-        shard_participants=group.mesh_axis_participants,
+        shard_participants=placement.shard_participants,
         storage_shape=tuple(compute_layout.param.shape),
         block_shard=compute_sharding,
     )
