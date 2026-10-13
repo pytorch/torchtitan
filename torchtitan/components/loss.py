@@ -437,9 +437,11 @@ def compute_logprobs(
     if not return_entropy:
         return logprobs
     with torch.no_grad():
-        entropy = torch.logsumexp(logits, dim=-1) - (
-            torch.softmax(logits, dim=-1) * logits
-        ).sum(dim=-1)
+        log_normalizer = torch.logsumexp(logits, dim=-1)
+        # Zero-probability -inf entries contribute zero; invalid rows remain NaN.
+        weighted_logits = (torch.softmax(logits, dim=-1) * logits).nan_to_num_(nan=0.0)
+        entropy = log_normalizer - weighted_logits.sum(dim=-1)
+        entropy.masked_fill_(~torch.isfinite(log_normalizer), torch.nan)
     return logprobs, entropy
 
 
