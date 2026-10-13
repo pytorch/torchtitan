@@ -90,7 +90,7 @@ class TestModelTDLayout(unittest.TestCase):
         config = build_config(
             "varlen", seq_len=max_context_length, parallelism=ParallelismConfig()
         )
-        attention_config = config.first_attention
+        attention_config = config.first_non_linear_attention
         assert attention_config is not None
         attention = attention_config.build()
         attention.inner_attention = _AttentionOutput()

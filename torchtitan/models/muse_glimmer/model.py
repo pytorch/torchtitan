@@ -440,7 +440,9 @@ class MuseGlimmerModel(MultimodalModel):
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.pop("padding_mask", None)
         if positions is not None:
-            inner = getattr(self.config.first_attention, "inner_attention", None)
+            inner = getattr(
+                self.config.first_non_linear_attention, "inner_attention", None
+            )
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):

@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -43,13 +43,12 @@ class TransformerBlock(Module):
     All language model TransformerBlocks share:
     - Attention module (from ``attention.build()``)
     - FFN or MoE (from ``feed_forward.build()`` / ``moe.build()``)
-    - Two RMSNorms (``attention_norm``, ``ffn_norm``)
-    - Forward: ``x + attn(norm(x), ...); x + ffn(norm(x))``
+    - Two normalization modules (``attention_norm``, ``ffn_norm``)
 
     Forward accepts ``aux_loss_denominator``. Dense blocks ignore it; MoE
     blocks pass it to routers configured with an auxiliary loss.
 
-    Children implement ``__init__`` and ``forward``.
+    Children implement ``__init__``, ``forward``, and residual connections.
     """
 
     attention: BaseAttention
@@ -59,8 +58,8 @@ class TransformerBlock(Module):
         attention: BaseAttention.Config  # required, no default
         feed_forward: FeedForward.Config | None = None
         moe: MoE.Config | None = None
-        attention_norm: RMSNorm.Config
-        ffn_norm: RMSNorm.Config
+        attention_norm: Module.Config
+        ffn_norm: Module.Config
 
 
 class Decoder(BaseModel):
@@ -69,6 +68,8 @@ class Decoder(BaseModel):
     Provides shared ``__init__``, ``forward``, ``init_states``, and
     ``_get_attention_metadata`` (flex/varlen dispatch) used by most models.
     """
+
+    layers: ModuleDict[TransformerBlock]
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
@@ -88,13 +89,14 @@ class Decoder(BaseModel):
         enable_weight_tying: bool = False
 
         @property
-        def first_attention(self) -> BaseAttention.Config | None:
-            """First full or sliding-window attention config, skipping linear layers."""
+        def first_non_linear_attention(self) -> BaseAttention.Config | None:
+            """First attention config excluding linear attention, else None."""
             return next(
                 (
                     layer.attention
                     for layer in self.layers
                     if isinstance(layer.attention, BaseAttention.Config)
+                    and not layer.attention.is_linear_attention
                 ),
                 None,
             )
@@ -159,7 +161,7 @@ class Decoder(BaseModel):
         from torchtitan.distributed.spmd_types import spmd_mesh_size, spmd_sparse_mesh
 
         tp = spmd_mesh_size("tp")
-        attention = config.first_attention
+        attention = config.first_non_linear_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -245,9 +247,7 @@ class Decoder(BaseModel):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    type(cast(TransformerBlock, layer).attention.inner_attention)
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             h = layer(
                 h,
@@ -335,16 +335,16 @@ class Decoder(BaseModel):
                     layer.attention
                     for layer in self.config.layers
                     if isinstance(layer.attention, BaseAttention.Config)
-                    and cast(
-                        InnerAttention.Config, layer.attention.inner_attention
-                    ).is_full_attention
+                    and layer.attention.inner_attention.is_full_attention
                 ),
-                self.config.first_attention,
+                self.config.first_non_linear_attention,
             )
             if attention is not None:
-                selected_attention_metadata = attention_metadata.get(
-                    attention.inner_attention._owner
+                cp_inner_attention = attention.inner_attention._owner
+                assert cp_inner_attention is not None and issubclass(
+                    cp_inner_attention, CPInnerAttention
                 )
+                selected_attention_metadata = attention_metadata.get(cp_inner_attention)
         load_balancer = (
             # TODO: `attention_metadata` alone cannot determine the load-balancing strategy.
             load_balancer_config.build(

@@ -771,7 +771,11 @@ class BaseAttention(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         n_heads: int
-        inner_attention: Module.Config
+        inner_attention: InnerAttention.Config
+
+        @property
+        def is_linear_attention(self) -> bool:
+            return False
 
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
@@ -868,7 +872,7 @@ class GQAttention(BaseAttention):
         qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
-        inner_attention: Module.Config
+        inner_attention: InnerAttention.Config
         rope: RoPE.Config | None
 
         def __post_init__(self) -> None:

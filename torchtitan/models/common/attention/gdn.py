@@ -36,7 +36,7 @@ from torchtitan.models.common.attn_gym import (
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
-from .attention import InnerAttention, local_head_split
+from .attention import BaseAttention, InnerAttention, local_head_split
 from .linear_attention import (
     build_linear_attention_metadata,
     chunk_kernel_options,
@@ -453,7 +453,7 @@ class InnerGDN(InnerAttention):
         )
 
 
-class GatedDeltaNet(Module):
+class GatedDeltaNet(BaseAttention):
     """Gated DeltaNet linear attention.
 
     Uses recurrent state + gated delta rule instead of softmax attention.
@@ -464,7 +464,7 @@ class GatedDeltaNet(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(BaseAttention.Config):
         key_head_dim: int
         value_head_dim: int
         conv_kernel_size: int = 4
@@ -479,9 +479,13 @@ class GatedDeltaNet(Module):
         conv_q: Conv1d.Config
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
-        inner_attention: Module.Config
+        inner_attention: InnerAttention.Config
         norm: GatedRMSNorm.Config
         out_proj: Linear.Config
+
+        @property
+        def is_linear_attention(self) -> bool:
+            return True
 
     def __init__(self, config: Config):
         super().__init__()

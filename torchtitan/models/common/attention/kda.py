@@ -32,7 +32,7 @@ from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
 
-from .attention import InnerAttention, local_head_split
+from .attention import BaseAttention, InnerAttention, local_head_split
 from .linear_attention import (
     build_linear_attention_metadata,
     chunk_kernel_options,
@@ -301,12 +301,11 @@ class InnerKDA(InnerAttention):
         )
 
 
-class KDA(Module):
+class KDA(BaseAttention):
     """Kimi Delta Attention with checkpoint-compatible Kimi K3 parameters."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        num_heads: int
+    class Config(BaseAttention.Config):
         head_dim: int
         conv_kernel_size: int
         q_proj: Linear.Config
@@ -319,13 +318,18 @@ class KDA(Module):
         forget_b: Linear.Config
         beta: Linear.Config
         output_gate: Linear.Config
-        inner_attention: Module.Config
+        inner_attention: InnerAttention.Config
         output_norm: GatedRMSNorm.Config
         output_proj: Linear.Config
 
+        @property
+        def is_linear_attention(self) -> bool:
+            return True
+
         def __post_init__(self):
-            if self.num_heads < 1:
-                raise ValueError(f"num_heads must be positive, got {self.num_heads}")
+            if self.n_heads < 1:
+                raise ValueError(f"n_heads must be positive, got {self.n_heads}")
+            BaseAttention.Config.__post_init__(self)
             if self.head_dim != 128:
                 raise ValueError(
                     "Attention Gym KDA requires head_dim=128, " f"got {self.head_dim}."
@@ -337,7 +341,7 @@ class KDA(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.num_heads = config.num_heads
+        self.n_heads = config.n_heads
         self.head_dim = config.head_dim
 
         self.q_proj = config.q_proj.build()
@@ -354,8 +358,8 @@ class KDA(Module):
         self.output_norm = config.output_norm.build()
         self.output_proj = config.output_proj.build()
 
-        self.A_log = nn.Parameter(torch.empty(config.num_heads))
-        self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
+        self.A_log = nn.Parameter(torch.empty(config.n_heads))
+        self.dt_bias = nn.Parameter(torch.empty(config.n_heads, config.head_dim))
 
     def forward(
         self,

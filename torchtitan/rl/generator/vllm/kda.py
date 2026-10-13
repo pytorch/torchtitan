@@ -325,7 +325,7 @@ def maybe_configure_kda_hybrid_model(
     state_shape = unique_state_shape(
         "KDA",
         (
-            (kda_config.num_heads, kda_config.head_dim, kda_config.conv_kernel_size)
+            (kda_config.n_heads, kda_config.head_dim, kda_config.conv_kernel_size)
             for layer in model_config.layers
             if isinstance(kda_config := layer.attention, KDA.Config)
         ),

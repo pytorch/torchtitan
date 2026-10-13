@@ -64,7 +64,7 @@ def validate_model_training_config(
             )
 
         tp = parallelism.tensor_parallel_degree
-        attention = model.first_attention
+        attention = model.first_non_linear_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -195,6 +195,10 @@ def validate_context_parallel(
                     )
 
         load_balancer_config = parallelism.context_parallel_load_balancer
+        # Linear attention routes recurrent states using the shared permutation;
+        # it does not constrain which attention load balancer creates it.
+        if attention.is_linear_attention:
+            continue
         if load_balancer_config is None:
             continue
         if issubclass(cp_inner_attention, UlyssesCPInnerAttention):

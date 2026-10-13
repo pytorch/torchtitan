@@ -28,7 +28,6 @@ from torchtitan.models.common.async_linear import (
     AsyncRowParallelLinear,
 )
 from torchtitan.models.common.attention import (
-    BaseAttention,
     FlexInnerAttention,
     SlidingWindowFlexInnerAttention,
     VarlenInnerAttention,
@@ -523,7 +522,7 @@ class TestTransformModel(unittest.TestCase):
 
     def test_transforms_nested_kda_backend(self):
         from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
-        from torchtitan.models.common.attention.kda import InnerKDA
+        from torchtitan.models.common.attention.kda import InnerKDA, KDA
         from torchtitan.models.kimi_k3 import build_model_config
 
         model = build_model_config(
@@ -548,9 +547,9 @@ class TestTransformModel(unittest.TestCase):
         for layer in model.layers:
             self.assertIsInstance(
                 layer.attention.inner_attention,
-                KVAllGatherCPFlexInnerAttention.Config
-                if isinstance(layer.attention, BaseAttention.Config)
-                else ContextParallelInnerKDA.Config,
+                ContextParallelInnerKDA.Config
+                if isinstance(layer.attention, KDA.Config)
+                else KVAllGatherCPFlexInnerAttention.Config,
             )
 
     def test_transforms_mtp_layers(self):

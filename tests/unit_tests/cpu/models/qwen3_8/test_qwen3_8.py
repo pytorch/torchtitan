@@ -180,9 +180,9 @@ def test_text_only_checkpoint_adapter_converts_fused_deltanet_qkv() -> None:
         }
     )
     assert set(converted) == {
-        "layers.0.attn.in_proj_q.weight",
-        "layers.0.attn.in_proj_k.weight",
-        "layers.0.attn.in_proj_v.weight",
+        "layers.0.attention.in_proj_q.weight",
+        "layers.0.attention.in_proj_k.weight",
+        "layers.0.attention.in_proj_v.weight",
         "lm_head.weight",
     }
 

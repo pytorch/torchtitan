@@ -48,7 +48,7 @@ class _RecordingLayer(nn.Module):
     def __init__(self, sink: dict, attention: nn.Module):
         super().__init__()
         self._sink = sink
-        self.attn = attention
+        self.attention = attention
 
     def forward(
         self,
@@ -82,7 +82,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             layer = model.layers[key]
             model.layers[key] = _RecordingLayer(
                 sink,
-                layer.attn,
+                layer.attention,
             )
         parallelism_context = ParallelismContext(
             dp_replicate=1,
@@ -96,9 +96,9 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         )
         parallelism = ParallelismConfig()
         deltanet_backend = next(
-            type(layer.attn.inner_attention)
+            type(layer.attention.inner_attention)
             for layer in model.layers.values()
-            if type(layer.attn.inner_attention).__name__ == "InnerGDN"
+            if type(layer.attention.inner_attention).__name__ == "InnerGDN"
         )
         return model, sink, parallelism_context, parallelism, deltanet_backend
 

@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import contextlib
 import inspect
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence, ValuesView
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Any
+from typing import Any, Generic, TYPE_CHECKING, TypeVar
 
 import spmd_types as spmd
 import torch
@@ -593,16 +593,25 @@ class Module(nn.Module, Configurable):
         )
 
 
-class ModuleList(nn.ModuleList, Module):
+_ModuleT = TypeVar("_ModuleT", bound=nn.Module)
+
+
+class ModuleList(nn.ModuleList, Module, Generic[_ModuleT]):
     """Module-protocol-compatible version of ``nn.ModuleList``."""
 
-    pass
+    if TYPE_CHECKING:
+
+        def __iter__(self) -> Iterator[_ModuleT]:
+            ...
 
 
-class ModuleDict(nn.ModuleDict, Module):
+class ModuleDict(nn.ModuleDict, Module, Generic[_ModuleT]):
     """Module-protocol-compatible version of ``nn.ModuleDict``."""
 
-    pass
+    if TYPE_CHECKING:
+
+        def values(self) -> ValuesView[_ModuleT]:
+            ...
 
 
 class Sequential(nn.Sequential, Module):

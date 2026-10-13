@@ -407,6 +407,8 @@ def _qwen35_deltanet_config(
         )
 
     return GatedDeltaNet.Config(
+        # The recurrence has one state per value head; Q/K heads can be shared.
+        n_heads=n_value_heads,
         key_head_dim=key_head_dim,
         value_head_dim=value_head_dim,
         conv_kernel_size=conv_kernel_size,

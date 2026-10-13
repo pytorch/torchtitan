@@ -66,7 +66,7 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     """
     if not cfg.layers:
         raise ValueError(f"Model config {type(cfg).__qualname__} has no layers")
-    attn = cfg.first_attention
+    attn = cfg.first_non_linear_attention
     if attn is None:
         raise ValueError(
             f"Model config {type(cfg).__qualname__} has no full-attention layer. "

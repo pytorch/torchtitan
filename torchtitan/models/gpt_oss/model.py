@@ -18,10 +18,10 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttentionMetadata,
+    InnerAttention,
     QKVLinear,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
@@ -60,7 +60,7 @@ class Attention(BaseAttention):
         dim: int
         qkv_linear: QKVLinear.Config
         wo: Linear.Config  # output projection
-        inner_attention: Module.Config = dataclasses.field(
+        inner_attention: InnerAttention.Config = dataclasses.field(
             default_factory=VarlenInnerAttention.Config
         )
         sliding_window_size: int | None = None

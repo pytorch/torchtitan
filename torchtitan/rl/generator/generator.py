@@ -945,7 +945,7 @@ class VLLMGenerator(Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        attention = model_config.first_attention
+        attention = model_config.first_non_linear_attention
         assert attention is not None, "No full-attention layer found in the model spec."
         attention_backend = attention.inner_attention
         assert isinstance(

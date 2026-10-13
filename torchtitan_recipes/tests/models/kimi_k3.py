@@ -149,7 +149,7 @@ def _dist_muon_optimizer(
     adamw_lr: float,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
-    attention = cast(KimiMLAAttention.Config, model_config.first_attention)
+    attention = cast(KimiMLAAttention.Config, model_config.first_non_linear_attention)
     delta_attention = next(
         layer.attention
         for layer in model_config.layers
@@ -228,7 +228,7 @@ def _dist_muon_optimizer(
         else:
             shardings.update(
                 {
-                    f"{prefix}.delta_attention.{projection}.weight": compute_sharding
+                    f"{prefix}.attention.{projection}.weight": compute_sharding
                     for projection, compute_sharding in (
                         delta_attention_shardings.items()
                     )
@@ -304,8 +304,8 @@ def _dist_muon_optimizer(
     # single-row [1, D], so Newton-Schulz would only rescale them.
     muon_pattern = (
         r"(?:"
-        rf"attention\.(?:{'|'.join(attention_shardings)})\.weight|"
-        rf"delta_attention\.(?:{'|'.join(delta_attention_shardings)})\.weight|"
+        rf"attention\.(?:{'|'.join(attention_shardings)}|"
+        rf"{'|'.join(delta_attention_shardings)})\.weight|"
         r"routed_experts\.w(?:13|2)\.weight|"
         r"feed_forward\.w(?:13|2)\.weight|"
         r"moe\.router\.gate\.weight|"

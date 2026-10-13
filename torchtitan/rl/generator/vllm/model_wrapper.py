@@ -69,7 +69,10 @@ def _replace_vllm_layer_configs(model_config):
         new_layer_cfg = layer_cfg
 
         attention_cfg = getattr(layer_cfg, "attention", None)
-        if isinstance(attention_cfg, BaseAttention.Config):
+        if (
+            isinstance(attention_cfg, BaseAttention.Config)
+            and not attention_cfg.is_linear_attention
+        ):
             (
                 num_heads,
                 num_kv_heads,
@@ -123,7 +126,7 @@ def _replace_vllm_layer_configs(model_config):
             from torchtitan.rl.generator.vllm.kda import VLLMInnerKDA
 
             vllm_inner_kda_cfg = VLLMInnerKDA.Config(
-                num_heads=kda_cfg.num_heads,
+                num_heads=kda_cfg.n_heads,
                 head_dim=kda_cfg.head_dim,
                 conv_kernel_size=kda_cfg.conv_kernel_size,
                 lower_bound=kda_cfg.inner_attention.kernel.lower_bound,

@@ -18,7 +18,6 @@ from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
@@ -33,6 +32,7 @@ from torchtitan.models.common import (
     TransformerBlock,
     UnaryActivationFn,
 )
+from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -160,7 +160,9 @@ def make_mla_attention_config(
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
     rope: RoPE.Config,
-    attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
+    attention_config_factory: Callable[
+        [str], InnerAttention.Config
+    ] = get_attention_config,
     enable_sp: bool,
 ) -> DeepSeekMLAAttention.Config:
     """Build a fully-specified, sharded DeepSeek V3 MLA ``DeepSeekMLAAttention.Config``.
@@ -284,7 +286,9 @@ def build_mla_moe_layers(
     depth_init: Callable[[int], dict[str, Callable]],
     depth_experts_init: Callable[[int], dict[str, Callable]],
     rope: RoPE.Config,
-    attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
+    attention_config_factory: Callable[
+        [str], InnerAttention.Config
+    ] = get_attention_config,
     router_config_factory: Callable[
         ..., TokenChoiceTopKRouter.Config
     ] = make_router_config,
