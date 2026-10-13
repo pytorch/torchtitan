@@ -75,6 +75,7 @@ def add_extra_vllm_engine_args(
         "max_num_batched_tokens": "max_num_batched_tokens",
         "compilation_config": "cuda_graph",
         "seed": "debug.seed",
+        # vLLM builds the same connector from it, without `CPUKVOffload.attach`.
         "kv_offloading_size": "cpu_kv_offload",
     }
     owned_keys = sorted(
@@ -875,9 +876,8 @@ class VLLMGenerator(Configurable):
         `VLLMSessionKVHolder`). None: off."""
 
         cpu_kv_offload: CPUKVOffload.Config | None = None
-        """vLLM's native CPU KV offload: a turn whose history left the GPU reloads it from host RAM
-        instead of recomputing it; ended sessions' chunks are evicted first (see `CPUKVOffload`).
-        None: off."""
+        """Copy KV blocks to host RAM, so a turn whose history left the GPU reloads it instead of
+        recomputing it (see `CPUKVOffload`). None: off."""
 
         def __post_init__(self):
             if (
@@ -982,7 +982,7 @@ class VLLMGenerator(Configurable):
 
         # Build vLLM engine
         enable_ep = config.parallelism.expert_parallel_degree > 1
-        engine_kwargs: dict[str, Any] = dict(
+        engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
             # config is sourced from TorchTitan's model config via
             # ``config_format=TORCHTITAN_CONFIG_FORMAT`` (no config.json
@@ -1178,8 +1178,8 @@ class VLLMGenerator(Configurable):
         # them. CPU offload alone still tracks them, to evict ended sessions' CPU chunks first.
         self._session_kv: VLLMSessionKVHolder | None = None
         if config.session_kv_holder is not None or self._cpu_kv_offload is not None:
-            self._session_kv = VLLMSessionKVHolder(
-                config.session_kv_holder or VLLMSessionKVHolder.Config(),
+            holder_config = config.session_kv_holder or VLLMSessionKVHolder.Config()
+            self._session_kv = holder_config.build(
                 scheduler=self._engine.engine_core.engine_core.scheduler,
                 hold=config.session_kv_holder is not None,
                 cpu_kv_offload=self._cpu_kv_offload,
@@ -1235,7 +1235,11 @@ class VLLMGenerator(Configurable):
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
-        if self.config.session_kv_holder is not None and self._rank == 0:
+        if (
+            self._session_kv is not None
+            and self.config.session_kv_holder is not None
+            and self._rank == 0
+        ):
             logger.info(
                 "Session KV at step %d: %d sessions held, %d evicted so far",
                 step,
@@ -1641,8 +1645,7 @@ class VLLMGenerator(Configurable):
         )
 
     async def release_groups(self, group_ids: list[int]) -> None:
-        """Drop the pinned cache salts and the held KV of finished rollout groups; their
-        CPU-offloaded KV is evicted first.
+        """Drop the pinned cache salts and the held KV of finished rollout groups.
 
         Args:
             group_ids: Groups with no more generation calls.
@@ -1656,8 +1659,8 @@ class VLLMGenerator(Configurable):
             self._engine_loop_queue.put(SessionReleaseMessage(group_ids=group_ids))
 
     async def release_sessions(self, session_ids: list[str]) -> None:
-        """Release the held KV of sessions whose rollout ended; their CPU-offloaded KV is evicted
-        first (rank 0; a no-op without ``session_kv_holder`` or ``cpu_kv_offload``).
+        """Release the held KV of sessions whose rollout ended (rank 0; a no-op without
+        ``session_kv_holder`` or ``cpu_kv_offload``).
 
         Args:
             session_ids: Routing session ids with no more generation calls.

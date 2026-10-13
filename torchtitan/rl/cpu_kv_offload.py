@@ -52,7 +52,7 @@ class CPUKVOffload(Configurable):
     def __init__(self, config: Config) -> None:
         self.config = config
         # Set by `attach`: vLLM's CPU LRU, and the KV cache groups each block has a chunk in.
-        self._policy: Any = None
+        self._lru: Any = None
         self._num_kv_cache_groups = 0
 
     def engine_kwargs(self) -> dict[str, Any]:
@@ -99,11 +99,11 @@ class CPUKVOffload(Configurable):
         scheduler = engine.engine_core.engine_core.scheduler
         connector_scheduler = scheduler.connector.connector_scheduler
         # `evict_first` reorders the LRU's private `evictable_chunks` (pinned vLLM version).
-        self._policy = connector_scheduler.manager._policy
-        if not isinstance(self._policy, LRUCachePolicy):
+        self._lru = connector_scheduler.manager._policy
+        if not isinstance(self._lru, LRUCachePolicy):
             raise RuntimeError(
                 "CPU KV offload needs vLLM's LRUCachePolicy, got "
-                f"{type(self._policy).__name__}"
+                f"{type(self._lru).__name__}"
             )
         self._num_kv_cache_groups = scheduler.kv_cache_manager.num_kv_cache_groups
 
@@ -181,7 +181,7 @@ class CPUKVOffload(Configurable):
 
         # TODO: a chunk whose store finishes after the release (the last turn's final blocks,
         # stored on the next engine step) keeps its LRU place; evict it first once stored.
-        evictable_chunks = self._policy.evictable_chunks
+        evictable_chunks = self._lru.evictable_chunks
         for block_hash in block_hashes:
             for group_idx in range(self._num_kv_cache_groups):
                 key = make_offload_key(block_hash, group_idx)

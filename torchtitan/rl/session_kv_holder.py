@@ -4,8 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Hold each multi-turn session's reusable KV between its turns; ended sessions' CPU copies are
-evicted first."""
+"""Hold each multi-turn session's reusable KV between its turns."""
 
 from __future__ import annotations
 
@@ -51,8 +50,8 @@ class VLLMSessionKVHolder(Configurable):
     - Every mutating method runs on every rank's engine thread in the same order, so the TP ranks'
       schedulers stay identical.
 
-    With CPU offload, vLLM also copies every computed block to CPU. When a session ends
-    (`release`), its CPU chunks are evicted first, except the chunks a live session also uses:
+    With `CPUKVOffload`, a session's CPU chunks are evicted first when it ends (`release`), except
+    the chunks a live session also uses:
 
         CPU eviction queue, evicted first on the left; GRPO siblings s1, s2 share prompt chunk p
             [churn, p, s1, s2]

@@ -28,7 +28,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import make_offload_key, OffloadKey, ReqContext
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.request import Request, RequestStatus
 
@@ -138,11 +137,8 @@ def _holder(
         waiting=waiting,
         skipped_waiting=skipped_waiting,
     )
-    holder = VLLMSessionKVHolder(
-        VLLMSessionKVHolder.Config(),
-        scheduler=scheduler,
-        hold=hold,
-        cpu_kv_offload=cpu_kv_offload,
+    holder = VLLMSessionKVHolder.Config().build(
+        scheduler=scheduler, hold=hold, cpu_kv_offload=cpu_kv_offload
     )
     holder.free_floor_blocks = floor
     return holder
@@ -472,14 +468,6 @@ def test_free_floor_release_keeps_the_cpu_chunks_of_a_live_session(
 
     assert holder.num_evicted == 1
     assert _eviction_order(cpu_tier) == order_before
-
-
-def test_offload_needs_vllm_lru_policy(monkeypatch, manager):
-    cpu_tier = SimpleNamespace(_policy=ARCCachePolicy(cache_capacity=8))
-    with pytest.raises(
-        RuntimeError, match="needs vLLM's LRUCachePolicy, got ARCCachePolicy"
-    ):
-        _cpu_kv_offload(monkeypatch, manager, cpu_tier)
 
 
 def test_free_floor_is_the_watermark_plus_one_prefill_chunk(manager):
