@@ -5,16 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any
 
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
-from torchtitan.config.configurable import Configurable
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
@@ -38,7 +36,6 @@ from torchtitan.observability.logging import warn_once
 __all__ = ["Decoder", "TransformerBlock"]
 
 logger = logging.getLogger(__name__)
-_ConfigT = TypeVar("_ConfigT", bound=Configurable.Config)
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
@@ -65,26 +62,6 @@ class TransformerBlock(Module):
         feed_forward: FeedForward.Config | MoE.Config
         attention_norm: Module.Config
         ffn_norm: Module.Config
-
-        def traverse(
-            self,
-            config_cls: type[_ConfigT],
-            *,
-            recurse: bool = False,
-            _prefix: str = "",
-        ) -> Iterator[tuple[str, _ConfigT, object | None, str | int | None]]:
-            # Keep module FQNs stable while the config field is shared by FFN/MoE.
-            prefix = f"{_prefix}." if _prefix else ""
-            config_prefix = f"{prefix}feed_forward"
-            is_moe = isinstance(self.feed_forward, MoE.Config)
-            for fqn, config, parent, attr in Module.Config.traverse(
-                self, config_cls, recurse=recurse, _prefix=_prefix
-            ):
-                if is_moe and (
-                    fqn == config_prefix or fqn.startswith(f"{config_prefix}.")
-                ):
-                    fqn = f"{prefix}moe{fqn[len(config_prefix):]}"
-                yield fqn, config, parent, attr
 
 
 class Decoder(BaseModel):

@@ -245,20 +245,20 @@ def _dist_muon_optimizer(
         else:
             shardings.update(
                 {
-                    f"{prefix}.moe.routed_experts.{projection}": per_expert
+                    f"{prefix}.feed_forward.routed_experts.{projection}": per_expert
                     for projection in expert_projections
                 }
             )
-            shardings[f"{prefix}.moe.router.gate.weight"] = owned
+            shardings[f"{prefix}.feed_forward.router.gate.weight"] = owned
             shardings.update(
                 {
-                    f"{prefix}.moe.shared_experts.{projection}.weight": compute_sharding
+                    f"{prefix}.feed_forward.shared_experts.{projection}.weight": compute_sharding
                     for projection, compute_sharding in (feed_forward_shardings.items())
                 }
             )
             shardings.update(
                 {
-                    f"{prefix}.moe.{projection}.weight": owned
+                    f"{prefix}.feed_forward.{projection}.weight": owned
                     for projection in ("routed_down", "routed_up")
                 }
             )
@@ -309,9 +309,9 @@ def _dist_muon_optimizer(
         rf"{'|'.join(delta_attention_shardings)})\.weight|"
         r"routed_experts\.w(?:13|2)\.weight|"
         r"feed_forward\.w(?:13|2)\.weight|"
-        r"moe\.router\.gate\.weight|"
-        r"moe\.shared_experts\.w(?:13|2)\.weight|"
-        r"moe\.routed_(?:down|up)\.weight"
+        r"feed_forward\.router\.gate\.weight|"
+        r"feed_forward\.shared_experts\.w(?:13|2)\.weight|"
+        r"feed_forward\.routed_(?:down|up)\.weight"
         r")$"
     )
     return OptimizersContainer.Config(

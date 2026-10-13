@@ -53,12 +53,12 @@ def test_qwen35_moe_lora_model_config():
     }
 
     assert set(dense_lora) == {
-        f"layers.{layer}.moe.shared_experts.{projection}"
+        f"layers.{layer}.feed_forward.shared_experts.{projection}"
         for layer in range(num_layers)
         for projection in ("w13", "w2")
     }
     assert set(grouped_lora) == {
-        f"layers.{layer}.moe.routed_experts.{projection}"
+        f"layers.{layer}.feed_forward.routed_experts.{projection}"
         for layer in range(num_layers)
         for projection in ("w13", "w2")
     }

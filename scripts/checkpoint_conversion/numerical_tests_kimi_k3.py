@@ -365,7 +365,7 @@ def _print_routing_comparison(
 def _force_hf_routing(model, expert_indices, device) -> None:
     """Use HF expert IDs with TorchTitan's independently computed scores."""
     for layer_idx, layer in model.layers.items():
-        moe = getattr(layer, "moe", None)
+        moe = layer.feed_forward
         if not isinstance(moe, KimiLatentMoE):
             continue
         ids = expert_indices[int(layer_idx)].to(device)
@@ -411,8 +411,8 @@ def run_tt(
 
     expert_indices: dict[int, torch.Tensor] = {}
     for layer_idx, layer in model.layers.items():
-        if isinstance(moe := getattr(layer, "moe", None), KimiLatentMoE):
-            moe.router.register_forward_hook(
+        if isinstance(layer.feed_forward, KimiLatentMoE):
+            layer.feed_forward.router.register_forward_hook(
                 lambda _module, _inputs, output, layer_idx=int(layer_idx): (
                     expert_indices.__setitem__(
                         layer_idx,

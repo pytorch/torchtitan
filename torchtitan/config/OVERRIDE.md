@@ -311,7 +311,7 @@ def nvfp4_linear(cfg: Linear.Config) -> "NVFP4Linear.Config":
     return NVFP4Linear.Config(in_features=cfg.in_features, ...)
 
 # Fused MoE only on the later layers
-@override(target=MoE.Config, fqns=["*.layers.1[0-9].moe"])
+@override(target=MoE.Config, fqns=["*.layers.1[0-9].feed_forward"])
 def vendor_moe(cfg: MoE.Config) -> "VendorMoE.Config":
     return VendorMoE.Config(num_experts=cfg.num_experts, ...)
 ```
@@ -340,11 +340,11 @@ This same rule answers the parent/child question directly. Say override A
 targets a parent Config (e.g. `MoE.Config`) and override B targets a Config
 nested inside it (e.g. `GroupedLinear.Config`):
 
-- **Disjoint subtrees** (A on `...layers.0.moe`, B on
-  `...layers.1.moe.routed_experts.w13`) — the claimed nodes are
+- **Disjoint subtrees** (A on `...layers.0.feed_forward`, B on
+  `...layers.1.feed_forward.routed_experts.w13`) — the claimed nodes are
   unrelated, so both apply.
-- **Overlapping** (A on `...layers.0.moe`, B on
-  `...layers.0.moe.routed_experts.w13`) — B's node is inside A's, the
+- **Overlapping** (A on `...layers.0.feed_forward`, B on
+  `...layers.0.feed_forward.routed_experts.w13`) — B's node is inside A's, the
   ancestor case above, so we **error**.
 
 We error rather than pick one of the two plausible behaviors implicitly:

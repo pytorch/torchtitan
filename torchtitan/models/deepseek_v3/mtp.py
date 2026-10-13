@@ -129,11 +129,7 @@ class MTPTransformerBlock(TransformerBlock):
         self.eh_proj = config.eh_proj.build()
         self.mtp_norm = config.mtp_norm.build()
 
-        ffn = config.feed_forward.build()
-        if isinstance(ffn, MoE):
-            self.moe = ffn
-        else:
-            self.feed_forward = ffn
+        self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -163,8 +159,8 @@ class MTPTransformerBlock(TransformerBlock):
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
         h = h + self.attention(self.attention_norm(h), attention_metadata, positions)
-        if hasattr(self, "moe"):
-            h = h + self.moe(
+        if isinstance(self.feed_forward, MoE):
+            h = h + self.feed_forward(
                 self.ffn_norm(h),
                 padding_mask_T=mtp_padding_mask_T,
                 aux_loss_denominator=aux_loss_denominator,

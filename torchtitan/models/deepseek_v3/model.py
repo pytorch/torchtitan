@@ -190,11 +190,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
 
-        ffn = config.feed_forward.build()
-        if isinstance(ffn, MoE):
-            self.moe = ffn
-        else:
-            self.feed_forward = ffn
+        self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -209,8 +205,8 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
-        if hasattr(self, "moe"):
-            ffn_out = self.moe(
+        if isinstance(self.feed_forward, MoE):
+            ffn_out = self.feed_forward(
                 self.ffn_norm(x),
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
