@@ -280,7 +280,7 @@ def _build_gptoss_layers(
                 param_init=_NORM_INIT,
                 sharding_config=norm_sharding,
             ),
-            moe=moe_cfg,
+            feed_forward=moe_cfg,
         )
         layers.append(layer_cfg)
     return layers

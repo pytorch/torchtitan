@@ -22,6 +22,7 @@ from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
+    FeedForward,
     HiMidLoLinear,
     Linear,
     RMSNorm,
@@ -53,7 +54,7 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_sharding_config,
     token_embedding_sharding_config,
 )
-from torchtitan.models.common.moe import TokenChoiceTopKRouter
+from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.moe.sharding import (
     router_gate_sharding_config,
     router_sharding_config,
@@ -330,6 +331,7 @@ def build_mla_moe_layers(
             enable_sp=enable_sp,
         )
 
+        ffn_cfg: FeedForward.Config | MoE.Config
         if layer_id < n_dense_layers:
             ffn_cfg = make_ffn_config(
                 dim=dim,
@@ -338,10 +340,8 @@ def build_mla_moe_layers(
                 w2_param_init=depth_init(layer_id),
                 enable_sp=enable_sp,
             )
-            moe_cfg = None
         else:
-            ffn_cfg = None
-            moe_cfg = make_moe_config(
+            ffn_cfg = make_moe_config(
                 num_experts=num_experts,
                 router=router_config_factory(
                     dim=dim,
@@ -388,7 +388,6 @@ def build_mla_moe_layers(
                     sharding_config=norm_sharding,
                 ),
                 feed_forward=ffn_cfg,
-                moe=moe_cfg,
                 sharding_config=first_layer_sharding_config if layer_id == 0 else None,
             )
         )
@@ -431,7 +430,6 @@ def _build_mtp_layers(
             MTPTransformerBlock.Config(
                 attention=copy.deepcopy(inner_cfg.attention),
                 feed_forward=copy.deepcopy(inner_cfg.feed_forward),
-                moe=copy.deepcopy(inner_cfg.moe),
                 attention_norm=copy.deepcopy(inner_cfg.attention_norm),
                 ffn_norm=copy.deepcopy(inner_cfg.ffn_norm),
                 enorm=RMSNorm.Config(

@@ -54,13 +54,13 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         model_config = build_model_config(
             "debugmodel_moe", parallelism=ParallelismConfig()
         )
-        moe = model_config.layers[1].moe
+        moe = model_config.layers[1].feed_forward
         assert moe is not None
         moe.num_experts = 63
 
         with self.assertRaisesRegex(
             ValueError,
-            r"layers\.1\.moe\.num_experts \(63\).*expert_parallel_degree \(8\)",
+            r"layers\.1\.feed_forward\.num_experts \(63\).*expert_parallel_degree \(8\)",
         ):
             Trainer.Config(
                 model=model_config,
@@ -117,8 +117,8 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             ),
         )
 
-        trainer_moe = trainer_config.layers[0].moe
-        generator_moe = generator_config.layers[0].moe
+        trainer_moe = trainer_config.layers[0].feed_forward
+        generator_moe = generator_config.layers[0].feed_forward
         assert trainer_moe is not None
         assert generator_moe is not None
         self.assertEqual(

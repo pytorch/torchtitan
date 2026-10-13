@@ -39,14 +39,13 @@ logger = logging.getLogger(__name__)
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
-# there is no special logic for each model, including
-# ffn vs. moe naming and creation, etc.
+# there is no special logic for each model.
 class TransformerBlock(Module):
     """Base class for all language model transformer blocks.
 
     All language model TransformerBlocks share:
     - Attention module (from ``attention.build()``)
-    - FFN or MoE (from ``feed_forward.build()`` / ``moe.build()``)
+    - FFN or MoE (from ``feed_forward.build()``)
     - Two normalization modules (``attention_norm``, ``ffn_norm``)
 
     Forward accepts ``aux_loss_denominator``. Dense blocks ignore it; MoE
@@ -60,8 +59,7 @@ class TransformerBlock(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         attention: Attention.Config  # required, no default
-        feed_forward: FeedForward.Config | None = None
-        moe: MoE.Config | None = None
+        feed_forward: FeedForward.Config | MoE.Config
         attention_norm: Module.Config
         ffn_norm: Module.Config
 
@@ -111,7 +109,7 @@ class Decoder(BaseModel):
                 (
                     layer.feed_forward
                     for layer in self.layers
-                    if layer.feed_forward is not None
+                    if isinstance(layer.feed_forward, FeedForward.Config)
                 ),
                 None,
             )
@@ -120,7 +118,7 @@ class Decoder(BaseModel):
         def first_moe(self) -> MoE.Config | None:
             """First mixture-of-experts config, else None."""
             return next(
-                (layer.moe for layer in self.layers if layer.moe is not None),
+                (config for _, config, _, _ in self.traverse(MoE.Config)),
                 None,
             )
 

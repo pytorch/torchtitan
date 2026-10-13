@@ -24,7 +24,7 @@ from torchtitan_recipes.models.deepseek_v3 import (
 
 def _dist_moe_graph_config(base_config: Trainer.Config) -> GraphTrainer.Config:
     """Convert a Dist-MoE recipe to functional-WGrad GraphTrainer execution."""
-    from torchtitan.models.common.moe.dist_moe import DistMoeRoutedExperts
+    from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 
     for _, experts, _, _ in base_config.model.traverse(DistMoeRoutedExperts.Config):
         experts.inplace_wgrad_accum = False

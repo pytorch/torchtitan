@@ -12,7 +12,7 @@ import pytest
 import torchtitan_recipes.rl
 import torchtitan_recipes.tests.rl
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,

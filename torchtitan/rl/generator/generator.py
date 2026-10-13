@@ -36,7 +36,7 @@ from torchtitan.config import Configurable, DebugConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.moe.dist_moe import DistMoeRuntime
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig

@@ -127,7 +127,7 @@ the [model guide](torchtitan/models/README.md).
 - [Pipeline parallel](torchtitan/distributed/PIPELINE_PARALLEL.md): 1F1B, Interleaved 1F1B, GPipe, and other `torch.distributed.pipelining` schedules
 - Context parallel: all-gather KV and Ulysses
 - Expert parallel with DeepEP / HybridEP dispatch
-- [Dist-MoE](torchtitan/models/common/moe/dist_moe/README.md): fused dispatch, expert compute, and combine on Blackwell
+- [Dist-MoE](torchtitan/models/common/dist_moe/README.md): fused dispatch, expert compute, and combine on Blackwell
 
 **Memory and performance**
 - [Activation checkpointing](torchtitan/distributed/REMAT.md): full, selective, and regional

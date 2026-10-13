@@ -20,6 +20,7 @@ from typing import Any, TYPE_CHECKING
 
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
 
 from torchtitan.models.common.rope import CosSinRoPE
@@ -50,10 +51,10 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.routed_experts.w1_EFD",
-            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.routed_experts.w3_EFD",
-            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.routed_experts.w2.weight",
-            "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
+            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.feed_forward.routed_experts.w1_EFD",
+            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.feed_forward.routed_experts.w3_EFD",
+            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.feed_forward.routed_experts.w2.weight",
+            "model.layers.{}.mlp.gate.weight": "layers.{}.feed_forward.router.gate.weight",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
         }
@@ -109,14 +110,14 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     moe_layer = next(
                         l
                         for l in self.model_config.layers  # pyrefly: ignore [missing-attribute]
-                        if l.moe is not None
+                        if isinstance(l.feed_forward, MoE.Config)
                     )
                     split_values = self._split_experts_weights(
                         value,
-                        moe_layer.moe.num_experts,
+                        moe_layer.feed_forward.num_experts,
                     )
 
-                    for expert_num in range(moe_layer.moe.num_experts):
+                    for expert_num in range(moe_layer.feed_forward.num_experts):
                         new_key = new_abstract_key.format(layer_num, expert_num)
                         hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
@@ -202,8 +203,8 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                         next(
                             l
                             for l in self.model_config.layers  # pyrefly: ignore [missing-attribute]
-                            if l.moe is not None
-                        ).moe.num_experts,
+                            if isinstance(l.feed_forward, MoE.Config)
+                        ).feed_forward.num_experts,
                     )
 
                 if stacked_value is not None:

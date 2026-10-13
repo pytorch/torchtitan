@@ -9,14 +9,14 @@ from dataclasses import dataclass, fields
 from typing import Any, cast
 
 from torchtitan.models.base.module import Module
+
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.lora import (
     get_lora_dist_moe_routed_experts,
     get_lora_grouped_linear,
     get_lora_linear,
 )
-
-from torchtitan.models.common.moe.dist_moe import DistMoeRoutedExperts
 
 from .base import ModelConfigTransform
 
@@ -209,7 +209,7 @@ class LoRATransform(ModelConfigTransform):
 
     Examples:
 
-    - ``"layers.0.moe.routed_experts.w2"``: one exact projection.
+    - ``"layers.0.feed_forward.routed_experts.w2"``: one exact projection.
     - ``"routed_experts.w2"``: every matching FQN suffix.
     - ``"w2"``: every supported projection named w2.
     - ``"*.w2"``: no matches; glob patterns are not supported.

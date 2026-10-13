@@ -27,12 +27,12 @@ from torchtitan.distributed.spmd_types import (  # noqa: E402
     set_spmd_meshes,
 )
 from torchtitan.models.base.module import Module  # noqa: E402
-from torchtitan.models.common.linear import GroupedLinear  # noqa: E402
-from torchtitan.models.common.moe import RoutedExperts  # noqa: E402
-from torchtitan.models.common.moe.dist_moe import (  # noqa: E402
+from torchtitan.models.common.dist_moe import (  # noqa: E402
     DistMoeRoutedExperts,
     DistMoeRuntime,
 )
+from torchtitan.models.common.linear import GroupedLinear  # noqa: E402
+from torchtitan.models.common.moe import RoutedExperts  # noqa: E402
 from torchtitan.models.common.moe.token_dispatcher import (  # noqa: E402
     AllToAllTokenDispatcher,
 )

@@ -36,7 +36,7 @@ runtime separately on the trainer:
 ```python
 from torchtitan.config.transform import apply_transforms
 from torchtitan.config.transform.dist_moe import DistMoeTransform
-from torchtitan.models.common.moe.dist_moe.runtime import DistMoeRuntime
+from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()
@@ -57,7 +57,7 @@ import dist_moe
 
 from torchtitan.config.transform import apply_transforms
 from torchtitan.config.transform.dist_moe import DistMoeTransform
-from torchtitan.models.common.moe.dist_moe.runtime import DistMoeRuntime
+from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()
@@ -219,7 +219,7 @@ into the same stable CUDA virtual range:
 ```python
 from torchtitan.config.transform import apply_transforms
 from torchtitan.config.transform.dist_moe import DistMoeTransform
-from torchtitan.models.common.moe.dist_moe.runtime import DistMoeRuntime
+from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()

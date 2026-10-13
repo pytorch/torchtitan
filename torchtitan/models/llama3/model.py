@@ -17,6 +17,7 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
@@ -42,7 +43,7 @@ class Llama3TransformerBlock(TransformerBlock):
     def __init__(self, config: Config):
         super().__init__()
         self.attention = config.attention.build()
-        assert config.feed_forward is not None
+        assert isinstance(config.feed_forward, FeedForward.Config)
         self.feed_forward = config.feed_forward.build()
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()

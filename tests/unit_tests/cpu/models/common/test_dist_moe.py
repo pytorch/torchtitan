@@ -35,14 +35,14 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.activation import ClampedSwiGLU, SiTUGLU
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import make_routed_experts_config
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.moe.dist_moe import (
+from torchtitan.models.common.dist_moe import (
     DistMoeRoutedExperts,
     DistMoeRuntime,
     MXFP8DistMoeRoutedExperts,
 )
-from torchtitan.models.common.moe.dist_moe.runtime import _DistMoeForwardContext
+from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -668,15 +668,15 @@ def test_forward_passes_native_postprocess_and_wgrad_policy() -> None:
 
     with (
         patch(
-            "torchtitan.models.common.moe.dist_moe.routed_experts.dist_moe.routed_experts",
+            "torchtitan.models.common.dist_moe.routed_experts.dist_moe.routed_experts",
             return_value=torch.empty(2, 32),
         ) as execute,
         patch(
-            "torchtitan.models.common.moe.dist_moe.routed_experts.remat.region",
+            "torchtitan.models.common.dist_moe.routed_experts.remat.region",
             side_effect=lambda fn, *_args, **_kwargs: fn,
         ) as remat_region,
         patch(
-            "torchtitan.models.common.moe.dist_moe.routed_experts.remat.recompute_needs_tensor"
+            "torchtitan.models.common.dist_moe.routed_experts.remat.recompute_needs_tensor"
         ) as recompute_needs_tensor,
     ):
         out_TD = module(
@@ -736,15 +736,15 @@ def _run_forward_with_padding(
     num_call_tokens = module._runtime.num_local_input_tokens_for_call(num_tokens)
     with (
         patch(
-            "torchtitan.models.common.moe.dist_moe.routed_experts.dist_moe.routed_experts",
+            "torchtitan.models.common.dist_moe.routed_experts.dist_moe.routed_experts",
             return_value=torch.zeros(num_call_tokens, 32),
         ) as execute,
         patch(
-            "torchtitan.models.common.moe.dist_moe.routed_experts.remat.region",
+            "torchtitan.models.common.dist_moe.routed_experts.remat.region",
             side_effect=lambda fn, *_args, **_kwargs: fn,
         ),
         patch(
-            "torchtitan.models.common.moe.dist_moe.routed_experts.remat.recompute_needs_tensor"
+            "torchtitan.models.common.dist_moe.routed_experts.remat.recompute_needs_tensor"
         ),
     ):
         out_TD = module(
@@ -848,7 +848,7 @@ def test_batch_invariant_inference_pins_the_bf16_grouped_gemm_schedule() -> None
     def preset(*, inference: bool, batch_invariant: bool) -> str | None:
         runtime.config = DistMoeRuntime.Config(inference=inference)
         with patch(
-            "torchtitan.models.common.moe.dist_moe.runtime.is_in_batch_invariant_mode",
+            "torchtitan.models.common.dist_moe.runtime.is_in_batch_invariant_mode",
             return_value=batch_invariant,
         ):
             return runtime._resolve_context_config(
@@ -871,13 +871,13 @@ def test_small_calls_stay_above_the_tiled_reduction_only_when_batch_invariant() 
     runtime.config = DistMoeRuntime.Config(inference=True)
     runtime.context = cast(Any, SimpleNamespace(max_num_local_input_tokens=512))
     with patch(
-        "torchtitan.models.common.moe.dist_moe.runtime.is_in_batch_invariant_mode",
+        "torchtitan.models.common.dist_moe.runtime.is_in_batch_invariant_mode",
         return_value=False,
     ):
         runtime.set_num_local_input_tokens_per_call(1)
         assert runtime.num_local_input_tokens_for_call(1) == 1
     with patch(
-        "torchtitan.models.common.moe.dist_moe.runtime.is_in_batch_invariant_mode",
+        "torchtitan.models.common.dist_moe.runtime.is_in_batch_invariant_mode",
         return_value=True,
     ):
         runtime.set_num_local_input_tokens_per_call(1)

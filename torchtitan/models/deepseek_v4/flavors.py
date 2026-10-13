@@ -535,6 +535,7 @@ def _build_v4_layers(
             enable_sp=enable_sp,
         )
 
+        ffn_cfg: FeedForward.Config | MoE.Config
         if layer_id in dense_layers:
             ffn_cfg = _make_v4_dense_config(
                 layer_id=actual_layer_id,
@@ -542,10 +543,8 @@ def _build_v4_layers(
                 hidden_dim=dense_hidden_dim,
                 enable_sp=enable_sp,
             )
-            moe_cfg = None
         else:
-            ffn_cfg = None
-            moe_cfg = _make_v4_moe_config(
+            ffn_cfg = _make_v4_moe_config(
                 layer_id=actual_layer_id,
                 dim=dim,
                 moe_inter_dim=moe_inter_dim,
@@ -577,7 +576,6 @@ def _build_v4_layers(
                     sharding_config=norm_sharding,
                 ),
                 feed_forward=ffn_cfg,
-                moe=moe_cfg,
                 hc_attn_pre=HcPre.Config(
                     hc_mult=hc_mult,
                     dim=dim,
@@ -644,8 +642,8 @@ def _build_mtp_layers(
     for depth in range(num_mtp_layers):
         layer_id = n_main_layers + depth
         block_cfg = _make_mtp_inner_block(inner_cfg, rope)
-        if block_cfg.moe is not None:
-            router_cfg = block_cfg.moe.router
+        if isinstance(block_cfg.feed_forward, MoE.Config):
+            router_cfg = block_cfg.feed_forward.router
             assert isinstance(router_cfg, DeepSeekV4Router.Config)
             router_cfg.gate.param_init = _depth_init(layer_id)
             router_cfg.layer_id = layer_id
@@ -653,17 +651,17 @@ def _build_mtp_layers(
                 layer_id=layer_id, n_hash_layers=router_cfg.n_hash_layers
             )
             expert_init = _depth_experts_init(layer_id)
-            block_cfg.moe.routed_experts.w13.param_init = (
+            block_cfg.feed_forward.routed_experts.w13.param_init = (
                 fused_grouped_gate_up_param_init(expert_init)
             )
-            block_cfg.moe.routed_experts.w2.param_init = {
+            block_cfg.feed_forward.routed_experts.w2.param_init = {
                 "weight": expert_init["w2_EDF"]
             }
-            if block_cfg.moe.shared_experts is not None:
+            if block_cfg.feed_forward.shared_experts is not None:
                 depth_init = _depth_init(layer_id)
-                block_cfg.moe.shared_experts.w2.param_init = depth_init
-                block_cfg.moe.shared_experts.w13.param_init = fused_gate_up_param_init(
-                    _LINEAR_INIT, _LINEAR_INIT
+                block_cfg.feed_forward.shared_experts.w2.param_init = depth_init
+                block_cfg.feed_forward.shared_experts.w13.param_init = (
+                    fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT)
                 )
         mtp_layers.append(
             MTPBlock.Config(
@@ -671,7 +669,6 @@ def _build_mtp_layers(
                 attention_norm=block_cfg.attention_norm,
                 ffn_norm=block_cfg.ffn_norm,
                 feed_forward=block_cfg.feed_forward,
-                moe=block_cfg.moe,
                 hc_attn_pre=block_cfg.hc_attn_pre,
                 hc_ffn_pre=block_cfg.hc_ffn_pre,
                 hc_post=block_cfg.hc_post,

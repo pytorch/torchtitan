@@ -629,11 +629,6 @@ def _kimi_k3_config(
                         dim=dim, hidden_dim=dense_hidden_dim, enable_sp=enable_sp
                     )
                     if layer_idx == 0
-                    else None
-                ),
-                moe=(
-                    None
-                    if layer_idx == 0
                     else _latent_moe_config(
                         dim=dim,
                         latent_dim=latent_dim,
