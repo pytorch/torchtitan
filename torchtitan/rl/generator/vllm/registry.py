@@ -66,11 +66,13 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     """
     if not cfg.layers:
         raise ValueError(f"Model config {type(cfg).__qualname__} has no layers")
+    # Full and sliding-window attention both provide the head dimensions vLLM needs.
+    # Window sizes are configured separately for each layer.
     attn = cfg.first_non_linear_attention
     if attn is None:
         raise ValueError(
-            f"Model config {type(cfg).__qualname__} has no full-attention layer. "
-            "vLLM's engine requires full-attention metadata before the model is built."
+            f"Model config {type(cfg).__qualname__} has no non-linear attention layer. "
+            "vLLM needs attention head counts and dimensions before building the model."
         )
     ffn = cfg.first_feed_forward
     moe = cfg.first_moe

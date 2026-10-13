@@ -725,13 +725,7 @@ class Qwen35Model(MultimodalModel):
             x = layer(
                 x,
                 (
-                    attention_metadata.get(
-                        type(
-                            cast(
-                                Qwen35TransformerBlock, layer
-                            ).attention.inner_attention
-                        )
-                    )
+                    attention_metadata.get(type(layer.attention.inner_attention))
                     if attention_metadata is not None
                     else None
                 ),
