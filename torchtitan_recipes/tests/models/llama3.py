@@ -33,9 +33,9 @@ from torchtitan.config.transform import (
     LoRATransform,
     NVFP4LinearConverter,
 )
-from torchtitan.distributed.activation_checkpoint import (
-    DefaultActivationCheckpointConfig,
-    FullActivationCheckpointConfig,
+from torchtitan.distributed.activation_remat import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
 )
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
@@ -106,7 +106,7 @@ def llama3_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=DefaultActivationCheckpointConfig(),
+        activation_remat=DefaultActivationRematConfig(),
         validator=None,
     )
 
@@ -270,7 +270,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpointer=None,
-        activation_checkpoint=DefaultActivationCheckpointConfig(),
+        activation_remat=DefaultActivationRematConfig(),
         validator=None,
     )
 
@@ -347,7 +347,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullActivationCheckpointConfig(),
+        activation_remat=FullActivationRematConfig(),
         validator=None,
     )
 
@@ -410,5 +410,5 @@ def sft_debugmodel(
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpointer=None,
-        activation_checkpoint=DefaultActivationCheckpointConfig(),
+        activation_remat=DefaultActivationRematConfig(),
     )

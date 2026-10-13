@@ -21,7 +21,7 @@ from .module import Module
 
 if TYPE_CHECKING:
     from torchtitan.components.optim import OptimizersContainer
-    from torchtitan.distributed.activation_checkpoint import ActivationCheckpointConfig
+    from torchtitan.distributed.activation_remat import ActivationRematConfig
 
     from .state_dict_adapter import BaseStateDictAdapter
 
@@ -133,7 +133,7 @@ class BaseModel(Module, ABC):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         local_compile_regions: list[str],
-        ac_config: ActivationCheckpointConfig | None,
+        activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> Self:
         """Apply the ordered model-level parallelization lifecycle."""
@@ -141,12 +141,8 @@ class BaseModel(Module, ABC):
         apply_local_compile(local_compile_regions)
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
-            if ac_config is not None:
-                from torchtitan.distributed.activation_checkpoint import (
-                    apply_activation_checkpoint,
-                )
-
-                apply_activation_checkpoint(self, ac_config)
+            if activation_remat is not None:
+                activation_remat.apply(self)
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
                 training=training,

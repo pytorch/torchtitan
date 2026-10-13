@@ -20,10 +20,9 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.activation_checkpoint import (
-    ActivationCheckpointConfig,
-    apply_activation_checkpoint,
-    DefaultActivationCheckpointConfig,
+from torchtitan.distributed.activation_remat import (
+    ActivationRematConfig,
+    DefaultActivationRematConfig,
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.base.module import Module, ModuleDict
@@ -163,11 +162,11 @@ class TestAllToAllRematRegions(DTensorTestBase):
         dispatch = "routed_experts.token_dispatcher.dispatch"
         combine = "routed_experts.token_dispatcher.combine"
         for policy_config, expected_replay_collectives, expected_replay_syncs in (
-            (ActivationCheckpointConfig(save_regions=[]), 3, 1),
-            (ActivationCheckpointConfig(save_regions=[dispatch]), 1, 0),
-            (ActivationCheckpointConfig(save_regions=[combine]), 2, 1),
-            (ActivationCheckpointConfig(save_regions=[dispatch, combine]), 0, 0),
-            (DefaultActivationCheckpointConfig(), 0, 0),
+            (ActivationRematConfig(save_regions=[]), 3, 1),
+            (ActivationRematConfig(save_regions=[dispatch]), 1, 0),
+            (ActivationRematConfig(save_regions=[combine]), 2, 1),
+            (ActivationRematConfig(save_regions=[dispatch, combine]), 0, 0),
+            (DefaultActivationRematConfig(), 0, 0),
         ):
             with (
                 self.subTest(policy_config=policy_config),
@@ -180,7 +179,7 @@ class TestAllToAllRematRegions(DTensorTestBase):
                     self.device_type
                 )
                 remat_model.load_state_dict(baseline.state_dict())
-                apply_activation_checkpoint(remat_model, policy_config)
+                policy_config.apply(remat_model)
 
                 num_collectives = 0
                 num_syncs = 0
@@ -249,15 +248,12 @@ class TestAllToAllRematRegions(DTensorTestBase):
                 self.device_type, torch.bfloat16
             )
             remat_model.load_state_dict(baseline.state_dict())
-            apply_activation_checkpoint(
-                remat_model,
-                ActivationCheckpointConfig(
-                    save_regions=[
-                        "routed_experts.w2.grouped_mm",
-                        "routed_experts.token_dispatcher.combine",
-                    ]
-                ),
-            )
+            ActivationRematConfig(
+                save_regions=[
+                    "routed_experts.w2.grouped_mm",
+                    "routed_experts.token_dispatcher.combine",
+                ]
+            ).apply(remat_model)
             w2 = remat_model.layers["0"].routed_experts.w2
             w2_output_refs = []
             original_forward = GroupedLinear.forward
@@ -309,9 +305,7 @@ class TestAllToAllRematRegions(DTensorTestBase):
             model = _Model(_AllToAllBlock(self.world_size, dispatcher_config))
             model = model.to(self.device_type)
             if save_regions is not None:
-                apply_activation_checkpoint(
-                    model, ActivationCheckpointConfig(save_regions=save_regions)
-                )
+                ActivationRematConfig(save_regions=save_regions).apply(model)
             return model
 
         padded_config = TorchAOTokenDispatcher.Config(

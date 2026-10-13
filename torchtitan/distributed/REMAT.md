@@ -1,30 +1,32 @@
-# `torch_remat` activation checkpointing
+# `torch_remat` activation rematerialization
 
-TorchTitan's activation-checkpointing policies use `torch_remat` to checkpoint
-each transformer block. Operations outside saved regions are recomputed during
-backward.
+Activation rematerialization (remat), also known as activation checkpointing,
+trades compute for memory: a transformer block keeps only some activations from
+its forward and recomputes the rest during backward. TorchTitan's remat
+policies use `torch_remat` to checkpoint each transformer block. Operations
+outside saved regions are recomputed during backward.
 
 ## Motivation
 
 Model code identifies semantic compute and communication regions, while the
-activation-checkpointing policy chooses which region outputs to retain.
+remat policy chooses which region outputs to retain.
 
 This requires small, explicit annotations in model code. In return, the policy
 surface is visible next to the operations it controls, and configurations refer
 to stable model concepts such as attention projections instead of individual
 ATen operators.
 
-The policies are configs applied to every transformer block with
-`apply_activation_checkpoint(model, config)`:
+The policies are configs, set as the trainer's `activation_remat` field, and
+applied to every transformer block with `config.apply(model)`:
 
-- `ActivationCheckpointConfig` saves the regions matching `save_regions`, except
+- `ActivationRematConfig` saves the regions matching `save_regions`, except
   those matching `recompute_regions`, and recomputes everything else.
-- `FullActivationCheckpointConfig` is a fixed policy with `save_regions=[]`. It
+- `FullActivationRematConfig` is a fixed policy with `save_regions=[]`. It
   recomputes every block operation except the regions model code always
   retains with `recompute=False`, such as routing decisions and trailing adds.
-- `DefaultActivationCheckpointConfig` is the trainer's default policy:
+- `DefaultActivationRematConfig` is the trainer's default policy:
   `save_regions=["*"]` and `recompute_regions=["*routed_experts.w13.*"]`.
-  Its regions may change as measurements improve; use `ActivationCheckpointConfig`
+  Its regions may change as measurements improve; use `ActivationRematConfig`
   with explicit regions for a fixed policy. It retains every
   model-declared region except the routed-expert `w13` grouped projection, and
   recomputes operations outside those regions. Routed-expert grouped matmul
@@ -37,16 +39,16 @@ The policies are configs applied to every transformer block with
 
 The former operator-level SelectiveAC policy and its
 `force_recompute_mm_shapes_by_fqns` option have been removed. Use
-`ActivationCheckpointConfig` when a policy needs finer control than the fixed
+`ActivationRematConfig` when a policy needs finer control than the fixed
 policies.
 
 ## Configuring saved regions
 
-`ActivationCheckpointConfig.save_regions` contains shell-style patterns relative to a
+`ActivationRematConfig.save_regions` contains shell-style patterns relative to a
 transformer block. For example:
 
 ```python
-ActivationCheckpointConfig(
+ActivationRematConfig(
     save_regions=[
         "attention.qkv_linear.wqkv.linear",
         "attention.wo.linear",
@@ -54,12 +56,12 @@ ActivationCheckpointConfig(
 )
 ```
 
-`ActivationCheckpointConfig.recompute_regions` uses the same pattern syntax and wins
+`ActivationRematConfig.recompute_regions` uses the same pattern syntax and wins
 over `save_regions`. Starting from no AC, save everything and list the few
 regions to recompute until the model fits its memory budget:
 
 ```python
-ActivationCheckpointConfig(
+ActivationRematConfig(
     save_regions=["*"],
     recompute_regions=["moe.routed_experts.w13.grouped_mm"],
 )
@@ -81,7 +83,7 @@ CPU memory, compression, and logging. See torch_remat's
 for the full semantics.
 
 To install hooks, pass a `saved_tensors_hooks` callable to
-`apply_activation_checkpoint`. It receives each transformer block and its FQN and is
+`config.apply`. It receives each transformer block and its FQN and is
 called once per block, so each block can own its hook state;
 returning `None` leaves a block unhooked. Inside `pack`,
 `torch_remat.current_saved_tensor_info().kind` says why a tensor is retained:
@@ -110,7 +112,7 @@ def cpu_offload_hooks(module, base_fqn):
     return pack, unpack
 
 
-apply_activation_checkpoint(model, config, saved_tensors_hooks=cpu_offload_hooks)
+config.apply(model, saved_tensors_hooks=cpu_offload_hooks)
 ```
 
 `pack` runs at block entry, before the forward reads its inputs, so it must not
@@ -120,7 +122,7 @@ runs under `torch.compile`.
 
 ## Diagnosing the effective policy
 
-After applying an activation-checkpointing policy, use `torch_remat`'s trace
+After applying a remat policy, use `torch_remat`'s trace
 collector around the forward that you want to inspect:
 
 ```python
@@ -165,7 +167,7 @@ out = remat.region(
 )(q, k, v)
 ```
 
-The activation-checkpointing policy configures each module with its name
+The remat policy configures each module with its name
 relative to the transformer block and its save patterns. The helpers above
 therefore resolve `inner_attention` to a qualified name such as
 `attention.inner_attention` and select whether it is saved or recomputed. Without an enclosing
@@ -295,7 +297,7 @@ communication regions:
   `ep_communication.combine` around their kernels. DeepEP saves or replays
   both together, following `ep_communication`. A replay must receive tokens
   in the forward's order, so DeepEP then uses a deterministic buffer, which
-  adds a sort to every dispatch. `FullActivationCheckpointConfig` replays them.
+  adds a sort to every dispatch. `FullActivationRematConfig` replays them.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.
@@ -305,7 +307,7 @@ communication regions:
 For a common MoE module named `moe`, the corresponding policy is:
 
 ```python
-ActivationCheckpointConfig(
+ActivationRematConfig(
     save_regions=[
         "moe.routed_experts.w13.grouped_mm",
         "moe.routed_experts.w2.grouped_mm",

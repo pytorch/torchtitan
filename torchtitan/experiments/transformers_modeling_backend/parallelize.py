@@ -21,10 +21,7 @@ from torch.distributed.tensor import Shard
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import (
-    ActivationCheckpointConfig,
-    apply_activation_checkpoint,
-)
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
@@ -91,7 +88,7 @@ def parallelize_hf_transformers(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     local_compile_regions: list[str],
-    ac_config: ActivationCheckpointConfig | None,
+    activation_remat: ActivationRematConfig | None,
     dump_folder: str,
     **kwargs: Any,
 ):
@@ -174,8 +171,8 @@ def parallelize_hf_transformers(
     # 4. Single parallelize call -- handles TP, EP, MoE, everything
     model._parallelize(parallelism_context)
 
-    if ac_config is not None:
-        apply_activation_checkpoint(model, ac_config)
+    if activation_remat is not None:
+        activation_remat.apply(model)
 
     model._apply_fsdp(
         parallelism_context=parallelism_context,

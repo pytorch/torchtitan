@@ -25,9 +25,7 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, LoRATransform
-from torchtitan.distributed.activation_checkpoint import (
-    DefaultActivationCheckpointConfig,
-)
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -98,7 +96,7 @@ def qwen35_debugmodel(
             steps=10,
         ),
         checkpointer=None,
-        activation_checkpoint=DefaultActivationCheckpointConfig(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -175,7 +173,7 @@ def qwen35_debugmodel_moe(
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=DefaultActivationCheckpointConfig(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 

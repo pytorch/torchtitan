@@ -143,7 +143,7 @@ def build_trainer_model(
         training=trainer_config.training,
         parallelism=parallelism,
         local_compile_regions=model_config.local_compile_regions,
-        ac_config=trainer_config.activation_checkpoint,
+        activation_remat=trainer_config.activation_remat,
         dump_folder=config.dump_folder,
     )
     with parallelism_context.activate_spmd():
