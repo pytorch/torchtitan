@@ -38,7 +38,11 @@ from torchtitan.models.base import BaseModel
 from torchtitan.models.common.linear import Linear
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
-from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
+from torchtitan.training_engine import (
+    _ForwardBackwardFn,
+    ForwardBackwardResult,
+    TrainingEngine,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +59,9 @@ class GraphTrainingEngine(TrainingEngine):
     # enabled. Class-level, so engines without it -- including those a test
     # harness builds without running initialization -- see it as disabled.
     _paged_stash_runner: PagedStashRunner | None = None
+    # The step the runner runs: the forward-backward, CUDA-graphed unless
+    # CUDA graphs are disabled. Rebuilt when the runner resets the graph.
+    _paged_stash_forward_backward: _ForwardBackwardFn
 
     def __init__(
         self,
@@ -180,30 +187,33 @@ class GraphTrainingEngine(TrainingEngine):
             self._forward_backward_body,
             defer_fsdp_gradient_reduction=False,
         )
-        self._run_forward_backward = eager_forward_backward_fn
+        self._run_forward_backward = self._maybe_wrap_with_cuda_graph(
+            eager_forward_backward_fn
+        )
         if self.config.compile.memory_policy == "sac_and_paged_stash":
+
+            def reset_cuda_graph() -> None:
+                # Drop the captured step before the paged stash releases the
+                # page buffers it points into. The rebuilt wrapper runs the
+                # rerun and the first step over the reallocated buffers
+                # eagerly, and captures on the step after.
+                cuda_graph_teardown()
+                self._paged_stash_forward_backward = self._maybe_wrap_with_cuda_graph(
+                    eager_forward_backward_fn
+                )
+
             self._paged_stash_runner = build_paged_stash_runner(
                 self.config.compile.paged_stash,
                 optimizers=self.optim.optimizers,
                 model_parts=self.model_parts,
                 device=self.device,
                 pp_enabled=self.parallelism_context.pp_enabled,
+                reset_cuda_graphs=reset_cuda_graph,
             )
-            self._run_forward_backward = partial(
-                self._page_stashed_forward_backward_body,
-                defer_fsdp_gradient_reduction=False,
-            )
-
-        if not self.config.training.disable_cuda_graphs and cuda_graphs_supported():
-            self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
-                self._run_forward_backward,
-                parameters=(
-                    parameter
-                    for model_part in self.model_parts
-                    for parameter in model_part.parameters()
-                ),
-                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
-            )
+            # The runner reads overflow flags on the host and may rerun the
+            # step, so it wraps the CUDA graph instead of being captured in it.
+            self._paged_stash_forward_backward = self._run_forward_backward
+            self._run_forward_backward = self._page_stashed_forward_backward
 
         maybe_apply_numa_binding(self.device.index, self.device.type)
 
@@ -301,14 +311,30 @@ class GraphTrainingEngine(TrainingEngine):
         assert accumulated_loss is not None
         return ForwardBackwardResult(accumulated_loss, loss_metrics)
 
-    def _page_stashed_forward_backward_body(
+    def _maybe_wrap_with_cuda_graph(
+        self, forward_backward_fn: _ForwardBackwardFn
+    ) -> _ForwardBackwardFn:
+        """Capture the whole forward-backward, every pipeline action included,
+        in one CUDA graph, unless CUDA graphs are disabled."""
+        if self.config.training.disable_cuda_graphs or not cuda_graphs_supported():
+            return forward_backward_fn
+        return wrap_fwd_bwd_with_cuda_graph(
+            forward_backward_fn,
+            parameters=(
+                parameter
+                for model_part in self.model_parts
+                for parameter in model_part.parameters()
+            ),
+            num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+        )
+
+    def _page_stashed_forward_backward(
         self,
         microbatch_groups: list[tuple[Any, ...]],
         global_loss_token_counts: torch.Tensor,
-        *,
-        defer_fsdp_gradient_reduction: bool,
     ) -> ForwardBackwardResult:
-        """``_forward_backward_body`` under the paged stash runner.
+        """The forward-backward, CUDA graph included, under the paged stash
+        runner.
 
         Wraps every microbatch group of the optimizer step rather than one
         graph: the step's schedule is the unit that shares the stash buffers,
@@ -321,12 +347,10 @@ class GraphTrainingEngine(TrainingEngine):
             graph_runtime = self.pp_schedule
             assert isinstance(graph_runtime, GraphRuntime)
             runner.apply_pp_schedule(graph_runtime.pipeline_liveness_schedule)
+        # Looked up on every attempt: a blocking rerun rebuilds the CUDA graph.
         return runner(
-            partial(
-                self._forward_backward_body,
-                microbatch_groups,
-                global_loss_token_counts,
-                defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
+            lambda: self._paged_stash_forward_backward(
+                microbatch_groups, global_loss_token_counts
             )
         )
 

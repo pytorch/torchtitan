@@ -232,20 +232,8 @@ def _round_robin_routing(config):
     return config
 
 
-def deepseek_v3_hybrid_ep_paged_stash():
-    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel_hybridep()
-    # Paged stash may release and reallocate buffers after an overflow.
-    config.training.disable_cuda_graphs = True
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 2
-    config.compile.memory_policy = "sac_and_paged_stash"
-    return _round_robin_routing(config)
-
-
 def deepseek_v3_graph_pp_hybrid_ep_paged_stash():
     config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel_hybridep()
-    config.training.disable_cuda_graphs = True
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 4
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
@@ -533,16 +521,11 @@ def _build_deepseek_v3_tests() -> list[IntegrationTestDefinition]:
             test_name="aot_fx_trace_deepseek_v3_graph_pp_dual_pipe_v_full_inductor",
             ngpu=8,
         ),
-        # Paged stashing under GraphTrainer's CUDA graph pass and under GraphPP.
+        # Paged stashing under GraphPP and the trainer's whole-step CUDA graph:
+        # the three compose, so one run covers them.
         # Round-robin routing keeps the stash footprint steady across steps: the
         # buffers are sized from the first step, and a step that outgrows them is
         # fatal under the default overflow check.
-        IntegrationTestDefinition(
-            configs=[deepseek_v3_hybrid_ep_paged_stash],
-            test_descr="aot_fx_trace deepseek_v3 FSDP+TP+HybridEP+paged_stash",
-            test_name="aot_fx_trace_deepseek_v3_hybridep_paged_stash",
-            ngpu=4,
-        ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_graph_pp_hybrid_ep_paged_stash],
             test_descr="aot_fx_trace deepseek_v3 GraphPP+HybridEP+paged_stash",

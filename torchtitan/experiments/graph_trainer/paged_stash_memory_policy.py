@@ -49,8 +49,6 @@ in a recipe derived from one that builds such a model::
     def paged_stash_debugmodel():
         config = graph_trainer_deepseek_v3_debugmodel_hybridep()
         config.compile.memory_policy = "sac_and_paged_stash"
-        # Paged stash may release and reallocate buffers after an overflow.
-        config.training.disable_cuda_graphs = True
         config.parallelism.data_parallel_shard_degree = 4
         config.parallelism.expert_parallel_degree = 2
         # Route round-robin, with exact balance (see below).
@@ -150,8 +148,11 @@ How It Works
    count and parks the activation, so it is numerically identical to a run
    without the feature. The second allocates the buffers, primes the Triton
    kernels (Triton cannot compile inside a CUDA graph capture), and pages for
-   real; CUDA graph capture happens on it. Later steps only reset freelists
-   and flags, which allocates nothing.
+   real. Both run eagerly. The trainer captures the third whole step in one
+   CUDA graph, every pipeline action at its own place in the schedule, and
+   replays it from then on. Later steps only reset freelists and flags, which
+   allocates nothing. ``PagedStashRunner`` does that outside the graph, since
+   it also reads the overflow flags on the host and may rerun a step.
 
 5. **GraphPP replaces the virtual-pipeline estimate.** Megatron reconstructs
    its schedule to work out how many stashes are live at once.
@@ -197,8 +198,6 @@ Limitations
   token-ordered, as Transformer Engine's do in Megatron. A tensor no shape shows
   token rows for is left to SAC; if backward then rebuilds it from a padded
   input, that input crosses into backward unpaged, and a warning names it.
-- GraphTrainer's GraphPP runtime does not capture CUDA graphs yet, so a single
-  run exercises either the CUDA-graph path or the GraphPP path, not both.
 - With the default ``deferred`` overflow check, an overflow can surface as the
   trainer's "Loss or gradient norm is not finite" error rather than the paged
   stash one: the overflowing step's backward reads activations that were never
@@ -213,7 +212,7 @@ import operator
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING, TypeVar
 
 import torch
 import torch.nn as nn
@@ -935,7 +934,6 @@ class PagedStashManager:
             ]
             | None
         ) = None
-        self._warned_capture_schedule = False
 
         # Every stash of a slot, in stash order, until its reload: Megatron's
         # `paged_tensors_to_reload`. Records are per slot because with
@@ -1072,27 +1070,13 @@ class PagedStashManager:
     def next_entries(self, entry: ScheduleEntry, count: int = 1) -> list[ScheduleEntry]:
         """The ``count`` schedule entries that follow ``entry`` on this rank.
 
-        Empty when the answer would not survive CUDA graph replay. A captured
-        graph freezes host-side Python, so with pipeline parallelism a stage
-        graph captured at one place in the schedule would replay that place's
-        skips and prefetches -- and the stash handles they read -- for every
-        microbatch. Without pipeline parallelism the step is one graph whose
-        place never changes. Not skipping and not prefetching is correct under
-        every schedule, so that is the safe direction to fail: each stash then
-        makes the round trip and each reload pops its pages when backward
-        first reads them.
+        The answer depends on ``entry``'s place in the schedule, and a CUDA
+        graph replays whatever its capture decided. That is correct because
+        the trainer captures the whole step, so every action of the schedule is
+        captured, and replayed, at its own place. A stage graph captured on its
+        own would replay one place's skips and prefetches for every
+        microbatch; GraphPP never captures one.
         """
-        if self._pp_actions is not None and torch.cuda.is_current_stream_capturing():
-            if not self._warned_capture_schedule:
-                self._warned_capture_schedule = True
-                logger.warning(
-                    "Paged stash: skipping stashes and prefetching reloads are "
-                    "disabled under CUDA graph capture with pipeline parallelism; "
-                    "a microbatch's place in the schedule cannot be replayed. "
-                    "Paging every stash and reloading on demand instead "
-                    "(correct, just not optimized)."
-                )
-            return []
         schedule, index = self._schedule(entry.microbatch)
         position = index.get(entry)
         if position is None:
@@ -3049,6 +3033,7 @@ def apply_graph_pp_sizing(schedule: _PipelineScheduleRuntime) -> PageCounts:
 
 
 OverflowCheckMode = Literal["deferred", "blocking"]
+_StepResult = TypeVar("_StepResult")
 
 
 @dataclass(frozen=True, slots=True)
@@ -3132,6 +3117,11 @@ class PagedStashRunner:
             which skips the optimizer steps after an overflow and fails the job;
             ``blocking`` for Megatron's synchronous per-step read, which reruns
             an overflowing step.
+        reset_cuda_graphs: Drops every CUDA graph that captured the stash
+            buffers' pointers, so a ``blocking`` rerun runs eagerly and a later
+            step captures again. Defaults to resetting the graphs
+            ``cuda_graph_pass`` applied; the trainer passes one that rebuilds
+            its whole-step graph.
     """
 
     def __init__(
@@ -3143,6 +3133,7 @@ class PagedStashRunner:
         max_attempts: int = 2,
         process_group: torch.distributed.ProcessGroup | None = None,
         overflow_check: OverflowCheckMode = "deferred",
+        reset_cuda_graphs: Callable[[], None] = reset_cuda_graphs,
     ) -> None:
         if overflow_check not in ("deferred", "blocking"):
             raise ValueError(
@@ -3155,6 +3146,7 @@ class PagedStashRunner:
         self.process_group = process_group
         self.overflow_check = overflow_check
         self._optimizers = optimizers
+        self._reset_cuda_graphs = reset_cuda_graphs
         if overflow_check == "deferred":
             self._skip_overflowed_steps(optimizers, expert_biases)
 
@@ -3383,9 +3375,9 @@ class PagedStashRunner:
         self._optimizers.zero_grad(set_to_none=True)
         # Drop the CUDA graphs before releasing the pages they captured
         # pointers to, as Megatron's ``reset_cuda_graph`` precedes
-        # ``release_stash_buffers``. The rerun runs eagerly, and the next step
+        # ``release_stash_buffers``. The rerun runs eagerly, and a later step
         # captures again over the reallocated buffers.
-        reset_cuda_graphs()
+        self._reset_cuda_graphs()
         self.manager.release_stash_buffers()
         self.manager.paging_disabled = True
 
@@ -3464,7 +3456,7 @@ class PagedStashRunner:
     # ------------------------------------------------------------------
     # Step entry points
     # ------------------------------------------------------------------
-    def __call__(self, fwd_bwd_fn: Callable[[], torch.Tensor]) -> torch.Tensor:
+    def __call__(self, fwd_bwd_fn: Callable[[], _StepResult]) -> _StepResult:
         """Run ``fwd_bwd_fn`` under the configured overflow policy."""
         if not self.manager.enabled:
             return fwd_bwd_fn()
@@ -3472,7 +3464,7 @@ class PagedStashRunner:
             return self._call_blocking(fwd_bwd_fn)
         return self._call_deferred(fwd_bwd_fn)
 
-    def _run_attempt(self, fwd_bwd_fn: Callable[[], torch.Tensor]) -> torch.Tensor:
+    def _run_attempt(self, fwd_bwd_fn: Callable[[], _StepResult]) -> _StepResult:
         """Reset the stash and the over-budget probes, then run ``fwd_bwd_fn``."""
         self.manager.begin_step()
         for probe in self.overbudget_probes:
@@ -3482,7 +3474,7 @@ class PagedStashRunner:
         warmup_paged_stash_kernels()
         return fwd_bwd_fn()
 
-    def _call_deferred(self, fwd_bwd_fn: Callable[[], torch.Tensor]) -> torch.Tensor:
+    def _call_deferred(self, fwd_bwd_fn: Callable[[], _StepResult]) -> _StepResult:
         # Read an earlier step's verdict if its copy has landed; never blocks.
         self._handle_deferred_verdict(self._take_verdict(blocking=False))
         result = self._run_attempt(fwd_bwd_fn)
@@ -3491,7 +3483,7 @@ class PagedStashRunner:
         self._snapshot_expert_biases()
         return result
 
-    def _call_blocking(self, fwd_bwd_fn: Callable[[], torch.Tensor]) -> torch.Tensor:
+    def _call_blocking(self, fwd_bwd_fn: Callable[[], _StepResult]) -> _StepResult:
         """Megatron's ``PagedStashRunner.__call__``: read the verdict at the end
         of every attempt, and rerun an overflowing step once with paging
         disabled."""
@@ -3573,6 +3565,7 @@ def build_paged_stash_runner(
     model_parts: Sequence[nn.Module],
     device: torch.device,
     pp_enabled: bool,
+    reset_cuda_graphs: Callable[[], None],
 ) -> PagedStashRunner:
     """Enable MoE paged stashing and return its step runner.
 
@@ -3620,6 +3613,7 @@ def build_paged_stash_runner(
             OverbudgetProbe(check_hybridep_over_budget, reset_hybridep_over_budget)
         ],
         overflow_check=paged_stash_config.overflow_check,
+        reset_cuda_graphs=reset_cuda_graphs,
     )
 
 
