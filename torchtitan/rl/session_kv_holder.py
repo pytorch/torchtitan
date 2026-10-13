@@ -24,16 +24,16 @@ class VLLMSessionKVHolder(Configurable):
     vLLM's free queue, where any new request can take them; the next turn then recomputes its
     history. The holder takes a reference on them instead:
 
-        turn 1 prefill done  ->  hold the blocks turn 2 would hit (attention + GDN state)
+        turn 1 prefill done  ->  hold the blocks turn 2 would hit (attention + Gated-DeltaNet state)
         tool call            ->  held: no other request can take them
         turn 2 prefill done  ->  hold the blocks turn 3 would hit, drop turn 1's hold
         rollout ends         ->  release: the blocks go back to vLLM's free queue, still cached
 
-    It holds right after prefill, not at the turn's end: in vLLM's hybrid "align" mode the prompt-end
-    Gated-DeltaNet state leaves the request when decode starts.
+    It holds at prefill, not at the turn's end: in vLLM's hybrid "align" mode the prompt-end GDN
+    state leaves the request when decode starts.
 
     When memory runs short, it releases whole idle sessions, idle longest first:
-    - before each step, while fewer than ``floor`` blocks are free (it can't act inside a step);
+    - before each step, while fewer than ``floor`` blocks are free;
     - after a step where nothing runs and requests wait: vLLM refused the head for lack of blocks.
 
     The floor is vLLM's watermark plus the most blocks the next step can add to running requests
@@ -44,9 +44,9 @@ class VLLMSessionKVHolder(Configurable):
         floor = free_floor_blocks
             + num_kv_cache_groups x len(running)  # a block each at a block boundary
 
-    Too small costs a preemption (a recompute, not a hang); too big only holds fewer sessions.
-    Held blocks count as used in vLLM's ``kv_cache_usage``. Every mutating method must run on the
-    engine thread of every rank, in the same order, so the schedulers of all TP ranks stay identical.
+    - Held blocks count as used in vLLM's ``kv_cache_usage``.
+    - Every mutating method runs on every rank's engine thread in the same order, so the TP ranks'
+      schedulers stay identical.
 
     Example:
 

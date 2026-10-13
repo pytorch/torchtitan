@@ -869,10 +869,8 @@ class VLLMGenerator(Configurable):
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
         session_kv_holder: VLLMSessionKVHolder.Config | None = None
-        """Hold each multi-turn session's reusable prefix (attention and Gated-DeltaNet state
-        blocks) from the end of a turn's prefill until its next turn or its end, so no other
-        request evicts it (see `VLLMSessionKVHolder`). Held blocks count in vLLM's KV usage.
-        None: off."""
+        """Keep each multi-turn session's cached prefix on GPU between its turns (see
+        `VLLMSessionKVHolder`). None: off."""
 
         def __post_init__(self):
             if (
@@ -1579,7 +1577,6 @@ class VLLMGenerator(Configurable):
                 action=LoopAction.STEP,
                 requests_per_dp_rank=requests_per_dp_rank,
             )
-        # Every rank releases these sessions before it acts on the decision.
         decision.released_session_ids = released_session_ids
         decision.released_group_ids = released_group_ids
         return decision
