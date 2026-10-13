@@ -829,7 +829,6 @@ def _run_with_generator_watcher(watcher) -> None:
             _batcher_loop=_block_forever,
             _trainer_loop=_block_forever,
         ),
-        patch("torchtitan.rl.controller.controller.ModelStateDictSync"),
     ):
         asyncio.run(asyncio.wait_for(controller.run(), timeout=10))
 

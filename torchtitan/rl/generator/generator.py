@@ -765,7 +765,7 @@ class VLLMGenerator(Configurable):
     Two endpoints are exceptions. `release_groups` pops cache-salt pins directly: each pop, like the engine loop's
     `setdefault`, is a single dict operation, atomic under the GIL. `prefetch_model_state_dict` writes the staging
     buffers the engine loop reads on a load: the router awaits it before `load_model_state_dict`, and the
-    controller awaits that load before the next model state dict sync, so the two never overlap.
+    controller awaits that load before the trainer's next push, so the two never overlap.
 
     A model state dict load rides the same loop: `load_model_state_dict` puts a `ModelStateDictLoadMessage` on the queue, which
     rank 0 turns into a `LoopDecision(LoopAction.LOAD_MODEL_STATE_DICT)` applied between step bursts. The engine does

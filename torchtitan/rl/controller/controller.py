@@ -117,7 +117,6 @@ from torchtitan.rl.controller.metrics import (
     compute_rollout_metrics,
     MetricsTimer,
 )
-from torchtitan.rl.controller.model_state_dict_sync import ModelStateDictSync
 from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
@@ -649,7 +648,7 @@ class Controller(Configurable):
                 hf_assets_path=config.hf_assets_path,
             )
 
-        # Initialize TorchStore for model state dict sync between trainer and generator.
+        # Initialize TorchStore, which carries the model state dict from the trainer to the generators.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
         # with the weight source for faster data access in the non-RDMA path.
         # https://github.com/meta-pytorch/torchstore
@@ -699,7 +698,7 @@ class Controller(Configurable):
         with sl.log_trace_span("generator_start_engine_loop"):
             await self.generator_router.start_engine_loop.call_one()
 
-        # Initial model state dict sync: only the trainer loads weights; generators pull at start_step.
+        # Initial push and pull: only the trainer loads weights; generators pull them at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
@@ -837,14 +836,6 @@ class Controller(Configurable):
         self._group_buffer = async_loop.group_buffer.build(
             max_active_rollout_groups=max_active_rollout_groups,
             window_size=window_size,
-        )
-
-        # Overlaps each step's model state dict handoff (push -> pull -> buffer-slot release) with the next step's fwd/bwd
-        self._model_state_dict_sync = ModelStateDictSync(
-            trainer=self.trainer,
-            generator_router=self.generator_router,
-            group_buffer=self._group_buffer,
-            num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
         )
 
         # training_sample_builder
@@ -1110,24 +1101,34 @@ class Controller(Configurable):
         *,
         num_training_steps: int,
     ) -> None:
-        """Run num_training_steps optimizer steps: train one packed batch, publish trainer weights,
-        then pull them into generators, log metrics.
+        """Run num_training_steps optimizer steps: train one packed batch, push the trainer's model
+        state dict, then pull it into the generators, log metrics.
 
-        NOTE: Model state dict sync is overlapped with the training step.
-        Trainer push:
-            - Called after optimizer.step()
-            - Awaited before next optimizer.step (weights changes then)
-        Generator pull:
-            - Called after push completes.
-            - Awaited before next push (weights changes then)
+        The push and pull of policy N overlap forward/backward N+1:
 
-        Impact on off-policiness: The buffer guarantees that no sample will be born stale,
-        as long as we call `self._group_buffer.release_active_groups` after the pull.
+            Trainer:    forward/backward N
+            Controller: await push N-1     (optimizer N must not mutate weights push N-1 stages)
+            Trainer:    optimizer N -> policy N
+            Controller: await pull N-1     (push N must not overwrite the TorchStore key mid-pull)
+            Controller: start push N -> pull N -> release groups, in the background
+                          |-> Trainer: stage policy N, TorchStore put_state_dict
+                          |-> Generators: prefetch policy N into pinned CPU memory, then load it
+                          |-> Group buffer: admit the next rollout groups
+            Trainer:    forward/backward N+1 (does not mutate persistent model state)
+
+        See `Trainer.push_model_state_dict` for why staging can overlap forward/backward, and
+        `VLLMGenerator.load_model_state_dict` for how a generator applies the load between steps.
+
+        Impact on off-policiness: no sample is born stale, because the buffer admits new rollout
+        groups only after the generators load the new policy.
 
         consumes: a TrainerStepBatch (training_batch_queue.get)
             waits for:    a TrainerStepBatch in the queue
             unblocked by: _batcher_loop training_batch_queue.put()
         """
+        # The previous step's push and pull, each returning its wall time; None before the first.
+        push_task: asyncio.Task[float] | None = None
+        pull_task: asyncio.Task[float] | None = None
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
             with sl.log_trace_span("sync_log_step"):
@@ -1188,7 +1189,7 @@ class Controller(Configurable):
                         "timing/step/blocking_trainer_push_model_state_dict"
                     ),
                 ):
-                    push_metrics = await self._model_state_dict_sync.wait_prev_push()
+                    push_s = await push_task if push_task is not None else 0.0
 
                 with (
                     sl.log_trace_span("optim_step"),
@@ -1218,11 +1219,14 @@ class Controller(Configurable):
                         "timing/step/blocking_generator_pull_model_state_dict"
                     ),
                 ):
-                    pull_metrics = await self._model_state_dict_sync.wait_prev_pull()
+                    pull_s = await pull_task if pull_task is not None else 0.0
 
-                # Overlap this step's push -> pull -> buffer-slot release with the next step's fwd/bwd.
-                self._model_state_dict_sync.start_async_push_pull(
-                    version=optimizer_result.policy_version
+                # Overlap this step's push -> pull -> group release with the next step's fwd/bwd.
+                push_task = asyncio.create_task(self._push_model_state_dict())
+                pull_task = asyncio.create_task(
+                    self._pull_model_state_dict_and_release_groups(
+                        optimizer_result.policy_version, after=push_task
+                    )
                 )
 
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
@@ -1246,8 +1250,14 @@ class Controller(Configurable):
                         *time_metrics,
                         *policy_age_panel,
                         # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
-                        *push_metrics,
-                        *pull_metrics,
+                        m.Metric(
+                            "timing/weight_sync/trainer_push_model_state_dict",
+                            m.NoReduce(push_s),
+                        ),
+                        m.Metric(
+                            "timing/weight_sync/generator_pull_model_state_dict",
+                            m.NoReduce(pull_s),
+                        ),
                         *compute_perf_ratio_metrics(
                             num_global_valid_tokens=int(
                                 packed.global_loss_token_counts[0]
@@ -1257,5 +1267,36 @@ class Controller(Configurable):
                     ],
                 )
 
-        # Finish the last in-flight sync so generators hold the final weights for post-validation.
-        await self._model_state_dict_sync.wait_inflight_push_pull()
+        # Finish the last push and pull so generators hold the final weights for post-validation.
+        if push_task is not None:
+            await push_task
+            await pull_task
+
+    async def _push_model_state_dict(self) -> float:
+        """Push the trainer's model state dict to TorchStore; returns its wall time in seconds."""
+        with sl.log_trace_span("trainer_push_model_state_dict"):
+            start = time.perf_counter()
+            await self.trainer.push_model_state_dict.call()
+            return time.perf_counter() - start
+
+    async def _pull_model_state_dict_and_release_groups(
+        self, version: int, *, after: asyncio.Task[float]
+    ) -> float:
+        """Once the push ``after`` lands, load policy ``version`` into every generator, then admit
+        the next rollout groups; returns the pull's wall time in seconds."""
+        await after
+        with sl.log_trace_span("generator_pull_model_state_dict"):
+            start = time.perf_counter()
+            await self.generator_router.pull_model_state_dict.call_one(version)
+            pull_s = time.perf_counter() - start
+        # TODO(perf): pull_model_state_dict awaits ALL generators before we release any buffer slots,
+        #   so a generator that finishes its pull early idles until the slowest one. Investigate
+        #   per-generator release (router surfaces each pull's completion -> release that generator's
+        #   share / resume it early); needs the born-fresh invariant to hold per-generator, not globally.
+
+        # Born-fresh: admit the next groups only now that the generators are on `version`, so a new
+        # rollout starts at the current version (keeps policy_age within the derived freshness bound).
+        await self._group_buffer.release_active_groups(
+            self.config.async_loop.num_prompts_per_train_step, reason="trained"
+        )
+        return pull_s

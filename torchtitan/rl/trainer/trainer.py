@@ -358,7 +358,19 @@ class Trainer(Configurable):
 
     @sl.log_trace_span("push_model_state_dict")
     async def push_model_state_dict(self) -> None:
-        """Publish a CPU snapshot of model weights for generators to pull."""
+        """Publish a CPU snapshot of model weights for generators to pull.
+
+        The controller overlaps this push with the next forward/backward (see
+        `Controller._trainer_loop`), which is safe because:
+        - The staging stream waits for the last optimizer step before copying, and
+          forward/backward does not mutate persistent model state.
+        - The CUDA-event wait and the TorchStore put run together in an
+          `asyncio.to_thread` worker, so they progress while a synchronous
+          forward/backward blocks this actor's event loop.
+        - The controller awaits this push before the next optimizer step mutates
+          the model, and awaits the generators' pull of it before the next push
+          reuses the staging buffers and TorchStore key.
+        """
 
         model_state_dict = self.model.state_dict()
         # Today we copy the model into reusable pinned CPU buffers before calling

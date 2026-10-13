@@ -180,7 +180,7 @@ class InterGeneratorRouter(Actor, Configurable):
         """
         # TODO(pytorch/torchtitan#5253): drain inside the generator, so this wait goes away.
         # A turn pinned to a draining generator waits for it: all generators drain in the same
-        # model state dict sync (hot_swap=False), so re-pinning would pile those sessions onto whichever
+        # model state dict load (hot_swap=False), so re-pinning would pile those sessions onto whichever
         # serves first.
         pinned = self._strategy.pinned_candidate(routing_ctx)
         if pinned is not None:
