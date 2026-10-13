@@ -103,7 +103,6 @@ class InterGeneratorRouter(Actor, Configurable):
         config: Config,
         *,
         generators: Sequence[Any],
-        forward_session_releases: bool = False,
     ):
         num_actors = math.prod(current_size().values())
         assert (
@@ -111,8 +110,6 @@ class InterGeneratorRouter(Actor, Configurable):
         ), f"InterGeneratorRouter must be a singleton, but its mesh holds {num_actors} actors"
 
         self._config = config
-        # Tell generators when a session ends, so they release its held KV (`hold_session_kv`).
-        self._forward_session_releases = forward_session_releases
         self._generators = [
             _GeneratorHandle(
                 actor=generator,
@@ -203,7 +200,7 @@ class InterGeneratorRouter(Actor, Configurable):
         pinned = self._strategy.pinned_candidate(RoutingContext(session_id=session_id))
         self._strategy.release_session(session_id)
         # Without a pin (non-sticky routing), `release_groups` frees the held KV at group end.
-        if self._forward_session_releases and pinned is not None:
+        if pinned is not None:
             await pinned.rank0_actor.release_sessions.call_one([session_id])
 
     async def _fanout(

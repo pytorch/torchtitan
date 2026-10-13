@@ -4,15 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""SessionKVHolder on vLLM's real KV cache manager: 1 attention group + 3 Mamba "align" groups,
-16-token blocks standing in for Qwen3.5's 1,152."""
+"""VLLMSessionKVHolder on vLLM's real KV cache manager: 1 attention group + 3 Mamba "align"
+groups, 16-token blocks standing in for Qwen3.5's 1,152."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from torchtitan.rl.session_kv_holder import SessionKVHolder
+from torchtitan.rl.session_kv_holder import VLLMSessionKVHolder
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -104,18 +104,27 @@ def _churn(manager, tag: str) -> None:
         manager.free(request)
 
 
+def _scheduler(manager, max_num_scheduled_tokens=0, **attrs) -> SimpleNamespace:
+    """The vLLM scheduler attributes the holder reads."""
+    return SimpleNamespace(
+        kv_cache_manager=manager,
+        vllm_config=SimpleNamespace(speculative_config=None),
+        max_num_scheduled_tokens=max_num_scheduled_tokens,
+        **attrs,
+    )
+
+
 def _holder(
     manager, requests, floor=0, running=(), waiting=(), skipped_waiting=()
-) -> SessionKVHolder:
-    scheduler = SimpleNamespace(
-        kv_cache_manager=manager,
-        max_num_scheduled_tokens=0,
+) -> VLLMSessionKVHolder:
+    scheduler = _scheduler(
+        manager,
         requests=requests,
         running=running,
         waiting=waiting,
         skipped_waiting=skipped_waiting,
     )
-    holder = SessionKVHolder(scheduler)
+    holder = VLLMSessionKVHolder.Config().build(scheduler=scheduler)
     holder.free_floor_blocks = floor
     return holder
 
@@ -284,9 +293,21 @@ def test_next_turn_moves_the_hold_and_release_frees_everything(manager):
 
 def test_free_floor_is_the_watermark_plus_one_prefill_chunk(manager):
     manager.watermark_blocks = 8  # vLLM's watermark=0.1 of the 80-block pool
-    scheduler = SimpleNamespace(kv_cache_manager=manager, max_num_scheduled_tokens=100)
+    scheduler = _scheduler(manager, max_num_scheduled_tokens=100)
+    holder = VLLMSessionKVHolder.Config().build(scheduler=scheduler)
     # watermark 8 + 4 KV cache groups x cdiv(100, 16) = 7 chunk blocks
-    assert SessionKVHolder(scheduler).free_floor_blocks == 8 + 4 * 7
+    assert holder.free_floor_blocks == 8 + 4 * 7
+
+
+def test_holder_rejects_partial_block_hits_and_speculative_decoding(manager):
+    manager.coordinator.enable_partial_hash_hits = True
+    with pytest.raises(ValueError, match="does not support partial-block prefix hits"):
+        VLLMSessionKVHolder.Config().build(scheduler=_scheduler(manager))
+    manager.coordinator.enable_partial_hash_hits = False
+    scheduler = _scheduler(manager)
+    scheduler.vllm_config.speculative_config = object()
+    with pytest.raises(ValueError, match="does not support speculative decoding"):
+        VLLMSessionKVHolder.Config().build(scheduler=scheduler)
 
 
 @pytest.mark.parametrize("queue", ["waiting", "skipped_waiting"])

@@ -50,7 +50,7 @@ from torchtitan.rl.model.vllm_registry import (
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
 from torchtitan.rl.rollout.types import Completion
-from torchtitan.rl.session_kv_holder import SessionKVHolder
+from torchtitan.rl.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
@@ -868,16 +868,20 @@ class VLLMGenerator(Configurable):
         vllm_stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
-        hold_session_kv: bool = False
+        session_kv_holder: VLLMSessionKVHolder.Config | None = None
         """Hold each multi-turn session's reusable prefix (attention and Gated-DeltaNet state
         blocks) from the end of a turn's prefill until its next turn or its end, so no other
-        request evicts it (see `SessionKVHolder`). Held blocks count in vLLM's KV usage."""
+        request evicts it (see `VLLMSessionKVHolder`). Held blocks count in vLLM's KV usage.
+        None: off."""
 
         def __post_init__(self):
-            if self.hold_session_kv and self.reset_kv_cache_on_weight_sync:
+            if (
+                self.session_kv_holder is not None
+                and self.reset_kv_cache_on_weight_sync
+            ):
                 raise ValueError(
-                    "hold_session_kv needs reset_kv_cache_on_weight_sync=False: vLLM cannot reset "
-                    "the prefix cache while blocks are held"
+                    "session_kv_holder needs reset_kv_cache_on_weight_sync=False: vLLM cannot "
+                    "reset the prefix cache while blocks are held"
                 )
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -1154,18 +1158,11 @@ class VLLMGenerator(Configurable):
         self._engine_loop_queue = EngineLoopQueue(self._engine_event_loop)
 
         # Every rank holds the same blocks in its own scheduler; only the engine thread touches them.
-        self._session_kv: SessionKVHolder | None = None
-        if config.hold_session_kv:
-            scheduler = self._engine.engine_core.engine_core.scheduler
-            # Partial-block prefix hits or speculative decoding move the replay point away from
-            # the prompt-end block that SessionKVHolder holds.
-            assert (
-                not scheduler.kv_cache_manager.coordinator.enable_partial_hash_hits
-            ), "hold_session_kv does not support partial-block prefix hits"
-            assert (
-                self._engine.vllm_config.speculative_config is None
-            ), "hold_session_kv does not support speculative decoding"
-            self._session_kv = SessionKVHolder(scheduler)
+        self._session_kv: VLLMSessionKVHolder | None = None
+        if config.session_kv_holder is not None:
+            self._session_kv = config.session_kv_holder.build(
+                scheduler=self._engine.engine_core.engine_core.scheduler
+            )
 
         # `_engine_loop` running on the engine thread's event loop, as a future any thread can await;
         # None until start_engine_loop starts it.
@@ -1557,33 +1554,35 @@ class VLLMGenerator(Configurable):
         # together are coalesced into one, at the highest version: every pull reads the latest push from
         # one TorchStore key, so the weights read are at least as new as any version requested.
         if pending_pull_messages:
-            return LoopDecision(
+            decision = LoopDecision(
                 action=LoopAction.PULL_MODEL_STATE_DICT,
                 requests_per_dp_rank=[],
                 pull_version=max(pull.version for pull in pending_pull_messages),
-                released_session_ids=released_session_ids,
-                released_group_ids=released_group_ids,
             )
-
-        # `LoopAction.STEP`: admit whatever is pending (may be empty -> just keep stepping in-flight work).
-        for request in pending_engine_requests:
-            if self.config.reset_kv_cache_on_weight_sync:
-                # Each pull resets all KV, so requests need no pin or salt.
-                request.min_policy_version = self.policy_version
-            else:
-                request.min_policy_version = self._group_min_policy_versions.setdefault(
-                    request.group_id, self.policy_version
-                )
-        requests_per_dp_rank = self._request_dispatcher.rank0_route(
-            pending_engine_requests
-        )
-        pending_engine_requests.clear()
-        return LoopDecision(
-            action=LoopAction.STEP,
-            requests_per_dp_rank=requests_per_dp_rank,
-            released_session_ids=released_session_ids,
-            released_group_ids=released_group_ids,
-        )
+        else:
+            # `LoopAction.STEP`: admit whatever is pending (may be empty -> just keep stepping in-flight work).
+            for request in pending_engine_requests:
+                if self.config.reset_kv_cache_on_weight_sync:
+                    # Each pull resets all KV, so requests need no pin or salt.
+                    request.min_policy_version = self.policy_version
+                else:
+                    request.min_policy_version = (
+                        self._group_min_policy_versions.setdefault(
+                            request.group_id, self.policy_version
+                        )
+                    )
+            requests_per_dp_rank = self._request_dispatcher.rank0_route(
+                pending_engine_requests
+            )
+            pending_engine_requests.clear()
+            decision = LoopDecision(
+                action=LoopAction.STEP,
+                requests_per_dp_rank=requests_per_dp_rank,
+            )
+        # Every rank releases these sessions before it acts on the decision.
+        decision.released_session_ids = released_session_ids
+        decision.released_group_ids = released_group_ids
+        return decision
 
     def _build_sampling_params(self, sampling: SamplingConfig) -> SamplingParams:
         """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1).
@@ -1637,7 +1636,7 @@ class VLLMGenerator(Configurable):
 
     async def release_sessions(self, session_ids: list[str]) -> None:
         """Release the held KV of sessions whose rollout ended (rank 0; a no-op without
-        ``hold_session_kv``).
+        ``session_kv_holder``).
 
         Args:
             session_ids: Routing session ids with no more generation calls.
@@ -1934,4 +1933,4 @@ class LoopDecision:
 
     released_session_ids: list[str] = field(default_factory=list)
     released_group_ids: list[int] = field(default_factory=list)
-    # sessions (and groups) whose held KV every rank releases before acting (hold_session_kv)
+    # sessions (and groups) whose held KV every rank releases before acting (session_kv_holder)
