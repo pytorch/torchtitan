@@ -26,11 +26,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    apply_transforms,
-    ModelConfigConverter,
-    TokenDispatcherTransform,
-)
+from torchtitan.config.transform import ModelConfigConverter, TokenDispatcherTransform
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
@@ -55,7 +51,10 @@ from torchtitan_recipes.rl.alphabet_sort import (
     rl_grpo_qwen3_0_6b_varlen_no_compile,
 )
 
-from torchtitan_recipes.rl.model_configs import build_rl_model_configs
+from torchtitan_recipes.rl.model_configs import (
+    apply_rl_transforms,
+    build_rl_model_configs,
+)
 
 
 def rl_grpo_qwen3_0_6b_varlen_checkpoint_test(
@@ -68,7 +67,7 @@ def rl_grpo_qwen3_0_6b_varlen_checkpoint_test(
     return config
 
 
-def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
+def _gpt_oss_debug_varlen_config(*, seq_len: int = 2048) -> Controller.Config:
     """Small GPT-OSS debug config (random init) to exercise the full RL loop."""
     num_samples_per_prompt = 8
     trainer_parallelism = ParallelismConfig(
@@ -88,7 +87,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
@@ -141,6 +140,11 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             ),
         ),
     )
+    return config
+
+
+def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
+    return apply_rl_transforms(_gpt_oss_debug_varlen_config(seq_len=seq_len))
 
 
 def rl_grpo_gpt_oss_debug_varlen_no_compile(
@@ -184,10 +188,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    # Local compile regions do not support batch-invariant mode.
-    for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
@@ -251,9 +252,14 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             reset_kv_cache_on_weight_sync=True,
         ),
     )
+    config = apply_rl_transforms(config)
+    # Local compile regions do not support batch-invariant mode.
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.local_compile_regions = []
+    return config
 
 
-def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
+def _qwen3_moe_debug_varlen_config() -> Controller.Config:
     """Debug MoE config with EP+TP on generator (8 GPUs: 4 gen + 4 train).
 
     Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
@@ -281,7 +287,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=5,
@@ -334,6 +340,11 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             ),
         ),
     )
+    return config
+
+
+def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
+    return apply_rl_transforms(_qwen3_moe_debug_varlen_config())
 
 
 def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
@@ -350,7 +361,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     backward-able DeepEP path, while the generator uses the CUDA-graph-compatible EXPAND
     layout. The ``fused_swiglu`` override applies to both models.
     """
-    config = rl_grpo_qwen3_moe_debug_varlen()
+    config = _qwen3_moe_debug_varlen_config()
     config.override = OverrideConfig(
         imports=["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
     )
@@ -358,37 +369,35 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     # vLLM's per-step token budget; it sizes the generator's DeepEP buffers.
     max_num_batched_tokens = 2048
     config.generator.max_num_batched_tokens = max_num_batched_tokens
-    config.trainer = apply_transforms(
-        config.trainer,
-        [
-            TokenDispatcherTransform(
-                dispatcher=DeepEPTokenDispatcher,
-                # Each EP rank dispatches one CP x TP shard of a microbatch.
-                num_max_tokens_per_rank=(
-                    config.trainer.training.num_tokens_per_microbatch_per_dp_rank
-                    // (
-                        config.trainer.parallelism.context_parallel_degree
-                        * config.trainer.parallelism.tensor_parallel_degree
-                    )
-                ),
-            )
-        ],
+    trainer_transforms = [
+        TokenDispatcherTransform(
+            dispatcher=DeepEPTokenDispatcher,
+            # Each EP rank dispatches one CP x TP shard of a microbatch.
+            num_max_tokens_per_rank=(
+                config.trainer.training.num_tokens_per_microbatch_per_dp_rank
+                // (
+                    config.trainer.parallelism.context_parallel_degree
+                    * config.trainer.parallelism.tensor_parallel_degree
+                )
+            ),
+        )
+    ]
+    generator_transforms = [
+        TokenDispatcherTransform(
+            dispatcher=DeepEPTokenDispatcher,
+            # vLLM shards each engine step's token budget across TP ranks.
+            num_max_tokens_per_rank=(
+                max_num_batched_tokens
+                // config.generator.parallelism.tensor_parallel_degree
+            ),
+            kwargs={"cuda_graph_compatible": True},
+        )
+    ]
+    return apply_rl_transforms(
+        config,
+        trainer_transforms=trainer_transforms,
+        generator_transforms=generator_transforms,
     )
-    config.generator = apply_transforms(
-        config.generator,
-        [
-            TokenDispatcherTransform(
-                dispatcher=DeepEPTokenDispatcher,
-                # vLLM shards each engine step's token budget across TP ranks.
-                num_max_tokens_per_rank=(
-                    max_num_batched_tokens
-                    // config.generator.parallelism.tensor_parallel_degree
-                ),
-                kwargs={"cuda_graph_compatible": True},
-            )
-        ],
-    )
-    return config
 
 
 def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
@@ -429,10 +438,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    # Local compile regions do not support batch-invariant mode.
-    for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
@@ -491,9 +497,14 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
             reset_kv_cache_on_weight_sync=True,
         ),
     )
+    config = apply_rl_transforms(config)
+    # Local compile regions do not support batch-invariant mode.
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.local_compile_regions = []
+    return config
 
 
-def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
+def _qwen3_5_debug_varlen_config(*, seq_len: int = 2048) -> Controller.Config:
     """Random-init Qwen3.5 GRPO config for CI."""
     num_samples_per_prompt = 8
     trainer_parallelism = ParallelismConfig(
@@ -512,7 +523,7 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=5,
@@ -567,13 +578,18 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             ),
         ),
     )
+    return config
+
+
+def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
+    return apply_rl_transforms(_qwen3_5_debug_varlen_config(seq_len=seq_len))
 
 
 def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
     *, seq_len: int = 2048
 ) -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5 GRPO config for CI."""
-    config = rl_grpo_qwen3_5_debug_varlen(seq_len=seq_len)
+    config = _qwen3_5_debug_varlen_config(seq_len=seq_len)
     config.async_loop = dataclasses.replace(config.async_loop, target_offpolicy_steps=0)
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -594,6 +610,7 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
     )
+    config = apply_rl_transforms(config)
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
         model_config.local_compile_regions = []
@@ -609,8 +626,7 @@ def _kimi_k3_rl_model_configs(
     generator_parallelism: InferenceParallelismConfig,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> tuple[Decoder.Config, Decoder.Config]:
-    """Kimi K3 ``(trainer, generator)`` model configs for RL, with the lm_head
-    fp32 cast always on and no local compile regions."""
+    """Build the Kimi K3 base model configs for both RL roles."""
     trainer_model, generator_model = build_rl_model_configs(
         build_kimi_k3_model_config,
         flavor,
@@ -620,12 +636,10 @@ def _kimi_k3_rl_model_configs(
         attn_backend=attn_backend,
         converters=converters,
     )
-    for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
     return trainer_model, generator_model
 
 
-def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
+def _kimi_k3_debug_varlen_config(*, seq_len: int = 2048) -> Controller.Config:
     """Random-init Kimi K3 GRPO config for Blackwell integration testing."""
     trainer_parallelism = ParallelismConfig(
         data_parallel_shard_degree=2,
@@ -643,7 +657,7 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=5,
@@ -697,6 +711,14 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             ),
         ),
     )
+    return config
+
+
+def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
+    config = apply_rl_transforms(_kimi_k3_debug_varlen_config(seq_len=seq_len))
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.local_compile_regions = []
+    return config
 
 
 def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config:
@@ -725,6 +747,9 @@ def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
     )
+    config = apply_rl_transforms(config)
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.local_compile_regions = []
     return config
 
 
@@ -732,7 +757,7 @@ def rl_grpo_kimi_k3_debug_varlen_batch_invariant(
     *, seq_len: int = 2048
 ) -> Controller.Config:
     """On-policy, batch-invariant random-weight Kimi K3 GRPO config."""
-    return _set_kimi_k3_batch_invariant(rl_grpo_kimi_k3_debug_varlen(seq_len=seq_len))
+    return _set_kimi_k3_batch_invariant(_kimi_k3_debug_varlen_config(seq_len=seq_len))
 
 
 def _configure_ci(
@@ -793,7 +818,7 @@ def rl_grpo_fsdp2_gen_tp2_compile() -> Controller.Config:
 
 
 def rl_grpo_moe_debug_tp4_ep4() -> Controller.Config:
-    config = rl_grpo_gpt_oss_debug_varlen_no_compile(seq_len=1024)
+    config = _gpt_oss_debug_varlen_config(seq_len=1024)
     config.trainer.parallelism.data_parallel_shard_degree = 1
     config.trainer.parallelism.tensor_parallel_degree = 4
     config.trainer.parallelism.expert_parallel_degree = 4
@@ -810,6 +835,7 @@ def rl_grpo_moe_debug_tp4_ep4() -> Controller.Config:
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
     )
+    config = apply_rl_transforms(config)
     for model_config in (config.trainer.model, config.generator.model):
         model_config.local_compile_regions = []
     # TODO: use FULL CUDA graphs once GPT-OSS CI enables a
@@ -927,7 +953,7 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     from torchtitan.distributed.activation_checkpoint import RegionAC
     from torchtitan.models.common.dist_moe import DistMoeRuntime
 
-    config = rl_grpo_qwen3_moe_debug_varlen()
+    config = _qwen3_moe_debug_varlen_config()
     # Full activation checkpointing would replay dist_moe's forward in backward and
     # corrupt its activation planner; RegionAC with no saved regions does not.
     config.trainer.activation_checkpoint = RegionAC.Config(save_regions=[])
@@ -945,6 +971,4 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
         max_generated_tokens=128,
         use_hf_assets_from_env=False,
     )
-    config.trainer = apply_transforms(config.trainer, [DistMoeTransform()])
-    config.generator = apply_transforms(config.generator, [DistMoeTransform()])
-    return config
+    return apply_rl_transforms(config, shared_transforms=[DistMoeTransform()])

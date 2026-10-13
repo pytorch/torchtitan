@@ -71,6 +71,13 @@ LoRA-transformed tree can replace an adapter config.
 See the [RL recipe example](../../rl/README.md#write-an-experiment) for use with
 trainer and generator configs.
 
+RL recipes use `apply_rl_transforms` from
+`torchtitan_recipes.rl.model_configs` after configuring both roles. It combines
+shared RL defaults with shared and role-specific transforms and calls
+`apply_transforms` once per role. `build_rl_model_configs` constructs the base
+pair without applying defaults, so all transforms participate in the same
+ordering and conflict checks.
+
 NOTE: With quantization followed by LoRA, LoRA freezes the original weights,
 but the current quantized linear implementations still regenerate quantized
 weight operands on every forward or FSDP unshard. This is avoidable work for

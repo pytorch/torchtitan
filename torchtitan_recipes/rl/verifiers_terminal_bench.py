@@ -69,7 +69,10 @@ from torchtitan.rl.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
 
-from torchtitan_recipes.rl.model_configs import build_rl_model_configs
+from torchtitan_recipes.rl.model_configs import (
+    apply_rl_transforms,
+    build_rl_model_configs,
+)
 
 _ENV_SERVER_WORKERS = 16
 
@@ -178,7 +181,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="./assets/hf/Qwen3.5-9B",
         dump_folder="outputs/rl/qwen35_9b_terminal_bench",
         rollout_recorder=RolloutSampleRecorder.Config(
@@ -264,6 +267,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             ),
         ),
     )
+    return apply_rl_transforms(config)
 
 
 def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
@@ -321,7 +325,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="./assets/hf/Qwen3.5-35B-A3B",
         dump_folder="outputs/rl/qwen35_35b_a3b_terminal_bench",
         rollout_recorder=RolloutSampleRecorder.Config(
@@ -407,3 +411,4 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             ),
         ),
     )
+    return apply_rl_transforms(config)

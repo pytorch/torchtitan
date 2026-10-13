@@ -48,7 +48,10 @@ from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 
-from torchtitan_recipes.rl.model_configs import build_rl_model_configs
+from torchtitan_recipes.rl.model_configs import (
+    apply_rl_transforms,
+    build_rl_model_configs,
+)
 
 # TODO: Enable CUDA graphs for RL trainers after eager/graph numerics parity is
 # verified.
@@ -121,7 +124,7 @@ def _qwen3_4b_verifiers_config(
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="./assets/hf/Qwen3-4B-Base",
         dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
@@ -195,6 +198,7 @@ def _qwen3_4b_verifiers_config(
             ),
         ),
     )
+    return apply_rl_transforms(config)
 
 
 def rl_dapo_qwen3_4b_verifiers_8k() -> Controller.Config:

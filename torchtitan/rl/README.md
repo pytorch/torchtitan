@@ -135,7 +135,7 @@ def my_experiment() -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    return Controller.Config(
+    config = Controller.Config(
         rollouter=rollouter,
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         trainer=Trainer.Config(
@@ -145,18 +145,41 @@ def my_experiment() -> Controller.Config:
             model=generator_model, parallelism=generator_parallelism, ...
         ),
     )
+    return apply_rl_transforms(config)
 ```
 
 The trainer and generator each own a model config, built and sharded for that
 role's parallelism. They must use the same model class; keeping them otherwise
 aligned (same architecture, same weights layout) is the recipe's job, and
-`build_rl_model_configs` builds both for their respective parallelisms and
-applies shared RL defaults with `transform_model_config_`. Its flags
-`fp32_lm_head=True` and `freeze_moe_routing=True` apply
-`LMHeadFP32OutputTransform` and `FreezeMoERoutingTransform` to both roles.
-Pass `False` to skip either default. Per-role differences, such as a
-CUDA-graph-compatible MoE dispatcher for the generator, are model config
-transforms applied to one role (`apply_transforms(config.generator, ...)`).
+`build_rl_model_configs` builds both base models for their respective
+parallelisms. After setting all trainer and generator options, call
+`apply_rl_transforms` once on the complete controller config. Import both helpers
+from `torchtitan_recipes.rl.model_configs`.
+
+`apply_rl_transforms` combines RL defaults, `shared_transforms`, and each role's
+`trainer_transforms` or `generator_transforms` into one ordered application per
+model. Its flags `fp32_lm_head=True` and `freeze_moe_routing=True` include
+`LMHeadFP32OutputTransform` and `FreezeMoERoutingTransform` for both roles; pass
+`False` to skip either default. The helper copies the controller config, applies
+each role's complete list through `apply_transforms`, validates both role configs,
+and validates the controller after updating both models.
+
+Role-specific transforms can use the final training or inference settings:
+
+```python
+return apply_rl_transforms(
+    config,
+    trainer_transforms=[trainer_dispatch_transform],
+    generator_transforms=[generator_dispatch_transform],
+)
+```
+
+Set companion runtime configs, such as `trainer.dist_moe_runtime` and
+`generator.dist_moe_runtime`, before this call. Derived recipes that add model
+transforms should compose through an untransformed base config helper and apply
+their complete transform lists at the end. A finished base recipe can be reused
+for changes that do not apply more model transforms. Ordering and conflict checks
+only cover the transforms supplied to one application.
 
 RL log-probability and KL calculations need the LM head logits in fp32.
 `LMHeadFP32OutputTransform` uses `HiMidLoLinear` to preserve the vocabulary
@@ -165,7 +188,7 @@ recover the lost precision. Recipes do not need to apply this transform again.
 
 Local compile regions do not support batch-invariant mode. Recipes using that
 mode, or otherwise disabling local compilation, clear
-`model.local_compile_regions` after building the shared RL model configs,
+`model.local_compile_regions` after applying RL transforms,
 because the LM head transform adds `fp32_to_bf16_split` to that list.
 `Controller.Config.override` applies registered overrides to both models.
 
