@@ -13,6 +13,7 @@ import torch_remat as remat
 from torch.distributed._functional_collectives import all_to_all_single
 from torch.distributed.tensor import DeviceMesh
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_sparse_mesh
 from torchtitan.models.base.module import Module
 from torchtitan.ops.scatter_add import deterministic_scatter_add
@@ -24,6 +25,10 @@ class LocalDispatchMetadata:
 
     token_indices_experts_sorted_N: torch.Tensor  # noqa: N815
     topk_scores_experts_sorted_N: torch.Tensor  # noqa: N815
+    # Inference only (no autograd): the expert-sorting permutation and the unsorted
+    # scores, for the gather-sum combine.
+    expert_sort_N: torch.Tensor | None = None  # noqa: N815
+    topk_scores_TK: torch.Tensor | None = None  # noqa: N815
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -122,6 +127,23 @@ class LocalTokenDispatcher(Module):
                 dst={"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
             )
         # R = N (no EP all-to-all)
+        if not torch.is_grad_enabled():
+            # Inference: each token owns exactly top_k expert rows, so a compiled
+            # combine gathers them back instead of scatter-adding (no index_put
+            # accumulate or asserts); it needs the expert sort, not just its token ids.
+            expert_sort_N = torch.argsort(topk_expert_ids_TK.view(-1), stable=True)
+            token_indices_experts_sorted_N = expert_sort_N // self.top_k
+            metadata = LocalDispatchMetadata(
+                token_indices_experts_sorted_N=token_indices_experts_sorted_N,
+                topk_scores_experts_sorted_N=topk_scores_TK.view(-1)[expert_sort_N],
+                expert_sort_N=expert_sort_N,
+                topk_scores_TK=topk_scores_TK,
+            )
+            return (
+                x_TD[token_indices_experts_sorted_N],
+                num_local_tokens_per_expert_E,
+                metadata,
+            )
         (
             routed_input_RD,
             token_indices_experts_sorted_N,
@@ -148,6 +170,15 @@ class LocalTokenDispatcher(Module):
         Returns:
             out_TD: ``(T, D)`` combined output.
         """
+        if metadata.expert_sort_N is not None:
+            return _gather_weighted_sum(
+                routed_output_ND=routed_output_RD,
+                expert_sort_N=metadata.expert_sort_N,
+                topk_scores_TK=metadata.topk_scores_TK,
+                topk_scores_experts_sorted_N=metadata.topk_scores_experts_sorted_N,
+                token_indices_experts_sorted_N=metadata.token_indices_experts_sorted_N,
+                x_TD=x_TD,
+            )
         # The scatter-add reads the expert outputs with bare ops.
         remat.recompute_needs_tensor(routed_output_RD)
         return self._score_and_scatter_add(
@@ -157,8 +188,8 @@ class LocalTokenDispatcher(Module):
             x_TD,
         )
 
+    @staticmethod
     def _score_and_scatter_add(
-        self,
         routed_output_ND: torch.Tensor,
         topk_scores_N: torch.Tensor,
         token_indices_N: torch.Tensor,
@@ -176,6 +207,48 @@ class LocalTokenDispatcher(Module):
             token_indices_N.reshape(-1, 1).expand(-1, x_TD.shape[-1]),
             routed_output_ND,
         )
+
+
+@local_compile("moe_combine", batch_invariant=False)
+def _gather_weighted_sum(
+    routed_output_ND: torch.Tensor,
+    expert_sort_N: torch.Tensor,
+    topk_scores_TK: torch.Tensor,
+    topk_scores_experts_sorted_N: torch.Tensor,
+    token_indices_experts_sorted_N: torch.Tensor,
+    x_TD: torch.Tensor,
+) -> torch.Tensor:
+    """Combine expert outputs per token as a score-weighted sum of its top_k rows.
+
+    Compiled, it gathers each token's rows through the inverse of ``expert_sort_N``
+    and accumulates in float32 in one kernel. Eager keeps
+    ``LocalTokenDispatcher._score_and_scatter_add``: unrolled over K, the gather-sum
+    is about 3K eager kernels.
+
+    Example:
+        expert_sort_N = [1, 3, 0, 2] puts routes (t, k) = (0, 1), (1, 1), (0, 0), (1, 0)
+        in rows 0..3, so out[0] = scores[0, 0] * rows[2] + scores[0, 1] * rows[0].
+    """
+    if not torch.compiler.is_compiling():
+        return LocalTokenDispatcher._score_and_scatter_add(
+            routed_output_ND=routed_output_ND,
+            topk_scores_N=topk_scores_experts_sorted_N,
+            token_indices_N=token_indices_experts_sorted_N,
+            x_TD=x_TD,
+        )
+    num_tokens, top_k = topk_scores_TK.shape
+    row_of_route_N = torch.empty_like(expert_sort_N)
+    row_of_route_N[expert_sort_N] = torch.arange(
+        expert_sort_N.numel(), device=expert_sort_N.device
+    )
+    rows_TKD = routed_output_ND[row_of_route_N].view(
+        num_tokens, top_k, routed_output_ND.shape[-1]
+    )
+    scores_TK = topk_scores_TK.float()
+    out_TD = rows_TKD[:, 0].float() * scores_TK[:, 0:1]
+    for k in range(1, top_k):
+        out_TD = out_TD + rows_TKD[:, k].float() * scores_TK[:, k : k + 1]
+    return out_TD.to(routed_output_ND.dtype)
 
 
 class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
