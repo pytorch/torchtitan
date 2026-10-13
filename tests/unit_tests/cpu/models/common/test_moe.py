@@ -736,9 +736,14 @@ class TestLocalTokenDispatcherInference(unittest.TestCase):
         ids_TK = torch.stack([torch.randperm(E)[:K] for _ in range(T)])
         expert_rows_TKD = (x_TD[:, None, :] * (ids_TK[..., None] + 1)).double()
         expected_TD = (expert_rows_TKD * scores_TK.double()[..., None]).sum(1).bfloat16()
-        compiled = torch.compile(token_dispatcher._gather_weighted_sum, backend="eager")
-        with torch.no_grad(), patch.object(
-            token_dispatcher, "_gather_weighted_sum", compiled
+        with torch.no_grad(), patch.multiple(
+            token_dispatcher,
+            _gather_weighted_sum=torch.compile(
+                token_dispatcher._gather_weighted_sum, backend="eager"
+            ),
+            _sort_routes_and_gather=torch.compile(
+                token_dispatcher._sort_routes_and_gather, backend="eager"
+            ),
         ):
             actual_TD = self._dispatch_combine(x_TD, scores_TK, ids_TK, E)
         torch.testing.assert_close(actual_TD, expected_TD, rtol=0, atol=0)
@@ -754,6 +759,34 @@ class TestLocalTokenDispatcherInference(unittest.TestCase):
         with torch.no_grad():
             actual = self._dispatch_combine(x_TD, scores_TK, ids_TK, E)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_counting_sort_matches_stable_argsort(self):
+        import torchtitan.models.common.token_dispatcher as token_dispatcher
+
+        sort_routes = token_dispatcher._sort_routes_and_gather
+        compiled = torch.compile(sort_routes, backend="eager", fullgraph=True)
+        torch.manual_seed(0)
+        K, D, E = 4, 8, 5
+        for T in (37, 0):
+            x_TD = torch.randn(T, D)
+            scores_TK = torch.rand(T, K)
+            # Duplicate experts within a token, as router replay allows.
+            ids_TK = torch.randint(0, E, (T, K))
+            argsort_outputs = sort_routes(x_TD, scores_TK, ids_TK, E)  # eager: argsort
+            counting_outputs = compiled(x_TD, scores_TK, ids_TK, E)
+            with patch.object(
+                token_dispatcher, "_MAX_COUNTING_SORT_ONE_HOT_ELEMENTS", 0
+            ):
+                torch._dynamo.reset()
+                compiled_argsort_outputs = torch.compile(
+                    sort_routes, backend="eager", fullgraph=True
+                )(x_TD, scores_TK, ids_TK, E)
+            torch._dynamo.reset()
+            for argsort_t, counting_t, compiled_argsort_t in zip(
+                argsort_outputs, counting_outputs, compiled_argsort_outputs, strict=True
+            ):
+                self.assertTrue(torch.equal(counting_t, argsort_t))
+                self.assertTrue(torch.equal(compiled_argsort_t, argsort_t))
 
     def test_no_grad_dispatch_and_combine_with_zero_tokens(self):
         x_TD = torch.randn(0, 8)
