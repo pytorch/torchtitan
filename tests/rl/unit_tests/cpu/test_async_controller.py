@@ -8,6 +8,7 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import gc
 import json
 import logging
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.controller import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
+    GCTimer,
     MetricsTimer,
 )
 from torchtitan.rl.rollout import RolloutGroup
@@ -555,7 +557,7 @@ def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
     ratios = {
         metric.key: metric.value.value
         for metric in compute_perf_ratio_metrics(
-            num_global_valid_tokens=100, time_metrics=time_metrics
+            num_global_tokens=100, time_metrics=time_metrics
         )
     }
     assert ratios["perf/trainer/tokens_per_second_full_step"] == 50.0
@@ -569,16 +571,44 @@ def test_compute_perf_ratio_metrics_skips_missing_spans() -> None:
     keys = {
         metric.key
         for metric in compute_perf_ratio_metrics(
-            num_global_valid_tokens=100, time_metrics=time_metrics
+            num_global_tokens=100, time_metrics=time_metrics
         )
     }
     assert keys == {"perf/trainer/tokens_per_second_full_step"}
 
 
 def test_compute_perf_ratio_metrics_returns_empty_without_total() -> None:
-    assert (
-        compute_perf_ratio_metrics(num_global_valid_tokens=100, time_metrics=[]) == []
-    )
+    assert compute_perf_ratio_metrics(num_global_tokens=100, time_metrics=[]) == []
+
+
+def test_gc_timer_times_collections_per_generation() -> None:
+    gc_timer = GCTimer()
+    gc.disable()  # only the collections below run
+    try:
+        gc.collect(0)
+        cycle = []
+        cycle.append(cycle)  # garbage only a collection can free
+        del cycle
+        gc.collect(2)
+        values = {
+            (metric.key, type(metric.value)): metric.value.value
+            for metric in gc_timer.flush()
+        }
+    finally:
+        gc_timer.close()
+        gc.enable()
+    collections = [
+        values[(f"controller/gc/gen{g}/collections", m.Sum)] for g in range(3)
+    ]
+    seconds = [values[(f"controller/gc/gen{g}/seconds", m.Sum)] for g in range(3)]
+    max_s = [values[(f"controller/gc/gen{g}/seconds", m.Max)] for g in range(3)]
+    assert collections == [1, 0, 1]
+    assert values[("controller/gc/gen2/collected", m.Sum)] >= 1
+    assert seconds[1] == max_s[1] == 0.0
+    assert values[("perf/controller/gc_seconds", m.Sum)] == sum(seconds)
+    assert values[("perf/controller/gc_seconds", m.Max)] == max(max_s) > 0.0
+    gc.collect(0)  # after close(): not timed, and the flush above reset the totals
+    assert all(metric.value.value == 0.0 for metric in gc_timer.flush())
 
 
 def test_metrics_timer_flush_drains() -> None:

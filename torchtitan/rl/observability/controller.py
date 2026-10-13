@@ -10,6 +10,7 @@
 # but components/ may not be the right home either.
 
 import contextlib
+import gc
 import logging
 import time
 from collections import defaultdict
@@ -56,6 +57,75 @@ class MetricsTimer:
         ]
 
 
+class GCTimer:
+    """Time this process spends in Python's garbage collector, per generation; flush() drains it per step.
+
+    Example:
+        gc_timer = GCTimer()  # registers a gc callback until close()
+        ...                   # collections run during the step
+        gc_timer.flush()
+        # -> [Metric("perf/controller/gc_seconds", Sum(1.9)),    # every collection this step
+        #     Metric("perf/controller/gc_seconds", Max(1.2)),    # the longest pause
+        #     ...,                                               # gen0, gen1: the same 4 keys as below
+        #     Metric("controller/gc/gen2/collections", Sum(2)),  # full collections
+        #     Metric("controller/gc/gen2/seconds", Sum(1.8)),    # time in them
+        #     Metric("controller/gc/gen2/seconds", Max(1.2)),    # the longest one
+        #     Metric("controller/gc/gen2/collected", Sum(310))]  # objects they freed
+        gc_timer.close()
+    """
+
+    def __init__(self) -> None:
+        self._start = time.perf_counter()
+        self._reset()
+        gc.callbacks.append(self._on_gc)
+
+    def _reset(self) -> None:
+        # One entry per GC generation: 0, 1, 2.
+        self._collections = [0, 0, 0]
+        self._total_s = [0.0, 0.0, 0.0]
+        self._max_s = [0.0, 0.0, 0.0]
+        self._collected = [0, 0, 0]
+
+    def _on_gc(self, phase: str, info: dict) -> None:
+        if phase == "start":
+            self._start = time.perf_counter()
+            return
+        # Wall time: if another thread takes the GIL during these callbacks, its run time counts too.
+        seconds = time.perf_counter() - self._start
+        generation = info["generation"]
+        self._collections[generation] += 1
+        self._total_s[generation] += seconds
+        self._max_s[generation] = max(self._max_s[generation], seconds)
+        self._collected[generation] += info["collected"]
+
+    def flush(self) -> list[m.Metric]:
+        """Return the GC metrics since the last flush, then reset."""
+        collections, total_s, max_s, collected = (
+            self._collections,
+            self._total_s,
+            self._max_s,
+            self._collected,
+        )
+        self._reset()
+        metrics = [
+            m.Metric("perf/controller/gc_seconds", m.Sum(sum(total_s))),
+            m.Metric("perf/controller/gc_seconds", m.Max(max(max_s))),
+        ]
+        # Not under perf/: the console prints every perf/ key.
+        for generation in range(3):
+            prefix = f"controller/gc/gen{generation}"
+            metrics += [
+                m.Metric(f"{prefix}/collections", m.Sum(collections[generation])),
+                m.Metric(f"{prefix}/seconds", m.Sum(total_s[generation])),
+                m.Metric(f"{prefix}/seconds", m.Max(max_s[generation])),
+                m.Metric(f"{prefix}/collected", m.Sum(collected[generation])),
+            ]
+        return metrics
+
+    def close(self) -> None:
+        gc.callbacks.remove(self._on_gc)
+
+
 def combine_microbatch_metrics(
     microbatch_metrics: list[dict[str, float]],
 ) -> dict[str, float]:
@@ -83,10 +153,11 @@ def combine_microbatch_metrics(
 
 
 def compute_perf_ratio_metrics(
-    *, num_global_valid_tokens: int, time_metrics: list[m.Metric]
+    *, num_global_tokens: int, time_metrics: list[m.Metric]
 ) -> list[m.Metric]:
     """Trainer-side timing ratios from the flushed step timers. A ratio is emitted only if every span
-    it needs was recorded this step (no fallback zeros)."""
+    it needs was recorded this step (no fallback zeros). `num_global_tokens` counts every non-padding
+    token in the step, prompts included."""
     # Each span is recorded once/step; Mean.from_list stores the summed seconds in `.value`.
     # Front-load each span's seconds into a short name (None if it was not recorded this step).
     seconds = {
@@ -117,9 +188,7 @@ def compute_perf_ratio_metrics(
         out.append(m.Metric(key, m.NoReduce(value)))
 
     # Throughput over the whole step (includes the idle wait for the next batch).
-    _add_metric(
-        "perf/trainer/tokens_per_second_full_step", num_global_valid_tokens / step_s
-    )
+    _add_metric("perf/trainer/tokens_per_second_full_step", num_global_tokens / step_s)
 
     # Each span's share of the step wall-clock (skip a span that was not recorded).
     if wait_s is not None:
@@ -142,7 +211,7 @@ def compute_perf_ratio_metrics(
         if compute_s:
             _add_metric(
                 "perf/trainer/tokens_per_second_fwd_bwd",
-                num_global_valid_tokens / compute_s,
+                num_global_tokens / compute_s,
             )
 
     # Step time the measured spans don't cover -- only when every span is present, else it misleads.
