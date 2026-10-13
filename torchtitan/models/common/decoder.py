@@ -328,9 +328,8 @@ class Decoder(BaseModel):
         load_balancer_config = parallelism.context_parallel_load_balancer
         selected_attention_metadata = None
         if load_balancer_config is not None and attention_metadata is not None:
-            # One permutation is shared across layers. Prefer full-attention
-            # metadata, falling back to the first quadratic inner attention
-            # for models containing only sliding-window attention.
+            # All layers share one token permutation. Prefer full-attention metadata,
+            # falling back to the first non-linear attention's metadata.
             attention = next(
                 (
                     layer.attention
