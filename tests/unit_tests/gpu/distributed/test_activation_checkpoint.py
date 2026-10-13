@@ -11,10 +11,10 @@ import torch
 import torch_remat as remat
 
 from torchtitan.distributed.activation_checkpoint import (
-    ActivationRematConfig,
-    apply_activation_remat,
-    DefaultActivationRematConfig,
-    FullActivationRematConfig,
+    ActivationCheckpointConfig,
+    apply_activation_checkpoint,
+    DefaultActivationCheckpointConfig,
+    FullActivationCheckpointConfig,
 )
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.linear import Linear
@@ -91,12 +91,12 @@ def _run_forward_backward(
 class TestActivationCheckpointing(unittest.TestCase):
     def test_full_and_default_recomputation(self):
         for policy_config, expected_counts in (
-            (FullActivationRematConfig(), (2, 2, 2)),
-            (DefaultActivationRematConfig(), (1, 1, 1)),
+            (FullActivationCheckpointConfig(), (2, 2, 2)),
+            (DefaultActivationCheckpointConfig(), (1, 1, 1)),
         ):
             with self.subTest(policy=type(policy_config).__qualname__):
                 model = ToyModel()
-                apply_activation_remat(model, policy_config)
+                apply_activation_checkpoint(model, policy_config)
                 _run_forward_backward(model, torch.randn(8, 32))
 
                 block = model.layers["0"]
@@ -150,7 +150,7 @@ class TestActivationCheckpointing(unittest.TestCase):
 
         model = Module()
         model.layers = ModuleDict({"0": ExpertsBlock()})
-        apply_activation_remat(model, DefaultActivationRematConfig())
+        apply_activation_checkpoint(model, DefaultActivationCheckpointConfig())
         block = model.layers["0"]
         block(torch.randn(8, 32, requires_grad=True)).backward()
 
@@ -166,12 +166,12 @@ class TestActivationCheckpointing(unittest.TestCase):
         expected = _run_forward_backward(baseline, x_BD)
 
         for policy_config in (
-            FullActivationRematConfig(),
-            DefaultActivationRematConfig(),
+            FullActivationCheckpointConfig(),
+            DefaultActivationCheckpointConfig(),
         ):
             with self.subTest(policy=type(policy_config).__qualname__):
                 model = deepcopy(baseline)
-                apply_activation_remat(model, policy_config)
+                apply_activation_checkpoint(model, policy_config)
                 actual = _run_forward_backward(model, x_BD)
 
                 torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
@@ -188,12 +188,12 @@ class TestActivationCheckpointing(unittest.TestCase):
     def test_remat_policies_reject_unsupported_options(self):
         for config_factory, message in (
             (
-                lambda: DefaultActivationRematConfig(preserve_rng_state=True),
+                lambda: DefaultActivationCheckpointConfig(preserve_rng_state=True),
                 "preserve_rng_state",
             ),
-            (lambda: DefaultActivationRematConfig(debug=True), "debug option"),
+            (lambda: DefaultActivationCheckpointConfig(debug=True), "debug option"),
             (
-                lambda: FullActivationRematConfig(preserve_rng_state=True),
+                lambda: FullActivationCheckpointConfig(preserve_rng_state=True),
                 "preserve_rng_state",
             ),
         ):
@@ -207,31 +207,33 @@ class TestActivationCheckpointing(unittest.TestCase):
         for name, config_factory in (
             (
                 "full save",
-                lambda: FullActivationRematConfig(save_regions=["attention.*"]),
+                lambda: FullActivationCheckpointConfig(save_regions=["attention.*"]),
             ),
             (
                 "full recompute",
-                lambda: FullActivationRematConfig(recompute_regions=["attention.*"]),
+                lambda: FullActivationCheckpointConfig(
+                    recompute_regions=["attention.*"]
+                ),
             ),
             (
                 "default save",
-                lambda: DefaultActivationRematConfig(save_regions=["attention.*"]),
+                lambda: DefaultActivationCheckpointConfig(save_regions=["attention.*"]),
             ),
             (
                 "default recompute",
-                lambda: DefaultActivationRematConfig(recompute_regions=[]),
+                lambda: DefaultActivationCheckpointConfig(recompute_regions=[]),
             ),
         ):
             with self.subTest(name), self.assertRaisesRegex(
-                ValueError, "Use ActivationRematConfig"
+                ValueError, "Use ActivationCheckpointConfig"
             ):
                 config_factory()
 
     def test_recompute_regions_override_save_regions(self):
         model = ToyModel()
-        apply_activation_remat(
+        apply_activation_checkpoint(
             model,
-            ActivationRematConfig(
+            ActivationCheckpointConfig(
                 save_regions=["*"], recompute_regions=["inner_compute"]
             ),
         )

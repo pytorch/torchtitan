@@ -20,9 +20,9 @@ from torch.multiprocessing.reductions import StorageWeakRef
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.distributed.activation_checkpoint import (
-    ActivationRematConfig,
-    apply_activation_remat,
-    DefaultActivationRematConfig,
+    ActivationCheckpointConfig,
+    apply_activation_checkpoint,
+    DefaultActivationCheckpointConfig,
 )
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import (
@@ -412,7 +412,7 @@ class TestRematRegions(unittest.TestCase):
     def test_save_regions_config_is_required(self):
         save_regions_field = next(
             field
-            for field in fields(ActivationRematConfig)
+            for field in fields(ActivationCheckpointConfig)
             if field.name == "save_regions"
         )
         self.assertIs(save_regions_field.default, MISSING)
@@ -421,11 +421,13 @@ class TestRematRegions(unittest.TestCase):
     def test_unsupported_config_options_error(self):
         for config_factory, message in (
             (
-                lambda: ActivationRematConfig(save_regions=[], preserve_rng_state=True),
+                lambda: ActivationCheckpointConfig(
+                    save_regions=[], preserve_rng_state=True
+                ),
                 "preserve_rng_state=True",
             ),
             (
-                lambda: ActivationRematConfig(save_regions=[], debug=True),
+                lambda: ActivationCheckpointConfig(save_regions=[], debug=True),
                 "debug option",
             ),
         ):
@@ -443,8 +445,8 @@ class TestRematRegions(unittest.TestCase):
             ).build()
         state_keys = list(model.state_dict())
 
-        apply_activation_remat(
-            model, ActivationRematConfig(save_regions=["attention.*"])
+        apply_activation_checkpoint(
+            model, ActivationCheckpointConfig(save_regions=["attention.*"])
         )
 
         self.assertEqual(list(model.state_dict()), state_keys)
@@ -461,8 +463,8 @@ class TestRematRegions(unittest.TestCase):
                 torch.manual_seed(42)
                 baseline = _RematModel(_AttentionBlock())
                 remat_model = deepcopy(baseline)
-                apply_activation_remat(
-                    remat_model, ActivationRematConfig(save_regions=save_regions)
+                apply_activation_checkpoint(
+                    remat_model, ActivationCheckpointConfig(save_regions=save_regions)
                 )
 
                 x_TD = torch.randn(3, 4)
@@ -519,9 +521,9 @@ class TestRematRegions(unittest.TestCase):
         torch.manual_seed(42)
         baseline = _TwoBlockRematModel()
         remat_model = deepcopy(baseline)
-        apply_activation_remat(
+        apply_activation_checkpoint(
             remat_model,
-            ActivationRematConfig(save_regions=["attention.wo.linear"]),
+            ActivationCheckpointConfig(save_regions=["attention.wo.linear"]),
             saved_tensors_hooks=cpu_offload_hooks,
         )
 
@@ -560,7 +562,7 @@ class TestRematRegions(unittest.TestCase):
         feed_forward.w13 = _PaddedRowsColumnParallelLinear(_feed_forward_config().w13)
         baseline = _RematModel(_FeedForwardBlock(feed_forward))
         remat_model = deepcopy(baseline)
-        apply_activation_remat(remat_model, DefaultActivationRematConfig())
+        apply_activation_checkpoint(remat_model, DefaultActivationCheckpointConfig())
 
         x_TD = torch.randn(3, 4)
         expected = _run_forward_backward(baseline, x_TD)
@@ -587,8 +589,8 @@ class TestRematRegions(unittest.TestCase):
                 feed_forward.w2 = _CountingRowParallelLinear(_feed_forward_config().w2)
                 baseline = _RematModel(_FeedForwardBlock(feed_forward))
                 remat_model = deepcopy(baseline)
-                apply_activation_remat(
-                    remat_model, ActivationRematConfig(save_regions=save_regions)
+                apply_activation_checkpoint(
+                    remat_model, ActivationCheckpointConfig(save_regions=save_regions)
                 )
 
                 x_TD = torch.randn(3, 4)
@@ -644,8 +646,8 @@ class TestRematRegions(unittest.TestCase):
             for feed_forward, expected_names in variants:
                 with self.subTest(feed_forward=type(feed_forward).__name__):
                     model = _RematModel(_FeedForwardBlock(feed_forward))
-                    apply_activation_remat(
-                        model, ActivationRematConfig(save_regions=[])
+                    apply_activation_checkpoint(
+                        model, ActivationCheckpointConfig(save_regions=[])
                     )
                     self.assertEqual(
                         _trace_region_names(lambda: model(torch.randn(3, 4))),
@@ -675,8 +677,8 @@ class TestRematRegions(unittest.TestCase):
                     torch.nn.init.normal_(parameter)
                 baseline = _RematModel(_FeedForwardBlock(feed_forward))
                 remat_model = deepcopy(baseline)
-                apply_activation_remat(
-                    remat_model, ActivationRematConfig(save_regions=save_regions)
+                apply_activation_checkpoint(
+                    remat_model, ActivationCheckpointConfig(save_regions=save_regions)
                 )
 
                 x_TD = torch.randn(3, 4)
@@ -709,8 +711,8 @@ class TestRematRegions(unittest.TestCase):
                     torch.nn.init.normal_(parameter)
                 baseline = _RematModel(_RoutedExpertsBlock(routed_experts))
                 remat_model = deepcopy(baseline)
-                apply_activation_remat(
-                    remat_model, ActivationRematConfig(save_regions=save_regions)
+                apply_activation_checkpoint(
+                    remat_model, ActivationCheckpointConfig(save_regions=save_regions)
                 )
 
                 x_TD = torch.randn(3, 4)
@@ -756,8 +758,8 @@ class TestRematRegions(unittest.TestCase):
                     _RoutedExpertsBlock(routed_experts, learned_scores=True)
                 )
                 remat_model = deepcopy(baseline)
-                apply_activation_remat(
-                    remat_model, ActivationRematConfig(save_regions=save_regions)
+                apply_activation_checkpoint(
+                    remat_model, ActivationCheckpointConfig(save_regions=save_regions)
                 )
 
                 x_TD = torch.randn(3, 4)
@@ -783,8 +785,8 @@ class TestRematRegions(unittest.TestCase):
         ):
             with self.subTest(save_regions=save_regions):
                 model = _RematModel(_MoEOutputReductionBlock())
-                apply_activation_remat(
-                    model, ActivationRematConfig(save_regions=save_regions)
+                apply_activation_checkpoint(
+                    model, ActivationCheckpointConfig(save_regions=save_regions)
                 )
                 num_reductions = 0
 
@@ -836,8 +838,8 @@ class TestRematRegions(unittest.TestCase):
                 )
                 baseline = _RematModel(_FeedForwardBlock(feed_forward))
                 remat_model = deepcopy(baseline)
-                apply_activation_remat(
-                    remat_model, ActivationRematConfig(save_regions=save_regions)
+                apply_activation_checkpoint(
+                    remat_model, ActivationCheckpointConfig(save_regions=save_regions)
                 )
                 num_gathers = 0
                 gathered_refs = []
@@ -898,8 +900,8 @@ class TestRematRegions(unittest.TestCase):
                 torch.manual_seed(42)
                 baseline = _RematModel(_SharedInputBlock())
                 remat_model = deepcopy(baseline)
-                apply_activation_remat(
-                    remat_model, ActivationRematConfig(save_regions=save_regions)
+                apply_activation_checkpoint(
+                    remat_model, ActivationCheckpointConfig(save_regions=save_regions)
                 )
                 num_gathers = 0
 
@@ -965,8 +967,8 @@ class TestRematRegions(unittest.TestCase):
                 )
                 baseline = _RematModel(_FeedForwardBlock(feed_forward))
                 remat_model = deepcopy(baseline)
-                apply_activation_remat(
-                    remat_model, ActivationRematConfig(save_regions=save_regions)
+                apply_activation_checkpoint(
+                    remat_model, ActivationCheckpointConfig(save_regions=save_regions)
                 )
                 num_reductions = 0
                 partial_refs = []
@@ -1055,7 +1057,9 @@ class TestRematRegions(unittest.TestCase):
                 for parameter in routed_experts.parameters():
                     torch.nn.init.normal_(parameter)
                 model = _RematModel(_RoutedExpertsBlock(routed_experts))
-                apply_activation_remat(model, ActivationRematConfig(save_regions=[]))
+                apply_activation_checkpoint(
+                    model, ActivationCheckpointConfig(save_regions=[])
+                )
 
                 with (
                     patch.object(
@@ -1097,8 +1101,8 @@ class TestRematRegions(unittest.TestCase):
                 torch.manual_seed(42)
                 baseline = _VisionRematModel()
                 remat_model = deepcopy(baseline)
-                apply_activation_remat(
-                    remat_model, ActivationRematConfig(save_regions=save_regions)
+                apply_activation_checkpoint(
+                    remat_model, ActivationCheckpointConfig(save_regions=save_regions)
                 )
 
                 x_TD = torch.randn(3, 4)

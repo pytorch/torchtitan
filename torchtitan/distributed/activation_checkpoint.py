@@ -25,13 +25,13 @@ _UnpackHook = Callable[[object], torch.Tensor]
 
 
 @dataclass(kw_only=True, slots=True)
-class ActivationRematConfig:
+class ActivationCheckpointConfig:
     """Retain selected model-declared regions and recompute everything else.
 
     Each transformer block is checkpointed with ``torch_remat``. Regions that
     model code always retains with ``recompute=False``, such as MoE routing
     decisions, are saved under every policy. Apply it with
-    ``apply_activation_remat``.
+    ``apply_activation_checkpoint``.
     """
 
     save_regions: list[str]
@@ -42,8 +42,8 @@ class ActivationRematConfig:
     recomputed.
 
     NB: Save-region names are relative to a transformer block, so the same
-    policy applies to every transformer block. Per-block remat policies are
-    not currently supported.
+    policy applies to every transformer block. Per-block activation
+    checkpointing policies are not currently supported.
     """
 
     recompute_regions: list[str] = field(default_factory=list)
@@ -86,7 +86,7 @@ class ActivationRematConfig:
 
 
 def _check_fixed_policy(
-    config: ActivationRematConfig,
+    config: ActivationCheckpointConfig,
     save_regions: list[str],
     recompute_regions: list[str],
 ) -> None:
@@ -96,13 +96,13 @@ def _check_fixed_policy(
     ):
         raise ValueError(
             f"{type(config).__name__} is a fixed policy. Use "
-            "ActivationRematConfig with explicit save_regions and "
+            "ActivationCheckpointConfig with explicit save_regions and "
             "recompute_regions to customize it."
         )
 
 
 @dataclass(kw_only=True, slots=True)
-class FullActivationRematConfig(ActivationRematConfig):
+class FullActivationCheckpointConfig(ActivationCheckpointConfig):
     """A fixed policy that saves no policy-controlled region.
 
     Every operation in a transformer block is recomputed except the regions
@@ -113,7 +113,7 @@ class FullActivationRematConfig(ActivationRematConfig):
     save_regions: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        super(FullActivationRematConfig, self).__post_init__()
+        super(FullActivationCheckpointConfig, self).__post_init__()
         _check_fixed_policy(self, [], [])
 
 
@@ -122,14 +122,14 @@ _DEFAULT_RECOMPUTE_REGIONS = ["*routed_experts.w13.*"]
 
 
 @dataclass(kw_only=True, slots=True)
-class DefaultActivationRematConfig(ActivationRematConfig):
-    """The default remat policy and the trainer's default.
+class DefaultActivationCheckpointConfig(ActivationCheckpointConfig):
+    """The default activation checkpointing policy and the trainer's default.
 
     Saves every model-declared region except the routed-expert ``w13`` grouped
     projection, whose saved activations scale with top-k and dominate MoE
     activation memory. It balances step time and memory for current MoE
     models and equals saving every region for dense models. Its regions may
-    change as measurements improve; use ``ActivationRematConfig`` with
+    change as measurements improve; use ``ActivationCheckpointConfig`` with
     explicit regions for a fixed policy. ``w2`` stays saved: its saved input is the activation
     output, which replay rebuilds anyway, so recomputing ``w2`` would cost time
     without freeing memory. Other regions under ``routed_experts`` (e.g. the EP
@@ -144,13 +144,13 @@ class DefaultActivationRematConfig(ActivationRematConfig):
     )
 
     def __post_init__(self) -> None:
-        super(DefaultActivationRematConfig, self).__post_init__()
+        super(DefaultActivationCheckpointConfig, self).__post_init__()
         _check_fixed_policy(self, _DEFAULT_SAVE_REGIONS, _DEFAULT_RECOMPUTE_REGIONS)
 
 
-def apply_activation_remat(
+def apply_activation_checkpoint(
     model: nn.Module,
-    config: ActivationRematConfig,
+    config: ActivationCheckpointConfig,
     *,
     saved_tensors_hooks: (
         Callable[[nn.Module, str], tuple[_PackHook, _UnpackHook] | None] | None
@@ -160,7 +160,7 @@ def apply_activation_remat(
 
     Args:
         model: Model whose ``layers`` children are the transformer blocks.
-        config: The remat policy.
+        config: The activation checkpointing policy.
         saved_tensors_hooks: Optional callable returning the saved-tensor hook
             pair for one block, given the block and its FQN (``layers.<id>``),
             or None to leave that block unhooked. The pair is passed to
@@ -211,11 +211,3 @@ def apply_activation_remat(
         config.save_regions or "none",
         config.recompute_regions or "none",
     )
-
-
-ActivationCheckpointingConfig = (
-    DefaultActivationRematConfig
-    | ActivationRematConfig
-    | FullActivationRematConfig
-    | None
-)

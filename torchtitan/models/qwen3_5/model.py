@@ -17,7 +17,7 @@ from torch import nn
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointConfig
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
@@ -437,7 +437,7 @@ class Qwen35Model(MultimodalModel):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         local_compile_regions: list[str],
-        ac_config: ActivationCheckpointingConfig | None,
+        ac_config: ActivationCheckpointConfig | None,
         dump_folder: str,
     ) -> Qwen35Model:
         return super().parallelize(

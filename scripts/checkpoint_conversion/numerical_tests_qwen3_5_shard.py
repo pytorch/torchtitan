@@ -31,7 +31,9 @@ import torchtitan.components.loss  # noqa: F401
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import DefaultActivationRematConfig
+from torchtitan.distributed.activation_checkpoint import (
+    DefaultActivationCheckpointConfig,
+)
 from torchtitan.models.qwen3_5 import build_model_config, Qwen35Model
 from torchtitan.tools import utils
 
@@ -99,7 +101,7 @@ def run_worker(args):
         training=training,
         parallelism=parallelism,
         local_compile_regions=config.local_compile_regions,
-        ac_config=DefaultActivationRematConfig(),
+        ac_config=DefaultActivationCheckpointConfig(),
         dump_folder="/tmp",
     )
 

@@ -8,7 +8,9 @@ from dataclasses import dataclass, field, fields
 from typing import Literal
 
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.distributed.activation_checkpoint import DefaultActivationRematConfig
+from torchtitan.distributed.activation_checkpoint import (
+    DefaultActivationCheckpointConfig,
+)
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -362,7 +364,7 @@ def to_graph_trainer_config(
     # per-config fixups.
     ac = d.get("activation_checkpoint")
     if ac is not None:
-        d["activation_checkpoint"] = DefaultActivationRematConfig()
+        d["activation_checkpoint"] = DefaultActivationCheckpointConfig()
 
     # graph_trainer's tracer requires explicit autograd outputs for lm_head
     # params instead of relying on .grad side effects from chunk_loss.backward().

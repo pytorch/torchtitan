@@ -24,7 +24,7 @@ from torchtitan.components.loss import LossFunction
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointConfig
 from torchtitan.distributed.pipeline_parallel import (
     _build_get_mesh_callback,
     _build_pipeline_schedule,
@@ -773,7 +773,7 @@ def graph_pipeline_llm(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: GraphTrainerCompileConfig,
-    ac_config: ActivationCheckpointingConfig,
+    ac_config: ActivationCheckpointConfig | None,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,

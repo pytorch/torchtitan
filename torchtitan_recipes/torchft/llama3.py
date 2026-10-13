@@ -12,7 +12,9 @@ from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW, LRSchedulersContainer
 from torchtitan.config import CommConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import DefaultActivationRematConfig
+from torchtitan.distributed.activation_checkpoint import (
+    DefaultActivationCheckpointConfig,
+)
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.llama3 import build_model_config
 from torchtitan.experiments.torchft.optimizer import (
@@ -61,7 +63,7 @@ def _llama3_torchft_config(*, replica_id: int) -> FaultTolerantTrainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         checkpointer=None,
-        activation_checkpoint=DefaultActivationRematConfig(),
+        activation_checkpoint=DefaultActivationCheckpointConfig(),
         parallelism=parallelism,
         comm=CommConfig(train_timeout_seconds=15),
         fault_tolerance=FaultTolerance(

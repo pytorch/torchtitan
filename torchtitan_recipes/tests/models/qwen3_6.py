@@ -25,8 +25,8 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import (
-    DefaultActivationRematConfig,
-    FullActivationRematConfig,
+    DefaultActivationCheckpointConfig,
+    FullActivationCheckpointConfig,
 )
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
@@ -90,7 +90,7 @@ def qwen36_debugmodel(
             steps=10,
         ),
         checkpointer=None,
-        activation_checkpoint=DefaultActivationRematConfig(),
+        activation_checkpoint=DefaultActivationCheckpointConfig(),
     )
 
 
@@ -150,7 +150,7 @@ def qwen36_debugmodel_moe(
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=DefaultActivationRematConfig(),
+        activation_checkpoint=DefaultActivationCheckpointConfig(),
     )
 
 
@@ -187,7 +187,7 @@ def qwen36_27b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullActivationRematConfig(),
+        activation_checkpoint=FullActivationCheckpointConfig(),
     )
 
 
@@ -228,5 +228,5 @@ def qwen36_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullActivationRematConfig(),
+        activation_checkpoint=FullActivationCheckpointConfig(),
     )

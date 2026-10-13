@@ -36,7 +36,7 @@ from torchstore import RankRole
 from torchtitan.components.optim import AdamW
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.activation_checkpoint import FullActivationRematConfig
+from torchtitan.distributed.activation_checkpoint import FullActivationCheckpointConfig
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
@@ -584,7 +584,9 @@ def test_qwen36_27b_perf_config():
     optimizer = config.trainer.optim.optimizer.optimizers[0]
     assert isinstance(optimizer, AdamW.Config)
     assert optimizer.moment_dtype == "bfloat16"
-    assert isinstance(config.trainer.activation_checkpoint, FullActivationRematConfig)
+    assert isinstance(
+        config.trainer.activation_checkpoint, FullActivationCheckpointConfig
+    )
     assert config.generator.cuda_graph.mode == "FULL"
 
 

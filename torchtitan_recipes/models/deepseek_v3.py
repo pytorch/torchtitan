@@ -28,7 +28,9 @@ from torchtitan.config.transform import (
     NVFP4LinearConverter,
     TokenDispatcherTransform,
 )
-from torchtitan.distributed.activation_checkpoint import DefaultActivationRematConfig
+from torchtitan.distributed.activation_checkpoint import (
+    DefaultActivationCheckpointConfig,
+)
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import build_model_config, DeepSeekV3Model
@@ -127,7 +129,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=DefaultActivationRematConfig(),
+        activation_checkpoint=DefaultActivationCheckpointConfig(),
     )
 
 

@@ -30,7 +30,7 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LMHeadFP32OutputConverter
-from torchtitan.distributed.activation_checkpoint import FullActivationRematConfig
+from torchtitan.distributed.activation_checkpoint import FullActivationCheckpointConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.components.data import IterableRLDataLoader
@@ -239,7 +239,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
                 dtype="float32",
             ),
             parallelism=trainer_parallelism,
-            activation_checkpoint=FullActivationRematConfig(),
+            activation_checkpoint=FullActivationCheckpointConfig(),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=20,
@@ -383,7 +383,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
                 dtype="float32",
             ),
             parallelism=trainer_parallelism,
-            activation_checkpoint=FullActivationRematConfig(),
+            activation_checkpoint=FullActivationCheckpointConfig(),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=20,

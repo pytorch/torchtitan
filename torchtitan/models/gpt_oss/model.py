@@ -16,7 +16,7 @@ from torch import nn
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
@@ -251,7 +251,7 @@ class GptOssModel(Decoder):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         local_compile_regions: list[str],
-        ac_config: ActivationCheckpointingConfig | None,
+        ac_config: ActivationCheckpointConfig | None,
         dump_folder: str,
     ) -> GptOssModel:
         if parallelism_context.cp_enabled and any(

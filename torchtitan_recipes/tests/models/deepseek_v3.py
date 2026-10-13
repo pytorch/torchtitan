@@ -25,7 +25,9 @@ from torchtitan.config.transform import (
     NVFP4LinearConverter,
     TokenDispatcherTransform,
 )
-from torchtitan.distributed.activation_checkpoint import DefaultActivationRematConfig
+from torchtitan.distributed.activation_checkpoint import (
+    DefaultActivationCheckpointConfig,
+)
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -88,7 +90,7 @@ def deepseek_v3_debugmodel(
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=DefaultActivationRematConfig(),
+        activation_checkpoint=DefaultActivationCheckpointConfig(),
     )
 
 
@@ -205,7 +207,7 @@ def deepseek_v3_16b(
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=DefaultActivationRematConfig(),
+        activation_checkpoint=DefaultActivationCheckpointConfig(),
     )
 
 
@@ -430,7 +432,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=DefaultActivationRematConfig(),
+        activation_checkpoint=DefaultActivationCheckpointConfig(),
     )
 
 

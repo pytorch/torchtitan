@@ -18,10 +18,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.activation_checkpoint import (
-    ActivationRematConfig,
-    apply_activation_remat,
-    DefaultActivationRematConfig,
-    FullActivationRematConfig,
+    ActivationCheckpointConfig,
+    apply_activation_checkpoint,
+    DefaultActivationCheckpointConfig,
+    FullActivationCheckpointConfig,
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.base.module import Module, ModuleDict
@@ -132,8 +132,8 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         # activations. These policies save dispatch and combine instead.
         self._check_deepep_activation_checkpointing(
             (
-                DefaultActivationRematConfig(),
-                ActivationRematConfig(save_regions=["*ep_communication"]),
+                DefaultActivationCheckpointConfig(),
+                ActivationCheckpointConfig(save_regions=["*ep_communication"]),
             ),
             num_replays=0,
         )
@@ -144,7 +144,10 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         # combine. DeepEP then uses a deterministic buffer, which receives rows in
         # the forward's order, so the gradients match the run without AC bitwise.
         self._check_deepep_activation_checkpointing(
-            (FullActivationRematConfig(), ActivationRematConfig(save_regions=[])),
+            (
+                FullActivationCheckpointConfig(),
+                ActivationCheckpointConfig(save_regions=[]),
+            ),
             num_replays=1,
         )
 
@@ -179,7 +182,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     self.device_type, torch.bfloat16
                 )
                 ac_model.load_state_dict(baseline.state_dict())
-                apply_activation_remat(ac_model, ac_config)
+                apply_activation_checkpoint(ac_model, ac_config)
                 # As in training, the buffer is created after AC is applied. Both
                 # models share it, so the baseline also runs deterministic when
                 # the AC model replays.

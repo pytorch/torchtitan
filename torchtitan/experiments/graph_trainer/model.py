@@ -13,7 +13,7 @@ import torch
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointConfig
 
 from .common_utils import annotate_graph_trainer_model, apply_simple_fsdp
 from .compile import apply_compile
@@ -36,7 +36,7 @@ class GraphTrainerModel:
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         compile_config: GraphTrainerCompileConfig,
-        ac_config: ActivationCheckpointingConfig | None,
+        ac_config: ActivationCheckpointConfig | None,
         dump_folder: str,
     ):
         del ac_config

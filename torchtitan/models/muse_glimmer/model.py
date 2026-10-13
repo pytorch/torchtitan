@@ -17,7 +17,7 @@ import torch_remat as remat
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -370,7 +370,7 @@ class MuseGlimmerModel(MultimodalModel):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         local_compile_regions: list[str],
-        ac_config: ActivationCheckpointingConfig | None,
+        ac_config: ActivationCheckpointConfig | None,
         dump_folder: str,
     ) -> MuseGlimmerModel:
         if self.vision_encoder is not None and parallelism_context.tp_enabled:

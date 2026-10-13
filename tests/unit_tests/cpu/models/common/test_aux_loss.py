@@ -29,10 +29,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import (
-    ActivationRematConfig,
-    apply_activation_remat,
-    DefaultActivationRematConfig,
-    FullActivationRematConfig,
+    ActivationCheckpointConfig,
+    apply_activation_checkpoint,
+    DefaultActivationCheckpointConfig,
+    FullActivationCheckpointConfig,
 )
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import Sigmoid
@@ -388,7 +388,7 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
             model.load_state_dict(initial_state)
             model.train()
             if ac_config is not None:
-                apply_activation_remat(model, ac_config)
+                apply_activation_checkpoint(model, ac_config)
             if forwards_first:
                 outputs = [model(x_TD).sum() for x_TD in microbatches]
                 for output in outputs:
@@ -405,9 +405,9 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
         ref_counts_E, ref_grad = run(None)
         self.assertEqual(ref_counts_E.sum().item(), T * K * len(microbatches))
         for ac_config in (
-            FullActivationRematConfig(),
-            DefaultActivationRematConfig(),
-            ActivationRematConfig(save_regions=[]),
+            FullActivationCheckpointConfig(),
+            DefaultActivationCheckpointConfig(),
+            ActivationCheckpointConfig(save_regions=[]),
         ):
             with self.subTest(ac=type(ac_config).__qualname__):
                 counts_E, grad = run(ac_config)
@@ -416,9 +416,9 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
 
         ref_counts_E, ref_grad = run(None, forwards_first=True)
         for ac_config in (
-            FullActivationRematConfig(),
-            DefaultActivationRematConfig(),
-            ActivationRematConfig(save_regions=[]),
+            FullActivationCheckpointConfig(),
+            DefaultActivationCheckpointConfig(),
+            ActivationCheckpointConfig(save_regions=[]),
         ):
             with self.subTest(ac=type(ac_config).__qualname__, forwards_first=True):
                 counts_E, grad = run(ac_config, forwards_first=True)

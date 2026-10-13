@@ -31,7 +31,7 @@ from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointConfig
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.base.module import ModuleDict, ModuleList
 from torchtitan.models.common.decoder import Decoder
@@ -79,7 +79,7 @@ def pipeline_llm(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     local_compile_regions: list[str],
-    ac_config: ActivationCheckpointingConfig,
+    ac_config: ActivationCheckpointConfig | None,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,

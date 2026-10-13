@@ -34,8 +34,8 @@ from torchtitan.components.validator import Validator
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_checkpoint import (
-    DefaultActivationRematConfig,
-    FullActivationRematConfig,
+    DefaultActivationCheckpointConfig,
+    FullActivationCheckpointConfig,
 )
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
@@ -417,7 +417,7 @@ def llama3_debugmodel_pp4_zero_bubble() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "InterleavedZeroBubble"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.activation_checkpoint = FullActivationRematConfig()
+    config.activation_checkpoint = FullActivationCheckpointConfig()
     config.debug.deterministic = True
     config.debug.seed = 42
     return config
@@ -429,7 +429,7 @@ def llama3_debugmodel_pp2_zbv() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "ZBVZeroBubble"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.activation_checkpoint = FullActivationRematConfig()
+    config.activation_checkpoint = FullActivationCheckpointConfig()
     config.debug.deterministic = True
     config.debug.seed = 42
     return config
@@ -443,7 +443,7 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule_csv = (
         "./tests/assets/custom_schedule.csv"
     )
-    config.activation_checkpoint = FullActivationRematConfig()
+    config.activation_checkpoint = FullActivationCheckpointConfig()
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.debug.deterministic = True
     config.debug.seed = 42
@@ -712,7 +712,7 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     config = llama3_debugmodel_varlen_attn(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
-    config.activation_checkpoint = DefaultActivationRematConfig()
+    config.activation_checkpoint = DefaultActivationCheckpointConfig()
     return config
 
 

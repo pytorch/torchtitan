@@ -48,7 +48,7 @@ class Module(nn.Module, Configurable):
     _sharding_config: ShardingConfig | None = None
     _pos_arg_list: list[str] | None = None
     _parallelized: bool = False
-    # apply_activation_remat replaces these defaults on every Module in a
+    # apply_activation_checkpoint replaces these defaults on every Module in a
     # checkpointed block.
     # Outside an enclosing torch_remat checkpoint, they do not affect execution.
     _remat_module_fqn: str = ""

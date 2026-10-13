@@ -22,8 +22,8 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import (
-    ActivationCheckpointingConfig,
-    apply_activation_remat,
+    ActivationCheckpointConfig,
+    apply_activation_checkpoint,
 )
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
@@ -91,7 +91,7 @@ def parallelize_hf_transformers(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     local_compile_regions: list[str],
-    ac_config: ActivationCheckpointingConfig,
+    ac_config: ActivationCheckpointConfig | None,
     dump_folder: str,
     **kwargs: Any,
 ):
@@ -175,7 +175,7 @@ def parallelize_hf_transformers(
     model._parallelize(parallelism_context)
 
     if ac_config is not None:
-        apply_activation_remat(model, ac_config)
+        apply_activation_checkpoint(model, ac_config)
 
     model._apply_fsdp(
         parallelism_context=parallelism_context,

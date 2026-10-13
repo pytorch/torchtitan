@@ -14,8 +14,8 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import (
-    DefaultActivationRematConfig,
-    FullActivationRematConfig,
+    DefaultActivationCheckpointConfig,
+    FullActivationCheckpointConfig,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.llama3 import build_model_config
@@ -62,7 +62,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpointer=None,
-        activation_checkpoint=DefaultActivationRematConfig(),
+        activation_checkpoint=DefaultActivationCheckpointConfig(),
         validator=None,
     )
 
@@ -95,6 +95,6 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullActivationRematConfig(),
+        activation_checkpoint=FullActivationCheckpointConfig(),
         validator=None,
     )

@@ -36,7 +36,7 @@ from torchtitan.config.transform import (
     LMHeadFP32OutputConverter,
     TokenDispatcherTransform,
 )
-from torchtitan.distributed.activation_checkpoint import FullActivationRematConfig
+from torchtitan.distributed.activation_checkpoint import FullActivationCheckpointConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.muse_glimmer import (
@@ -366,8 +366,8 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
     * **Full activation checkpointing is required.** Adam's m/v are allocated on the
       *first* ``optimizer.step()``, so per-GPU memory jumps by roughly 8 bytes/param
       between step 1 and step 2 (~37 GB/GPU here, sharded 6 ways). With the default
-      ``DefaultActivationRematConfig`` that jump OOMs at step 2;
-      ``FullActivationRematConfig`` frees the activation headroom it needs.
+      ``DefaultActivationCheckpointConfig`` that jump OOMs at step 2;
+      ``FullActivationCheckpointConfig`` frees the activation headroom it needs.
 
     varlen attention is used for both roles so the trainer and the vLLM generator run
     one model config. The state-dict adapter handles the HF checkpoint's Q/K RoPE layout
@@ -418,7 +418,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=4096,
                 max_context_length=4096,
             ),
-            activation_checkpoint=FullActivationRematConfig(),
+            activation_checkpoint=FullActivationCheckpointConfig(),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,  # first run loads HF; restarts resume from DCP
