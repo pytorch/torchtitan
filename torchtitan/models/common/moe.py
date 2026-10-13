@@ -168,6 +168,19 @@ class RoutedExperts(Module):
         return out_TD
 
 
+@local_compile("expert_counts", batch_invariant=False)
+def _count_tokens_per_expert(routing_map_TE: torch.Tensor) -> torch.Tensor:
+    """Return the number of tokens routed to each expert, ``(E,)`` int64.
+
+    Compiled it is one fused reduction; eager casts the bool map to int64 first.
+
+    Example:
+        >>> _count_tokens_per_expert(torch.tensor([[True, False], [True, True]]))
+        tensor([2, 1])
+    """
+    return routing_map_TE.sum(dim=0)
+
+
 class TokenChoiceTopKRouter(Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
     routed to top K experts based on the router scores.
@@ -809,7 +822,7 @@ class MoE(Module):
             aux_loss_denominator=aux_loss_denominator,
             **router_kwargs,
         )
-        num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
+        num_local_tokens_per_expert_E = _count_tokens_per_expert(routing_map_TE)
 
         out_TD = self.routed_experts(
             routed_x_TD,

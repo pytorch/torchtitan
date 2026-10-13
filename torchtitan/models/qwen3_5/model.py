@@ -364,6 +364,7 @@ class Qwen35Model(MultimodalModel):
                 "fp32_to_bf16_split",
                 "moe_dispatch",
                 "moe_combine",
+                "expert_counts",
             ]
         )
 
