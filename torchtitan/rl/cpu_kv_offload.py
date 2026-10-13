@@ -16,6 +16,7 @@ from typing import Any
 
 import torch.distributed as dist
 from vllm.config import KVTransferConfig
+from vllm.v1.metrics.loggers import StatLoggerBase
 
 from torchtitan.config import Configurable
 
@@ -33,7 +34,9 @@ class CPUKVOffload(Configurable):
 
         offload = CPUKVOffload.Config(size_gib=96).build()
         engine_kwargs.update(offload.engine_kwargs())  # before the engine build
-        engine = LLMEngine.from_engine_args(EngineArgs(**engine_kwargs))
+        engine = LLMEngine.from_engine_args(
+            EngineArgs(**engine_kwargs), stat_loggers=[offload.stat_logger]
+        )
         offload.attach(engine)
         offload.evict_first(ended_block_hashes)  # a session ended
     """
@@ -54,6 +57,9 @@ class CPUKVOffload(Configurable):
         # Set by `attach`: vLLM's CPU LRU, and the KV cache groups each block has a chunk in.
         self._lru: Any = None
         self._num_kv_cache_groups = 0
+        # Bytes vLLM stored to the CPU tier, added by `stat_logger` on the engine thread. A plain
+        # int, so another thread can read it.
+        self.store_bytes = 0
 
     def engine_kwargs(self) -> dict[str, Any]:
         """vLLM engine args that turn the offload on."""
@@ -189,5 +195,36 @@ class CPUKVOffload(Configurable):
                     evictable_chunks.move_to_end(key, last=False)
 
     def used_fraction(self) -> float:
-        """Fraction of the CPU tier's chunks that hold KV (stored or being stored)."""
+        """Fraction of the CPU tier's chunks that hold KV (stored or being stored); vLLM's usage
+        gauge counts only the chunks a transfer pins."""
         return len(self._lru.chunks) / self._lru.cache_capacity
+
+    def stat_logger(self, vllm_config: Any, engine_index: int) -> StatLoggerBase:
+        """A vLLM stat logger factory: adds each engine step's CPU store bytes to `store_bytes`."""
+        return _StoreBytesStatLogger(self)
+
+
+class _StoreBytesStatLogger(StatLoggerBase):
+    def __init__(self, offload: CPUKVOffload) -> None:
+        self._offload = offload
+
+    def record(
+        self,
+        scheduler_stats: Any,
+        iteration_stats: Any,
+        mm_cache_stats: Any = None,
+        engine_idx: int = 0,
+    ) -> None:
+        if scheduler_stats is None or scheduler_stats.kv_connector_stats is None:
+            return
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+            OffloadingConnectorStats,
+        )
+
+        counters = OffloadingConnectorStats(
+            data=scheduler_stats.kv_connector_stats
+        ).reduce()
+        self._offload.store_bytes += counters.get("vllm:kv_offload_store_bytes", 0)
+
+    def log_engine_initialized(self) -> None:
+        pass

@@ -19,6 +19,9 @@ from torchtitan.rl.cpu_kv_offload import CPUKVOffload
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
@@ -181,3 +184,19 @@ def test_attach_needs_vllms_lru_policy(monkeypatch):
         _multi_worker_engine(
             monkeypatch, tp_size=1, cpu_cache_policy=ARCCachePolicy(cache_capacity=8)
         )
+
+
+def test_stat_logger_adds_each_steps_store_bytes():
+    def scheduler_stats(store_bytes: int) -> SimpleNamespace:
+        connector_stats = OffloadingConnectorStats()
+        connector_stats.increase_counter("vllm:kv_offload_store_bytes", store_bytes)
+        connector_stats.increase_counter("vllm:kv_offload_load_bytes", 7)
+        return SimpleNamespace(kv_connector_stats=connector_stats.to_dict())
+
+    offload = CPUKVOffload.Config(size_gib=1).build()
+    stat_logger = offload.stat_logger(vllm_config=None, engine_index=0)
+    stat_logger.record(scheduler_stats(100), None)
+    stat_logger.record(SimpleNamespace(kv_connector_stats=None), None)
+    stat_logger.record(scheduler_stats(20), None)
+
+    assert offload.store_bytes == 120

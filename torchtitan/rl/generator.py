@@ -49,11 +49,7 @@ from torchtitan.rl.model.vllm_registry import (
     TORCHTITAN_WORKER_CLS,
 )
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.observability.vllm import (
-    KVOffloadStoreBytesStatLogger,
-    StatLoggerContext,
-    VllmOtelStatLogger,
-)
+from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
 from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.tools.utils import has_cuda_capability
@@ -1101,14 +1097,8 @@ class VLLMGenerator(Configurable):
                     stat_loggers = [build_stat_logger]
 
             # Rank 0 adds up its engine's CPU KV store bytes for `get_session_kv_metrics`.
-            self._kv_offload_store_bytes: KVOffloadStoreBytesStatLogger | None = None
             if self._cpu_kv_offload is not None and self._rank == 0:
-                store_bytes = KVOffloadStoreBytesStatLogger()
-                self._kv_offload_store_bytes = store_bytes
-                stat_loggers = [
-                    *(stat_loggers or []),
-                    lambda vllm_config, engine_index: store_bytes,
-                ]
+                stat_loggers = [*(stat_loggers or []), self._cpu_kv_offload.stat_logger]
 
             # Start the thread that runs vllm engine.
             self._engine_event_loop = asyncio.new_event_loop()
@@ -1191,7 +1181,7 @@ class VLLMGenerator(Configurable):
         # Every rank tracks the same sessions in its own scheduler; only the engine thread touches
         # them. CPU offload alone still tracks them, to evict ended sessions' CPU chunks first.
         self._session_kv: VLLMSessionKVHolder | None = None
-        # The holder's running totals at the last `get_session_kv_metrics`.
+        # Running totals (holder, CPU offload) at the last `get_session_kv_metrics`.
         self._session_kv_totals: dict[str, int] = {}
         if config.session_kv_holder is not None or self._cpu_kv_offload is not None:
             holder_config = config.session_kv_holder or VLLMSessionKVHolder.Config()
@@ -1699,9 +1689,10 @@ class VLLMGenerator(Configurable):
             levels["held_blocks"] = holder.num_held_blocks
             totals["evicted_sessions"] = holder.num_evicted
             totals["stall_evicted_sessions"] = holder.num_stall_evicted
-        if self._kv_offload_store_bytes is not None:
-            levels["cpu_used_fraction"] = self._cpu_kv_offload.used_fraction()
-            totals["cpu_store_bytes"] = self._kv_offload_store_bytes.store_bytes
+        offload = self._cpu_kv_offload
+        if offload is not None:
+            levels["cpu_used_fraction"] = offload.used_fraction()
+            totals["cpu_store_bytes"] = offload.store_bytes
         counts = {
             key: total - self._session_kv_totals.get(key, 0)
             for key, total in totals.items()

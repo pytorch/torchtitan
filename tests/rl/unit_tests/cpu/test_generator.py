@@ -151,7 +151,7 @@ def _generator():
 
 
 def _session_kv_generator(*, hold: bool, offload: bool):
-    """A bare generator with a stub holder, as `get_session_kv_metrics` reads it."""
+    """A bare generator with stub holder and CPU offload, as `get_session_kv_metrics` reads them."""
     generator = _generator()
     generator.config = SimpleNamespace(
         session_kv_holder=VLLMSessionKVHolder.Config() if hold else None
@@ -166,12 +166,9 @@ def _session_kv_generator(*, hold: bool, offload: bool):
         recomputed_prefix_tokens=0,
     )
     generator._cpu_kv_offload = (
-        SimpleNamespace(used_fraction=lambda: 0.5) if offload else None
+        SimpleNamespace(used_fraction=lambda: 0.5, store_bytes=10) if offload else None
     )
     generator._session_kv_totals = {}
-    generator._kv_offload_store_bytes = (
-        SimpleNamespace(store_bytes=10) if offload else None
-    )
     kv_cache_manager = SimpleNamespace(usage=0.3)
     generator._engine = SimpleNamespace(
         engine_core=SimpleNamespace(
@@ -199,7 +196,7 @@ def test_session_kv_metrics_are_levels_now_and_counts_since_the_last_call():
     holder = generator._session_kv
     holder.num_sessions, holder.num_evicted = 78, 5
     holder.recomputed_prefix_tokens = 528
-    generator._kv_offload_store_bytes.store_bytes = 25
+    generator._cpu_kv_offload.store_bytes = 25
     second = _session_kv_metrics(generator)
 
     assert first == {
