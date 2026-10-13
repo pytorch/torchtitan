@@ -236,6 +236,7 @@ class TokenChoiceTopKRouter(Module):
         *,
         padding_mask_T: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
+        routed_expert_ids_TK: torch.Tensor | None = None,
         **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -243,6 +244,9 @@ class TokenChoiceTopKRouter(Module):
             x_TD: Input ``(T, D)``.
             expert_bias_E: Optional load-balancing bias ``(E,)``.
             padding_mask_T: Boolean ``(T,)`` mask that is true for padding.
+            routed_expert_ids_TK: Optional experts ``(T, K)`` to route real tokens to instead
+                of this router's top-k, e.g. the RL generator's (router replay). The gate
+                weights still come from this router's scores, at those experts.
 
         Returns:
             topk_scores_TK: Routing scores ``(T, K)``.
@@ -279,6 +283,18 @@ class TokenChoiceTopKRouter(Module):
             **router_kwargs,
         )
         remat.recompute_needs_tensor(topk_expert_ids_TK)
+        if routed_expert_ids_TK is not None:
+            # Padding rows are 0 (expert 0, K times), so padding keeps its own ids.
+            replayed_expert_ids_TK = routed_expert_ids_TK.long()
+            topk_expert_ids_TK = (
+                replayed_expert_ids_TK
+                if padding_mask_T is None
+                else torch.where(
+                    padding_mask_T.unsqueeze(-1),
+                    topk_expert_ids_TK,
+                    replayed_expert_ids_TK,
+                )
+            )
         # The expert bias is only used for routing. The gating value is
         # still derived from the original scores.
         topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
@@ -780,12 +796,15 @@ class MoE(Module):
         *,
         padding_mask_T: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
+        routed_expert_ids_TK: torch.Tensor | None = None,
         **router_kwargs,
     ) -> torch.Tensor:
         """
         Args:
             x_TD: Input ``(T, D)``.
             padding_mask_T: Boolean ``(T,)`` mask that is true for padding.
+            routed_expert_ids_TK: Optional experts ``(T, K)`` to route to; see
+                ``TokenChoiceTopKRouter.forward``.
 
         Returns:
             Output ``(T, D)``.
@@ -798,7 +817,10 @@ class MoE(Module):
         (
             routed_x_TD,
             routed_padding_mask_T,
-        ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+            routed_expert_ids_TK,
+        ) = self._maybe_shard_routed_branch_inputs_across_tp(
+            x_TD, padding_mask_T, routed_expert_ids_TK
+        )
 
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
@@ -807,6 +829,7 @@ class MoE(Module):
             self.expert_bias_E,
             padding_mask_T=routed_padding_mask_T,
             aux_loss_denominator=aux_loss_denominator,
+            routed_expert_ids_TK=routed_expert_ids_TK,
             **router_kwargs,
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
@@ -832,23 +855,25 @@ class MoE(Module):
         self,
         x_TD: torch.Tensor,
         padding_mask_T: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        routed_expert_ids_TK: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Prepare the router and routed-expert inputs for TP token sharding.
 
         With EP, the routed branch consumes ``Shard(0)`` tokens across TP. Dense
         SP already provides that layout for ``x_TD``; otherwise this boundary
-        explicitly shards it. The padding mask enters the MoE replicated in
-        either case and is explicitly sharded here to follow the routed tokens.
+        explicitly shards it. The padding mask and the routed expert ids enter
+        the MoE replicated in either case and are explicitly sharded here to
+        follow the routed tokens.
         """
         if spmd_sparse_mesh() is None:
             assert (
                 spmd_mesh_group(MeshAxisName.TP) is None
             ), "MoE requires expert parallelism when tensor parallelism is enabled on dense modules"
-            return x_TD, padding_mask_T
+            return x_TD, padding_mask_T, routed_expert_ids_TK
 
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
-            return x_TD, padding_mask_T
+            return x_TD, padding_mask_T, routed_expert_ids_TK
 
         if not spmd_dense_sp_enabled():
             x_TD = spmd.redistribute(
@@ -858,7 +883,8 @@ class MoE(Module):
                 dst=spmd.S(0),
                 backward_options={"op_dtype": x_TD.dtype},
             )
-        # The padding mask is replicated even when SP has already sharded x_TD.
+        # The padding mask and routed expert ids are replicated even when SP has
+        # already sharded x_TD.
         if padding_mask_T is not None:
             padding_mask_T = spmd.redistribute(
                 padding_mask_T,
@@ -867,7 +893,15 @@ class MoE(Module):
                 dst=spmd.S(0),
                 backward_options={"op_dtype": padding_mask_T.dtype},
             )
-        return x_TD, padding_mask_T
+        if routed_expert_ids_TK is not None:
+            routed_expert_ids_TK = spmd.redistribute(
+                routed_expert_ids_TK,
+                tp_group,
+                src=spmd.R,
+                dst=spmd.S(0),
+                backward_options={"op_dtype": routed_expert_ids_TK.dtype},
+            )
+        return x_TD, padding_mask_T, routed_expert_ids_TK
 
     def _maybe_zero_fill_routed_output_to_tp_partial(
         self, routed_output_TD: torch.Tensor

@@ -707,12 +707,21 @@ class Batcher(Configurable):
             input_ids = [10, 11, 20, 21, 0, 0, 0, 0]
             labels    = [11, 12, 21, 22, 0, 0, 0, 0]
             positions = [ 0,  1,  0,  1, 0, 1, 2, 3]
+            # Router replay: one row of experts per input token (e10: token 10's), 0 on padding.
+            model_kwargs["routed_expert_ids"] = [e10, e11, e20, e21, 0, 0, 0, 0]
         """
         pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
         keys = list(pad_values)
         packed_fields: dict[str, list[np.ndarray]] = {key: [] for key in keys}
         positions: list[np.ndarray] = []
         padding_mask: list[np.ndarray] = []
+        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
+        routed_expert_ids = None
+        if training_samples and training_samples[0].routed_expert_ids is not None:
+            row = training_samples[0].routed_expert_ids[0]
+            # Torch can't unpickle uint16 tensors; every expert id fits in int16.
+            dtype = np.int16 if row.dtype == np.uint16 else row.dtype
+            routed_expert_ids = np.zeros((num_tokens_per_rank, *row.shape), dtype)
 
         def pad(key: str, num_tokens: int) -> np.ndarray:
             return np.full(num_tokens, pad_values[key], dtype=_DTYPES[key])
@@ -735,12 +744,15 @@ class Batcher(Configurable):
                 sample_len = ((sample_len + align - 1) // align) * align
 
             # extend row
+            if routed_expert_ids is not None:
+                rows = training_sample.routed_expert_ids
+                start = sum(map(len, positions))
+                routed_expert_ids[start : start + len(rows)] = rows
             for key in keys:
                 packed_fields[key] += [sample[key], pad(key, sample_len - unpadded_len)]
             positions.append(np.arange(sample_len, dtype=np.int64))
             padding_mask.append(np.arange(sample_len) >= unpadded_len)
 
-        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
         pad_len = num_tokens_per_rank - sum(map(len, positions))
         assert pad_len >= 0
         if pad_len > 0:
@@ -778,6 +790,11 @@ class Batcher(Configurable):
             padding_mask=padding_mask_tensor,
             loss_token_counts=loss_token_counts,
             routing_token_counts=routing_token_counts,
+            model_kwargs=(
+                {}
+                if routed_expert_ids is None
+                else {"routed_expert_ids": torch.from_numpy(routed_expert_ids)}
+            ),
         )
 
     def _padding_fraction(

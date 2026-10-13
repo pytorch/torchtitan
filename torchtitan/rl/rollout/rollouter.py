@@ -476,6 +476,13 @@ class RolloutWorker(Configurable):
                         completion_logprobs=np.asarray(
                             completion.token_logprobs, dtype=np.float32
                         ),
+                        routed_expert_ids=(
+                            None
+                            if completion.routed_expert_ids is None
+                            else completion.routed_expert_ids[
+                                max(env_step.next_prompt_prefix_len - 1, 0) :
+                            ]
+                        ),
                         completion_message=next_env_step.completion_message,
                         env_messages=next_env_step.env_messages,
                         env_rewards=next_env_step.env_rewards,

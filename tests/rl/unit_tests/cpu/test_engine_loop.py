@@ -504,6 +504,7 @@ def _finished_output(request_id: str) -> SimpleNamespace:
                 token_ids=[7],
                 logprobs=logprobs,
                 finish_reason="stop",
+                routed_experts=None,
             )
         ],
     )

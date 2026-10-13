@@ -38,11 +38,12 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import torch_utils as _torch_utils
@@ -329,6 +330,7 @@ class VLLMModelWrapper(Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         dist_moe_runtime: DistMoeRuntime.Config | None = None,
+        return_routed_experts: bool = False,
     ):
         super().__init__()
 
@@ -404,6 +406,9 @@ class VLLMModelWrapper(Module):
 
         # Give each gpt-oss attention's vLLM backend its sink rescale.
         self._inject_attention_sinks()
+
+        if return_routed_experts:
+            self._expose_routed_experts_to_vllm()
 
         # Route the TP all-reduce through vLLM's custom AR (off under
         # batch-invariant mode, where its size-dependent algorithm breaks).
@@ -586,6 +591,41 @@ class VLLMModelWrapper(Module):
                     out, lse, attention.sinks
                 )
             )
+
+    def _expose_routed_experts_to_vllm(self) -> None:
+        """Hook every router so vLLM records each token's experts (router replay).
+
+            router(x) -> (scores, topk_expert_ids_TK, ...)
+                              |  forward hook
+                              v
+            vLLM capture_fn(topk_expert_ids_TK)  # stored by KV slot
+                              v
+            CompletionOutput.routed_experts      # [P + N - 1, num_layers, top_k]
+
+        vLLM binds ``capture_fn`` on every module with ``layer_id`` and ``capture_fn``
+        (``RoutedExpertsCaptureSource``) after its profile run.
+        """
+        # With EP and TP > 1 each TP rank routes a shard of the tokens; vLLM wants all of them.
+        gather_across_tp = (
+            self.parallelism_context.ep_enabled and self.parallelism_context.tp_enabled
+        )
+
+        def capture(router, args, output):
+            if router.capture_fn is None:
+                return
+            topk_expert_ids_TK = output[1]
+            if gather_across_tp:
+                topk_expert_ids_TK = get_tp_group().all_gather(
+                    topk_expert_ids_TK, dim=0
+                )
+            router.capture_fn(topk_expert_ids_TK)
+
+        for layer_name, layer in self.model.layers.items():
+            for module in layer.modules():
+                if isinstance(module, TokenChoiceTopKRouter):
+                    module.layer_id = int(layer_name)
+                    module.capture_fn = None
+                    module.register_forward_hook(capture)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.

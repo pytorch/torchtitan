@@ -404,6 +404,10 @@ class VerifiersRollouter(Rollouter):
         for branch in trace.branches:
             token_ids = branch.token_ids
             logprobs = branch.logprobs
+            # [len(token_ids), num_layers, top_k] from the generation server; None without replay.
+            # TODO: Verifiers gives a continued turn's last token the row of the token before it,
+            # so 1 input per turn boundary replays its neighbor's experts (native: next prefill's row).
+            routed_expert_ids = branch.routed_experts
             branch_offset = 0
             reply_to: RolloutTurn | None = None
             for node in branch.nodes:
@@ -435,6 +439,13 @@ class VerifiersRollouter(Rollouter):
                             ),
                             completion_logprobs=np.asarray(
                                 logprobs[absolute_start:absolute_end], dtype=np.float32
+                            ),
+                            routed_expert_ids=(
+                                None
+                                if routed_expert_ids is None
+                                else routed_expert_ids[
+                                    max(prompt_prefix_len - 1, 0) : absolute_end - 1
+                                ]
                             ),
                             min_policy_version=generation_metadata.min_policy_version,
                             max_policy_version=generation_metadata.max_policy_version,

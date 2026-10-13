@@ -202,6 +202,36 @@ def test_rewrite_that_keeps_a_prefix_branches_then_continues() -> None:
     assert (second.min_policy_version, second.max_policy_version) == (1, 2)
 
 
+def test_routed_expert_ids_follow_the_trainer_inputs_across_turns_and_branches() -> None:
+    # The same turns as above. Each turn's generator rows are tagged turn * 100 + position;
+    # a turn keeps the rows from its prefix's last token on, like its prompt delta.
+    rollout = _scored_rollout(
+        [
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1),
+            _turn(prompt_token_ids=[1, 2, 7], completion_token_ids=[5], version=1),
+            _turn(
+                prompt_token_ids=[1, 2, 7, 5, 9], completion_token_ids=[6], version=2
+            ),
+        ],
+        reward=0.5,
+        advantage=0.1,
+    )
+    for turn_idx, rollout_turn in enumerate(rollout.turns):
+        # One completion token: prompt + completion - 1 rows.
+        num_rows = rollout_turn.num_prompt_tokens
+        rows = np.arange(num_rows).reshape(-1, 1, 1) + 100 * turn_idx
+        rollout_turn.routed_expert_ids = rows[
+            max(rollout_turn.prompt_prefix_len - 1, 0) :
+        ]
+
+    first, second = rollout_to_training_samples(rollout)
+
+    # [1, 2, 4] -> rows of inputs [1, 2]. [1, 2, 7, 5, 9, 6] -> rows of [1, 2, 7, 5, 9]: the branch
+    # copies the shared prefix's row from the first sample, then takes each turn's delta.
+    assert first.routed_expert_ids.flatten().tolist() == [0, 1]
+    assert second.routed_expert_ids.flatten().tolist() == [0, 101, 102, 203, 204]
+
+
 @pytest.mark.parametrize(
     "prompt_prefix_len, prompt_delta_token_ids",
     [

@@ -78,7 +78,11 @@ def _forward_with_routed_mask(
     """Run ``moe_cls.forward`` on stubs; return the mask the routed branch sees."""
     routed_mask_T = padding_mask_T.clone()  # stands for the TP-sharded mask
     moe = SimpleNamespace(
-        _maybe_shard_routed_branch_inputs_across_tp=lambda x, mask: (x, routed_mask_T),
+        _maybe_shard_routed_branch_inputs_across_tp=lambda x, mask, ids: (
+            x,
+            routed_mask_T,
+            ids,
+        ),
         router=lambda x, bias, padding_mask_T=None, **kwargs: (
             torch.zeros(x.shape[0], 2),
             torch.zeros(x.shape[0], 2, dtype=torch.int64),
@@ -471,6 +475,79 @@ class TestMoE(unittest.TestCase):
                     _per_axis_types(token_id_placement(enable_sp=True)),
                 )
 
+    def test_router_replays_routed_expert_ids_on_real_tokens_only(self):
+        # Zero gate + descending bias: the router's own top-2 is {0, 1} for every token.
+        router = make_router_config(
+            dim=4,
+            num_experts=4,
+            score_func=Sigmoid.Config(),
+            gate_param_init={"weight": nn.init.zeros_},
+            top_k=2,
+        ).build()
+        router.init_states()
+
+        topk_scores_TK, topk_expert_ids_TK, _ = router(
+            torch.randn(3, 4),
+            torch.tensor([4.0, 3.0, 2.0, 1.0]),
+            padding_mask_T=torch.tensor([False, False, True]),
+            routed_expert_ids_TK=torch.tensor(
+                [[2, 3], [0, 3], [0, 0]], dtype=torch.uint8
+            ),
+        )
+
+        # Real tokens take the replayed ids; padding keeps the router's own {0, 1}.
+        self.assertEqual(topk_expert_ids_TK[:2].tolist(), [[2, 3], [0, 3]])
+        self.assertEqual(sorted(topk_expert_ids_TK[2].tolist()), [0, 1])
+        # The gate weights still come from this router's scores: sigmoid(0).
+        torch.testing.assert_close(topk_scores_TK, torch.full((3, 2), 0.5))
+
+    def test_routed_expert_ids_shard_across_tp_like_the_padding_mask(self):
+        moe = MoE.__new__(MoE)
+        routed_expert_ids_TK = torch.zeros(4, 2, dtype=torch.uint8)
+        tp_group = object()
+
+        with (
+            patch(
+                "torchtitan.models.common.moe.spmd_sparse_mesh",
+                return_value=object(),
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                return_value=True,
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd_mesh_group",
+                return_value=tp_group,
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd.redistribute",
+                side_effect=lambda tensor, *_args, **_kwargs: tensor,
+            ) as redistribute,
+        ):
+            moe._maybe_shard_routed_branch_inputs_across_tp(
+                torch.randn(4, 8), None, routed_expert_ids_TK
+            )
+
+        redistribute.assert_called_once_with(
+            routed_expert_ids_TK,
+            tp_group,
+            src=spmd.R,
+            dst=spmd.S(0),
+            backward_options={"op_dtype": torch.uint8},
+        )
+        # Replicated into the MoE, TP-sharded into the router.
+        moe_inputs = moe_sharding.moe_sharding_config(enable_sp=False).in_src_shardings
+        router_inputs = moe_sharding.router_sharding_config().in_src_shardings
+        assert moe_inputs is not None and router_inputs is not None
+        self.assertEqual(
+            _per_axis_types(moe_inputs["routed_expert_ids_TK"]),
+            _per_axis_types(token_id_placement()),
+        )
+        self.assertEqual(
+            _per_axis_types(router_inputs["routed_expert_ids_TK"]),
+            _per_axis_types(token_id_placement(enable_sp=True)),
+        )
+
     def test_shared_expert_uses_runtime_sp_aware_output_projection(self):
         config = make_shared_expert_ffn_config(
             dim=4,
@@ -683,6 +760,7 @@ class TestMoE(unittest.TestCase):
             (
                 actual_x_TD,
                 actual_padding_mask_T,
+                _,
             ) = moe._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
 
         self.assertIs(actual_x_TD, x_TD)

@@ -9,10 +9,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 
 pytest.importorskip("verifiers")
@@ -60,6 +62,7 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
                 nodes=[node],
                 token_ids=[10, 11, 12, 13],
                 logprobs=[0.0, 0.0, -0.2, -0.3],
+                routed_experts=None,
             )
         ],
     )
@@ -109,6 +112,8 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
                 nodes=[first_node, second_node],
                 token_ids=[10, 11, 12, 13],
                 logprobs=[0.0, -0.1, 0.0, -0.2],
+                # Row i holds the experts of position i.
+                routed_experts=np.arange(4).reshape(4, 1, 1),
             )
         ],
     )
@@ -131,6 +136,11 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
     ]
     assert stored == [(0, [10]), (2, [12])]
     assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13]]
+    # Like the prompt, a delta: turn 1's rows start at 11, which only its prefill ran.
+    assert [turn.routed_expert_ids.flatten().tolist() for turn in turns] == [
+        [0],
+        [1, 2],
+    ]
     assert [turn.completion_logprobs.tolist() for turn in turns] == [
         pytest.approx([-0.1]),
         pytest.approx([-0.2]),
@@ -156,11 +166,13 @@ def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> 
                 nodes=[shared, first_leaf],
                 token_ids=[10, 11, 12, 13],
                 logprobs=[0.0, -0.1, 0.0, -0.2],
+                routed_experts=None,
             ),
             SimpleNamespace(
                 nodes=[shared, second_leaf],
                 token_ids=[10, 11, 14, 15],
                 logprobs=[0.0, -0.1, 0.0, -0.3],
+                routed_experts=None,
             ),
         ],
     )
@@ -214,6 +226,7 @@ def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
                 nodes=branch_nodes,
                 token_ids=[0] * len(branch_nodes),
                 logprobs=[0.0] * len(branch_nodes),
+                routed_experts=None,
             )
             for branch_nodes in (
                 [task, first, out, second],
@@ -450,6 +463,56 @@ def test_generation_server_rejects_aborted_generation() -> None:
         assert generation_metadata is None
 
     asyncio.run(run_test())
+
+
+def test_generation_server_returns_routed_experts_from_the_prompt_start() -> None:
+    # Prompt [10, 11, 12] + completion [31, 32]: rows for positions 0..3.
+    routed_expert_ids = np.arange(4 * 2 * 2, dtype=np.uint8).reshape(4, 2, 2)
+
+    async def run_test() -> dict:
+        async def generate_fn(prompt_token_ids, *, request_id, **kwargs):
+            return Completion(
+                min_policy_version=0,
+                max_policy_version=0,
+                request_id=request_id,
+                token_ids=[31, 32],
+                token_logprobs=[-0.1, -0.2],
+                finish_reason="stop",
+                routed_expert_ids=routed_expert_ids,
+            )
+
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        server.set_generate_fn(generate_fn)
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                response = await session.post(
+                    f"http://{server.host}:{server.port}/inference/v1/generate",
+                    headers={"X-Session-ID": "group=1/rollout=2"},
+                    json={
+                        "token_ids": [10, 11, 12],
+                        "sampling_params": {
+                            "max_tokens": 2,
+                            "torchtitan_group_id": 1,
+                            "stop_token_ids": [99],
+                            # The previous turn already returned positions 0 and 1.
+                            "routed_experts_prompt_start": 2,
+                        },
+                    },
+                )
+                assert response.status == 200
+                return await response.json()
+        finally:
+            await server.close()
+
+    payload = asyncio.run(run_test())["choices"][0]["routed_experts"]
+    assert (payload["shape"], payload["start"], payload["dtype"]) == (
+        [2, 2, 2],
+        2,
+        "uint8",
+    )
+    rows = np.frombuffer(base64.b64decode(payload["data"]), dtype=np.uint8)
+    assert rows.reshape(payload["shape"]).tolist() == routed_expert_ids[2:].tolist()
 
 
 def test_generation_server_requires_group_id() -> None:

@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from dataclasses import dataclass
 
+import numpy as np
 from aiohttp import web
 
 from torchtitan.config import Configurable
@@ -196,6 +198,10 @@ class GenerationServer(Configurable):
                 raise ValueError(
                     f"sampling_params.{GROUP_ID_SAMPLING_PARAM} must be an integer"
                 )
+            # Verifiers sets it on a continued turn: earlier rows came with the previous turn.
+            routed_experts_prompt_start = sampling_params.pop(
+                "routed_experts_prompt_start", 0
+            )
             sampling = _parse_sampling_config(sampling_params)
             if body.get("features") is not None:
                 raise ValueError("multimodal features are not supported")
@@ -279,12 +285,41 @@ class GenerationServer(Configurable):
                             ]
                         },
                         "finish_reason": completion.finish_reason,
+                        **(
+                            {}
+                            if completion.routed_expert_ids is None
+                            else {
+                                "routed_experts": _routed_experts_payload(
+                                    completion.routed_expert_ids,
+                                    start=routed_experts_prompt_start,
+                                )
+                            }
+                        ),
                     }
                 ],
                 "prompt_logprobs": None,
                 "kv_transfer_params": None,
             }
         )
+
+
+def _routed_experts_payload(
+    routed_expert_ids: np.ndarray, *, start: int
+) -> dict[str, object]:
+    """Verifiers' ``routed_experts`` field: the rows from position ``start`` on.
+
+    Example:
+
+        _routed_experts_payload(routed_expert_ids, start=3)  # uint8 [6, 48, 8]
+        # -> {"data": <base64 of rows 3..5>, "shape": [3, 48, 8], "start": 3, "dtype": "uint8"}
+    """
+    rows = routed_expert_ids[start:]
+    return {
+        "data": base64.b64encode(rows.tobytes()).decode("ascii"),
+        "shape": list(rows.shape),
+        "start": start,
+        "dtype": str(rows.dtype),
+    }
 
 
 def _validate_token_ids(value: object, *, field_name: str) -> list[int]:
@@ -313,7 +348,6 @@ def _parse_sampling_config(value: object):
     protocol_fields = {
         "logprobs",
         "skip_special_tokens",
-        "routed_experts_prompt_start",
     }
     unsupported = set(value) - supported - protocol_fields
     if unsupported:
