@@ -624,8 +624,7 @@ class KimiK3Model(MultimodalModel):
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        for layer in self.layers.values():
-            block = cast(KimiK3TransformerBlock, layer)
+        for block in self.layers.values():
             h_TD, block_residual_TND = block(
                 h_TD,
                 block_residual_TND,

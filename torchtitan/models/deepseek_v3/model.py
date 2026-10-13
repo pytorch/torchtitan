@@ -16,7 +16,9 @@ from torch import nn
 from torchtitan.models.common.attention import (
     Attention,
     FlexAttentionMetadata,
+    InnerAttention,
     VarlenAttentionMetadata,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.flops import (
@@ -55,6 +57,9 @@ class DeepSeekMLAAttention(Attention):
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
         rope: RoPE.Config
+        inner_attention: InnerAttention.Config = field(
+            default_factory=VarlenInnerAttention.Config
+        )
         mscale: float = 1.0
 
     def __init__(self, config: Config):

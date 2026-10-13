@@ -134,6 +134,8 @@ class DeepSeekV4Model(Decoder):
 
     """DeepSeek V4 decoder model with HC branches and sparse attention."""
 
+    mtp_layers: "ModuleList[MTPBlock]"
+
     @classmethod
     def _register_optimizer_hooks(
         cls, optimizers, model_parts, parallelism_context
@@ -309,9 +311,7 @@ class DeepSeekV4Model(Decoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    type(cast(TransformerBlock, layer).attention.inner_attention)
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             h = layer(
                 h,
@@ -366,9 +366,7 @@ class DeepSeekV4Model(Decoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    type(cast(TransformerBlock, mtp_block).attention.inner_attention)
-                )
+                else attention_metadata.get(type(mtp_block.attention.inner_attention))
             )
             with spmd.no_typecheck():
                 aux_loss_denominator = (
