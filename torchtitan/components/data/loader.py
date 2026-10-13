@@ -8,6 +8,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -63,6 +64,10 @@ class BaseDataLoader(Stateful, ABC, Configurable):
 
     def close(self) -> None:
         pass
+
+    def restart(self) -> None:
+        """Reset iteration to its initial order while retaining the source."""
+        raise NotImplementedError("this dataloader does not support restart")
 
 
 class GrainDataLoader(BaseDataLoader):
@@ -159,9 +164,14 @@ class GrainDataLoader(BaseDataLoader):
             dataset, prefetch_buffer_size=config.num_prefetch_microbatches
         )
         self._iterator = iter(dataset)
+        self._initial_state = deepcopy(self._iterator.get_state())
 
     def __iter__(self) -> Iterator[TrainingMicrobatch]:
         return self._iterator
+
+    def restart(self) -> None:
+        """Stop prefetch and restore the initial iterator state in place."""
+        self._iterator.set_state(deepcopy(self._initial_state))
 
     def state_dict(self) -> dict[str, Any]:
         return {

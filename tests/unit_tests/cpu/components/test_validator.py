@@ -25,12 +25,16 @@ class _ClosableLoader:
     def __init__(self, rows):
         self.rows = rows
         self.closed = False
+        self.restarts = 0
 
     def __iter__(self):
         return iter(self.rows)
 
     def close(self):
         self.closed = True
+
+    def restart(self):
+        self.restarts += 1
 
 
 class _EchoModel(nn.Module):
@@ -74,13 +78,13 @@ def _generic_validator(loader):
         reset=mock.Mock(),
         log_validation=mock.Mock(),
     )
-    validator.loss_fn = lambda predictions, labels: (predictions.sum(), None)
+    validator.loss_fn = lambda predictions, labels: (predictions.sum(), {})
     validator.parallelism = SimpleNamespace()
     return validator
 
 
 @pytest.mark.parametrize("raises", [False, True])
-def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
+def test_generic_validator_retains_loader_and_restores_model_mode(monkeypatch, raises):
     def microbatch():
         return TokenizedTrainingMicrobatch(
             input=torch.ones(1, 1),
@@ -94,6 +98,9 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
     loader = _ClosableLoader([microbatch(), microbatch()])
     validator = _generic_validator(loader)
     model = _FailingModel() if raises else _EchoModel()
+    model.add_module("dropout", nn.Dropout())
+    model.dropout.eval()
+    modes = [module.training for module in model.modules()]
     monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
     if raises:
         with pytest.raises(RuntimeError, match="validation failed"):
@@ -101,8 +108,39 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
     else:
         validator.validate([model], step=1)
 
-    assert loader.closed
+    assert loader.closed is raises
+    assert loader.restarts == 1
+    assert [module.training for module in model.modules()] == modes
     validator.metrics_processor.reset.assert_called_once()
+    validator.close()
+    assert loader.closed
+
+
+def test_generic_validator_restarts_one_source_across_events(monkeypatch):
+    microbatch = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 1),
+        labels=torch.ones(1, 1, dtype=torch.long),
+        positions=torch.zeros(1, 1, dtype=torch.long),
+        padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+        loss_token_counts=torch.tensor(1),
+        routing_token_counts=torch.tensor([1]),
+    )
+    loader = _ClosableLoader([microbatch])
+    validator = _generic_validator(loader)
+    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
+
+    try:
+        for step in (1, 10):
+            validator.validate([_EchoModel()], step)
+        validator.dl_config.build.assert_called_once()
+        assert loader.restarts == 2
+        assert not loader.closed
+        assert validator.metrics_processor.log_validation.call_args_list == [
+            mock.call(loss=1.0, step=1),
+            mock.call(loss=1.0, step=10),
+        ]
+    finally:
+        validator.close()
 
 
 def _flux_validator(loader):
