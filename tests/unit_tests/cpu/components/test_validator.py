@@ -147,6 +147,30 @@ def test_generic_validator_restarts_one_source_across_events(monkeypatch):
         validator.close()
 
 
+def test_generic_validator_reports_lm_term_as_canonical_loss(monkeypatch):
+    microbatch = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 1),
+        labels=torch.ones(1, 1, dtype=torch.long),
+        positions=torch.zeros(1, 1, dtype=torch.long),
+        padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+        loss_token_counts=torch.tensor(1),
+        routing_token_counts=torch.tensor([1]),
+    )
+    validator = _generic_validator(_ClosableLoader([microbatch]))
+    validator.loss_fn = lambda predictions, labels: (
+        torch.tensor(10.0),
+        {"lm_loss_mean": torch.tensor(3.0)},
+    )
+    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
+    try:
+        validator.validate([_EchoModel()], step=1)
+        validator.metrics_processor.log_validation.assert_called_once_with(
+            loss=3.0, step=1
+        )
+    finally:
+        validator.close()
+
+
 @pytest.mark.parametrize("mask_documents,expected_capacity", [(True, 8), (False, 1)])
 def test_validation_uses_data_policy_capacity(
     monkeypatch, mask_documents, expected_capacity
@@ -378,9 +402,10 @@ def test_pipeline_validator_does_not_keep_outputs(monkeypatch):
     validator.pp_has_first_stage = True
     validator.pp_has_last_stage = True
 
-    def schedule_eval(*, target_mbs, losses, **kwargs):
+    def schedule_eval(*, target_mbs, losses, loss_results, **kwargs):
         del kwargs
         losses.extend(torch.tensor(1.0) for _ in target_mbs)
+        loss_results.extend({"loss": loss.detach(), "metrics": {}} for loss in losses)
 
     validator.pp_schedule = mock.Mock(eval=mock.Mock(side_effect=schedule_eval))
     monkeypatch.setattr(validator_module.utils, "device_type", "cpu")

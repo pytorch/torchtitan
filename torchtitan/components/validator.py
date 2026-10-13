@@ -263,6 +263,7 @@ class Validator(BaseValidator):
 
                 with self.parallelism_context.activate_spmd():
                     losses = [] if self.pp_has_last_stage else None
+                    loss_results = [] if self.pp_has_last_stage else None
                     # As training's step: without return_outputs=False, the last
                     # stage keeps every microbatch's output (logits) to merge.
                     self.pp_schedule.eval(
@@ -270,6 +271,7 @@ class Validator(BaseValidator):
                         kwarg_mbs=kwarg_mbs,
                         target_mbs=target_mbs,
                         losses=losses,
+                        loss_results=loss_results,
                         return_outputs=False,
                     )
 
@@ -277,8 +279,22 @@ class Validator(BaseValidator):
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
                 if self.pp_has_last_stage:
                     assert losses is not None
+                    assert loss_results is not None
+                    if len(loss_results) != len(microbatch_group):
+                        raise RuntimeError(
+                            "Expected one loss_results entry per microbatch; use the required PyTorch structured-loss API."
+                        )
                     # using sum because loss_fn already uses reduction='sum'
-                    loss_sum = torch.sum(torch.stack(losses)).to(device_type)
+                    loss_sum = torch.sum(
+                        torch.stack(
+                            [
+                                result["metrics"].get("lm_loss_mean", result["loss"])
+                                for result in loss_results
+                            ]
+                        )
+                    ).to(device_type)
+                    losses.clear()
+                    loss_results.clear()
                 else:
                     loss_sum = torch.tensor([-1.0], device=device_type)
             else:
@@ -294,7 +310,8 @@ class Validator(BaseValidator):
                     )
                     assert len(model_parts) == 1
                     predictions = model_parts[0](inputs, **extra_kwargs)
-                    loss_sum, _ = self.loss_fn(predictions, labels)
+                    loss_sum, loss_metrics = self.loss_fn(predictions, labels)
+                    loss_sum = loss_metrics.get("lm_loss_mean", loss_sum)
 
             loss_sum = loss_sum.detach()
             if accumulated_loss is None:

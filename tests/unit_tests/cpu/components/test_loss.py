@@ -46,6 +46,28 @@ from torchtitan.models.deepseek_v3.pipeline_dsv3 import (
 
 
 class TestLoss(unittest.TestCase):
+    def test_mtp_reports_unweighted_auxiliary_loss_and_combined_loss(self):
+        torch.manual_seed(42)
+        predictions = tuple(torch.randn(4, 8, requires_grad=True) for _ in range(2))
+        labels = (torch.tensor([1, 2, 3, 4]), torch.tensor([2, 3, 4, IGNORE_INDEX]))
+        counts = torch.tensor([4, 3])
+        loss, metrics = MTPLoss.Config(global_vocab_size=8, mtp_scale=0.1).build()(
+            predictions, labels, global_loss_token_counts=counts
+        )
+        lm = F.cross_entropy(predictions[0], labels[0], reduction="sum") / 4
+        mtp = (
+            F.cross_entropy(
+                predictions[1], labels[1], reduction="sum", ignore_index=IGNORE_INDEX
+            )
+            / 3
+        )
+        torch.testing.assert_close(loss, lm + 0.1 * mtp)
+        torch.testing.assert_close(metrics["lm_loss_mean"], lm)
+        torch.testing.assert_close(metrics["mtp_loss_mean"], mtp)
+        torch.testing.assert_close(metrics["combined_loss_mean"], loss)
+        self.assertTrue(loss.requires_grad)
+        self.assertTrue(all(not value.requires_grad for value in metrics.values()))
+
     def test_compute_logprobs_token_major(self):
         torch.manual_seed(42)
         logits = torch.randn(8, 16)

@@ -69,6 +69,53 @@ def test_unmasked_pipeline_graph_config_derives_metadata_capacity():
     assert not config.training.disable_cuda_graphs
 
 
+@pytest.mark.parametrize("mode", ["valid", "missing", "extra_name", "missing_name"])
+def test_pp_loss_results_validate_export_count_and_metric_names(mode):
+    def step(*, losses, loss_results, **kwargs):
+        losses.extend([torch.tensor(1.0), torch.tensor(2.0)])
+        if mode == "missing":
+            return
+        metrics = [{"term": torch.tensor(1.0)}, {"term": torch.tensor(2.0)}]
+        if mode == "extra_name":
+            metrics[1]["extra"] = torch.tensor(3.0)
+        if mode == "missing_name":
+            metrics[1] = {}
+        loss_results.extend(
+            {"loss": loss.detach(), "metrics": metric}
+            for loss, metric in zip(losses, metrics, strict=True)
+        )
+
+    engine = SimpleNamespace(
+        pp_has_last_stage=True,
+        device=torch.device("cpu"),
+        loss_metrics={},
+        config=SimpleNamespace(debug=SimpleNamespace(spmd_typechecking=False)),
+        parallelism_context=SimpleNamespace(
+            activate_spmd=lambda **kwargs: contextlib.nullcontext()
+        ),
+        pp_schedule=SimpleNamespace(step=step),
+    )
+
+    def run_group():
+        return TrainingEngine._pp_forward_backward_microbatch_group(
+            engine,
+            inputs=None,
+            labels=[torch.tensor(0)] * 2,
+            model_kwargs=[{}, {}],
+            loss_kwargs={},
+        )
+
+    if mode == "valid":
+        torch.testing.assert_close(run_group(), torch.tensor(3.0))
+        torch.testing.assert_close(engine.loss_metrics["term"], torch.tensor(3.0))
+    elif mode == "missing":
+        with pytest.raises(RuntimeError, match="one loss_results entry per microbatch"):
+            run_group()
+    else:
+        with pytest.raises(ValueError, match="Loss metric names must remain constant"):
+            run_group()
+
+
 def test_common_imports_do_not_require_dist_moe() -> None:
     """Ordinary engine and recipe imports keep Dist-MoE optional."""
     script = r"""
@@ -263,6 +310,7 @@ def test_pp_forward_backward_microbatch_group_releases_consumed_loss_graphs(
             activation_refs.append(weakref.ref(activation))
             loss_refs.append(weakref.ref(loss))
             kwargs["losses"].append(loss)
+            kwargs["loss_results"].append({"loss": loss.detach(), "metrics": {}})
 
     trainer = cast(
         TrainingEngine,

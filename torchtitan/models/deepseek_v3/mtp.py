@@ -579,6 +579,7 @@ class MTPLoss(CrossEntropyLoss):
                 src=spmd.R,
                 dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
             )
+        depth_losses = []
         for depth, (mtp_pred, mtp_labels) in enumerate(
             zip(pred[1:], labels[1:], strict=True), 1
         ):
@@ -587,6 +588,16 @@ class MTPLoss(CrossEntropyLoss):
                 mtp_labels,
                 loss_token_counts[depth],
             )
+            depth_losses.append(depth_loss)
             mtp_loss = mtp_loss + depth_loss * mtp_weight
         loss = main_loss + mtp_loss
-        return loss, {}
+        unweighted_mtp_loss = (
+            depth_losses[0]
+            if len(depth_losses) == 1
+            else torch.stack(depth_losses).mean()
+        )
+        return loss, {
+            "lm_loss_mean": main_loss.detach(),
+            "mtp_loss_mean": unweighted_mtp_loss.detach(),
+            "combined_loss_mean": loss.detach(),
+        }
