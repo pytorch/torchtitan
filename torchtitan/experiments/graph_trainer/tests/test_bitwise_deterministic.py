@@ -26,6 +26,7 @@ from tests.utils import hash_gradient, hash_model
 from torch.nn.attention.flex_attention import flex_attention
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -141,6 +142,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         )
         Trainer.Config(
             model=self.model_config,
+            dataloader=BaseDataLoader.Config(max_num_documents=BATCH_SIZE),
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=NUM_TOKENS,
                 max_context_length=SEQ_LEN,
@@ -172,7 +174,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         if not isinstance(self.model_config, Decoder.Config):
             return {}
-        attention_metadata = model._get_attention_metadata(self.positions)
+        attention_metadata = model._get_attention_metadata(
+            self.positions,
+            max_num_documents=BATCH_SIZE,
+            max_context_length=SEQ_LEN,
+        )
         return {"attention_metadata": attention_metadata}
 
     def _run_steps(
@@ -207,7 +213,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
             compile_numerics_changing_optim=numerics_changing_optim,
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
             parallelism_context=self.parallelism_context,
+            max_num_documents=BATCH_SIZE,
         )
+        trainer.config.training.max_context_length = SEQ_LEN
         global_loss_token_counts = torch.tensor(
             NUM_TOKENS, dtype=torch.float, device="cuda"
         )

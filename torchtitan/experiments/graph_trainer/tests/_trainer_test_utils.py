@@ -91,6 +91,7 @@ def build_minimal_trainer(
     tokenizer=None,
     fsdp_reshard_after_forward: str = "default",
     parallelism_context: ParallelismContext,
+    max_num_documents: int | None = None,
 ) -> Trainer:
     """Build the minimal Trainer/GraphTrainer needed for single-GPU test steps."""
     trainer = object.__new__(trainer_cls)
@@ -103,8 +104,8 @@ def build_minimal_trainer(
     engine.device = torch.device("cuda")
     engine.preprocess_inputs_kwargs = {}
     trainer.tokenizer = tokenizer
-    trainer.dataloader = SimpleNamespace(max_num_documents=None)
-    engine.max_num_documents = None
+    trainer.dataloader = SimpleNamespace(max_num_documents=max_num_documents)
+    engine.max_num_documents = max_num_documents
     engine.ntokens_seen = 0
     engine.num_completed_steps = 0
     engine.sdc_replayer = None
@@ -137,7 +138,7 @@ def build_minimal_trainer(
                 "selective": SelectiveAC.Config(),
                 "full": FullAC.Config(),
             }[activation_checkpoint_mode],
-            dataloader=SimpleNamespace(max_num_documents=None),
+            dataloader=SimpleNamespace(max_num_documents=max_num_documents),
             debug=DebugConfig(),
             training=TrainingConfig(disable_cuda_graphs=True),
             parallelism=SimpleNamespace(
@@ -234,7 +235,7 @@ def build_minimal_trainer(
         engine._run_forward_backward = run_direct_graph_accumulation
     else:
         trainer.config = SimpleNamespace(
-            dataloader=SimpleNamespace(max_num_documents=None),
+            dataloader=SimpleNamespace(max_num_documents=max_num_documents),
             debug=DebugConfig(),
             training=TrainingConfig(disable_cuda_graphs=True),
             parallelism=SimpleNamespace(
