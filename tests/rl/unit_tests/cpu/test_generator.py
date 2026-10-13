@@ -658,7 +658,7 @@ def test_cpu_kv_offload_names_vllms_offloading_connector(monkeypatch, tmp_path):
     # Named, not set through kv_offloading_size: vLLM's in-process config checks see it, so vLLM
     # rejects router replay with it.
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
-    assert kv_transfer_config.is_kv_transfer_instance
+    assert kv_transfer_config.kv_role == "kv_both"
     assert kv_transfer_config.kv_connector_extra_config == {
         "cpu_bytes_to_use": 16 << 30,
         "offload_prompt_only": False,
