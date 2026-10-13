@@ -72,9 +72,9 @@ def test_qwen38_2_4t_a95b_matches_hugging_face_config() -> None:
     assert full_attention_layer.attention.n_heads == 64
     assert full_attention_layer.attention.n_kv_heads == 4
 
-    assert linear_layer.moe is not None
-    assert linear_layer.moe.router.num_experts == 512
-    assert linear_layer.moe.router.top_k == 10
+    assert linear_layer.feed_forward is not None
+    assert linear_layer.feed_forward.router.num_experts == 512
+    assert linear_layer.feed_forward.router.top_k == 10
 
 
 def test_text_only_qwen38_sharding_does_not_require_vision() -> None:

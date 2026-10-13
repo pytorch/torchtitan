@@ -25,6 +25,7 @@ from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.utils import clip_grad_norm_
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.sharding import replicated_param_placement_sparse
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3Model
@@ -102,8 +103,8 @@ def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
 def _get_expert_shard_dims(model: Qwen3Model) -> tuple[int | None, int | None]:
     """Return the W13 and W2 shard dimensions."""
     for layer in model.layers.values():
-        if layer.moe_enabled:
-            routed_experts = layer.moe.routed_experts
+        if isinstance(layer.feed_forward, MoE):
+            routed_experts = layer.feed_forward.routed_experts
             return (
                 _shard_dim(routed_experts.w13.weight),
                 _shard_dim(routed_experts.w2.weight),
@@ -200,8 +201,8 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             parallelism=ParallelismConfig(),
         )
         for layer_config in config.layers:
-            layer_config.moe.routed_experts.w13.out_features = 16
-            layer_config.moe.routed_experts.w2.in_features = 16
+            layer_config.feed_forward.routed_experts.w13.out_features = 16
+            layer_config.feed_forward.routed_experts.w2.in_features = 16
         model = config.build().to(self.device_type)
         edp_mesh = init_device_mesh(
             self.device_type, (4, 2), mesh_dim_names=("edp_shard", "ep")
@@ -221,7 +222,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         )
 
         for layer in model.layers.values():
-            routed_experts = layer.moe.routed_experts
+            routed_experts = layer.feed_forward.routed_experts
             self.assertEqual(
                 {_shard_dim(param) for param in routed_experts.parameters()},
                 {0},
@@ -256,13 +257,13 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                     ),
                 )
                 for layer_config in config.layers:
-                    assert layer_config.moe is not None
-                    layer_config.moe.routed_experts.output_postprocess = (
+                    assert layer_config.feed_forward is not None
+                    layer_config.feed_forward.routed_experts.output_postprocess = (
                         output_postprocess
                     )
                     # The bare model call below supplies no aux-loss
                     # denominator; this test only checks postprocess sharding.
-                    layer_config.moe.router.aux_loss = None
+                    layer_config.feed_forward.router.aux_loss = None
                 model = config.build().to(self.device_type)
                 model.init_states()
                 model._parallelize(parallelism_context)
@@ -280,7 +281,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                 )
 
                 for layer in model.layers.values():
-                    routed_experts = layer.moe.routed_experts
+                    routed_experts = layer.feed_forward.routed_experts
                     postprocess = routed_experts.output_postprocess
                     assert postprocess is not None
                     self.assertEqual(
@@ -305,7 +306,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
                 state_dict = model.state_dict()
                 for layer_id, layer in model.layers.items():
-                    postprocess = layer.moe.routed_experts.output_postprocess
+                    postprocess = layer.feed_forward.routed_experts.output_postprocess
                     assert postprocess is not None
                     postprocess_grad = postprocess.weight.grad
                     assert postprocess_grad is not None
@@ -314,14 +315,14 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                         postprocess.weight.placements,
                     )
                     weight_key = (
-                        f"layers.{layer_id}.moe.routed_experts."
+                        f"layers.{layer_id}.feed_forward.routed_experts."
                         "output_postprocess.weight"
                     )
                     self.assertEqual(state_dict[weight_key].shape, (config.dim,))
                 clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 for layer in model.layers.values():
-                    postprocess = layer.moe.routed_experts.output_postprocess
+                    postprocess = layer.feed_forward.routed_experts.output_postprocess
                     assert postprocess is not None
                     local_weight = postprocess.weight.to_local()
                     ep_replicas = [

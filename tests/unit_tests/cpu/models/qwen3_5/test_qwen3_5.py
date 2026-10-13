@@ -42,7 +42,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
             ),
         ),
     )
-    moe = config.layers[0].moe
+    moe = config.layers[0].feed_forward
     assert moe is not None
     shared_experts = moe.shared_experts
     assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
@@ -221,9 +221,9 @@ def test_qwen35_keeps_small_dense_and_moe_models() -> None:
 
     assert dense_config.dim == 1024
     assert moe_config.dim == 2048
-    assert moe_config.layers[0].moe is not None
-    assert moe_config.layers[0].moe.router.num_experts == 256
-    assert moe_config.layers[0].moe.router.top_k == 8
+    assert moe_config.layers[0].feed_forward is not None
+    assert moe_config.layers[0].feed_forward.router.num_experts == 256
+    assert moe_config.layers[0].feed_forward.router.top_k == 8
 
 
 @pytest.mark.parametrize(

@@ -18,12 +18,12 @@ from torchtitan.distributed.fsdp import (
     linear_param_shard_placements,
 )
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
 
 
 class _FSDPModule(nn.Module):
-    def __init__(self, *, moe_enabled: bool) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.moe_enabled = moe_enabled
         self.force_sum_enabled = False
         self.symm_mem_enabled = False
 
@@ -82,6 +82,7 @@ def test_stacked_linear_shard_placements_use_num_linears() -> None:
     }
 
 
+@pytest.mark.parametrize("moe_field", ["feed_forward", "moe"])
 @pytest.mark.parametrize(
     ("scope", "dense_enabled", "sparse_enabled"),
     [
@@ -91,11 +92,15 @@ def test_stacked_linear_shard_placements_use_num_linears() -> None:
     ],
 )
 def test_enable_fsdp_symm_mem_scope(
-    scope: FSDPSymmMemScope, dense_enabled: bool, sparse_enabled: bool
+    scope: FSDPSymmMemScope, dense_enabled: bool, sparse_enabled: bool, moe_field: str
 ) -> None:
     model = nn.Module()
-    dense = _FSDPModule(moe_enabled=False)
-    sparse = _FSDPModule(moe_enabled=True)
+    dense = _FSDPModule()
+    dense.feed_forward = nn.Linear(4, 4)
+    sparse = _FSDPModule()
+    moe = MoE.__new__(MoE)
+    nn.Module.__init__(moe)
+    setattr(sparse, moe_field, moe)
     model.add_module("dense", dense)
     model.add_module("sparse", sparse)
 

@@ -13,8 +13,10 @@ from torchtitan.components.optim import DistMuon
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import LinearAttentionMetadata
 from torchtitan.models.common.attention.kda import KDA, KDAKernel
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.model import KimiK3Model, KimiMLAAttention
+from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan_recipes.tests.models.kimi_k3 import _dist_muon_optimizer
 
@@ -141,15 +143,23 @@ class TestKimiK3(unittest.TestCase):
 
         self.assertTrue(
             any(
-                fqn.endswith("moe.routed_experts.w13.weight") for fqn in compute_layouts
+                fqn.endswith("feed_forward.routed_experts.w13.weight")
+                for fqn in compute_layouts
             )
         )
         self.assertTrue(
-            any(fqn.endswith("moe.routed_experts.w2.weight") for fqn in compute_layouts)
+            any(
+                fqn.endswith("feed_forward.routed_experts.w2.weight")
+                for fqn in compute_layouts
+            )
         )
         self.assertFalse(any("inner_experts" in fqn for fqn in compute_layouts))
-        self.assertRegex("layers.1.moe.routed_experts.w13.weight", muon_config.pattern)
-        self.assertRegex("layers.1.moe.routed_experts.w2.weight", muon_config.pattern)
+        self.assertRegex(
+            "layers.1.feed_forward.routed_experts.w13.weight", muon_config.pattern
+        )
+        self.assertRegex(
+            "layers.1.feed_forward.routed_experts.w2.weight", muon_config.pattern
+        )
 
     def test_flex_attention_mask(self):
         config = _small_model_config()
@@ -280,6 +290,17 @@ class TestKimiK3(unittest.TestCase):
 
         self.assertIsInstance(model.layers["0"].attention, KDA)
         self.assertIsInstance(model.layers["1"].attention, KimiMLAAttention)
+        self.assertIsInstance(model.layers["0"].feed_forward, FeedForward)
+        self.assertIsInstance(model.layers["1"].feed_forward, KimiLatentMoE)
+        self.assertIs(config.first_feed_forward, config.layers[0].feed_forward)
+        self.assertIs(config.first_moe, config.layers[1].feed_forward)
+        self.assertTrue(all(not hasattr(layer, "moe") for layer in config.layers))
+        self.assertTrue(
+            all(not hasattr(layer, "moe") for layer in model.layers.values())
+        )
+        self.assertTrue(
+            all(not hasattr(layer, "moe_enabled") for layer in model.layers.values())
+        )
         self.assertTrue(
             all(
                 not hasattr(layer, "delta_attention") for layer in model.layers.values()
@@ -289,7 +310,7 @@ class TestKimiK3(unittest.TestCase):
         adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
         hf_state_dict = adapter.to_hf(state_dict)
         self.assertIn(
-            "layers.1.moe.routed_experts.w13.weight",
+            "layers.1.feed_forward.routed_experts.w13.weight",
             state_dict,
         )
         self.assertIn(

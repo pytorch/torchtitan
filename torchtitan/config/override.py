@@ -199,7 +199,7 @@ def override(
     Example — fuse MoE only on the later layers::
 
         @override(target=MoE.Config,
-                  fqns=["layers.1[0-9].moe"],
+                  fqns=["layers.1[0-9].feed_forward"],
                   description="Vendor fused MoE")
         def vendor_moe(cfg: MoE.Config) -> VendorMoE.Config:
             return VendorMoE.Config(num_experts=cfg.num_experts, ...)

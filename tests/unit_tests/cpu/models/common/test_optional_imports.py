@@ -228,7 +228,7 @@ class BlockDistMoe(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, BlockDistMoe())
 import torchtitan.config.transform
 import torchtitan.config.transform.dist_moe
-import torchtitan.models.common.moe.dist_moe
+import torchtitan.models.common.dist_moe
 import torchtitan.models.common.lora
 """
     result = subprocess.run(

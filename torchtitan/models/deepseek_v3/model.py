@@ -26,6 +26,7 @@ from torchtitan.models.common.flops import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
@@ -189,13 +190,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
 
-        self.moe_enabled = config.moe is not None
-        if self.moe_enabled:
-            assert config.moe is not None
-            self.moe = config.moe.build()
-        else:
-            assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build()
+        self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -210,8 +205,8 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
-        if self.moe_enabled:
-            ffn_out = self.moe(
+        if isinstance(self.feed_forward, MoE):
+            ffn_out = self.feed_forward(
                 self.ffn_norm(x),
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,

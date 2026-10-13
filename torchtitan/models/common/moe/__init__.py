@@ -6,6 +6,7 @@
 
 from .moe import (
     BatchWiseLoadBalanceLoss,
+    get_moe,
     MicrobatchWiseLoadBalanceLoss,
     MoE,
     QuantileBalancedTopKRouter,
@@ -19,6 +20,7 @@ from .moe import (
 
 __all__ = [
     "BatchWiseLoadBalanceLoss",
+    "get_moe",
     "MicrobatchWiseLoadBalanceLoss",
     "MoE",
     "QuantileBalancedTopKRouter",

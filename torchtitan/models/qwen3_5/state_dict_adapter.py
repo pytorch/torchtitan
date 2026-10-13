@@ -76,13 +76,13 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             "model.language_model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.language_model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE (grouped 3D format, handled specially in to_hf/from_hf)
-            "model.language_model.layers.{}.mlp.experts.down_proj": "layers.{}.moe.routed_experts.w2.weight",
-            "model.language_model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
+            "model.language_model.layers.{}.mlp.experts.down_proj": "layers.{}.feed_forward.routed_experts.w2.weight",
+            "model.language_model.layers.{}.mlp.gate.weight": "layers.{}.feed_forward.router.gate.weight",
             # MoE shared expert
-            "model.language_model.layers.{}.mlp.shared_expert.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
-            "model.language_model.layers.{}.mlp.shared_expert.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
-            "model.language_model.layers.{}.mlp.shared_expert.down_proj.weight": "layers.{}.moe.shared_experts.w2.weight",
-            "model.language_model.layers.{}.mlp.shared_expert_gate.weight": "layers.{}.moe.shared_experts.gate.weight",
+            "model.language_model.layers.{}.mlp.shared_expert.gate_proj.weight": "layers.{}.feed_forward.shared_experts.w1.weight",
+            "model.language_model.layers.{}.mlp.shared_expert.up_proj.weight": "layers.{}.feed_forward.shared_experts.w3.weight",
+            "model.language_model.layers.{}.mlp.shared_expert.down_proj.weight": "layers.{}.feed_forward.shared_experts.w2.weight",
+            "model.language_model.layers.{}.mlp.shared_expert_gate.weight": "layers.{}.feed_forward.shared_experts.gate.weight",
             # Final norm and output
             "model.language_model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
@@ -140,18 +140,23 @@ class Qwen35StateDictAdapter(StateDictAdapter):
         deltanet_qkv_by_layer: dict[str, dict[str, Any]] = {}
 
         for tt_key, value in state_dict.items():
-            if ".moe.routed_experts." in tt_key:
+            if ".feed_forward.routed_experts." in tt_key:
                 tt_abstract_key = re.sub(r"(\d+)", "{}", tt_key, count=1)
                 # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", tt_key).group(0)
 
-                if tt_abstract_key == "layers.{}.moe.routed_experts.w13.weight":
+                if (
+                    tt_abstract_key
+                    == "layers.{}.feed_forward.routed_experts.w13.weight"
+                ):
                     hf_state_dict[
                         f"{self.hf_language_model_prefix}.layers."
                         f"{layer_num}.mlp.experts.gate_up_proj"
                     ] = value.flatten(1, 2)
                     continue
-                elif tt_abstract_key == "layers.{}.moe.routed_experts.w2.weight":
+                elif (
+                    tt_abstract_key == "layers.{}.feed_forward.routed_experts.w2.weight"
+                ):
                     hf_key = (
                         f"{self.hf_language_model_prefix}.layers."
                         f"{layer_num}.mlp.experts.down_proj"
@@ -289,7 +294,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     == f"{self.hf_language_model_prefix}.layers.{{}}.mlp.experts.gate_up_proj"
                 ):
                     tt_state_dict[
-                        f"layers.{idx}.moe.routed_experts.w13.weight"
+                        f"layers.{idx}.feed_forward.routed_experts.w13.weight"
                     ] = value.unflatten(1, (2, -1))
                     continue
 
@@ -298,7 +303,9 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     hf_abstract_key
                     == f"{self.hf_language_model_prefix}.layers.{{}}.mlp.experts.down_proj"
                 ):
-                    tt_state_dict[f"layers.{idx}.moe.routed_experts.w2.weight"] = value
+                    tt_state_dict[
+                        f"layers.{idx}.feed_forward.routed_experts.w2.weight"
+                    ] = value
                     continue
 
                 # GatedDeltaNet fused in_proj_qkv → split into q/k/v

@@ -9,6 +9,8 @@
 import math
 from typing import TYPE_CHECKING
 
+from torchtitan.models.common.feed_forward import FeedForward
+
 
 if TYPE_CHECKING:
     from torchtitan.models.common import TransformerBlock
@@ -50,9 +52,13 @@ def nvfp4_ffn_submodules(
     it, rather than as a literal each config has to pick correctly.
     """
     dense = next(
-        (layer.feed_forward for layer in layers if layer.feed_forward is not None),
+        (
+            layer.feed_forward
+            for layer in layers
+            if isinstance(layer.feed_forward, FeedForward.Config)
+        ),
         None,
     )
     if dense is not None and dense.w13.out_features % _NVFP4_GEMM_ALIGNMENT:
-        return ("moe.shared_experts.",)
-    return ("feed_forward.", "moe.shared_experts.")
+        return ("feed_forward.shared_experts.",)
+    return ("feed_forward.w13", "feed_forward.w2", "feed_forward.shared_experts.")

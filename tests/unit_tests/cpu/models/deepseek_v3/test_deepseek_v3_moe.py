@@ -91,12 +91,12 @@ class TestDeepSeekV3Router(unittest.TestCase):
             "236B", seq_len=2048, parallelism=ParallelismConfig()
         )
 
-        router_config = config.layers[1].moe.router
+        router_config = config.layers[1].feed_forward.router
         self.assertIsInstance(router_config, DeepSeekV3Router.Config)
         self.assertEqual(router_config.num_expert_groups, 8)
         self.assertEqual(router_config.num_limited_groups, 3)
 
-        shared_experts = config.layers[1].moe.shared_experts
+        shared_experts = config.layers[1].feed_forward.shared_experts
         self.assertIsNotNone(shared_experts)
         assert shared_experts is not None
         self.assertIs(type(shared_experts.w13), ColumnParallelLinear.Config)

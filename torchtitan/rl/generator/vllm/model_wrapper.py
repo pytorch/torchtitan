@@ -45,7 +45,7 @@ from torchtitan.models.common.attention import Attention, LinearAttention
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.moe.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 

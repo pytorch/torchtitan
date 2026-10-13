@@ -28,6 +28,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import get_moe
 
 
 logger = logging.getLogger(__name__)
@@ -366,7 +367,7 @@ def annotate_module_fqns(model: nn.Module) -> None:
 
 def annotate_graph_trainer_model(model: Decoder) -> None:
     """Attach the annotations consumed by GraphTrainer passes."""
-    if any(getattr(layer, "moe", None) is not None for layer in model.config.layers):
+    if model.config.first_moe is not None:
         annotate_moe_ep_regions()
     annotate_module_fqns(model)
 
@@ -502,10 +503,10 @@ def get_default_transformer_block_buckets(
                         f"layers.{layer_id}.attention_norm",
                         f"layers.{layer_id}.attention",
                         f"layers.{layer_id}.ffn_norm",
-                        f"layers.{layer_id}.moe.router",
-                        f"layers.{layer_id}.moe.shared_experts",
+                        f"layers.{layer_id}.feed_forward.router",
+                        f"layers.{layer_id}.feed_forward.shared_experts",
                     ],
-                    f"layers.{layer_id}.moe.routed_experts",
+                    f"layers.{layer_id}.feed_forward.routed_experts",
                 ]
             )
         else:
@@ -608,7 +609,7 @@ def apply_simple_fsdp(
         for transformer_block in model.modules():
             if not isinstance(transformer_block, TransformerBlock):
                 continue
-            moe = getattr(transformer_block, "moe", None)
+            moe = get_moe(transformer_block)
             if moe is None:
                 continue
             routed_experts = moe.routed_experts

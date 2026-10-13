@@ -582,7 +582,7 @@ def _build_qwen35_moe_layers(
         layers.append(
             Qwen35TransformerBlock.Config(
                 attention=attention,
-                moe=make_moe_config(
+                feed_forward=make_moe_config(
                     num_experts=num_experts,
                     router=make_router_config(
                         dim=dim,
