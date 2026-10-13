@@ -107,11 +107,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
     build_model_config: Callable
     annotate_model: Callable
     model_flavor: str
-    # The unsuffixed subclasses use SDPA (a test-only backend that exercises the
-    # backend-agnostic graph machinery — precompile serialization, codegen,
-    # determinism — without FlexInnerAttention's unpicklable, non-tensor BlockMask).
-    # The *FlexAttn subclasses override this to "flex".
-    attn_backend: str = "sdpa"
+    # Flex-specific subclasses override the shared Varlen backend.
+    attn_backend: str = "varlen"
 
     def setUp(self):
         self.parallelism_context = self.enterContext(
@@ -168,21 +165,10 @@ class BitwiseDeterministicBase(unittest.TestCase):
         FlexInnerAttention._compiled_flex_attn = self._orig_compiled_flex_attn
 
     def _get_extra_kwargs(self, model: nn.Module) -> dict[str, object]:
-        """Build extra_kwargs matching what the model's preprocess_inputs produces.
-
-        For FlexInnerAttention models, this generates the BlockMask attention
-        masks. For SDPA models, returns an empty dict.
-        """
-        from torchtitan.models.common.attention import (
-            FlexInnerAttention as FlexAttnModule,
-        )
+        """Build the selected backend's metadata before tracing."""
         from torchtitan.models.common.decoder import Decoder
 
         if not isinstance(self.model_config, Decoder.Config):
-            return {}
-        layer = self.model_config.layers[0]
-        inner_attention = getattr(layer.attention, "inner_attention", None)
-        if not isinstance(inner_attention, FlexAttnModule.Config):
             return {}
         attention_metadata = model._get_attention_metadata(self.positions)
         return {"attention_metadata": attention_metadata}
@@ -437,8 +423,8 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         if self.attn_backend == "flex":
             # FlexInnerAttention's BlockMask mask_mod closures are Python code objects
-            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
-            # path (SDPA carries no such object).
+            # that pickle.dumps cannot serialize. The Varlen subclasses cover this
+            # path with tensor-based sequence metadata.
             self.skipTest("FlexInnerAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
@@ -501,8 +487,8 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         if self.attn_backend == "flex":
             # FlexInnerAttention's BlockMask mask_mod closures are Python code objects
-            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
-            # path (SDPA carries no such object).
+            # that pickle.dumps cannot serialize. The Varlen subclasses cover this
+            # path with tensor-based sequence metadata.
             self.skipTest("FlexInnerAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
@@ -569,8 +555,8 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         if self.attn_backend == "flex":
             # FlexInnerAttention's BlockMask mask_mod closures are Python code objects
-            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
-            # path (SDPA carries no such object).
+            # that pickle.dumps cannot serialize. The Varlen subclasses cover this
+            # path with tensor-based sequence metadata.
             self.skipTest("FlexInnerAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
@@ -655,8 +641,8 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         if self.attn_backend == "flex":
             # FlexInnerAttention's BlockMask mask_mod closures are Python code objects
-            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
-            # path (SDPA carries no such object).
+            # that pickle.dumps cannot serialize. The Varlen subclasses cover this
+            # path with tensor-based sequence metadata.
             self.skipTest("FlexInnerAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
@@ -756,8 +742,8 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         if self.attn_backend == "flex":
             # FlexInnerAttention's BlockMask mask_mod closures are Python code objects
-            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
-            # path (SDPA carries no such object).
+            # that pickle.dumps cannot serialize. The Varlen subclasses cover this
+            # path with tensor-based sequence metadata.
             self.skipTest("FlexInnerAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
@@ -824,8 +810,8 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         if self.attn_backend == "flex":
             # FlexInnerAttention's BlockMask mask_mod closures are Python code objects
-            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
-            # path (SDPA carries no such object).
+            # that pickle.dumps cannot serialize. The Varlen subclasses cover this
+            # path with tensor-based sequence metadata.
             self.skipTest("FlexInnerAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
