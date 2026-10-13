@@ -117,7 +117,9 @@ def test_lora_model_builds():
 
 def test_lora_forward():
     """LoRA model forward produces correct output shape."""
-    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+    model_config = build_model_config(
+        "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+    )
     model_config = transform_model_config_(
         model_config,
         [
@@ -137,8 +139,7 @@ def test_lora_forward():
     tokens = torch.randint(0, vocab_size, (num_tokens,))
     positions = torch.arange(seq_len).repeat(num_documents)
     attention_metadata = model._get_attention_metadata(positions)
-    # The default attention backend is FlexInnerAttention, which does not support
-    # backward on CPU; this is a forward-only shape check, so run under no_grad.
+    # Flex supports the CPU forward used by this shape check, but not backward.
     with torch.no_grad():
         output = model(
             tokens, attention_metadata=attention_metadata, positions=positions

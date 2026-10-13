@@ -815,7 +815,7 @@ def build_model_config(
     *,
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
     num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:

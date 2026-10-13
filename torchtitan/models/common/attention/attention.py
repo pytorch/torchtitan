@@ -250,10 +250,16 @@ class VarlenInnerAttention(InnerAttention):
 
         varlen_attn_fn = varlen_attn if out_transform is None else varlen_attn_with_lse
 
+        # Align Q/K with V while preserving its FP16/BF16 projection dtype.
+        attn_dtype = v_THV.dtype
+        if attn_dtype not in (torch.float16, torch.bfloat16):
+            # Preserve the legacy BF16 conversion for full-precision callers.
+            attn_dtype = torch.bfloat16
+
         result = varlen_attn_fn(
-            q_THK.to(torch.bfloat16),
-            k_THK.to(torch.bfloat16),
-            v_THV.to(torch.bfloat16),
+            q_THK.to(attn_dtype),
+            k_THK.to(attn_dtype),
+            v_THV.to(attn_dtype),
             cu_seq_q,
             cu_seq_k,
             max_q,

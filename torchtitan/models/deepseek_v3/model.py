@@ -17,8 +17,8 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttentionMetadata,
-    FlexInnerAttention,
     VarlenAttentionMetadata,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.flops import (
@@ -59,7 +59,7 @@ class Attention(BaseAttention):
         v_head_dim: int = 128
         rope: RoPE.Config
         inner_attention: Module.Config = field(
-            default_factory=FlexInnerAttention.Config
+            default_factory=VarlenInnerAttention.Config
         )
         mscale: float = 1.0
 

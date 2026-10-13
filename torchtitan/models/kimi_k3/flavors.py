@@ -790,7 +790,7 @@ MODEL_FLAVORS = {
 
 def build_model_config(
     flavor: str,
-    attn_backend: str = "flex",
+    attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
     *,
     parallelism: ParallelismConfig,

@@ -25,7 +25,6 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import LMHeadFP32OutputConverter
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.rl.components.data import IterableRLDataLoader
@@ -119,7 +118,6 @@ def _qwen3_4b_verifiers_config(
         "4B",
         seq_len=max_total_tokens,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )

@@ -594,7 +594,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
 
         flex_model = build_model_config(
-            "debugmodel", parallelism=ParallelismConfig()
+            "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
         ).build()
         masks = flex_model._get_attention_metadata(positions)
         flex_backend = next(
