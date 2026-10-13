@@ -189,8 +189,8 @@ def test_lora_wraps_hi_mid_lo_linear():
     torch.testing.assert_close(output_TO, input_TD.float() @ layer.weight.float().T)
 
 
-def test_lm_head_converter_swaps_only_lm_head():
-    from torchtitan.config.transform import LMHeadFP32OutputConverter
+def test_lm_head_transform_swaps_only_lm_head():
+    from torchtitan.config.transform import LMHeadFP32OutputTransform
     from torchtitan.models.muse_glimmer.model import SoftCappedLinear
     from torchtitan.models.qwen3 import MODEL_FLAVORS
 
@@ -200,7 +200,7 @@ def test_lm_head_converter_swaps_only_lm_head():
     )
     lm_head_before = config.lm_head
 
-    LMHeadFP32OutputConverter.Config().build().convert(config)
+    LMHeadFP32OutputTransform().transform(config)
 
     swapped = [
         fqn
@@ -216,17 +216,17 @@ def test_lm_head_converter_swaps_only_lm_head():
     assert config.lm_head.backward_mode == "hi_mid"
     # It turns on the split's local_compile region.
     assert "fp32_to_bf16_split" in config.local_compile_regions
-    # Converting an already converted head is a no-op.
+    # Applying the transform again preserves the config.
     converted = config.lm_head
-    LMHeadFP32OutputConverter.Config().build().convert(config)
+    LMHeadFP32OutputTransform().transform(config)
     assert config.lm_head == converted
     # The flag is configurable.
     config.lm_head = lm_head_before
-    converter = LMHeadFP32OutputConverter.Config(backward_mode="hi_mid_lo").build()
-    converter.convert(config)
+    transform = LMHeadFP32OutputTransform(backward_mode="hi_mid_lo")
+    transform.transform(config)
     assert config.lm_head.backward_mode == "hi_mid_lo"
     # A later default pass keeps the converted head's backward_mode.
-    LMHeadFP32OutputConverter.Config().build().convert(config)
+    LMHeadFP32OutputTransform().transform(config)
     assert config.lm_head.backward_mode == "hi_mid_lo"
 
     # A Linear subclass would lose its own fields and forward, e.g. a soft cap.
@@ -237,9 +237,9 @@ def test_lm_head_converter_swaps_only_lm_head():
         },
         output_soft_cap_temp=30.0,
     )
-    with pytest.raises(ValueError, match="is a SoftCappedLinear"):
-        LMHeadFP32OutputConverter.Config().build().convert(config)
+    with pytest.raises(ValueError, match="must inherit SoftCappedLinear"):
+        LMHeadFP32OutputTransform().transform(config)
 
     config.lm_head = None
     with pytest.raises(ValueError, match="lm_head"):
-        LMHeadFP32OutputConverter.Config().build().convert(config)
+        LMHeadFP32OutputTransform().transform(config)

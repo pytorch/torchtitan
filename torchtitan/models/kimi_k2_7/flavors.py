@@ -13,10 +13,7 @@ import spmd_types as spmd
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
+from torchtitan.config.transform import ModelConfigConverter
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
@@ -616,7 +613,6 @@ def build_model_config(
         parallelism=parallelism,
     )
     if converters is not None:
-        validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
     return config

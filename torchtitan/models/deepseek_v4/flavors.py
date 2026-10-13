@@ -15,10 +15,7 @@ import spmd_types as spmd
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
+from torchtitan.config.transform import ModelConfigConverter
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -1213,7 +1210,6 @@ def build_model_config(
                 else None
             )
     if converters is not None:
-        validate_converter_compatibility(converters)
         for converter_cfg in converters:
             config = converter_cfg.build().convert(config)
     return config

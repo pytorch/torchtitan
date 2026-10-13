@@ -11,9 +11,9 @@ from .async_tensor_parallel import AsyncTensorParallelTransform
 from .base import convert_config_type, ModelConfigTransform
 from .batch_invariance import BatchInvariantFlexConverter
 from .context_parallel import ContextParallelTransform
-from .converter import ModelConfigConverter, validate_converter_compatibility
+from .converter import ModelConfigConverter
 from .freeze_moe_routing import FreezeMoERoutingTransform
-from .lm_head_fp32 import LMHeadFP32OutputConverter
+from .lm_head_fp32 import LMHeadFP32OutputTransform
 from .lora import LoRATransform
 from .quantization import (
     MXFP8GroupedLinearConverter,
@@ -36,7 +36,7 @@ __all__ = [
     "TokenDispatcherTransform",
     "BatchInvariantFlexConverter",
     "FreezeMoERoutingTransform",
-    "LMHeadFP32OutputConverter",
+    "LMHeadFP32OutputTransform",
     "LoRATransform",
     "MXFP8GroupedLinearConverter",
     "MXFP8LinearConverter",
@@ -44,5 +44,4 @@ __all__ = [
     "NVFP4LinearConverter",
     "QuantizationConverter",
     "TransformRelations",
-    "validate_converter_compatibility",
 ]

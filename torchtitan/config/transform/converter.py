@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from torchtitan.config import Configurable
 from torchtitan.models.base.module import Module
 
-__all__ = ["ModelConfigConverter", "validate_converter_compatibility"]
+__all__ = ["ModelConfigConverter"]
 
 
 class ModelConfigConverter(Configurable):
@@ -32,25 +32,3 @@ class ModelConfigConverter(Configurable):
     @abstractmethod
     def convert(self, model_config: Module.Config) -> Module.Config:
         raise NotImplementedError
-
-
-def validate_converter_compatibility(
-    converters: list[ModelConfigConverter.Config],
-) -> None:
-    """Validate converter compatibility before model conversion."""
-    from .lm_head_fp32 import LMHeadFP32OutputConverter
-    from .quantization import QuantizationConverter
-
-    has_quantization = any(
-        isinstance(converter, QuantizationConverter.Config) for converter in converters
-    )
-    has_lm_head_fp32 = any(
-        isinstance(converter, LMHeadFP32OutputConverter.Config)
-        for converter in converters
-    )
-    # TODO: Allow this combination once linear quantization and HiMidLoLinear can
-    # preserve each other's config and compute semantics.
-    if has_quantization and has_lm_head_fp32:
-        raise ValueError(
-            "QuantizationConverter and LMHeadFP32OutputConverter cannot be combined."
-        )

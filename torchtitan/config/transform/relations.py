@@ -12,6 +12,7 @@ from .async_tensor_parallel import AsyncTensorParallelTransform
 from .base import ModelConfigTransform
 from .context_parallel import ContextParallelTransform
 from .dist_moe import DistMoeTransform
+from .lm_head_fp32 import LMHeadFP32OutputTransform
 from .lora import LoRATransform
 from .token_dispatcher import TokenDispatcherTransform
 
@@ -30,10 +31,15 @@ _BUILTIN_PRECEDES: tuple[PrecedenceRelation, ...] = (
     (ContextParallelTransform, LoRATransform),
     # Dist-MoE must create DistMoeRoutedExperts.Config before LoRA can adapt it.
     (DistMoeTransform, LoRATransform),
+    # LoRA must wrap the fp32-output head, including when it only freezes it.
+    (LMHeadFP32OutputTransform, LoRATransform),
 )
 
 # Each pair is unordered.
 _BUILTIN_CONFLICTS: tuple[ConflictRelation, ...] = (
+    # Quantization and LMHeadFP32OutputTransform are incompatible on lm_head.
+    # TODO: Declare their conflict when quantization converters migrate to
+    # ModelConfigTransform. Until then, convert_config_type rejects a quantized head.
     # Async kernels invoke fused autograd functions directly instead of the
     # projection's _linear method, which would silently omit LoRA computation.
     # TODO: Add quantization transforms when they migrate from

@@ -59,14 +59,24 @@ Transforms run on a model config that is already sharded for its parallelism
 keeps its `sharding_config`, or sets the sharding its replacement needs; it
 never re-derives sharding for the whole model.
 
-`apply_transforms` deep-copies the trainer config. It orders and applies the
-transforms, then validates the result. It returns the changed copy. The input
-config stays unchanged if a transform fails.
+`apply_transforms` deep-copies the config that owns the model, orders and applies
+the transforms, and validates through `__post_init__`. It returns the changed
+copy and leaves the input unchanged.
 
-Legacy `ModelConfigConverter` instances passed to `build_model_config` run before
-all model config transforms. In particular, apply quantization in
+Legacy converters passed through `build_model_config(converters=...)` run
+before recipe transforms. In particular, apply quantization in
 `build_model_config` before applying `LoRATransform`; running a converter over a
 LoRA-transformed tree can replace an adapter config.
+
+See the [RL recipe example](../../rl/README.md#write-an-experiment) for use with
+trainer and generator configs.
+
+RL recipes use `apply_rl_transforms` from
+`torchtitan_recipes.rl.model_configs` after configuring both roles. It combines
+shared RL defaults with shared and role-specific transforms and calls
+`apply_transforms` once per role. `build_rl_model_configs` constructs the base
+pair without applying defaults, so all transforms participate in the same
+ordering and conflict checks.
 
 NOTE: With quantization followed by LoRA, LoRA freezes the original weights,
 but the current quantized linear implementations still regenerate quantized
@@ -88,7 +98,7 @@ model_config = build_model_config(
     "0.6B", attn_backend="varlen", parallelism=ParallelismConfig()
 )
 model_config = transform_model_config_(
-    model_config, [LoRATransform(handlers=(LinearLoRAHandler(),))]
+    model_config, [LoRATransform(target_modules=["wqkv", "wo"])]
 )
 ```
 
@@ -185,8 +195,8 @@ requirements.
 ## Validation
 
 See [Configuration validation](../README.md#validation) for where validation
-belongs. `apply_transforms` validates the final trainer config after the last
-transform. The trainer validates it again after command-line overrides.
+belongs. `apply_transforms` runs the owning config's `__post_init__` after the
+last transform. The trainer validates it again after command-line overrides.
 
 `__post_init__` also runs when a config is constructed. Set related training
 options before calling `apply_transforms`. It can then validate the final

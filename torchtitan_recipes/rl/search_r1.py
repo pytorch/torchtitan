@@ -31,7 +31,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import apply_transforms, TokenDispatcherTransform
+from torchtitan.config.transform import TokenDispatcherTransform
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
@@ -55,7 +55,10 @@ from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer import Trainer
 
-from torchtitan_recipes.rl.model_configs import build_rl_model_configs
+from torchtitan_recipes.rl.model_configs import (
+    apply_rl_transforms,
+    build_rl_model_configs,
+)
 
 # TODO: Enable CUDA graphs for RL trainers after eager/graph numerics parity is
 # verified.
@@ -87,7 +90,7 @@ def _search_r1_rollouter_config() -> Rollouter.Config:
     )
 
 
-def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
+def _qwen3_1_7b_search_r1_config() -> Controller.Config:
     """GRPO Search-R1 (multi-turn retrieval QA) for Qwen3-1.7B.
 
     Runs on 8 GPUs: 4 generator (TP=4) + 1 trainer (TP=1), with a dense retrieval
@@ -111,7 +114,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="./assets/hf/Qwen3-1.7B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
@@ -169,6 +172,11 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             ),
         ),
     )
+    return config
+
+
+def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
+    return apply_rl_transforms(_qwen3_1_7b_search_r1_config())
 
 
 def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
@@ -179,7 +187,7 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
     """
     # TODO: use mixed precision (fp32 master + bf16 compute) via FSDP + activation
     # checkpointing, which is more memory-efficient and could keep the split generator-heavy.
-    config = rl_grpo_qwen3_1_7b_search_r1()
+    config = _qwen3_1_7b_search_r1_config()
     config.hf_assets_path = "./assets/hf/Qwen3-8B"
     trainer_parallelism = dataclasses.replace(
         config.trainer.parallelism, tensor_parallel_degree=4
@@ -220,7 +228,7 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
         gpu_memory_limit=0.6,
         parallelism=generator_parallelism,
     )
-    return config
+    return apply_rl_transforms(config)
 
 
 def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
@@ -310,39 +318,37 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             imports=["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
         ),
     )
-    config.trainer = apply_transforms(
-        config.trainer,
-        [
-            TokenDispatcherTransform(
-                dispatcher=DeepEPTokenDispatcher,
-                # Each EP rank dispatches one CP x TP shard of a microbatch.
-                num_max_tokens_per_rank=(
-                    config.trainer.training.num_tokens_per_microbatch_per_dp_rank
-                    // (
-                        config.trainer.parallelism.context_parallel_degree
-                        * config.trainer.parallelism.tensor_parallel_degree
-                    )
-                ),
-            )
-        ],
-    )
+    trainer_transforms = [
+        TokenDispatcherTransform(
+            dispatcher=DeepEPTokenDispatcher,
+            # Each EP rank dispatches one CP x TP shard of a microbatch.
+            num_max_tokens_per_rank=(
+                config.trainer.training.num_tokens_per_microbatch_per_dp_rank
+                // (
+                    config.trainer.parallelism.context_parallel_degree
+                    * config.trainer.parallelism.tensor_parallel_degree
+                )
+            ),
+        )
+    ]
     # The generator captures CUDA graphs, so it needs DeepEP's static,
     # host-sync-free EXPAND dispatch.
-    config.generator = apply_transforms(
-        config.generator,
-        [
-            TokenDispatcherTransform(
-                dispatcher=DeepEPTokenDispatcher,
-                # vLLM shards each engine step's token budget across TP ranks.
-                num_max_tokens_per_rank=(
-                    max_num_batched_tokens
-                    // config.generator.parallelism.tensor_parallel_degree
-                ),
-                kwargs={"cuda_graph_compatible": True},
-            )
-        ],
+    generator_transforms = [
+        TokenDispatcherTransform(
+            dispatcher=DeepEPTokenDispatcher,
+            # vLLM shards each engine step's token budget across TP ranks.
+            num_max_tokens_per_rank=(
+                max_num_batched_tokens
+                // config.generator.parallelism.tensor_parallel_degree
+            ),
+            kwargs={"cuda_graph_compatible": True},
+        )
+    ]
+    return apply_rl_transforms(
+        config,
+        trainer_transforms=trainer_transforms,
+        generator_transforms=generator_transforms,
     )
-    return config
 
 
 def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
@@ -381,11 +387,8 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
-        # TODO: bf16 logits. LMHeadFP32OutputConverter can't convert Muse Glimmer's
-        # SoftCappedLinear head; it needs a HiMidLoLinear-based variant with the soft cap.
-        fp32_lm_head=False,
     )
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
@@ -441,3 +444,5 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             ),
         ),
     )
+    # TODO: LMHeadFP32OutputTransform needs a variant for the soft-capped head.
+    return apply_rl_transforms(config, fp32_lm_head=False)

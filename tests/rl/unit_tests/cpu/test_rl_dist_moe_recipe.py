@@ -18,6 +18,7 @@ def test_rl_integration_recipe_runs_dist_moe_on_both_roles():
     # The RL integration test guards the Dist-MoE path only if its recipe really
     # puts Dist-MoE on the trainer and on the generator, with graphs and uneven DP.
     from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
+    from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
     from torchtitan.models.common.moe import RoutedExperts
     from torchtitan_recipes.tests.rl.alphabet_sort import (
         rl_grpo_moe_debug_dist_moe_tp2_ep4,
@@ -26,6 +27,7 @@ def test_rl_integration_recipe_runs_dist_moe_on_both_roles():
     config = rl_grpo_moe_debug_dist_moe_tp2_ep4()
 
     for model_config in (config.trainer.model, config.generator.model):
+        assert isinstance(model_config.lm_head, HiMidLoLinear.Config)
         assert list(model_config.traverse(DistMoeRoutedExperts.Config))
         assert not [
             entry
