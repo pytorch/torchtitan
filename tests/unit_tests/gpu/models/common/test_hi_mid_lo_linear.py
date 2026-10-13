@@ -440,10 +440,21 @@ def test_backward_accumulates_into_running_weight_grad(
         assert _relative_error(actual, exact) <= _relative_error(expected, exact)
 
 
-def test_inplace_wgrad_accum_raises_under_compile():
-    x = torch.randn(4, 256, device="cuda", dtype=torch.bfloat16)
-    with pytest.raises(Exception, match="inplace_wgrad_accum=False"):
-        torch.compile(_lm_head(), fullgraph=True)(x)
+def test_inplace_wgrad_accum_ignored_under_compile():
+    # torch.compile traces the ordinary WGRAD instead of breaking the graph.
+    inputs = [
+        torch.randn(4, 256, device="cuda", dtype=torch.bfloat16) for _ in range(2)
+    ]
+    lm_heads = []
+    for inplace_wgrad_accum in (True, False):
+        torch.manual_seed(0)
+        lm_head = _lm_head()
+        lm_head.inplace_wgrad_accum = inplace_wgrad_accum
+        compiled = torch.compile(lm_head, fullgraph=True)
+        for x in inputs:
+            compiled(x).float().sum().backward()
+        lm_heads.append(lm_head)
+    assert torch.equal(lm_heads[0].weight.grad, lm_heads[1].weight.grad)
 
 
 def _run_fsdp_accumulates_chunk_weight_grads(rank, world_size, port):

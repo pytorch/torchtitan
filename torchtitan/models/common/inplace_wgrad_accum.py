@@ -26,9 +26,9 @@ epilogue:
     return ..., grad_weight, ...
 
 Clearing ``.grad`` and returning the same buffer lets AccumulateGrad reattach
-it without a copy, instead of adding it to itself. Tracing (torch.compile,
-GraphTrainer) cannot represent the read-and-clear of ``.grad``, so those paths
-set ``inplace_wgrad_accum=False``.
+it without a copy, instead of adding it to itself. Tracing cannot represent
+the read-and-clear of ``.grad``: under torch.compile the option is ignored, and
+GraphTrainer sets ``inplace_wgrad_accum=False``.
 """
 
 import torch
@@ -41,20 +41,28 @@ def uses_inplace_wgrad_accum(
 ) -> bool:
     """Whether this forward's backward adds its WGRAD into ``weight.grad`` in place.
 
-    False when ``inplace_wgrad_accum`` is off or no WGRAD will be computed
-    (grad mode off, or a frozen weight). Raises when it is on but cannot run,
-    rather than silently falling back to an ordinary WGRAD: a traced forward
-    (torch.compile, or GraphTrainer's make_fx, which does not set
-    is_compiling, hence the proxy mode check), or a weight that is not the leaf
-    parameter whose ``.grad`` autograd populates.
+    False when ``inplace_wgrad_accum`` is off, no WGRAD will be computed (grad
+    mode off, or a frozen weight), or Dynamo is tracing: the compiled graph
+    then uses the ordinary WGRAD formula and AccumulateGrad adds it. Raising
+    under Dynamo would not reach the user: Dynamo treats the exception as a
+    graph break and reruns the frame eagerly, where this check passes, so the
+    forward mixes compiled and eager code (and activation checkpointing's
+    recompute can diverge from it).
+
+    Raises when it is on but cannot run, rather than silently falling back to
+    an ordinary WGRAD: under GraphTrainer's make_fx, which does not set
+    is_compiling, or for a weight that is not the leaf parameter whose
+    ``.grad`` autograd populates.
     """
     if not (inplace_wgrad_accum and torch.is_grad_enabled() and weight.requires_grad):
         return False
+    if torch.compiler.is_compiling():
+        return False
     module_name = type(module).__qualname__
-    if torch.compiler.is_compiling() or get_proxy_mode() is not None:
+    if get_proxy_mode() is not None:
         raise RuntimeError(
             f"{module_name} has inplace_wgrad_accum=True but is being traced "
-            "(torch.compile or GraphTrainer). A traced backward cannot add into "
+            "by make_fx (GraphTrainer). A traced backward cannot add into "
             "weight.grad in place; set inplace_wgrad_accum=False."
         )
     if not weight.is_leaf:
