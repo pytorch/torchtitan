@@ -22,7 +22,7 @@ from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
 )
 from torchtitan_recipes.tests.graph_trainer.llama3 import (
     graph_trainer_llama3_debugmodel,
-    graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss,
+    graph_trainer_llama3_debugmodel_varlen_cross_entropy_loss,
 )
 from torchtitan_recipes.tests.graph_trainer.qwen3 import (
     graph_trainer_qwen3_debugmodel,
@@ -116,6 +116,7 @@ def llama3_graph_hsdp_pp_numerics():
 def deepseek_v3_eager_numerics():
     config = deepseek_v3_debugmodel(
         seq_len=2048,
+        attn_backend="flex",
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=4,
             tensor_parallel_degree=2,
@@ -163,7 +164,9 @@ def _deepseek_v3_pp_numerics(config, *, schedule: str):
 def deepseek_v3_eager_pp_numerics():
     return _without_inplace_wgrad_accum(
         _deepseek_v3_pp_numerics(
-            deepseek_v3_debugmodel(seq_len=2048, parallelism=_pp_ep_parallelism()),
+            deepseek_v3_debugmodel(
+                seq_len=2048, attn_backend="flex", parallelism=_pp_ep_parallelism()
+            ),
             schedule="Interleaved1F1B",
         )
     )
@@ -266,12 +269,14 @@ def qwen3_graph_numerics():
 def qwen3_moe_eager_numerics():
     config = qwen3_moe_debug(
         seq_len=2048,
+        attn_backend="flex",
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=4,
             tensor_parallel_degree=2,
             expert_parallel_degree=2,
         ),
     )
+    config.dataloader.max_num_documents = None
     # Match GraphTrainer, which captures model and loss in one eager FX graph.
     config.model.local_compile_regions = []
     config.training.disable_cuda_graphs = True
@@ -289,15 +294,15 @@ def qwen3_moe_graph_numerics():
     return config
 
 
-def llama3_sdpa_manual_numerics():
-    config = graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss()
+def llama3_varlen_manual_numerics():
+    config = graph_trainer_llama3_debugmodel_varlen_cross_entropy_loss()
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     return config
 
 
-def llama3_sdpa_autoparallel_numerics():
-    config = llama3_sdpa_manual_numerics()
+def llama3_varlen_autoparallel_numerics():
+    config = llama3_varlen_manual_numerics()
     config.compile.enable_autoparallel = True
     return config
 

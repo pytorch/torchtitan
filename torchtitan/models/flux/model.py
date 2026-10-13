@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Shape suffixes: T = packed tokens.
+
 from dataclasses import dataclass, field
 from typing import Any, cast, Self
 
@@ -17,10 +19,17 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.local_compile import apply_local_compile
-from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.distributed.spmd_types import annotate_replicated_parameters
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.spmd_types import (
+    annotate_replicated_parameters,
+    spmd_mesh_size,
+)
 from torchtitan.models.base import BaseModel
 from torchtitan.models.base.module import Module, ModuleList
+from torchtitan.models.common.attention import (
+    VarlenAttentionMetadata,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.flops import quadratic_attention_flops_per_token
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.autoencoder import AutoEncoder
@@ -46,6 +55,40 @@ from torchtitan.models.flux.utils import (
 )
 
 from .state_dict_adapter import FluxStateDictAdapter
+
+
+@spmd.local_map(
+    in_types=(
+        spmd.PartitionSpec("dp", "cp", None),
+        spmd.PartitionSpec("dp", "cp", None),
+    ),
+    out_types=spmd.PartitionSpec("dp", "cp", None),
+)
+def local_concat_text_image(text: Tensor, image: Tensor) -> Tensor:
+    return torch.cat((text, image), dim=1)
+
+
+def _get_attention_metadata(
+    attention_config: VarlenInnerAttention.Config,
+    batch_size: int,
+    seq_len: int,
+    *,
+    device: torch.device,
+) -> VarlenAttentionMetadata:
+    """Treat each sample as one sequence, with local Q and CP-gathered K/V."""
+    positions_T = torch.arange(seq_len, device=device, dtype=torch.int32).repeat(
+        batch_size
+    )
+    metadata = attention_config.build_attention_metadata(
+        positions_T,
+        max_num_documents=batch_size,
+        max_context_length=seq_len,
+    )
+    cp_size = spmd_mesh_size(MeshAxisName.CP)
+    return metadata._replace(
+        cu_seq_k=metadata.cu_seq_k * cp_size,
+        max_k=metadata.max_k * cp_size,
+    )
 
 
 class FluxModel(BaseModel):
@@ -160,6 +203,7 @@ class FluxModel(BaseModel):
     def __init__(self, config: Config):
         super().__init__()
 
+        self.config = config
         self.in_channels = config.in_channels
         self.out_channels = config.out_channels
         if config.hidden_size % config.num_heads != 0:
@@ -381,35 +425,34 @@ class FluxModel(BaseModel):
             timesteps=timesteps,
         )
 
-        @spmd.local_map(
-            in_types=(
-                spmd.PartitionSpec("dp", "cp", None),
-                spmd.PartitionSpec("dp", "cp", None),
-            ),
-            out_types=spmd.PartitionSpec("dp", "cp", None),
-        )
-        def _local_concat_text_image(text: Tensor, image: Tensor) -> Tensor:
-            return torch.cat((text, image), dim=1)
-
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
+        if img.shape[0] != txt.shape[0]:
+            raise ValueError(
+                "Input img and txt tensors must have matching batch sizes."
+            )
 
-        # running on sequences img
+        batch_size, text_seq_len = txt.shape[:2]
+        attention_metadata = _get_attention_metadata(
+            self.config.double_blocks[0].inner_attention,
+            batch_size,
+            img.shape[1] + text_seq_len,
+            device=img.device,
+        )
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
-
-        ids = _local_concat_text_image(txt_ids, img_ids)
+        ids = local_concat_text_image(txt_ids, img_ids)
         pe = self.pe_embedder(ids)
 
         for block in self.double_blocks:
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+            img, txt = block(img, txt, vec, pe, attention_metadata=attention_metadata)
 
-        img = _local_concat_text_image(txt, img)
+        img = local_concat_text_image(txt, img)
         for block in self.single_blocks:
-            img = block(img, vec=vec, pe=pe)
-        _, img = local_split_text_image(img, txt.shape[1])
+            img = block(img, vec, pe, attention_metadata=attention_metadata)
+        _, img = local_split_text_image(img, text_seq_len)
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         return img
