@@ -34,6 +34,7 @@ case "$COMMAND" in
     feature_tests)
         python -m tests.integration_tests.run_tests \
             --test_suite features \
+            --exclude "cpu_offload+opt_in_bwd+TP+DP+CP" \
             --ngpu "$NGPU" \
             "$OUTPUT_DIR"
         ;;

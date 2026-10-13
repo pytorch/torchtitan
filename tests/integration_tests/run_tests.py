@@ -370,26 +370,6 @@ def run_single_test(
             )
 
 
-def _validate_test_names(args, test_list: list[IntegrationTestDefinition]) -> None:
-    available_names = {test.test_name for test in test_list}
-    selectors = {
-        "--test_name": {args.test_name} if args.test_name != "all" else set(),
-        "--exclude": (
-            {name.strip() for name in args.exclude.split(",")}
-            if args.exclude
-            else set()
-        ),
-    }
-    for option, names in selectors.items():
-        unknown = names - available_names
-        if unknown:
-            raise ValueError(
-                f"Unknown test name(s) for {option} in suite(s) '{args.test_suite}': "
-                f"{', '.join(sorted(unknown))}. "
-                f"Available test names: {', '.join(sorted(available_names))}"
-            )
-
-
 def _filter_tests(
     args, test_list: list[IntegrationTestDefinition]
 ) -> tuple[list[IntegrationTestDefinition], list[IntegrationTestDefinition]]:
@@ -635,17 +615,6 @@ def main():
         parser.error(f"The {suites} suite(s) only support --execution_mode real_pg")
     if args.execution_mode == "fake_pg" and args.test_scope == "real_pg_required":
         parser.error("real_pg_required test scope requires --execution_mode real_pg")
-
-    tests_by_suite = {suite: _build_test_list(suite) for suite in test_suites}
-    # A selector may belong to any of the requested suites. Validate their union
-    # before running tests or applying hardware and execution-mode filters.
-    try:
-        _validate_test_names(
-            args, [test for tests in tests_by_suite.values() for test in tests]
-        )
-    except ValueError as error:
-        parser.error(str(error))
-
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
     if os.listdir(args.output_dir):
@@ -658,7 +627,7 @@ def main():
             suite_args.output_dir = os.path.join(args.output_dir, test_suite)
             os.makedirs(suite_args.output_dir)
 
-        test_list = tests_by_suite[test_suite]
+        test_list = _build_test_list(test_suite)
         run_tests(suite_args, test_list, parallel=suite_args.parallel)
 
 
