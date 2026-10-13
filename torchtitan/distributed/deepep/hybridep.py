@@ -20,6 +20,7 @@ Configuration (via HybridEPTokenDispatcher.Config):
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,6 +34,8 @@ logger = logging.getLogger(__name__)
 _buffer: Any = None  # Global buffer instance
 # Sticky "a non-blocking dispatch dropped tokens" flag; see _record_over_budget.
 _over_budget: torch.Tensor | None = None
+# See register_dispatch_observer.
+_dispatch_observers: list[Callable[[torch.Tensor, torch.Tensor], None]] = []
 
 
 class DispatchHandle(CustomClassBase):
@@ -188,6 +191,8 @@ def _dispatch_impl(
     # The flag is accumulated on device instead, for reading after the step.
     if non_blocking:
         _record_over_budget(handle[-1])
+        for observer in _dispatch_observers:
+            observer(hidden, tokens_per_expert)
 
     if scores is None:
         scores = torch.empty(0, device=x.device, dtype=torch.float32)
@@ -566,6 +571,22 @@ def _record_over_budget(overflow_flag: torch.Tensor) -> None:
     _over_budget.logical_or_(overflow_flag)
 
 
+def register_dispatch_observer(
+    observer: Callable[[torch.Tensor, torch.Tensor], None],
+) -> Callable[[], None]:
+    """Call ``observer(hidden, tokens_per_expert)`` after every non-blocking
+    dispatch, and return a function that unregisters it.
+
+    ``hidden`` is the permuted output, whose leading dimension is the static
+    capacity the dispatch was sized for; ``sum(tokens_per_expert)`` of its rows
+    are live. Observers run inside the dispatch op, before activation
+    checkpointing caches its outputs. This is how MoE paged stashing learns a
+    region's padded and live row counts.
+    """
+    _dispatch_observers.append(observer)
+    return lambda: _dispatch_observers.remove(observer)
+
+
 def check_hybridep_over_budget() -> torch.Tensor | None:
     """Return the device-side flag set when a non-blocking dispatch dropped tokens.
 
@@ -585,6 +606,7 @@ __all__ = [
     "dispatch_tokens",
     "combine_tokens",
     "check_hybridep_over_budget",
+    "register_dispatch_observer",
     "reset_hybridep_over_budget",
     "DispatchState",
     "DispatchHandle",

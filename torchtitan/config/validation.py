@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 __all__ = [
     "validate_context_parallel",
     "validate_model_training_config",
+    "validate_paged_stash",
 ]
 
 
@@ -37,6 +38,7 @@ def validate_model_training_config(
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
+    from torchtitan.distributed.activation_checkpoint import PagedAC
     from torchtitan.distributed.cuda_graph import cuda_graphs_supported
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
@@ -147,6 +149,44 @@ def validate_model_training_config(
         )
 
     validate_context_parallel(model, parallelism)
+    if isinstance(activation_checkpoint, PagedAC.Config):
+        validate_paged_stash(model, parallelism=parallelism)
+
+
+def validate_paged_stash(
+    model: BaseModel.Config, *, parallelism: ParallelismConfig
+) -> None:
+    """Validate that ``PagedAC`` can page this model's routed experts.
+
+    Paging needs every routed-expert token dispatch to have a static capacity,
+    which is what makes its permuted activations capacity-padded and so worth
+    paging. Nothing here cross-checks activation checkpointing: ``PagedAC`` is
+    the checkpointing policy, so a model cannot be paged and recomputed by two
+    policies at once.
+    """
+    from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.token_dispatcher import (
+        HybridEPTokenDispatcher,
+        LocalTokenDispatcher,
+    )
+
+    if not any(model.traverse(MoE.Config)):
+        raise ValueError("PagedAC pages MoE activations; this model has no MoE.")
+    if parallelism.expert_parallel_degree <= 1:
+        raise ValueError(
+            "PagedAC needs expert_parallel_degree > 1: it pages the "
+            "capacity-padded output of an expert-parallel HybridEP dispatch."
+        )
+    for fqn, dispatcher, _, _ in model.traverse(LocalTokenDispatcher.Config):
+        if (
+            not isinstance(dispatcher, HybridEPTokenDispatcher.Config)
+            or dispatcher.non_blocking_capacity_factor is None
+        ):
+            raise ValueError(
+                f"PagedAC needs a static-capacity token dispatch, but {fqn} "
+                f"is a {type(dispatcher).__qualname__} without one. Use "
+                "HybridEPTokenDispatcher with non_blocking_capacity_factor set."
+            )
 
 
 def validate_context_parallel(

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
@@ -25,6 +26,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
+    PagedAC,
     SelectiveAC,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
@@ -32,6 +34,7 @@ from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
     NUM_CUDA_GRAPH_WARMUP_STEPS,
+    reset_cuda_graphs,
     wrap_fwd_bwd_with_cuda_graph,
     wrap_with_cuda_graph,
 )
@@ -50,6 +53,8 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 
 
 if TYPE_CHECKING:
+    from torchtitan.distributed.deepep.paged_stash.eager import EagerPagedStash
+    from torchtitan.distributed.deepep.paged_stash.runtime import PagedStashRunner
     from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 
 
@@ -87,7 +92,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             +-- _preprocess_microbatch_groups
             |
             +-- _run_forward_backward =
-                _forward_backward_body (maybe_wrapped_with_cuda_graph)
+                _forward_backward_body (maybe_wrapped_with_cuda_graph,
+                maybe run by the paged stash runner)
                 |
                 +-- _pp_forward_backward_microbatch_group
                 |
@@ -130,6 +136,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 and self.training.mixed_precision_param != "bfloat16"
             ):
                 raise ValueError("Dist-MoE requires mixed_precision_param='bfloat16'")
+            if self.dist_moe_runtime is not None and isinstance(
+                self.activation_checkpoint, PagedAC.Config
+            ):
+                raise ValueError(
+                    "PagedAC does not support Dist-MoE, which manages its own "
+                    "routed-expert memory."
+                )
             if (
                 self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
@@ -229,6 +242,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     _run_forward_backward: _ForwardBackwardFn
     _cuda_graph_per_accumulation_group_enabled: bool
     _dist_moe_runtime: "DistMoeRuntime | None"
+    _paged_stash: "EagerPagedStash | None"
+    _paged_stash_runner: "PagedStashRunner | None"
 
     def __init__(
         self,
@@ -251,6 +266,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.sdc_replayer = None
         self._cuda_graph_per_accumulation_group_enabled = False
         self._dist_moe_runtime = None
+        self._paged_stash = None
+        self._paged_stash_runner = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
         self._initialize_distributed_runtime()
@@ -486,53 +503,102 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             ),
         )
         self._run_forward_backward = eager_forward_backward_fn
-        if self.config.training.disable_cuda_graphs or not cuda_graphs_supported():
-            return
+        if not self.config.training.disable_cuda_graphs and cuda_graphs_supported():
+            if self.config.training.cuda_graph_per_accumulation_group:
+                graph_group_runner = wrap_with_cuda_graph(
+                    eager_forward_backward_fn,
+                    num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                )
 
-        if self.config.training.cuda_graph_per_accumulation_group:
-            graph_group_runner = wrap_with_cuda_graph(
-                eager_forward_backward_fn,
-                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                # TODO: Use multiple CUDA graphs to support variable group counts
+                # without duplicating the gradient accumulation logic.
+                def run_forward_backward_groups(
+                    microbatch_groups: list[tuple[Any, ...]],
+                    global_loss_token_counts: torch.Tensor,
+                ) -> ForwardBackwardResult:
+                    accumulated_loss: torch.Tensor | None = None
+                    loss_metrics: list[dict[str, torch.Tensor]] = []
+                    for microbatch_group in microbatch_groups:
+                        result = graph_group_runner(
+                            [microbatch_group],
+                            global_loss_token_counts,
+                        )
+                        group_loss = result.loss.clone()
+                        if accumulated_loss is None:
+                            accumulated_loss = group_loss
+                        else:
+                            accumulated_loss.add_(group_loss)
+                        loss_metrics.extend(
+                            {key: value.clone() for key, value in group_metrics.items()}
+                            for group_metrics in result.loss_metrics
+                        )
+                    assert accumulated_loss is not None
+                    return ForwardBackwardResult(accumulated_loss, loss_metrics)
+
+                self._cuda_graph_per_accumulation_group_enabled = True
+                self._run_forward_backward = run_forward_backward_groups
+            else:
+                self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
+                    eager_forward_backward_fn,
+                    parameters=(
+                        parameter
+                        for model_part in self.model_parts
+                        for parameter in model_part.parameters()
+                    ),
+                    num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                )
+        if isinstance(self.config.activation_checkpoint, PagedAC.Config):
+            self._initialize_paged_stash(self.config.activation_checkpoint)
+
+    def _initialize_paged_stash(self, ac_config: PagedAC.Config) -> None:
+        """Page the routed experts' padded activations, and run every
+        forward-backward under the paged stash's overflow check.
+
+        The runner wraps the whole forward-backward, CUDA graph included, as
+        Megatron's ``PagedStashRunner`` wraps ``forward_backward_func``: the
+        microbatches of a step share the stash, so a step is what an overflow
+        verdict covers and what a ``blocking`` rerun repeats.
+        """
+        from torchtitan.distributed.deepep.paged_stash.eager import EagerPagedStash
+        from torchtitan.distributed.deepep.paged_stash.runtime import (
+            hybridep_overbudget_probe,
+            moe_expert_biases,
+            PagedStashRunner,
+        )
+
+        paged_stash = EagerPagedStash(
+            ac_config,
+            model_parts=self.model_parts,
+            pp_schedule=(
+                self.pp_schedule if self.parallelism_context.pp_enabled else None
+            ),
+            device=self.device,
+        )
+        runner = PagedStashRunner(
+            self.optim.optimizers,
+            expert_biases=moe_expert_biases(self.model_parts),
+            overbudget_probes=[hybridep_overbudget_probe()],
+            overflow_check=ac_config.paged_stash.overflow_check,
+            reset_cuda_graphs=reset_cuda_graphs,
+        )
+        self._paged_stash = paged_stash
+        self._paged_stash_runner = runner
+        run_forward_backward = self._run_forward_backward
+
+        def paged_forward_backward(
+            microbatch_groups: list[tuple[Any, ...]],
+            global_loss_token_counts: torch.Tensor,
+        ) -> ForwardBackwardResult:
+            return runner(
+                partial(
+                    paged_stash.run_step,
+                    run_forward_backward,
+                    microbatch_groups,
+                    global_loss_token_counts,
+                )
             )
 
-            # TODO: Use multiple CUDA graphs to support variable group counts
-            # without duplicating the gradient accumulation logic.
-            def run_forward_backward_groups(
-                microbatch_groups: list[tuple[Any, ...]],
-                global_loss_token_counts: torch.Tensor,
-            ) -> ForwardBackwardResult:
-                accumulated_loss: torch.Tensor | None = None
-                loss_metrics: list[dict[str, torch.Tensor]] = []
-                for microbatch_group in microbatch_groups:
-                    result = graph_group_runner(
-                        [microbatch_group],
-                        global_loss_token_counts,
-                    )
-                    group_loss = result.loss.clone()
-                    if accumulated_loss is None:
-                        accumulated_loss = group_loss
-                    else:
-                        accumulated_loss.add_(group_loss)
-                    loss_metrics.extend(
-                        {key: value.clone() for key, value in group_metrics.items()}
-                        for group_metrics in result.loss_metrics
-                    )
-                assert accumulated_loss is not None
-                return ForwardBackwardResult(accumulated_loss, loss_metrics)
-
-            self._cuda_graph_per_accumulation_group_enabled = True
-            self._run_forward_backward = run_forward_backward_groups
-            return
-
-        self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
-            eager_forward_backward_fn,
-            parameters=(
-                parameter
-                for model_part in self.model_parts
-                for parameter in model_part.parameters()
-            ),
-            num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
-        )
+        self._run_forward_backward = paged_forward_backward
 
     @sl.log_trace_span("forward_backward")
     def forward_backward(
@@ -821,9 +887,25 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
     def close(self) -> None:
         """Release CUDA graph and checkpoint resources owned by the trainer."""
+        # A deferred paged-stash overflow verdict for the final steps has no
+        # later step to read it; read it here so the job fails instead of
+        # exiting cleanly with skipped steps. Not while an exception unwinds,
+        # so it cannot mask that error.
+        if self._paged_stash_runner is not None and sys.exc_info()[0] is None:
+            self._paged_stash_runner.final_overflow_check()
         self.close_profiler()
         if not self.config.training.disable_cuda_graphs:
             cuda_graph_teardown()
+        if self._paged_stash is not None:
+            from torchtitan.distributed.deepep.paged_stash.runtime import (
+                PagedStashManager,
+            )
+
+            self._paged_stash.close()
+            self._paged_stash = None
+            self._paged_stash_runner = None
+            # Frees the stash buffers, now that no CUDA graph points into them.
+            PagedStashManager.reset_instance()
         if self._dist_moe_runtime is not None:
             self._dist_moe_runtime.close()
             self._dist_moe_runtime = None

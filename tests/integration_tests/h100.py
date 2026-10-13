@@ -11,7 +11,7 @@ training process, so it must stay importable from this module.
 """
 
 from torchtitan.trainer import Trainer
-from torchtitan_recipes.tests import _set_spmd_typechecking
+from torchtitan_recipes.tests import _route_round_robin, _set_spmd_typechecking
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel_hybridep
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
@@ -40,6 +40,29 @@ def deepseek_v3_debugmodel_hybridep_fsdp4_ep2() -> Trainer.Config:
     config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 2
+    return config
+
+
+def deepseek_v3_debugmodel_hybridep_pp2_ep2_paged_stash() -> Trainer.Config:
+    """MoE paged stashing in the eager trainer: Interleaved1F1B over two
+    pipeline ranks, FSDP2 and EP2, with CUDA graphs.
+
+    ``PagedAC`` is the activation checkpointing policy. It keeps the default
+    region policy outside the paged regions and owns the routed experts, whose
+    retained activations it pages rather than recomputing.
+    """
+    from torchtitan.distributed.activation_checkpoint import PagedAC
+
+    config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 4
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.activation_checkpoint = PagedAC.Config()
+    # The stash is sized from the first step, and a step that outgrows it is
+    # fatal under the default overflow check: keep every step's routing alike.
+    _route_round_robin(config)
     return config
 
 
@@ -197,6 +220,14 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             ngpu=4,
             # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
             skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_debugmodel_hybridep_pp2_ep2_paged_stash],
+            test_descr="DeepSeek V3 PP+FSDP+HybridEP+CUDA graphs+paged stash",
+            test_name="deepseek_v3_pp+hybridep+paged_stash",
+            ngpu=4,
+            skip_rocm_test=True,
+            use_real_pg=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_dist_gemm_tp2],

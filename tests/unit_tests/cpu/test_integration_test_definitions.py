@@ -211,6 +211,7 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
     h100_tests = build_h100_tests_list()
     assert {test.test_name for test in h100_tests} == {
         "deepseek_v3_fsdp+hybridep",
+        "deepseek_v3_pp+hybridep+paged_stash",
         "dist_gemm",
         "fsdp_symm_mem",
         "kimi_k3_mm_allgather_kv_cp",

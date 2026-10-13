@@ -32,6 +32,7 @@ import torch.fx as fx
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.deepep.paged_stash.runtime import PagedStashManager
 from torchtitan.experiments.graph_trainer.common_utils import (
     BOXED_CODEGEN_META,
     ensure_boxed_graph_module,
@@ -45,9 +46,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     example_inputs_from_placeholders,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
-from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
-    PagedStashManager,
-)
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     canonicalize_graph_pass,

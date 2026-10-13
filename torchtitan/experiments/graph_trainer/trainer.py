@@ -15,11 +15,17 @@ import torch
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
+from torchtitan.distributed.activation_checkpoint import PagedAC
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
     NUM_CUDA_GRAPH_WARMUP_STEPS,
+    reset_cuda_graphs,
     wrap_fwd_bwd_with_cuda_graph,
+)
+from torchtitan.distributed.deepep.paged_stash.runtime import (
+    PagedStashManager,
+    PagedStashRunner,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
@@ -30,9 +36,8 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
 from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+    apply_graph_pp,
     build_paged_stash_runner,
-    PagedStashManager,
-    PagedStashRunner,
 )
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.linear import Linear
@@ -60,7 +65,8 @@ class GraphTrainingEngine(TrainingEngine):
     # harness builds without running initialization -- see it as disabled.
     _paged_stash_runner: PagedStashRunner | None = None
     # The step the runner runs: the forward-backward, CUDA-graphed unless
-    # CUDA graphs are disabled. Rebuilt when the runner resets the graph.
+    # CUDA graphs are disabled. The wrapper survives a reset, which only drops
+    # the captured graph, so this is bound once.
     _paged_stash_forward_backward: _ForwardBackwardFn
 
     def __init__(
@@ -191,24 +197,17 @@ class GraphTrainingEngine(TrainingEngine):
             eager_forward_backward_fn
         )
         if self.config.compile.memory_policy == "sac_and_paged_stash":
-
-            def reset_cuda_graph() -> None:
-                # Drop the captured step before the paged stash releases the
-                # page buffers it points into. The rebuilt wrapper runs the
-                # rerun and the first step over the reallocated buffers
-                # eagerly, and captures on the step after.
-                cuda_graph_teardown()
-                self._paged_stash_forward_backward = self._maybe_wrap_with_cuda_graph(
-                    eager_forward_backward_fn
-                )
-
             self._paged_stash_runner = build_paged_stash_runner(
                 self.config.compile.paged_stash,
                 optimizers=self.optim.optimizers,
                 model_parts=self.model_parts,
                 device=self.device,
                 pp_enabled=self.parallelism_context.pp_enabled,
-                reset_cuda_graphs=reset_cuda_graph,
+                # Drops the captured step before the stash releases the pages
+                # it points into, and keeps the shared pool, so the reallocated
+                # buffers can be captured into it again. The rerun is the one
+                # eager call the reset asks for; the step after it captures.
+                reset_cuda_graphs=reset_cuda_graphs,
             )
             # The runner reads overflow flags on the host and may rerun the
             # step, so it wraps the CUDA graph instead of being captured in it.
@@ -346,11 +345,12 @@ class GraphTrainingEngine(TrainingEngine):
         if self.parallelism_context.pp_enabled:
             graph_runtime = self.pp_schedule
             assert isinstance(graph_runtime, GraphRuntime)
-            runner.apply_pp_schedule(graph_runtime.pipeline_liveness_schedule)
-        # Looked up on every attempt: a blocking rerun rebuilds the CUDA graph.
+            apply_graph_pp(graph_runtime.pipeline_liveness_schedule)
         return runner(
-            lambda: self._paged_stash_forward_backward(
-                microbatch_groups, global_loss_token_counts
+            partial(
+                self._paged_stash_forward_backward,
+                microbatch_groups,
+                global_loss_token_counts,
             )
         )
 
@@ -410,6 +410,13 @@ class GraphTrainer(Trainer):
     engine: GraphTrainingEngine
 
     def __init__(self, config: Config) -> None:
+        if isinstance(config.activation_checkpoint, PagedAC.Config):
+            raise ValueError(
+                "GraphTrainer pages MoE activations in its compiled graph: set "
+                "compile.memory_policy = 'sac_and_paged_stash' and "
+                "compile.paged_stash rather than the PagedAC checkpointing "
+                "policy, which is the eager trainer's frontend."
+            )
         super().__init__(config)
         if (
             not self.engine.parallelism_context.pp_enabled
