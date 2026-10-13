@@ -66,16 +66,13 @@ class _Actor:
         return 1
 
 
-def _router(
-    actors, *, strategy=None, hot_swap=False, forward_session_releases=False
-) -> InterGeneratorRouter:
+def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
     return InterGeneratorRouter(
         InterGeneratorRouter.Config(
             strategy=strategy or LeastLoadedRoutingStrategy.Config(),
             hot_swap=hot_swap,
         ),
         generators=actors,
-        forward_session_releases=forward_session_releases,
     )
 
 
@@ -394,15 +391,11 @@ def test_sticky_session_release_drops_its_assignment():
 
 
 def test_session_release_reaches_only_its_pinned_generator():
-    """With `hold_session_kv`, the generator a session is pinned to releases its held KV."""
+    """The generator a session is pinned to releases its held KV."""
 
     async def _run():
         actors = [_Actor("gen0"), _Actor("gen1")]
-        router = _router(
-            actors,
-            strategy=StickySessionRoutingStrategy.Config(),
-            forward_session_releases=True,
-        )
+        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
         assert await _generate(router, group_id=0, session_id="s0") == "gen0"
 
         await router._release_session(session_id="s0")

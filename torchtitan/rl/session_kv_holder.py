@@ -10,24 +10,32 @@ evicted first."""
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.request import RequestStatus
 
+from torchtitan.config import Configurable
 
-class SessionKVHolder:
-    """Keeps a session's reusable prefix out of vLLM's free pool until its next turn or its end.
 
-    vLLM frees a finished turn's blocks to an LRU free queue, where any new request can evict them;
-    the session's next turn then recomputes its history. In vLLM's hybrid "align" mode the prompt-end
-    Gated-DeltaNet state even leaves the request when decode starts. So right after a request's
-    prefill, this holds the blocks vLLM's own prefix lookup says a continuation would hit (attention
-    blocks and the matching GDN state blocks), and lets go of the session's previous hold. Held blocks
-    count as used in vLLM's ``kv_cache_usage``.
+class VLLMSessionKVHolder(Configurable):
+    """Keeps each multi-turn session's cached prefix on GPU between its turns.
 
-    It releases whole idle sessions, idle longest first:
-    - before each step, while fewer than ``floor`` blocks are free (it can't act inside a step);
+    Between turns (a tool call, an env step) a session has no request in vLLM, so its blocks sit in
+    vLLM's free queue, where any new request can take them; the next turn then recomputes its
+    history. The holder takes a reference on them instead:
+
+        turn 1 prefill done  ->  hold the blocks turn 2 would hit (attention + Gated-DeltaNet state)
+        tool call            ->  held: no other request can take them
+        turn 2 prefill done  ->  hold the blocks turn 3 would hit, drop turn 1's hold
+        rollout ends         ->  release: the blocks go back to vLLM's free queue, still cached
+
+    It holds at prefill, not at the turn's end: in vLLM's hybrid "align" mode the prompt-end GDN
+    state leaves the request when decode starts.
+
+    When memory runs short, it releases whole idle sessions, idle longest first:
+    - before each step, while fewer than ``floor`` blocks are free;
     - after a step where nothing runs and requests wait: vLLM refused the head for lack of blocks.
 
     The floor is vLLM's watermark plus the most blocks the next step can add to running requests
@@ -38,12 +46,9 @@ class SessionKVHolder:
         floor = free_floor_blocks
             + num_kv_cache_groups x len(running)  # a block each at a block boundary
 
-    Too small, and vLLM preempts a running request (a recompute, not a hang); too big only holds
-    fewer sessions.
-
-    A release only demotes: the blocks go to vLLM's LRU free queue and stay prefix hits until reused.
-    Every mutating method must run on the engine thread of every rank, in the same order, so the
-    schedulers of all TP ranks stay identical.
+    - Held blocks count as used in vLLM's ``kv_cache_usage``.
+    - Every mutating method runs on every rank's engine thread in the same order, so the TP ranks'
+      schedulers stay identical.
 
     With CPU offload, vLLM also copies every computed block to CPU. When a session ends
     (`release`), its CPU chunks are evicted first, except the chunks a live session also uses:
@@ -55,7 +60,7 @@ class SessionKVHolder:
 
     Example:
 
-        holder = SessionKVHolder(scheduler)
+        holder = VLLMSessionKVHolder.Config().build(scheduler=scheduler)
         internal_id = engine.add_request(request_id="group=3/rollout=0/turn=2", ...)
         holder.track(internal_id, session_id="group=3/rollout=0", group_id=3)
         holder.evict_until_free()  # before each engine.step()
@@ -69,12 +74,30 @@ class SessionKVHolder:
         offload_policy: vLLM's CPU offload `LRUCachePolicy`; None without CPU offload.
     """
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
     def __init__(
         self,
+        config: Config,
+        *,
         scheduler: Any,
         hold: bool = True,
         offload_policy: Any | None = None,
     ) -> None:
+        del config
+        if hold:
+            # Partial-block prefix hits or speculative decoding move the replay point away from the
+            # prompt-end block this holds.
+            if scheduler.kv_cache_manager.coordinator.enable_partial_hash_hits:
+                raise ValueError(
+                    "session_kv_holder does not support partial-block prefix hits"
+                )
+            if scheduler.vllm_config.speculative_config is not None:
+                raise ValueError(
+                    "session_kv_holder does not support speculative decoding"
+                )
         if offload_policy is not None:
             # Imported here: runs without CPU offload never load vLLM's offload code.
             from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy

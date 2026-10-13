@@ -299,6 +299,21 @@ def test_pull_takes_precedence_over_queued_requests(runner) -> None:
     assert pending_engine_requests == []
 
 
+@pytest.mark.parametrize("pull", [False, True])
+def test_session_releases_ride_the_pull_or_step_decision(runner, pull) -> None:
+    generator = _bare_generator(event_loop=runner.get_loop())
+    messages = [
+        SessionReleaseMessage(session_ids=["s0"]),
+        _request(),
+        SessionReleaseMessage(group_ids=[3]),
+    ]
+    decision = _decide(runner, generator, [], *messages, *([_pull(5)] if pull else []))
+    assert decision.action is (
+        LoopAction.PULL_MODEL_STATE_DICT if pull else LoopAction.STEP
+    )
+    assert (decision.released_session_ids, decision.released_group_ids) == (["s0"], [3])
+
+
 def test_pulls_taken_off_the_queue_together_coalesce_at_the_highest_version(
     runner,
 ) -> None:

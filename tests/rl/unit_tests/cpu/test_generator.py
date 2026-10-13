@@ -63,6 +63,7 @@ from torchtitan.rl.model.vllm_worker import (
     TorchTitanGPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.session_kv_holder import VLLMSessionKVHolder
 from vllm import SamplingParams
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
@@ -574,6 +575,16 @@ def test_batch_invariant_requires_kv_cache_reset():
             model=_MODEL_CONFIG,
             parallelism=_PARALLELISM,
             debug=DebugConfig(batch_invariant=True),
+        )
+
+
+def test_session_kv_holder_rejects_kv_cache_reset_on_weight_sync():
+    with pytest.raises(ValueError, match="needs reset_kv_cache_on_weight_sync=False"):
+        VLLMGenerator.Config(
+            model=_MODEL_CONFIG,
+            parallelism=_PARALLELISM,
+            session_kv_holder=VLLMSessionKVHolder.Config(),
+            reset_kv_cache_on_weight_sync=True,
         )
 
 

@@ -641,10 +641,6 @@ class Controller(Configurable):
                 InterGeneratorRouter,
                 config.generator_router,
                 generators=generators,
-                forward_session_releases=(
-                    config.generator.hold_session_kv
-                    or config.generator.kv_offload_gib > 0
-                ),
             )
 
             await self._rollouter.setup_async(
