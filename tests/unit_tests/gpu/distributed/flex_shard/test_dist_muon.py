@@ -7,12 +7,15 @@
 # @lint-ignore-every CITRINE
 
 import unittest
+from typing import Literal
 from unittest import mock
 
 import pytest
 import torch
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp._fully_shard._fsdp_common import _from_local_no_grad
 from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
+from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
@@ -32,6 +35,7 @@ from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
     ComputeLayout,
+    dist_muon as dist_muon_module,
     Owned,
 )
 from torchtitan.distributed.flex_shard.dist_muon import (
@@ -535,6 +539,121 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         )
         compute_ready_layout = compute_ready_optimizer._parameter_compute_layouts[0]
         self.assertTrue(compute_ready_layout.storage_is_compute_ready)
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+class TestDistMuonCpuOffload(DTensorTestBase):
+    """Host-resident shards, as FSDP2 CPU offload leaves them for the optimizer."""
+
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @property
+    def backend(self):
+        return "cpu:gloo,cuda:nccl"
+
+    @with_comms
+    def test_cuda_ns_device_matches_host_iteration(self):
+        lr = 0.03
+        weight_decay = 0.2
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        fqns = ("layers.0.redistributed", "layers.0.local_blocks")
+        values = (
+            torch.arange(24).reshape(8, 3).float().div_(10).add_(1),
+            torch.arange(24, 72).reshape(16, 3).float().div_(10),
+        )
+        grads = tuple(
+            torch.arange(1, value.numel() + 1).reshape(value.shape).float().div_(17)
+            for value in values
+        )
+
+        def host_dtensor(value: torch.Tensor) -> DTensor:
+            # DTensor.from_local would move the shard onto the CUDA mesh; build
+            # the DTensor directly, as FSDP2 does under CPU offload.
+            local = value.chunk(self.world_size)[self.rank].clone()
+            spec = DTensorSpec(
+                mesh,
+                (Shard(0),),
+                tensor_meta=TensorMeta(value.shape, value.stride(), value.dtype),
+            )
+            return _from_local_no_grad(local, spec)
+
+        def make_parameter(value: torch.Tensor) -> torch.nn.Parameter:
+            param = torch.nn.Parameter(host_dtensor(value))
+            self.assertEqual(param.to_local().device.type, "cpu")
+            return param
+
+        def run(ns_device: Literal["cuda", "cpu"] | None):
+            params = tuple(make_parameter(value) for value in values)
+            optimizer = DistMuon(
+                [{"params": list(params), "param_names": list(fqns)}],
+                compute_sharding_by_fqn={
+                    fqns[0]: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Owned()},
+                    ),
+                    fqns[1]: ComputeLayout(
+                        shardings_by_mesh_axis={
+                            "dp_shard": BlockShard(dim=0, block_sizes=(4,))
+                        },
+                    ),
+                },
+                bucket_configs=[
+                    BucketConfig(patterns=("layers.0.*",), name="layers.0")
+                ],
+                lr=lr,
+                weight_decay=weight_decay,
+                momentum=0.8,
+                nesterov=True,
+                ns_steps=2,
+                ns_device=ns_device,
+            )
+            ns_devices: list[torch.device] = []
+            original = dist_muon_module._compute_muon_direction
+
+            def record_device(prepared, **kwargs):
+                ns_devices.append(prepared.device)
+                return original(prepared, **kwargs)
+
+            with mock.patch.object(
+                dist_muon_module, "_compute_muon_direction", record_device
+            ):
+                for _ in range(2):
+                    for param, grad in zip(params, grads, strict=True):
+                        param.grad = host_dtensor(grad)
+                    optimizer.step()
+            return params, optimizer, ns_devices
+
+        host_params, _, host_ns_devices = run(None)
+        cuda_params, cuda_optimizer, cuda_ns_devices = run("cuda")
+
+        self.assertTrue(host_ns_devices)
+        self.assertTrue(all(d.type == "cpu" for d in host_ns_devices))
+        self.assertTrue(cuda_ns_devices)
+        self.assertTrue(
+            all(d == torch.device("cuda", self.rank) for d in cuda_ns_devices)
+        )
+        # Parameters and optimizer state stay on the host.
+        for param in cuda_params:
+            self.assertEqual(param.to_local().device.type, "cpu")
+        for state in cuda_optimizer.state.values():
+            for value in state.values():
+                if isinstance(value, torch.Tensor):
+                    local = value.to_local() if isinstance(value, DTensor) else value
+                    self.assertEqual(local.device.type, "cpu")
+        # BF16 Newton-Schulz kernels differ between host and device.
+        for host_param, cuda_param in zip(host_params, cuda_params, strict=True):
+            torch.testing.assert_close(
+                cuda_param.to_local(), host_param.to_local(), rtol=0, atol=2e-3
+            )
 
 
 instantiate_parametrized_tests(TestDistMuon)
