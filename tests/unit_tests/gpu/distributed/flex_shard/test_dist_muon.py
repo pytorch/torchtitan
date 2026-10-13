@@ -541,6 +541,28 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         self.assertTrue(compute_ready_layout.storage_is_compute_ready)
 
 
+def _zeropower_via_newtonschulz_fp32(
+    update: torch.Tensor,
+    *,
+    ns_coefficients: tuple[float, float, float],
+    ns_steps: int,
+    eps: float,
+) -> torch.Tensor:
+    """FP32 copy of DistMuon's Newton-Schulz, so host and device runs agree
+    to FP32 rounding instead of BF16 rounding."""
+    a, b, c = ns_coefficients
+    result = update.to(dtype=torch.float32, copy=True)
+    transposed = result.shape[-2] > result.shape[-1]
+    if transposed:
+        result = result.transpose(-2, -1)
+    result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
+    for _ in range(ns_steps):
+        gram = result @ result.transpose(-2, -1)
+        gram_update = b * gram + c * (gram @ gram)
+        result = a * result + gram_update @ result
+    return result.transpose(-2, -1) if transposed else result
+
+
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestDistMuonCpuOffload(DTensorTestBase):
     """Host-resident shards, as FSDP2 CPU offload leaves them for the optimizer."""
@@ -559,6 +581,8 @@ class TestDistMuonCpuOffload(DTensorTestBase):
 
     @with_comms
     def test_cuda_ns_device_matches_host_iteration(self):
+        # TF32 would put device matmuls far outside the FP32 tolerance below.
+        torch.backends.cuda.matmul.allow_tf32 = False
         lr = 0.03
         weight_decay = 0.2
         mesh = init_device_mesh(
@@ -623,8 +647,15 @@ class TestDistMuonCpuOffload(DTensorTestBase):
                 ns_devices.append(prepared.device)
                 return original(prepared, **kwargs)
 
-            with mock.patch.object(
-                dist_muon_module, "_compute_muon_direction", record_device
+            with (
+                mock.patch.object(
+                    dist_muon_module, "_compute_muon_direction", record_device
+                ),
+                mock.patch.object(
+                    dist_muon_module,
+                    "_zeropower_via_newtonschulz",
+                    _zeropower_via_newtonschulz_fp32,
+                ),
             ):
                 for _ in range(2):
                     for param, grad in zip(params, grads, strict=True):
@@ -649,10 +680,11 @@ class TestDistMuonCpuOffload(DTensorTestBase):
                 if isinstance(value, torch.Tensor):
                     local = value.to_local() if isinstance(value, DTensor) else value
                     self.assertEqual(local.device.type, "cpu")
-        # BF16 Newton-Schulz kernels differ between host and device.
+        # FP32 Newton-Schulz: host and device differ only by reduction order.
+        # A dropped copy-back would leave the momentum input as the direction.
         for host_param, cuda_param in zip(host_params, cuda_params, strict=True):
             torch.testing.assert_close(
-                cuda_param.to_local(), host_param.to_local(), rtol=0, atol=2e-3
+                cuda_param.to_local(), host_param.to_local(), rtol=0, atol=1e-5
             )
 
 
