@@ -81,10 +81,7 @@ from torchtitan.experiments.graph_trainer.mutation_utils import (
     mutation_deps,
     mutation_target_nodes,
 )
-from torchtitan.experiments.graph_trainer.passes import (
-    apply_graph_passes,
-    construct_mandatory_graph_passes,
-)
+from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
@@ -151,8 +148,9 @@ def _trace_dsv3_moe_block_stage(
     torch.manual_seed(0)
 
     with _stable_flex_attention_compile_config():
+        parallelism = ParallelismConfig(expert_parallel_degree=2)
         model_config = build_deepseek_v3_model_config(
-            "debugmodel", attn_backend="flex", seq_len=seq_len
+            "debugmodel", attn_backend="flex", seq_len=seq_len, parallelism=parallelism
         )
         trainer_config = Trainer.Config(
             model=model_config,
@@ -162,11 +160,10 @@ def _trace_dsv3_moe_block_stage(
                 steps=1,
                 disable_cuda_graphs=True,
             ),
-            parallelism=ParallelismConfig(expert_parallel_degree=2),
+            parallelism=parallelism,
             checkpointer=CheckpointManager.Config(initial_load_model_only=False),
             debug=DebugConfig(seed=0, deterministic=True),
         )
-        model_config.set_sharding_(trainer_config.parallelism)
         moe_layer_config = model_config.layers[1]
         if moe_layer_config.moe is None:
             raise AssertionError("DeepSeek V3 MoE layer must contain an MoE block")

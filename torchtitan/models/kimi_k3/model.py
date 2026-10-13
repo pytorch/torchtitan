@@ -15,15 +15,18 @@ import torch_remat as remat
 from torch import nn
 
 from torchtitan.config import TrainingConfig
+from torchtitan.config.configurable import Configurable
+from torchtitan.config.function import Function
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import apply_local_compile, local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     annotate_replicated_parameters,
     spmd_local_context,
 )
+from torchtitan.models.base.module import Module
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
     AttentionMetadata,
@@ -41,6 +44,11 @@ from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
 )
+from torchtitan.models.common.flops import (
+    delta_rule_flops_per_token,
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -53,12 +61,6 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.utils import (
-    delta_rule_flops_per_token,
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
-from torchtitan.protocols.module import Module
 
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
@@ -191,28 +193,41 @@ class KimiMLAAttention(BaseAttention):
         return self.wo(out_TD)
 
 
-def _apply_attention_residual(
-    partial_block_TD: torch.Tensor | None,
-    block_residual_TND: torch.Tensor,
-    projection: Linear,
-    norm: RMSNorm,
-) -> torch.Tensor:
-    """Apply Kimi's block-level attention residual in FP32."""
-    assert norm.eps is not None
+class AttentionResidual(Function[torch.Tensor]):
+    """Configurable callable for Kimi K3 attention residual aggregation."""
 
-    values_TND = (
-        block_residual_TND
-        if partial_block_TD is None
-        else torch.cat((block_residual_TND, partial_block_TD.unsqueeze(1)), dim=1)
-    )
-    values_float = values_TND.float()
-    variance = values_float.pow(2).mean(dim=-1, keepdim=True)
-    keys_TND = values_float * torch.rsqrt(variance + norm.eps)
-    score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
-    scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
-    probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
-    output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
-    return output_TD.to(values_TND.dtype)
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
+
+    # N grows across attention-residual blocks, so keep one shape-polymorphic graph.
+    @local_compile("attention_residual", batch_invariant=True, dynamic=True)
+    def __call__(
+        self,
+        partial_block_TD: torch.Tensor | None,
+        block_residual_TND: torch.Tensor,
+        projection: Linear,
+        norm: RMSNorm,
+    ) -> torch.Tensor:
+        """Apply Kimi's block-level attention residual in FP32."""
+        assert norm.eps is not None
+
+        values_TND = (
+            block_residual_TND
+            if partial_block_TD is None
+            else torch.cat((block_residual_TND, partial_block_TD.unsqueeze(1)), dim=1)
+        )
+        values_float = values_TND.float()
+        variance = values_float.pow(2).mean(dim=-1, keepdim=True)
+        keys_TND = values_float * torch.rsqrt(variance + norm.eps)
+        score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
+        scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
+        probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
+        output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
+        return output_TD.to(values_TND.dtype)
 
 
 class KimiK3TransformerBlock(Module):
@@ -232,6 +247,7 @@ class KimiK3TransformerBlock(Module):
         attention_res_proj: Linear.Config | None
         ffn_res_norm: RMSNorm.Config
         ffn_res_proj: Linear.Config
+        attention_residual: AttentionResidual.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -279,6 +295,7 @@ class KimiK3TransformerBlock(Module):
         )
         self.ffn_res_norm = config.ffn_res_norm.build()
         self.ffn_res_proj = config.ffn_res_proj.build()
+        self.attention_residual = config.attention_residual.build()
 
     def forward(
         self,
@@ -302,7 +319,7 @@ class KimiK3TransformerBlock(Module):
             h_TD = x_TD
         else:
             assert self.attention_res_norm is not None
-            h_TD = _apply_attention_residual(
+            h_TD = self.attention_residual(
                 partial_block_TD,
                 block_residual_TND,
                 self.attention_res_proj,
@@ -318,7 +335,7 @@ class KimiK3TransformerBlock(Module):
         remat.recompute_needs_tensor(h_TD)
         prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
 
-        h_TD = _apply_attention_residual(
+        h_TD = self.attention_residual(
             prefix_sum_TD,
             block_residual_TND,
             self.ffn_res_proj,
@@ -371,12 +388,16 @@ class KimiK3Model(MultimodalModel):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
+        attention_residual: AttentionResidual.Config = field(
+            default_factory=AttentionResidual.Config
+        )
         local_compile_regions: list[str] = field(
             default_factory=lambda: [
                 "loss",
                 "gated_rmsnorm",
                 "fused_binary_activation",
                 "fp32_to_bf16_split",
+                "attention_residual",
             ]
         )
 
@@ -409,15 +430,6 @@ class KimiK3Model(MultimodalModel):
                     )
             return nparams, 6 * active_nparams + attention_op_flops
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_kimi_k3_sharding_config
-
-            set_kimi_k3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size
 
@@ -435,6 +447,7 @@ class KimiK3Model(MultimodalModel):
         super().__init__(config)
         self.output_res_norm = config.output_res_norm.build()
         self.output_res_proj = config.output_res_proj.build()
+        self.attention_residual = config.attention_residual.build()
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
@@ -629,7 +642,7 @@ class KimiK3Model(MultimodalModel):
                     {
                         MeshAxisName.DP: spmd.V,
                         MeshAxisName.CP: spmd.V,
-                        MeshAxisName.TP: spmd.I,
+                        MeshAxisName.TP: spmd.R,
                     },
                     partition_spec=spmd.PartitionSpec(
                         (MeshAxisName.DP, MeshAxisName.CP), None
@@ -661,7 +674,7 @@ class KimiK3Model(MultimodalModel):
 
         if self.output_res_proj is None:
             return h_TD, block_residual_TND
-        h_TD = _apply_attention_residual(
+        h_TD = self.attention_residual(
             h_TD,
             block_residual_TND,
             self.output_res_proj,

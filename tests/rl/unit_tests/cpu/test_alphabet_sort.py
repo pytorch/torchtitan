@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
+import numpy as np
 import pytest
 from renderers import Qwen3RendererConfig
 
@@ -27,7 +28,7 @@ from torchtitan.rl.examples.alphabet_sort import (
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import score_sorted_list
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
-from torchtitan.rl.types import RolloutTurnID
+from torchtitan.rl.rollout.types import RolloutTurnID
 from torchtitan_recipes.rl.alphabet_sort import _alphabet_sort_rollouter_config
 
 from torchtitan_recipes.tests.rl.alphabet_sort import (
@@ -83,16 +84,17 @@ def test_ci_recipes_limit_prompt_length_to_model_context(config_fn) -> None:
 
     assert (
         config.rollouter.worker.token_env.max_rollout_tokens
-        == config.model.max_context_length
+        == config.trainer.model.max_context_length
     )
 
 
 def _assistant_turn(content: str) -> RolloutTurn:
     return RolloutTurn(
         rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
-        prompt_token_ids=[],
-        completion_token_ids=[],
-        completion_logprobs=[],
+        prompt_prefix_len=0,
+        prompt_delta_token_ids=np.array([], dtype=np.int32),
+        completion_token_ids=np.array([], dtype=np.int32),
+        completion_logprobs=np.array([], dtype=np.float32),
         min_policy_version=0,
         completion_message={"role": "assistant", "content": content},
     )

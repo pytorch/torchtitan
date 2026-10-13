@@ -13,8 +13,9 @@ import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.moe_state_dict_adapter import MoEStateDictAdapter
+
 from torchtitan.models.common.rope import ComplexRoPE
-from torchtitan.models.utils import MoEStateDictAdapter
 
 if TYPE_CHECKING:
     from .model import DeepSeekV3Model

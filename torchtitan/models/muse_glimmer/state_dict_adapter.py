@@ -62,8 +62,9 @@ torchtitan mid-layer name note: torchtitan exposes the pre-FFN norm as
 import re
 from typing import Any, TYPE_CHECKING
 
+from torchtitan.models.base.state_dict_adapter import dtensor_safe, StateDictAdapter
+
 from torchtitan.models.common.rope import ComplexRoPE
-from torchtitan.protocols.state_dict_adapter import dtensor_safe, StateDictAdapter
 
 if TYPE_CHECKING:
     from .model import MuseGlimmerModel

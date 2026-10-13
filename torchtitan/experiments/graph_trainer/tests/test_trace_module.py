@@ -15,12 +15,15 @@ from torch.optim import swap_in_optimizer_params_and_state
 from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
     _maybe_materialize_grad_for_param_layout,
     accumulate_param_grads_,
+    disable_inplace_wgrad_accum,
     get_simple_fsdp_mesh,
     maybe_register_blockmask_pytree_node,
 )
@@ -60,6 +63,8 @@ def make_train_step(model, loss_fn, *, fwd_kwargs=None):
 
 
 def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
+    # make_fx traces the backward, which cannot add into weight.grad in place.
+    disable_inplace_wgrad_accum(model_config)
     model = config_cls(model_config)
     model.to(device=device, dtype=dtype)
     with torch.no_grad():
@@ -180,7 +185,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
             compile=SimpleNamespace(memory_policy="none"),
-            dist_moe=None,
+            dist_moe_runtime=None,
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             sdc_replayer=None,
             training=SimpleNamespace(
@@ -1737,7 +1742,11 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.llama3 import Llama3Model, MODEL_FLAVORS
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_model_test(
             Llama3Model,
             config,
@@ -1750,7 +1759,11 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.qwen3.model import Qwen3Model
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_model_test(
             Qwen3Model,
             config,
@@ -1764,13 +1777,22 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.qwen3.model import Qwen3Model
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel_moe"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_model_test(
             Qwen3Model,
             config,
             use_attention_metadata=True,
             use_regional_inductor=True,
             dtype=torch.bfloat16,
+            fwd_kwargs={
+                "aux_loss_denominators": torch.tensor(
+                    [self.BATCH_SIZE * self.SEQ_LEN], device=self.DEVICE
+                )
+            },
         )
 
     def test_deepseek_v3(self):
@@ -1781,6 +1803,7 @@ class TestTraceModels(unittest.TestCase):
         config = build_config(
             attn_backend="flex",
             seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
         )
         self._run_model_test(
             DeepSeekV3Model,
@@ -1829,41 +1852,42 @@ class TestTraceModels(unittest.TestCase):
                 qk_nope_head_dim = 16
                 v_head_dim = 16
                 qk_head_dim = qk_nope_head_dim + rope_dim
-                self.attn = DSAttention(
-                    DSAttention.Config(
-                        n_heads=n_heads,
-                        dim=dim,
-                        q_lora_rank=0,
-                        kv_lora_rank=kv_lora_rank,
-                        qk_nope_head_dim=qk_nope_head_dim,
-                        qk_rope_head_dim=rope_dim,
-                        v_head_dim=v_head_dim,
-                        rope=ComplexRoPE.Config(
-                            dim=rope_dim,
-                            max_context_length=seq_len,
-                            scaling="none",
-                        ),
-                        q_norm=RMSNorm.Config(normalized_shape=1),
-                        kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
-                        inner_attention=FlexInnerAttention.Config(),
-                        wq=Linear.Config(
-                            in_features=dim,
-                            out_features=n_heads * qk_head_dim,
-                        ),
-                        wkv_a=Linear.Config(
-                            in_features=dim,
-                            out_features=kv_lora_rank + rope_dim,
-                        ),
-                        wkv_b=Linear.Config(
-                            in_features=kv_lora_rank,
-                            out_features=n_heads * (qk_nope_head_dim + v_head_dim),
-                        ),
-                        wo=Linear.Config(
-                            in_features=n_heads * v_head_dim,
-                            out_features=dim,
-                        ),
+                attn_config = DSAttention.Config(
+                    n_heads=n_heads,
+                    dim=dim,
+                    q_lora_rank=0,
+                    kv_lora_rank=kv_lora_rank,
+                    qk_nope_head_dim=qk_nope_head_dim,
+                    qk_rope_head_dim=rope_dim,
+                    v_head_dim=v_head_dim,
+                    rope=ComplexRoPE.Config(
+                        dim=rope_dim,
+                        max_context_length=seq_len,
+                        scaling="none",
+                    ),
+                    q_norm=RMSNorm.Config(normalized_shape=1),
+                    kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
+                    inner_attention=FlexInnerAttention.Config(),
+                    wq=Linear.Config(
+                        in_features=dim,
+                        out_features=n_heads * qk_head_dim,
+                    ),
+                    wkv_a=Linear.Config(
+                        in_features=dim,
+                        out_features=kv_lora_rank + rope_dim,
+                    ),
+                    wkv_b=Linear.Config(
+                        in_features=kv_lora_rank,
+                        out_features=n_heads * (qk_nope_head_dim + v_head_dim),
+                    ),
+                    wo=Linear.Config(
+                        in_features=n_heads * v_head_dim,
+                        out_features=dim,
                     ),
                 )
+                # make_fx traces the backward, which cannot add into weight.grad in place.
+                disable_inplace_wgrad_accum(attn_config)
+                self.attn = DSAttention(attn_config)
                 self.proj = nn.Linear(dim, vocab_size)
 
             def init_states(self, buffer_device=None):
@@ -1932,7 +1956,11 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         vocab_size = config.vocab_size
         model_ref = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         model_test = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
@@ -1960,7 +1988,11 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         annotate_module_fqns(model)
 
@@ -1968,17 +2000,19 @@ class TestTraceModels(unittest.TestCase):
         tokens = torch.randint(0, config.vocab_size, (num_tokens,), device=self.DEVICE)
         positions = torch.arange(num_tokens, device=self.DEVICE)
         attention_metadata = model._get_attention_metadata(positions)
+        aux_loss_denominators = torch.tensor([num_tokens], device=self.DEVICE)
         maybe_register_blockmask_pytree_node()
 
-        def forward(tokens, positions, attention_metadata):
+        def forward(tokens, positions, attention_metadata, aux_loss_denominators):
             return model(
                 tokens,
                 positions=positions,
                 attention_metadata=attention_metadata,
+                aux_loss_denominators=aux_loss_denominators,
             )
 
         traced = minimal_fx_tracer(forward, module=model)(
-            tokens, positions, attention_metadata
+            tokens, positions, attention_metadata, aux_loss_denominators
         )
 
         flex_nodes = [
@@ -2123,7 +2157,11 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.llama3 import Llama3Model, MODEL_FLAVORS
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_fsdp_model_test(
             Llama3Model,
             config,
@@ -2136,7 +2174,11 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.qwen3.model import Qwen3Model
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_fsdp_model_test(
             Qwen3Model,
             config,
@@ -2153,6 +2195,7 @@ class TestTraceFSDP(FSDPTest):
         config = build_config(
             attn_backend="flex",
             seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
         )
         self._run_fsdp_model_test(
             DeepSeekV3Model,
@@ -2170,7 +2213,11 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_fsdp_model_test(
             GptOssModel,
             config,
@@ -2199,7 +2246,7 @@ class TestTraceContextParallel(FSDPTest):
         import torch.distributed as dist
 
         from torchtitan_recipes.tests.graph_trainer.llama3 import (
-            graph_trainer_llama3_debugmodel_sdpa,
+            graph_trainer_llama3_debugmodel_varlen,
         )
 
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
@@ -2213,7 +2260,7 @@ class TestTraceContextParallel(FSDPTest):
         trainer = None
         try:
             with tempfile.TemporaryDirectory() as dump_folder:
-                config = graph_trainer_llama3_debugmodel_sdpa()
+                config = graph_trainer_llama3_debugmodel_varlen()
                 config.dump_folder = dump_folder
                 config.training.max_context_length = 128
                 config.training.num_tokens_per_microbatch_per_dp_rank = 2 * 128
@@ -2242,7 +2289,7 @@ class TestTraceContextParallel(FSDPTest):
                     device=trainer.engine.device,
                 )
                 # The dataloader always supplies per-document positions, which
-                # drive RoPE (SDPA itself is maskless and uses is_causal).
+                # drive RoPE and define the Varlen document boundaries.
                 positions = (
                     torch.arange(
                         num_tokens,
@@ -2270,25 +2317,29 @@ class TestTraceContextParallel(FSDPTest):
                 code_lines = trainer.engine._traced_step.gm.graph.python_code(
                     "self"
                 ).src.splitlines()
-                sdpa_line = next(
+                attention_line = next(
                     (
                         idx
                         for idx, line in enumerate(code_lines)
-                        if "scaled_dot_product" in line
+                        if "flash_attention" in line or "flash_attn" in line
                     ),
                     None,
                 )
                 self.assertIsNotNone(
-                    sdpa_line,
-                    "Expected SDPA in generated code:\n" + "\n".join(code_lines),
+                    attention_line,
+                    "Expected Varlen attention in generated code:\n"
+                    + "\n".join(code_lines),
                 )
-                assert sdpa_line is not None
-                all_gather_pg_names_before_sdpa = []
+                assert attention_line is not None
+                all_gather_pg_names_before_attention = []
                 for node in trainer.engine._traced_step.gm.graph.nodes:
-                    if "scaled_dot_product" in str(node.target):
+                    if any(
+                        name in str(node.target)
+                        for name in ("flash_attention", "flash_attn")
+                    ):
                         break
                     if "all_gather_into_tensor" in str(node.target):
-                        all_gather_pg_names_before_sdpa.append(node.args[2])
+                        all_gather_pg_names_before_attention.append(node.args[2])
 
                 cp_pg_name = (
                     trainer.engine.parallelism_context.get_mesh("cp")
@@ -2307,8 +2358,8 @@ class TestTraceContextParallel(FSDPTest):
                 trainer = None
                 return {
                     "code": code,
-                    "all_gather_pg_names_before_sdpa": (
-                        all_gather_pg_names_before_sdpa
+                    "all_gather_pg_names_before_attention": (
+                        all_gather_pg_names_before_attention
                     ),
                     "cp_pg_name": cp_pg_name,
                     "fsdp_pg_name": fsdp_pg_name,
@@ -2321,26 +2372,20 @@ class TestTraceContextParallel(FSDPTest):
             else:
                 os.environ["LOCAL_RANK"] = old_local_rank
 
-    # Pinned to the SDPA backend: this validates CP all_gather-before-SDPA
-    # codegen, which requires the scaled_dot_product op. The default
-    # FlexInnerAttention backend has no SDPA op and flex + CP is unsupported anyway
-    # (torch's _create_cp_block_mask requires seq_len divisible by 2 *
-    # BLOCK_SIZE, here 128 < 256; see the aot_fx_trace_llama3_fsdp_tp_cp
-    # integration flavor). SDPA has native CP support and emits the SDPA op.
-    def test_llama3_cp_only_codegen_all_gather_before_sdpa(self):
+    def test_llama3_cp_only_codegen_all_gather_before_attention(self):
         cp_trace = self._trace_llama3_step_code(
             dp_shard_degree=1,
             context_parallel_degree=2,
         )
-        # Verify AG along CP PG exists before SDPA
+        # Verify AG along CP PG exists before attention
         self.assertIn(
             cp_trace["cp_pg_name"],
-            cp_trace["all_gather_pg_names_before_sdpa"],
-            "Expected CP all_gather on the CP mesh before SDPA. "
+            cp_trace["all_gather_pg_names_before_attention"],
+            "Expected CP all_gather on the CP mesh before attention. "
             f"CP pg={cp_trace['cp_pg_name']}, "
             f"FSDP pg={cp_trace['fsdp_pg_name']}, "
-            "pre-SDPA all_gather pgs="
-            f"{cp_trace['all_gather_pg_names_before_sdpa']}.\n"
+            "pre-attention all_gather pgs="
+            f"{cp_trace['all_gather_pg_names_before_attention']}.\n"
             f"Generated code:\n{cp_trace['code']}",
         )
 
@@ -2358,7 +2403,11 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
         from torchtitan.models.llama3 import Llama3Model, MODEL_FLAVORS
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
         prev_deterministic = torch.are_deterministic_algorithms_enabled()

@@ -56,7 +56,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     eliminate_dead_code_pass,
     final_inductor_compile_passes,
 )
-from torchtitan.protocols.model import BaseModel
+from torchtitan.models.base.model import BaseModel
 
 
 if TYPE_CHECKING:

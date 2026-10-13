@@ -14,8 +14,8 @@ from typing import Any
 import grain.python as grain
 
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
+from torchtitan.components.data.multimodal.mm_datasets import VisionProcessor
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
-from torchtitan.hf_datasets.multimodal.mm_datasets import VisionProcessor
 from torchtitan.trainer import Trainer
 
 

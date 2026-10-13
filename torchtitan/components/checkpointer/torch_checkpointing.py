@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import queue
 import threading
 from collections.abc import Callable
@@ -21,7 +20,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import _stateful_to_state_dict
 from torch.distributed.checkpoint.stateful import Stateful
-from torch_checkpointing.barriers import TCPStoreBarrierConfig
+from torch_checkpointing.barriers import DefaultStoreBarrierConfig
 from torch_checkpointing.checkpoint_layout import LayoutInfo, SafetensorsSerialization
 from torch_checkpointing.checkpoint_manager import (
     CheckpointManager as BackendCheckpointManager,
@@ -52,8 +51,8 @@ from torchtitan.components.optim import (  # noqa: N811
     OptimizersContainer,
 )
 from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.observability import structured_logger as sl
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
 from torchtitan.tools.garbage_collector import GarbageCollector
 
@@ -70,7 +69,6 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
 _DEFAULT_BARRIER_INIT_TIMEOUT_SEC = 60
 _DEFAULT_BARRIER_TIMEOUT_SEC = 600
 _DEFAULT_ITEM_SPEC = ItemSpec(requires_copy=False)
@@ -161,11 +159,10 @@ def _writer_config(*, use_barrier: bool) -> CheckpointWriterConfig:
     return CheckpointWriterConfig(
         checkpoint_write_barrier_timeout_sec=_DEFAULT_BARRIER_TIMEOUT_SEC,
         barrier_config=(
-            TCPStoreBarrierConfig(
-                master_address=os.environ.get("MASTER_ADDR", "localhost"),
-                tcpstore_port=DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT,
-                timeout_barrier_init_sec=_DEFAULT_BARRIER_INIT_TIMEOUT_SEC,
-                use_checkpoint_barrier_tcpstore_libuv=True,
+            # Runs over the store the default process group already serves, so
+            # no second store or port is needed.
+            DefaultStoreBarrierConfig(
+                timeout_barrier_init_sec=_DEFAULT_BARRIER_INIT_TIMEOUT_SEC
             )
             if use_barrier
             else None

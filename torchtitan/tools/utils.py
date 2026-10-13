@@ -9,7 +9,6 @@ import logging
 import os
 import subprocess
 from collections.abc import Generator
-from dataclasses import dataclass
 from types import ModuleType
 
 import torch
@@ -231,41 +230,6 @@ def get_peak_flops(device_name: str) -> float:
     else:  # for other GPU types, assume A100
         logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
         return 312e12
-
-
-@dataclass(frozen=True)
-class Color:
-    black = "\033[30m"
-    red = "\033[31m"
-    green = "\033[32m"
-    yellow = "\033[33m"
-    blue = "\033[34m"
-    magenta = "\033[35m"
-    cyan = "\033[36m"
-    white = "\033[37m"
-    reset = "\033[39m"
-    orange = "\033[38;2;180;60;0m"
-    turquoise = "\033[38;2;54;234;195m"
-
-
-@dataclass(frozen=True)
-class NoColor:
-    black = ""
-    red = ""
-    green = ""
-    yellow = ""
-    blue = ""
-    magenta = ""
-    cyan = ""
-    white = ""
-    reset = ""
-    orange = ""
-    turquoise = ""
-
-
-assert set(NoColor.__dataclass_fields__.keys()) == set(
-    Color.__dataclass_fields__.keys()
-), "NoColor must have the same fields as Color."
 
 
 @contextlib.contextmanager
