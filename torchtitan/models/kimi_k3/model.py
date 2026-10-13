@@ -32,9 +32,11 @@ from torchtitan.models.common.attention import (
     AttentionMetadata,
     AttentionMetadataMap,
     FlexAttentionMetadata,
+    InnerAttention,
     LinearAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -94,6 +96,9 @@ class KimiMLAAttention(Attention):
         wkv_b: Linear.Config
         gate: Linear.Config
         wo: Linear.Config
+        inner_attention: InnerAttention.Config = field(
+            default_factory=VarlenInnerAttention.Config
+        )
 
     def __init__(self, config: Config):
         super().__init__()
