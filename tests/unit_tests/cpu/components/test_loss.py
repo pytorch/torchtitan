@@ -32,12 +32,16 @@ from torchtitan.components.loss import (
     GradAccumulator,
     IGNORE_INDEX,
 )
+from torchtitan.distributed.pipeline_parallel import _split_module
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.deepseek_v3.mtp import (
     get_mtp_token_counts,
     MTPDecoder,
     MTPLoss,
     roll_mtp_sequence,
+)
+from torchtitan.models.deepseek_v3.pipeline_dsv3 import (
+    _finalize_mtp_embedding_gradients,
 )
 
 
@@ -727,6 +731,9 @@ class _AddMTPBlock(nn.Module):
 class _FakeMTPDecoder(MTPDecoder):
     def __init__(self, *, skip_lm_head: bool, num_mtp_layers: int = 1):
         nn.Module.__init__(self)
+        self.num_mtp_layers = num_mtp_layers
+        self._mtp_pipeline_enabled = False
+        self._mtp_pipeline_first_stage = False
         self._skip_lm_head = skip_lm_head
         self.tok_embeddings = nn.Embedding(16, 4)
         self.layers = nn.ModuleDict({"0": _IdentityDecoderBlock()})
@@ -958,6 +965,73 @@ class TestChunkedLossWrapper(unittest.TestCase):
         )
         self.assertEqual(full_outputs[0].shape, (4, 16))
         self.assertEqual(full_outputs[1].shape, (4, 16))
+
+    def test_mtp_embedding_owners_report_missing_embeddings(self):
+        tokens = torch.tensor([1, 2, 3, 4])
+        kwargs = {
+            "positions": torch.arange(4),
+            "mtp_input_valid_masks": (torch.ones(4, dtype=torch.bool),),
+        }
+        for first_stage in (None, True, False):
+            with self.subTest(first_stage=first_stage):
+                model = _FakeMTPDecoder(skip_lm_head=False)
+                model.tok_embeddings = None
+                if first_stage is None:
+                    inputs = (tokens, tokens)
+                else:
+                    model._mtp_pipeline_enabled = True
+                    model._mtp_pipeline_first_stage = first_stage
+                    inputs = tokens if first_stage else torch.randn(4, 4)
+                    kwargs["mtp_input_tokens"] = (tokens,)
+                with self.assertRaisesRegex(ValueError, "requires token embeddings"):
+                    model(inputs, **kwargs)
+
+    def test_mtp_pipeline_stage_chain_matches_single_model_gradients(self):
+        class ScaleBlock(nn.Module):
+            def __init__(self, scale):
+                super().__init__()
+                self.scale = scale
+
+            def forward(self, hidden, *args, **kwargs):
+                return hidden * self.scale
+
+        torch.manual_seed(42)
+        model = _FakeMTPDecoder(skip_lm_head=False)
+        model.layers = nn.ModuleDict({"0": ScaleBlock(2.0), "1": ScaleBlock(3.0)})
+        model.norm = nn.LayerNorm(4)
+        parts = [
+            _split_module(model, fqns)
+            for fqns in (
+                ["tok_embeddings", "layers.0"],
+                ["layers.1"],
+                ["tok_embeddings", "mtp_layers.0", "norm", "lm_head"],
+            )
+        ]
+        for index, part in enumerate(parts):
+            part._mtp_pipeline_enabled = True
+            part._mtp_pipeline_first_stage = index == 0
+        tokens = torch.tensor([1, 2, 3, 4])
+        positions = torch.tensor([0, 1, 0, 1])
+        shifted, valid = roll_mtp_sequence(
+            tokens, shift=1, positions=positions, fill_value=0, return_valid_mask=True
+        )
+        kwargs = {"positions": positions, "mtp_input_valid_masks": (valid,)}
+        expected = model((tokens, shifted), **kwargs)
+        hidden = tokens
+        for part in parts:
+            hidden = part(hidden, mtp_input_tokens=(shifted,), **kwargs)
+        actual = hidden
+        self.assertIsInstance(actual, tuple)
+        for actual_logits, expected_logits in zip(actual, expected, strict=True):
+            torch.testing.assert_close(actual_logits, expected_logits)
+        sum(output.square().sum() for output in expected).backward()
+        sum(output.square().sum() for output in actual).backward()
+        _finalize_mtp_embedding_gradients(parts)
+        for part in parts:
+            for name, parameter in part.named_parameters():
+                torch.testing.assert_close(
+                    parameter.grad, dict(model.named_parameters())[name].grad
+                )
 
     def test_chunked_mtp_matches_full_objective(self):
         torch.manual_seed(42)

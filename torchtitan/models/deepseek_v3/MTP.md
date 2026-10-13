@@ -49,9 +49,9 @@ The model constructor configures sharding for both the normal decoder layers and
 `mtp_layers` from the active `ParallelismContext` before building either set of
 modules.
 
-MTP supports CP by constructing shifted inputs before CP sharding. PP remains
-unsupported because its stage ownership and communication paths are not yet
-integrated.
+Non-pipeline MTP supports CP by constructing shifted inputs before CP sharding.
+Eager pipeline parallelism supports DeepSeek-V3 MTP1 through
+`pipeline_dsv3.py`; combining MTP pipeline parallelism with CP remains a TODO.
 
 ## 2. MTP Input Handling
 
@@ -168,9 +168,9 @@ The current implementation therefore:
 
 1. Constructs `mtp_input_tokens` at the token-id level.
 2. Reuses `tok_embeddings(mtp_input_tokens)` so the shifted embedding output follows the configured sharding strategy.
-3. Passes `mtp_input_valid_mask` into `MTPTransformerBlock`; under SP, the block-level `ShardingConfig` aligns this mask to the activation layout.
-
-In other words, SP handling does not call `redistribute` explicitly in the forward code. The placement conversion for the mask input is described by the MTP layer sharding config.
+3. Passes `mtp_input_valid_mask` into `MTPTransformerBlock`; the block explicitly
+   redistributes the TP-replicated validity mask to match sequence-sharded
+   hidden activations. The MoE separately owns its routing padding-mask layout.
 
 ## 3. MTP Parallelization and Sharding
 
@@ -187,11 +187,11 @@ MTP TP/SP sharding is set where `_build_mtp_layers()` in `flavors.py` builds eac
 - MTP attention/feed-forward/MoE submodules reuse the normal DeepSeek-V3 layer sharding policy.
 - `enorm`, `hnorm`, and `mtp_norm` use norm sharding that matches the activation layout.
 - `eh_proj` input and output activations are aligned with the dense activation placement.
-- When SP is enabled, `mtp_input_valid_mask` is redistributed from the
-  decoder token-ID placement (DP/CP-sharded and TP-replicated) to the 1D
-  sequence-parallel token-ID placement through the block-level `ShardingConfig`.
+- When SP is enabled, the block explicitly redistributes `mtp_input_valid_mask`
+  from the decoder token-ID placement (DP/CP-sharded and TP-replicated) to the
+  sequence-parallel token layout.
 
-This keeps the MTP block forward code independent from explicit redistribution details. Placement is described by sharding config instead.
+Other input/output placements remain declared through the shared sharding config.
 
 ### 3.3 EP
 
@@ -209,6 +209,53 @@ MTP preprocessing constructs shifted tokens, labels, and validity masks before
 the common CP sharding step. The same load balancer then shards the main and
 MTP tensors together, so corresponding local positions remain aligned without
 boundary exchange between CP ranks.
+
+### 3.5 Eager Pipeline Parallelism
+
+`DeepSeekV3Model.pipeline()` selects `pipeline_dsv3()` when MTP is enabled.
+That function extends the normal decoder split and delegates partitioning,
+parallelization, and scheduling to `pipeline_llm()`. The automatic split counts
+the MTP block as an additional unit of work on the final virtual stage; an
+explicit split retains its configured main-layer placement.
+
+| Owner | Modules and work |
+| --- | --- |
+| First virtual stage | Canonical `tok_embeddings`; first main decoder layers |
+| Intermediate stages | Their main decoder layers; hidden-state input/output |
+| Final virtual stage | Remaining main layers, embedding replica, MTP block, norm and LM head |
+
+```text
+each PP rank: same local batch -> shifted IDs, masks, labels, attention metadata
+                                  | rank-local root kwargs
+                                  v
+first stage                 intermediate stages                 final stage
+main IDs -> embedding -> h -------> decoder -> h ------------------+-> norm -> LM logits
+                                                                  |
+final-stage local shifted IDs ----------------> embedding replica --+-> MTP -> MTP logits
+                                                                      |
+                                                          combined training loss
+```
+
+Only `h` crosses pipeline edges. Shifted IDs are already available from the
+rank-local batch and add no activation payload to P2P communication. The final
+stage uses one shared LM head for the main and MTP predictions.
+
+Both physical embedding copies retain `tok_embeddings.weight`. Existing model
+and optimizer checkpoint keys therefore remain canonical. Model-owned private
+hooks synchronize their local FSDP/TP shards after initialization and checkpoint
+loading, then sum their gradients after all pipeline microbatches and before
+gradient clipping. The replica contributes zero additional weight to the
+global norm, but both physical copies are clipped with the same factor and
+updated by their optimizers. PP2 reuses its existing PP group for these owner
+collectives; every PP4 rank participates in a collective split of its PP
+group, and only the two embedding owners join the resulting subgroup.
+
+`deepseek_v3_debugmodel_mtp_pp2_dp2_ep2()` is the four-GPU integration recipe:
+MTP1, eager Interleaved1F1B, PP2/DP2/EP2, four pipeline microbatches and ten
+deterministic optimizer steps. Real process groups are required. CPU-offloaded
+embedding synchronization, fake-PG MTP pipeline metadata, and MTP+PP+CP are
+currently unsupported. GraphTrainer must implement its own MTP graph ownership
+and scheduling; it is outside this eager integration.
 
 ## 4. MTP Loss Handling
 
@@ -271,13 +318,9 @@ auxiliary cross-entropy objectives.
 
 ## TODO
 
-### 1. PP Integration
+### 1. Remaining Pipeline Modes
 
-Under PP, the ownership of MTP layers across pipeline stages must be defined, and auxiliary logits/loss must be routed to the loss stage. The following pieces are still needed:
-
-- Which PP stage owns the MTP layers.
-- How main hidden states and MTP hidden states are transferred across stages.
-- How multi-depth MTP outputs are passed to the loss stage.
-- Wrapping and communication order when PP is combined with FSDP, TP, and EP.
-
-Until PP integration is complete, enabling MTP with PP should remain unsupported.
+- MTP with pipeline and context parallelism together.
+- GraphTrainer MTP graph ownership, scheduling and metrics.
+- Pipeline prediction depths greater than MTP1.
+- Fake-PG structured MTP pipeline metadata and CPU-offloaded owner synchronization.

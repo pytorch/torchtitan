@@ -6,6 +6,7 @@
 
 import dataclasses
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -25,7 +26,99 @@ from torchtitan.distributed.pipeline_parallel import (
     _static_stage_metadata,
     _unsupported_static_split,
 )
+
+from torchtitan.models.deepseek_v3 import pipeline_dsv3 as dsv3_pipeline
 from torchtitan_recipes.tests.models.llama3 import build_model_config
+
+
+@pytest.mark.parametrize("pp_degree,pp_rank", [(2, 0), (4, 0), (4, 1)])
+def test_dsv3_mtp_split_reuses_core_mapping_and_pins_final_stage(
+    monkeypatch, pp_degree, pp_rank
+):
+    group = MagicMock(spec=torch.distributed.ProcessGroup)
+    mesh = SimpleNamespace(
+        mesh=torch.arange(pp_degree),
+        get_group=lambda: group,
+        size=lambda: pp_degree,
+        get_local_rank=lambda: pp_rank,
+    )
+    context = SimpleNamespace(
+        cp_enabled=False, pp=pp_degree, get_mesh=lambda axis: mesh
+    )
+    model = SimpleNamespace(num_mtp_layers=1)
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=pp_degree, pipeline_parallel_schedule="Interleaved1F1B"
+    )
+    captured = {}
+
+    def create_owner_group(*args, **kwargs):
+        captured["group_kwargs"] = kwargs
+        return (
+            group
+            if pp_rank in (0, pp_degree - 1)
+            else torch.distributed.GroupMember.NON_GROUP_MEMBER
+        )
+
+    def core_pipeline(model, **kwargs):
+        captured.update(kwargs)
+        indices = _get_pp_rank_to_stage_indices_mapping(
+            pp_rank, pp_degree, "Interleaved1F1B", 2 * pp_degree
+        )
+        parts = [
+            SimpleNamespace(
+                tok_embeddings=object() if index in (0, 2 * pp_degree - 1) else None
+            )
+            for index in indices
+        ]
+        return object(), parts, 0 in indices, 2 * pp_degree - 1 in indices
+
+    monkeypatch.setattr(dsv3_pipeline.dist, "get_backend", lambda group: "nccl")
+    monkeypatch.setattr(dsv3_pipeline.dist, "split_group", create_owner_group)
+    monkeypatch.setattr(dsv3_pipeline, "pipeline_llm", core_pipeline)
+    dsv3_pipeline.pipeline_dsv3(
+        model,
+        parallelism_context=context,
+        parallelism=parallelism,
+        model_config=SimpleNamespace(layers=[None] * 61),
+        training=SimpleNamespace(enable_cpu_offload=False),
+    )
+    parts = captured["parallelism"].pipeline_parallel_module_fqns_per_model_part
+    _assert_layer_assignment(parts, num_layers=61)
+    assert len(parts) == 2 * pp_degree
+    assert parts[-1][-2:] == ["mtp_layers.0", "tok_embeddings"]
+    assert all("mtp_layers.0" not in part for part in parts[:-1])
+    assert parallelism.pipeline_parallel_module_fqns_per_model_part is None
+    assert parallelism.pipeline_parallel_last_stage_less_layers == 1
+    if pp_degree == 4:
+        assert captured["group_kwargs"]["parent_pg"] is group
+        assert captured["group_kwargs"]["split_ranks"] == [[0, 3]]
+    else:
+        assert "group_kwargs" not in captured
+
+
+@pytest.mark.parametrize("misplaced", ["tok_embeddings", "mtp_layers.0"])
+def test_dsv3_mtp_rejects_misplaced_modules_without_mutating_config(
+    monkeypatch, misplaced
+):
+    mesh = SimpleNamespace(get_group=lambda: object())
+    context = SimpleNamespace(cp_enabled=False, get_mesh=lambda axis: mesh)
+    layout = [
+        ["tok_embeddings", "layers.0"],
+        [misplaced, "layers.1"],
+        ["norm", "lm_head"],
+    ]
+    parallelism = ParallelismConfig(pipeline_parallel_module_fqns_per_model_part=layout)
+    original = [part.copy() for part in layout]
+    monkeypatch.setattr(dsv3_pipeline.dist, "get_backend", lambda group: "nccl")
+    with pytest.raises(ValueError, match="final stage"):
+        dsv3_pipeline.pipeline_dsv3(
+            SimpleNamespace(num_mtp_layers=1),
+            parallelism_context=context,
+            parallelism=parallelism,
+            model_config=SimpleNamespace(),
+            training=SimpleNamespace(enable_cpu_offload=False),
+        )
+    assert layout == original
 
 
 def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeypatch):

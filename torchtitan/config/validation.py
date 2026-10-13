@@ -109,7 +109,14 @@ def validate_model_training_config(
 
         mtp_layers = getattr(model, "mtp_layers", None)
         if mtp_layers and parallelism.pipeline_parallel_degree > 1:
-            raise NotImplementedError("MTP does not support pipeline parallelism yet.")
+            from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
+
+            if not isinstance(model, DeepSeekV3Model.Config) or len(mtp_layers) != 1:
+                raise NotImplementedError(
+                    "Pipeline MTP currently supports DeepSeek-V3 MTP1."
+                )
+            if parallelism.context_parallel_degree > 1:
+                raise NotImplementedError("MTP pipeline context parallelism is a TODO.")
 
     if not training.disable_cuda_graphs and cuda_graphs_supported():
         if max_num_documents is None:
