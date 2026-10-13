@@ -503,10 +503,10 @@ def get_default_transformer_block_buckets(
                         f"layers.{layer_id}.attention_norm",
                         f"layers.{layer_id}.attention",
                         f"layers.{layer_id}.ffn_norm",
-                        f"layers.{layer_id}.feed_forward.router",
-                        f"layers.{layer_id}.feed_forward.shared_experts",
+                        f"layers.{layer_id}.moe.router",
+                        f"layers.{layer_id}.moe.shared_experts",
                     ],
-                    f"layers.{layer_id}.feed_forward.routed_experts",
+                    f"layers.{layer_id}.moe.routed_experts",
                 ]
             )
         else:

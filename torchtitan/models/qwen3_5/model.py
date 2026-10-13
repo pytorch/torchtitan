@@ -234,7 +234,11 @@ class Qwen35TransformerBlock(TransformerBlock):
         self.full_attn = isinstance(config.attention, Qwen35Attention.Config)
         self.attention = config.attention.build()
 
-        self.feed_forward = config.feed_forward.build()
+        ffn = config.feed_forward.build()
+        if isinstance(ffn, MoE):
+            self.moe = ffn
+        else:
+            self.feed_forward = ffn
 
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -258,8 +262,8 @@ class Qwen35TransformerBlock(TransformerBlock):
         x_TD = x_TD + h_TD
 
         h_TD = self.ffn_norm(x_TD)
-        if isinstance(self.feed_forward, MoE):
-            h_TD = self.feed_forward(
+        if hasattr(self, "moe"):
+            h_TD = self.moe(
                 h_TD,
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,

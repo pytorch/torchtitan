@@ -7,7 +7,7 @@
 """Eager producer for the EP-overlap chunk metadata contract.
 
 Eager chunking is intentionally narrow: it supports the model input contracts
-used by ``layers.*`` TransformerBlock roots and ``layers.*.feed_forward`` MoE roots, and
+used by ``layers.*`` TransformerBlock roots and ``layers.*.moe`` MoE roots, and
 fails loudly if those upstream forward signatures drift.
 """
 

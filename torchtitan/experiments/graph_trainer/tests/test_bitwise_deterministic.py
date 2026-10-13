@@ -590,7 +590,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
                     chunk_dim="seq",
-                    module_fqn="layers.*.feed_forward",
+                    module_fqn="layers.*.moe",
                 ),
             ),
         )
@@ -684,7 +684,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             GraphTrainer,
             compile_ep_overlap_enabled=True,
             compile_ep_overlap_chunk_dim="seq",
-            compile_ep_overlap_module_fqn="layers.*.feed_forward",
+            compile_ep_overlap_module_fqn="layers.*.moe",
         )
 
         self._assert_runs_match(

@@ -35,7 +35,7 @@ def _transformer_block(*, with_moe: bool) -> TransformerBlock:
         moe = MoE.__new__(MoE)
         nn.Module.__init__(moe)
         moe.routed_experts = _RoutedExperts()
-        block.feed_forward = moe
+        block.moe = moe
     else:
         block.feed_forward = nn.Linear(8, 8)
     return block
@@ -163,9 +163,9 @@ class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
         for with_auxiliary_moe, num_expert_calls in ((False, 1), (True, 2)):
             with self.subTest(with_auxiliary_moe=with_auxiliary_moe):
                 model = _decoder(with_auxiliary_moe=with_auxiliary_moe)
-                main_routed_experts = model.layers["0"].feed_forward.routed_experts
+                main_routed_experts = model.layers["0"].moe.routed_experts
                 auxiliary_routed_experts = (
-                    model.auxiliary_blocks[0].feed_forward.routed_experts
+                    model.auxiliary_blocks[0].moe.routed_experts
                     if with_auxiliary_moe
                     else None
                 )

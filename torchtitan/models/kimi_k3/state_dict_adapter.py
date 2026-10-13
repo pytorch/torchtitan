@@ -52,33 +52,33 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             "language_model.model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
             # MoE.
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w1.weight": (
-                "layers.{}.feed_forward.routed_experts.w1_EFD"
+                "layers.{}.moe.routed_experts.w1_EFD"
             ),
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w2.weight": (
-                "layers.{}.feed_forward.routed_experts.w2.weight"
+                "layers.{}.moe.routed_experts.w2.weight"
             ),
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w3.weight": (
-                "layers.{}.feed_forward.routed_experts.w3_EFD"
+                "layers.{}.moe.routed_experts.w3_EFD"
             ),
-            "language_model.model.layers.{}.block_sparse_moe.gate.weight": "layers.{}.feed_forward.router.gate.weight",
-            "language_model.model.layers.{}.block_sparse_moe.gate.e_score_correction_bias": "layers.{}.feed_forward.expert_bias_E",
+            "language_model.model.layers.{}.block_sparse_moe.gate.weight": "layers.{}.moe.router.gate.weight",
+            "language_model.model.layers.{}.block_sparse_moe.gate.e_score_correction_bias": "layers.{}.moe.expert_bias_E",
             "language_model.model.layers.{}.block_sparse_moe.routed_expert_down_proj.weight": (
-                "layers.{}.feed_forward.routed_down.weight"
+                "layers.{}.moe.routed_down.weight"
             ),
             "language_model.model.layers.{}.block_sparse_moe.routed_expert_up_proj.weight": (
-                "layers.{}.feed_forward.routed_up.weight"
+                "layers.{}.moe.routed_up.weight"
             ),
             "language_model.model.layers.{}.block_sparse_moe.routed_expert_norm.weight": (
-                "layers.{}.feed_forward.routed_norm.weight"
+                "layers.{}.moe.routed_norm.weight"
             ),
             "language_model.model.layers.{}.block_sparse_moe.shared_experts.gate_proj.weight": (
-                "layers.{}.feed_forward.shared_experts.w1.weight"
+                "layers.{}.moe.shared_experts.w1.weight"
             ),
             "language_model.model.layers.{}.block_sparse_moe.shared_experts.up_proj.weight": (
-                "layers.{}.feed_forward.shared_experts.w3.weight"
+                "layers.{}.moe.shared_experts.w3.weight"
             ),
             "language_model.model.layers.{}.block_sparse_moe.shared_experts.down_proj.weight": (
-                "layers.{}.feed_forward.shared_experts.w2.weight"
+                "layers.{}.moe.shared_experts.w2.weight"
             ),
             "language_model.model.output_attn_res_norm.weight": "output_res_norm.weight",
             "language_model.model.output_attn_res_proj.weight": "output_res_proj.weight",

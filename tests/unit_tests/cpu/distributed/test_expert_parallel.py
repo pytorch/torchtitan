@@ -60,7 +60,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            r"layers\.1\.feed_forward\.num_experts \(63\).*expert_parallel_degree \(8\)",
+            r"layers\.1\.moe\.num_experts \(63\).*expert_parallel_degree \(8\)",
         ):
             Trainer.Config(
                 model=model_config,
