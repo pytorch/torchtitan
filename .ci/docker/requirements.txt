@@ -1,5 +1,7 @@
 grain == 0.2.18
 datasets >= 3.6.0, < 4.8.0
+# PyArrow 26 requires NumPy 2; PyTorch CI also covers NumPy 1.x.
+pyarrow < 26
 tensorboard
 wandb
 tokenizers >= 0.15.0
