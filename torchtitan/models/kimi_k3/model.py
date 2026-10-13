@@ -28,11 +28,10 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
+    Attention,
     AttentionMetadata,
     AttentionMetadataMap,
-    BaseAttention,
     FlexAttentionMetadata,
-    InnerAttention,
     LinearAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
@@ -71,7 +70,7 @@ from .vision_encoder import KimiK3VisionEncoder
 # N = attention-residual entries.
 
 
-class KimiMLAAttention(BaseAttention):
+class KimiMLAAttention(Attention):
     """Kimi K3 multi-head latent attention.
 
     Unlike DeepSeek-V3 MLA, the released K3 configuration sets
@@ -81,7 +80,7 @@ class KimiMLAAttention(BaseAttention):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
+    class Config(Attention.Config):
         dim: int
         kv_lora_rank: int
         qk_nope_head_dim: int
@@ -95,7 +94,6 @@ class KimiMLAAttention(BaseAttention):
         wkv_b: Linear.Config
         gate: Linear.Config
         wo: Linear.Config
-        inner_attention: InnerAttention.Config
 
     def __init__(self, config: Config):
         super().__init__()

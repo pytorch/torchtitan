@@ -27,16 +27,15 @@ from torchtitan.distributed.spmd_types import (
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
+    Attention,
     AttentionMetadata,
     AttentionMetadataMap,
-    BaseAttention,
     FlexAttentionMetadata,
-    InnerAttention,
     LinearAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.attention.gdn import GatedDeltaNet
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
@@ -96,7 +95,7 @@ class OffsetRMSNorm(Module):
         return ((1.0 + self.weight.float()) * x).to(input_dtype)
 
 
-class Qwen35Attention(BaseAttention):
+class Qwen35Attention(Attention):
     """Full attention with output gating and partial RoPE for Qwen3.5.
 
     Differences from GQAttention:
@@ -106,13 +105,12 @@ class Qwen35Attention(BaseAttention):
     - QK norm uses OffsetRMSNorm
 
     Uses separate ``wq``/``wk``/``wv`` instead of the common fused ``qkv_linear``
-    (so this subclasses ``BaseAttention``, not ``GQAttention``): the 2x-wide,
+    (so this subclasses ``Attention``, not ``GQAttention``): the 2x-wide,
     gated ``wq`` doesn't fit a fused QKV projection that TP-shards by head.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
-        n_heads: int
+    class Config(Attention.Config):
         n_kv_heads: int
         head_dim: int
         rotary_dim: int
@@ -123,7 +121,6 @@ class Qwen35Attention(BaseAttention):
         wo: Linear.Config
         q_norm: OffsetRMSNorm.Config
         k_norm: OffsetRMSNorm.Config
-        inner_attention: InnerAttention.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -223,7 +220,7 @@ class Qwen35TransformerBlock(TransformerBlock):
     """Hybrid transformer block for Qwen3.5.
 
     Each layer uses either full attention (Qwen35Attention) or linear
-    attention (GatedDeltaNet), determined by the attention config type.
+    attention (GDN), determined by the attention config type.
     Both types share the same FFN/MoE structure.
     """
 
@@ -374,7 +371,7 @@ class Qwen35Model(MultimodalModel):
                         v_head_dim=attention.head_dim,
                         seq_len=seq_len,
                     )
-                elif isinstance(layer.attention, GatedDeltaNet.Config):
+                elif isinstance(layer.attention, GDN.Config):
                     delta_net = layer.attention
                     num_value_heads = (
                         delta_net.in_proj_v.out_features // delta_net.value_head_dim
@@ -395,7 +392,7 @@ class Qwen35Model(MultimodalModel):
                 (
                     layer.attention
                     for layer in config.layers
-                    if isinstance(layer.attention, GatedDeltaNet.Config)
+                    if isinstance(layer.attention, GDN.Config)
                 ),
                 None,
             )

@@ -10,7 +10,7 @@ from unittest.mock import Mock
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention.gdn import GatedDeltaNet
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.generator.vllm import gdn, kda
@@ -48,7 +48,7 @@ def test_gdn_hybrid_model_registers_state_copy_funcs(monkeypatch):
     )
 
     gdn_config = Mock(
-        spec=GatedDeltaNet.Config,
+        spec=GDN.Config,
         in_proj_q=SimpleNamespace(out_features=8),
         in_proj_v=SimpleNamespace(out_features=12),
         key_head_dim=4,

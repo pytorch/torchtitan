@@ -30,7 +30,7 @@ import os
 from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.models.common.attention.gdn import GatedDeltaNet
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
@@ -166,8 +166,7 @@ def register_to_vllm(
             with Dist-MoE routed experts; ``None`` otherwise.
     """
     has_gdn = any(
-        isinstance(layer.attention, GatedDeltaNet.Config)
-        for layer in model_config.layers
+        isinstance(layer.attention, GDN.Config) for layer in model_config.layers
     )
     has_kda = any(
         isinstance(layer.attention, KDA.Config) for layer in model_config.layers

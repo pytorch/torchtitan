@@ -18,10 +18,11 @@ from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
+    Attention,
     AttentionMetadata,
     AttentionMetadataMap,
-    BaseAttention,
     InnerAttention,
+    LinearAttention,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -51,11 +52,11 @@ class TransformerBlock(Module):
     Children implement ``__init__``, ``forward``, and residual connections.
     """
 
-    attention: BaseAttention
+    attention: Attention
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        attention: BaseAttention.Config  # required, no default
+        attention: Attention.Config  # required, no default
         feed_forward: FeedForward.Config | None = None
         moe: MoE.Config | None = None
         attention_norm: Module.Config
@@ -89,14 +90,14 @@ class Decoder(BaseModel):
         enable_weight_tying: bool = False
 
         @property
-        def first_non_linear_attention(self) -> BaseAttention.Config | None:
+        def first_non_linear_attention(self) -> Attention.Config | None:
             """First attention config excluding linear attention, else None."""
             return next(
                 (
                     layer.attention
                     for layer in self.layers
-                    if isinstance(layer.attention, BaseAttention.Config)
-                    and not layer.attention.is_linear_attention
+                    if isinstance(layer.attention, Attention.Config)
+                    and not isinstance(layer.attention, LinearAttention.Config)
                 ),
                 None,
             )
@@ -334,7 +335,7 @@ class Decoder(BaseModel):
                 (
                     layer.attention
                     for layer in self.config.layers
-                    if isinstance(layer.attention, BaseAttention.Config)
+                    if isinstance(layer.attention, Attention.Config)
                     and layer.attention.inner_attention.is_full_attention
                 ),
                 self.config.first_non_linear_attention,

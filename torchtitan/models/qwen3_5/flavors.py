@@ -31,7 +31,7 @@ from torchtitan.models.common import (  # noqa: F401
     Softmax,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.attention.gdn import GatedDeltaNet, GDNKernel, InnerGDN
+from torchtitan.models.common.attention.gdn import GDN, GDNKernel, InnerGDN
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
     get_attention_config,
@@ -374,8 +374,8 @@ def _qwen35_deltanet_config(
     layer_id: int,
     enable_sp: bool,
     conv_kernel_size: int = 4,
-) -> GatedDeltaNet.Config:
-    """Build a fully-specified, head-sharded GatedDeltaNet.Config.
+) -> GDN.Config:
+    """Build a fully-specified, head-sharded GDN.Config.
 
     Input projections are colwise-sharded (head-sharded output) and out_proj is
     row-parallel. Conv weights and per-head A_log/dt_bias are Shard(0). The
@@ -406,7 +406,7 @@ def _qwen35_deltanet_config(
             sharding_config=conv_weight_sharding_config(),
         )
 
-    return GatedDeltaNet.Config(
+    return GDN.Config(
         # The recurrence has one state per value head; Q/K heads can be shared.
         n_heads=n_value_heads,
         key_head_dim=key_head_dim,

@@ -14,7 +14,7 @@ from torch import nn
 pytest.importorskip("fla")
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention.gdn import GatedDeltaNet
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.qwen3_5 import build_model_config, MODEL_FLAVORS, Qwen35Model
 from torchtitan.models.qwen3_5.model import Qwen35Attention
 from torchtitan.models.qwen3_8 import build_model_config as build_qwen3_8_model_config
@@ -130,7 +130,7 @@ def test_qwen35_attention_output_matches_row_parallel_projection(
             attention = layer.attention
             output_projection = attention.wo
         else:
-            assert isinstance(layer.attention, GatedDeltaNet.Config)
+            assert isinstance(layer.attention, GDN.Config)
             attention = layer.attention
             output_projection = attention.out_proj
         assert attention.sharding_config is not None

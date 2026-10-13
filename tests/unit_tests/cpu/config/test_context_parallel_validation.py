@@ -13,7 +13,7 @@ from unittest import mock
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, LinearAttention
 
 
 class TestDecoderConfigCpValidation(unittest.TestCase):
@@ -101,7 +101,7 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
                 linear_attention = next(
                     layer.attention
                     for layer in model.layers
-                    if layer.attention.is_linear_attention
+                    if isinstance(layer.attention, LinearAttention.Config)
                 )
                 plain_model = module.build_model_config(
                     "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
@@ -109,7 +109,7 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
                 linear_attention.inner_attention = next(
                     layer.attention.inner_attention
                     for layer in plain_model.layers
-                    if layer.attention.is_linear_attention
+                    if isinstance(layer.attention, LinearAttention.Config)
                 )
                 with self.assertRaisesRegex(ValueError, "must use CPInnerAttention"):
                     validate_context_parallel(model, parallelism)

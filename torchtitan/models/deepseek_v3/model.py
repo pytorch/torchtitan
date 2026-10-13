@@ -14,9 +14,8 @@ import torch_remat as remat
 from torch import nn
 
 from torchtitan.models.common.attention import (
-    BaseAttention,
+    Attention,
     FlexAttentionMetadata,
-    InnerAttention,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import TransformerBlock
@@ -32,7 +31,7 @@ from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 
-class DeepSeekMLAAttention(BaseAttention):
+class DeepSeekMLAAttention(Attention):
     """
     Multi-head latent attention (MLA) module.
 
@@ -40,8 +39,7 @@ class DeepSeekMLAAttention(BaseAttention):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
-        n_heads: int
+    class Config(Attention.Config):
         dim: int
         wq: Linear.Config | None = None
         wq_a: Linear.Config | None = None
@@ -57,7 +55,6 @@ class DeepSeekMLAAttention(BaseAttention):
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
         rope: RoPE.Config
-        inner_attention: InnerAttention.Config
         mscale: float = 1.0
 
     def __init__(self, config: Config):

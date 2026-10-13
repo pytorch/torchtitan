@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from torchtitan.models.common.attention import BaseAttention
+from torchtitan.models.common.attention import Attention, LinearAttention
 
 if TYPE_CHECKING:
     from torchtitan.config import DebugConfig, TrainingConfig
@@ -159,7 +159,7 @@ def validate_context_parallel(
 
     cp = parallelism.context_parallel_degree
 
-    for fqn, traversed, _, _ in model.traverse(BaseAttention.Config):
+    for fqn, traversed, _, _ in model.traverse(Attention.Config):
         attention = traversed
         inner_attention = attention.inner_attention
         is_cp_attention = isinstance(inner_attention, CPInnerAttention.Config)
@@ -197,7 +197,7 @@ def validate_context_parallel(
         load_balancer_config = parallelism.context_parallel_load_balancer
         # Linear attention routes recurrent states using the shared permutation;
         # it does not constrain which attention load balancer creates it.
-        if attention.is_linear_attention:
+        if isinstance(attention, LinearAttention.Config):
             continue
         if load_balancer_config is None:
             continue

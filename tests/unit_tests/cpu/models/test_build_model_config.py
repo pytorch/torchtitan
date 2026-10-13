@@ -15,11 +15,12 @@ import pytest
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import ModelConfigConverter
 from torchtitan.models.common.attention import (
-    BaseAttention,
+    Attention,
     InnerAttention,
+    LinearAttention,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.attention.gdn import GatedDeltaNet
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 
@@ -51,8 +52,8 @@ def test_model_defaults_to_varlen(model):
         [
             layer.attention
             for layer in config.layers
-            if isinstance(layer.attention, BaseAttention.Config)
-            and not layer.attention.is_linear_attention
+            if isinstance(layer.attention, Attention.Config)
+            and not isinstance(layer.attention, LinearAttention.Config)
         ]
         if isinstance(config, Decoder.Config)
         else [config]
@@ -75,21 +76,25 @@ def test_hybrid_layers_have_one_attention_config(model):
     config = module.build_model_config("debugmodel", parallelism=ParallelismConfig())
     for layer in config.layers:
         assert isinstance(layer, TransformerBlock.Config)
-        assert isinstance(layer.attention, BaseAttention.Config)
+        assert isinstance(layer.attention, Attention.Config)
         assert layer.attention.n_heads > 0
-        if isinstance(layer.attention, GatedDeltaNet.Config):
+        if isinstance(layer.attention, GDN.Config):
+            assert isinstance(layer.attention, LinearAttention.Config)
             assert layer.attention.n_heads == (
                 layer.attention.in_proj_v.out_features // layer.attention.value_head_dim
             )
         elif isinstance(layer.attention, KDA.Config):
+            assert isinstance(layer.attention, LinearAttention.Config)
             assert layer.attention.n_heads * layer.attention.head_dim == (
                 layer.attention.v_proj.out_features
             )
         assert not hasattr(layer, "delta_net")
         assert not hasattr(layer, "delta_attention")
-    assert isinstance(config.first_non_linear_attention, BaseAttention.Config)
+    assert isinstance(config.first_non_linear_attention, Attention.Config)
     config.layers = [
-        layer for layer in config.layers if layer.attention.is_linear_attention
+        layer
+        for layer in config.layers
+        if isinstance(layer.attention, LinearAttention.Config)
     ]
     assert config.layers
     assert config.first_non_linear_attention is None

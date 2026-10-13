@@ -13,7 +13,7 @@ import torch
 pytest.importorskip("attn_gym")
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention.gdn import GatedDeltaNet
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.qwen3_5 import Qwen35Model
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 from torchtitan.models.qwen3_8 import build_model_config, MODEL_FLAVORS
@@ -63,7 +63,7 @@ def test_qwen38_2_4t_a95b_matches_hugging_face_config() -> None:
     assert config.vision_encoder is None
 
     linear_layer = config.layers[0]
-    assert isinstance(linear_layer.attention, GatedDeltaNet.Config)
+    assert isinstance(linear_layer.attention, GDN.Config)
     assert linear_layer.attention.in_proj_q.out_features == 16 * 128
     assert linear_layer.attention.in_proj_v.out_features == 128 * 128
 
@@ -168,7 +168,7 @@ def test_text_only_checkpoint_adapter_converts_fused_deltanet_qkv() -> None:
     )
     adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     delta_net = config.layers[0].attention
-    assert isinstance(delta_net, GatedDeltaNet.Config)
+    assert isinstance(delta_net, GDN.Config)
     key_dim = delta_net.in_proj_q.out_features
     value_dim = delta_net.in_proj_v.out_features
     fused_qkv = torch.randn(key_dim * 2 + value_dim, 1)
