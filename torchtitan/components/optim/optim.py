@@ -12,10 +12,10 @@ import torch.nn as nn
 
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
-from torchtitan.distributed.cuda_graph import (
-    cuda_graphs_supported,
-    NUM_CUDA_GRAPH_WARMUP_STEPS,
-    wrap_with_cuda_graph,
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graphs_supported,
+    NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+    wrap_with_accelerator_graph,
 )
 
 from .ema import EMA
@@ -72,7 +72,7 @@ class Optim(Configurable):
         self._is_first_step_call = True
         enable_cuda_graph = (
             config.enable_cuda_graph
-            and cuda_graphs_supported()
+            and accelerator_graphs_supported()
             and all(parameter.device.type == "cuda" for parameter in self.parameters)
         )
         if config.enable_cuda_graph and not enable_cuda_graph:
@@ -96,9 +96,9 @@ class Optim(Configurable):
 
         self._run_update = self._update
         if enable_cuda_graph:
-            self._run_update = wrap_with_cuda_graph(
+            self._run_update = wrap_with_accelerator_graph(
                 self._update,
-                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
             )
 
     def zero_grad(self, *, set_to_none: bool = True) -> None:

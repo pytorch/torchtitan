@@ -32,7 +32,7 @@ def test_fake_scale_recipe_tokenizer(recipe):
     with (
         patch.object(recipes, "_with_dist_moe", side_effect=configure_dist_moe),
         patch(
-            "torchtitan.distributed.cuda_graph.cuda_graphs_supported",
+            "torchtitan.distributed.accelerator_graph.accelerator_graphs_supported",
             return_value=False,
         ),
     ):

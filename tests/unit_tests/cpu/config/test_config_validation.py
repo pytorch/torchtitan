@@ -26,13 +26,14 @@ from torchtitan_recipes.tests.models.llama3 import (
 
 
 @contextlib.contextmanager
-def _cuda_graphs_supported(value: bool):
+def _accelerator_graphs_supported(value: bool):
     with mock.patch(
-        "torchtitan.distributed.cuda_graph.cuda_graphs_supported", return_value=value
+        "torchtitan.distributed.accelerator_graph.accelerator_graphs_supported",
+        return_value=value,
     ), mock.patch(
-        "torchtitan.trainer.cuda_graphs_supported", return_value=value
+        "torchtitan.trainer.accelerator_graphs_supported", return_value=value
     ), mock.patch(
-        "torchtitan.training_engine.cuda_graphs_supported", return_value=value
+        "torchtitan.training_engine.accelerator_graphs_supported", return_value=value
     ):
         yield
 
@@ -117,7 +118,7 @@ def test_cuda_graphs_reject_pipeline_validation() -> None:
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.validator = Validator.Config()
 
-    with _cuda_graphs_supported(True), pytest.raises(
+    with _accelerator_graphs_supported(True), pytest.raises(
         ValueError, match="do not support validation"
     ):
         config.__post_init__()
@@ -127,7 +128,7 @@ def test_cuda_graphs_reject_synchronizing_ep_dispatcher() -> None:
     config = deepseek_v3_debugmodel()
     config.parallelism.expert_parallel_degree = 2
 
-    with _cuda_graphs_supported(True), pytest.raises(
+    with _accelerator_graphs_supported(True), pytest.raises(
         ValueError, match="without CPU synchronization"
     ):
         config.__post_init__()
@@ -137,7 +138,7 @@ def test_cuda_graphs_allow_nonblocking_hybrid_ep() -> None:
     config = deepseek_v3_debugmodel_hybridep()
     config.parallelism.expert_parallel_degree = 2
 
-    with _cuda_graphs_supported(True):
+    with _accelerator_graphs_supported(True):
         config.__post_init__()
 
 
@@ -147,7 +148,7 @@ def test_cuda_graphs_reject_blocking_hybrid_ep() -> None:
         dispatcher.non_blocking_capacity_factor = None
     config.parallelism.expert_parallel_degree = 2
 
-    with _cuda_graphs_supported(True), pytest.raises(
+    with _accelerator_graphs_supported(True), pytest.raises(
         ValueError, match="non_blocking_capacity_factor"
     ):
         config.__post_init__()
@@ -172,11 +173,11 @@ def test_sdc_replay_count_respects_cuda_graph_support() -> None:
     config.debug.deterministic = True
     config.sdc_replayer = SDCReplayer.Config(num_replays=2)
 
-    with _cuda_graphs_supported(True), pytest.raises(
+    with _accelerator_graphs_supported(True), pytest.raises(
         ValueError, match="at most one replay"
     ):
         TrainingEngine.Config.__post_init__(config)
-    with _cuda_graphs_supported(False):
+    with _accelerator_graphs_supported(False):
         TrainingEngine.Config.__post_init__(config)
 
 
@@ -208,11 +209,11 @@ def test_varlen_cuda_graphs_require_document_bound() -> None:
     config = llama3_debugmodel_varlen_attn()
     config.dataloader.max_num_documents = None
 
-    with _cuda_graphs_supported(True), pytest.raises(
+    with _accelerator_graphs_supported(True), pytest.raises(
         ValueError, match="max_num_documents is unset"
     ):
         config.__post_init__()
-    with _cuda_graphs_supported(False):
+    with _accelerator_graphs_supported(False):
         config.__post_init__()
 
 
