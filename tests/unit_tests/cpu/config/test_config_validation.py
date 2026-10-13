@@ -76,7 +76,7 @@ def test_per_group_cuda_graph_config_restrictions() -> None:
 
 
 def test_graph_trainer_rejects_per_group_cuda_graphs() -> None:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(attn_backend="flex")
     with pytest.raises(ValueError, match="not supported with GraphTrainer"):
         GraphTrainer.Config(
             model=config.model,
