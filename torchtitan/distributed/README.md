@@ -31,6 +31,17 @@ is applied during model parallelization.
 
 ## Environment settings
 
+**`NCCL_RUNTIME_CONNECT=0` by default.** `init_distributed()` sets this before
+process-group creation and preserves explicit environment values. NCCL connects
+collective peers and allocates their buffers at communicator initialization.
+This reduces allocation failures when PyTorch holds unused cached memory that
+NCCL cannot reclaim. See [issue #5019](https://github.com/pytorch/torchtitan/issues/5019).
+Initialization can take longer and allocate buffers for unused communication
+paths, leaving less memory for training. This does not force PyTorch to create
+every NCCL communicator early or prevent all later allocations, including P2P
+connections. Communicators created after memory pressure rises can still fail.
+Set `NCCL_RUNTIME_CONNECT=1` before launch to use runtime connection setup.
+
 **`TORCH_NCCL_AVOID_RECORD_STREAMS=1` with tensor parallelism.** TP issues async
 collectives to overlap communication with compute. By default the process group
 calls [`Tensor.record_stream`](https://pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html)

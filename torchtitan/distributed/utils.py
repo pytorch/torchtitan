@@ -385,6 +385,11 @@ def init_distributed(
         )
         return DistributedTopology(torch.distributed.get_world_size())
 
+    # Allocate NCCL connection buffers before PyTorch's cache fills device memory.
+    # This can increase startup time and memory use.
+    # https://github.com/pytorch/torchtitan/issues/5019
+    os.environ.setdefault("NCCL_RUNTIME_CONNECT", "0")
+
     # Directed physical PP edges need independent, preinitialized communicator
     # FIFOs so eager execution and CUDA graph replay use deterministic ordering.
     # Older PyTorch versions do not expose this option.

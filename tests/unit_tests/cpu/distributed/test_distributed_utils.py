@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import os
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -29,6 +30,45 @@ def test_get_local_tensor_uses_dtensor_local_shard_without_to_local() -> None:
 
     assert get_local_tensor(tensor) is local_tensor
     tensor.to_local.assert_not_called()
+
+
+@pytest.mark.parametrize("backend", ["nccl", "real_pp_fake_spmd"])
+@pytest.mark.parametrize("runtime_connect", [None, "1"])
+def test_init_distributed_sets_nccl_connection_policy_before_group_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    runtime_connect: str | None,
+) -> None:
+    if runtime_connect is None:
+        monkeypatch.delenv("NCCL_RUNTIME_CONNECT", raising=False)
+    else:
+        monkeypatch.setenv("NCCL_RUNTIME_CONNECT", runtime_connect)
+    monkeypatch.setenv("NGPU", "2")
+
+    def check_connection_policy(*args, **kwargs):
+        assert os.environ["NCCL_RUNTIME_CONNECT"] == (runtime_connect or "0")
+        return DistributedTopology(world_size=2)
+
+    with (
+        patch.dict(os.environ),
+        patch.object(dist_utils.dist, "is_initialized", return_value=False),
+        patch.object(dist_utils.dist, "get_world_size", return_value=2),
+        patch.object(
+            dist_utils.dist, "init_process_group", side_effect=check_connection_policy
+        ) as init_process_group,
+        patch.object(
+            dist_utils, "_init_real_pp_fake_spmd", side_effect=check_connection_policy
+        ) as init_real_pp,
+    ):
+        topology = init_distributed(CommConfig(backend=backend))
+
+    assert topology == DistributedTopology(world_size=2)
+    if backend == "real_pp_fake_spmd":
+        init_real_pp.assert_called_once()
+        init_process_group.assert_not_called()
+    else:
+        init_process_group.assert_called_once()
+        init_real_pp.assert_not_called()
 
 
 @pytest.mark.parametrize(
