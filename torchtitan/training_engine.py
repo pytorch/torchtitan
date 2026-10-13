@@ -383,6 +383,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 with torch.no_grad():
                     model_part.init_weights(buffer_device=buffer_device)
                 model_part.train()
+            with torch.no_grad():
+                self.model_cls._synchronize_shared_parameters(
+                    self.model_parts, self.parallelism_context
+                )
 
         if isinstance(self.loss_fn, ChunkedLossWrapper) and (
             not self.parallelism_context.pp_enabled or self.pp_has_last_stage
@@ -424,6 +428,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             parallelism_context=self.parallelism_context,
             training_steps=self.config.training.steps,
             pp_has_last_stage=self.pp_has_last_stage,
+            norm_parameters=[
+                parameter
+                for model_part in self.model_parts
+                for parameter in model_part._get_grad_norm_parameters()
+            ],
         )
         self.model_cls._register_optimizer_hooks(
             self.optim.optimizers,
@@ -775,6 +784,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         current_step = self.num_completed_steps + 1
         if hasattr(self, "checkpointer"):
             self.checkpointer.maybe_wait_for_staging()
+        self.model_cls._finalize_shared_gradients(
+            self.model_parts, self.parallelism_context
+        )
         grad_norm = self.optim.step(
             self.loss,
             current_step=current_step,
@@ -795,7 +807,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         checkpointer_config = self.config.checkpointer
         if checkpointer_config is None:
             return False
-        return self.checkpointer.load(step=checkpointer_config.load_step)
+        loaded = self.checkpointer.load(step=checkpointer_config.load_step)
+        if loaded:
+            with self.parallelism_context.activate_spmd(), torch.no_grad():
+                self.model_cls._synchronize_shared_parameters(
+                    self.model_parts, self.parallelism_context
+                )
+        return loaded
 
     def save_checkpoint(self, *, last_step: bool = False) -> bool:
         if not hasattr(self, "checkpointer"):

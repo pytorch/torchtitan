@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self, TYPE_CHECKING
 
@@ -48,6 +49,32 @@ class BaseModel(Module, ABC):
         # TODO: remove this once autoparallel has wrap_init_states
         buffer_device = kwargs.get("buffer_device")
         self.init_states(buffer_device=buffer_device)
+
+    @classmethod
+    def _synchronize_shared_parameters(
+        cls,
+        model_parts: list[BaseModel],
+        parallelism_context: ParallelismContext,
+    ) -> None:
+        """Synchronize model-owned replicas after initialization or checkpoint load."""
+        del model_parts, parallelism_context
+
+    @classmethod
+    def _finalize_shared_gradients(
+        cls,
+        model_parts: list[BaseModel],
+        parallelism_context: ParallelismContext,
+    ) -> None:
+        """Combine model-owned replica gradients before clipping and updating."""
+        del model_parts, parallelism_context
+
+    def _get_grad_norm_parameters(self) -> Iterator[torch.nn.Parameter]:
+        """Return logical parameters counted once in the global gradient norm.
+
+        Every physical parameter is still clipped using that norm. Models
+        with replicas may exclude them here without excluding their updates.
+        """
+        return self.parameters()
 
     def preprocess_inputs(
         self,
