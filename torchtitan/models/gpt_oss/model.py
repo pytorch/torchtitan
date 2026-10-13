@@ -155,7 +155,7 @@ class GptOssTransformerBlock(TransformerBlock):
         self.ffn_norm = config.ffn_norm.build()
 
         assert isinstance(config.feed_forward, MoE.Config)
-        self.feed_forward = config.feed_forward.build()
+        self.moe = config.feed_forward.build()
 
     def forward(
         self,
@@ -183,7 +183,7 @@ class GptOssTransformerBlock(TransformerBlock):
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
-        moe_out = self.feed_forward(
+        moe_out = self.moe(
             self.ffn_norm(x),
             padding_mask_T=padding_mask,
             aux_loss_denominator=aux_loss_denominator,

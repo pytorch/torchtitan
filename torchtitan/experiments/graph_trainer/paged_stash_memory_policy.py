@@ -101,7 +101,7 @@ Options
     Megatron's). 0 reloads an activation when backward first reads it.
 ``compile.paged_stash.module_fqn``
     Module-FQN pattern of the modules annotated as the paged-stash region
-    (default ``layers.*.feed_forward.routed_experts``).
+    (default ``layers.*.moe.routed_experts``).
 ``compile.paged_stash.skip_immediate_backward``
     Keep the last paged layer resident instead of stashing it when the schedule
     runs that microbatch's backward next (default on). Matches Megatron's
@@ -1991,7 +1991,7 @@ PAGED_STASH_REGION = "paged_stash_region"
 # Default module-FQN pattern of the paged-stash region: the routed experts, so
 # the region holds the dispatcher's output and everything inside
 # ``inner_experts``.
-DEFAULT_MODULE_FQN = "layers.*.feed_forward.routed_experts"
+DEFAULT_MODULE_FQN = "layers.*.moe.routed_experts"
 
 # Paging a tensor costs one full round trip through the stash, so tiny tensors
 # are never worth it. Same rationale as cpu_offload's ``_MIN_OFFLOAD_BYTES``.

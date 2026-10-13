@@ -22,9 +22,9 @@ if TYPE_CHECKING:
 
 
 class GptOssStateDictAdapter(MoEStateDictAdapter):
-    _EXPERT_BIAS_KEY = "layers.{}.feed_forward.expert_bias_E"
-    _W13_WEIGHT_KEY = "layers.{}.feed_forward.routed_experts.w13.weight"
-    _W13_BIAS_KEY = "layers.{}.feed_forward.routed_experts.w13.bias"
+    _EXPERT_BIAS_KEY = "layers.{}.moe.expert_bias_E"
+    _W13_WEIGHT_KEY = "layers.{}.moe.routed_experts.w13.weight"
+    _W13_BIAS_KEY = "layers.{}.moe.routed_experts.w13.bias"
 
     def __init__(self, model_config: GptOssModel.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
@@ -52,10 +52,10 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             # MoE
             "model.layers.{}.mlp.experts.gate_up_proj_blocks": self._W13_WEIGHT_KEY,
             "model.layers.{}.mlp.experts.gate_up_proj_bias": self._W13_BIAS_KEY,
-            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.feed_forward.routed_experts.w2.weight",
-            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.feed_forward.routed_experts.w2.bias",
-            "model.layers.{}.mlp.router.weight": "layers.{}.feed_forward.router.gate.weight",
-            "model.layers.{}.mlp.router.bias": "layers.{}.feed_forward.router.gate.bias",
+            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.moe.routed_experts.w2.weight",
+            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.moe.routed_experts.w2.bias",
+            "model.layers.{}.mlp.router.weight": "layers.{}.moe.router.gate.weight",
+            "model.layers.{}.mlp.router.bias": "layers.{}.moe.router.gate.bias",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
         }

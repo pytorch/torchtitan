@@ -189,7 +189,7 @@ def _trace_dsv3_moe_block_stage(
         model.train()
 
         block = model.layers["1"]
-        if not isinstance(block.feed_forward, MoE):
+        if not hasattr(block, "moe"):
             raise AssertionError("DeepSeek V3 debug layer 1 must be a MoE layer")
         inner_attention_type = type(block.attention.inner_attention)
         if fsdp_mesh is not None:

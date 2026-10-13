@@ -50,6 +50,7 @@ from torchtitan.models.common.flops import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.linear import maybe_gather_tp_input
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -62,7 +63,6 @@ from torchtitan.models.common.multimodal import (
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 
-from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder
 
@@ -248,7 +248,11 @@ class KimiK3TransformerBlock(TransformerBlock):
         # A block's first layer closes the previous block and joins the stack.
         self.first_layer_in_block = config.layer_id % config.attn_res_block_size == 0
         self.attention = config.attention.build()
-        self.feed_forward = config.feed_forward.build()
+        ffn = config.feed_forward.build()
+        if isinstance(ffn, MoE):
+            self.moe = ffn
+        else:
+            self.feed_forward = ffn
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
         self.attention_res_norm = (
@@ -306,8 +310,8 @@ class KimiK3TransformerBlock(TransformerBlock):
             self.ffn_res_norm,
         )
         h_TD = self.ffn_norm(h_TD)
-        if isinstance(self.feed_forward, KimiLatentMoE):
-            h_TD = self.feed_forward(
+        if hasattr(self, "moe"):
+            h_TD = self.moe(
                 h_TD,
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,

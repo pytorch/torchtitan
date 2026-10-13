@@ -45,7 +45,11 @@ class Qwen3TransformerBlock(TransformerBlock):
 
         self.attention = config.attention.build()
 
-        self.feed_forward = config.feed_forward.build()
+        ffn = config.feed_forward.build()
+        if isinstance(ffn, MoE):
+            self.moe = ffn
+        else:
+            self.feed_forward = ffn
 
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -64,8 +68,8 @@ class Qwen3TransformerBlock(TransformerBlock):
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
 
-        if isinstance(self.feed_forward, MoE):
-            ffn_out = self.feed_forward(
+        if hasattr(self, "moe"):
+            ffn_out = self.moe(
                 self.ffn_norm(x),
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
