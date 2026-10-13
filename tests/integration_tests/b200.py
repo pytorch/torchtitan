@@ -123,7 +123,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
     """Exercise host-backed VMM scratch with MXFP8 Dist-MoE."""
-    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+    from torchtitan.models.common.moe.dist_moe.runtime import DistMoeRuntime
 
     config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2()
     runtime_config = config.dist_moe_runtime

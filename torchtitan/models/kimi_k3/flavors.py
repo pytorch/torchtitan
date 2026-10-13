@@ -51,7 +51,7 @@ from torchtitan.models.common.decoder_sharding import (
     token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe import QuantileBalancedTopKRouter
-from torchtitan.models.common.moe_sharding import (
+from torchtitan.models.common.moe.sharding import (
     moe_sharding_config,
     router_gate_sharding_config,
     router_sharding_config,

@@ -12,8 +12,8 @@ import torch
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
+from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.trainer import Trainer
 

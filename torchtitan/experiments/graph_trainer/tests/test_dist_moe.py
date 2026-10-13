@@ -349,7 +349,10 @@ def _assert_common_recipe(
     max_documents: int,
 ):
     pytest.importorskip("dist_moe")
-    from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
+    from torchtitan.models.common.moe.dist_moe import (
+        DistMoeRoutedExperts,
+        DistMoeRuntime,
+    )
 
     experts = list(config.model.traverse(DistMoeRoutedExperts.Config))
     runtime = config.dist_moe_runtime
@@ -388,7 +391,7 @@ def test_bf16_recipes_replace_all_experts(
     max_documents,
 ) -> None:
     """GraphTrainer BF16 recipes use native functional-WGrad experts."""
-    from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
+    from torchtitan.models.common.moe.dist_moe import DistMoeRoutedExperts
 
     experts = _assert_common_recipe(
         factory(),
@@ -421,7 +424,7 @@ def test_mxfp8_recipes_quantize_experts_dense_linears_and_lm_head(
 ) -> None:
     """GraphTrainer MXFP8 recipes configure every intended projection."""
     pytest.importorskip("torchao")
-    from torchtitan.models.common.dist_moe import MXFP8DistMoeRoutedExperts
+    from torchtitan.models.common.moe.dist_moe import MXFP8DistMoeRoutedExperts
     from torchtitan.quantization import MXFP8Linear
 
     if MXFP8Linear is None:

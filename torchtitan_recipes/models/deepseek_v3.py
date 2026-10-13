@@ -30,7 +30,7 @@ from torchtitan.config.transform import (
 )
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import build_model_config, DeepSeekV3Model
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 from torchtitan.trainer import Trainer
@@ -53,7 +53,7 @@ def _require_dist_moe() -> ModuleType:
 
 def _dist_moe_runtime_config(*, scratch_capacity_factor: float) -> Configurable.Config:
     """Build the rank-wide activation and scratch policy for Dist-MoE."""
-    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+    from torchtitan.models.common.moe.dist_moe.runtime import DistMoeRuntime
 
     return DistMoeRuntime.Config(
         activation_slot_capacity_factor=1.0,

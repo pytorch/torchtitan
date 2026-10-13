@@ -38,8 +38,8 @@ from torchtitan.models.common.activation import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
 from .token_dispatcher import LocalTokenDispatcher
 

@@ -50,14 +50,14 @@ from torchtitan.models.common.decoder_sharding import (
     token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
-from torchtitan.models.common.moe_sharding import (
+from torchtitan.models.common.moe.sharding import (
     moe_sharding_config,
     routed_experts_sharding_config,
     router_gate_sharding_config,
     router_sharding_config,
 )
+from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from .model import GptOssAttention, GptOssModel, GptOssTransformerBlock
 from .moe import GptOssGroupedLinear
 from .sharding import attention_sharding_config, routed_expert_linear_sharding_config

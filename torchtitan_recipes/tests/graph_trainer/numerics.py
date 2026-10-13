@@ -205,8 +205,8 @@ def _deepseek_v3_dist_moe_pp_numerics(
     slot_policy: Literal["microbatch", "stage_microbatch"],
 ):
     """Configure the shared four-GPU Dist-MoE PP numerics contract."""
-    from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
-    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+    from torchtitan.models.common.moe.dist_moe import DistMoeRoutedExperts
+    from torchtitan.models.common.moe.dist_moe.runtime import DistMoeRuntime
 
     runtime_config = config.dist_moe_runtime
     assert isinstance(runtime_config, DistMoeRuntime.Config)

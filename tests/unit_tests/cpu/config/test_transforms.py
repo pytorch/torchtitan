@@ -23,10 +23,6 @@ from torchtitan.config.transform import (
     transform_model_config_,
     TransformRelations,
 )
-from torchtitan.models.common.async_linear import (
-    AsyncColumnParallelLinear,
-    AsyncRowParallelLinear,
-)
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     SlidingWindowFlexInnerAttention,
@@ -44,8 +40,12 @@ from torchtitan.models.common.linear import (
     Linear,
     RowParallelLinear,
 )
+from torchtitan.models.common.linear.async_linear import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import (
+from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
 )

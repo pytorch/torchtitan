@@ -13,7 +13,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     residual_activation_placement,
 )
-from torchtitan.models.common.moe_sharding import routed_expert_weight_placement
+from torchtitan.models.common.moe.sharding import routed_expert_weight_placement
 
 
 def attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:

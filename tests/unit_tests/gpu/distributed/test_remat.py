@@ -32,7 +32,6 @@ from torchtitan.models.common.activation import (
 )
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
@@ -40,6 +39,7 @@ from torchtitan.models.common.linear import (
     maybe_gather_tp_input,
     RowParallelLinear,
 )
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import (
     MoE,
     QuantileBalancedTopKRouter,
@@ -47,7 +47,7 @@ from torchtitan.models.common.moe import (
     RoutedExperts,
     TokenChoiceTopKRouter,
 )
-from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import LocalTokenDispatcher
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
@@ -776,15 +776,15 @@ class TestRematRegions(unittest.TestCase):
 
                 with (
                     patch(
-                        "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                        "torchtitan.models.common.moe.moe.spmd_dense_sp_enabled",
                         return_value=False,
                     ),
                     patch(
-                        "torchtitan.models.common.moe.spmd_mesh_group",
+                        "torchtitan.models.common.moe.moe.spmd_mesh_group",
                         return_value=object(),
                     ),
                     patch(
-                        "torchtitan.models.common.moe.spmd.redistribute",
+                        "torchtitan.models.common.moe.moe.spmd.redistribute",
                         new=counted_redistribute,
                     ),
                 ):
@@ -831,15 +831,15 @@ class TestRematRegions(unittest.TestCase):
 
                 with (
                     patch(
-                        "torchtitan.models.common.linear.spmd_dense_sp_enabled",
+                        "torchtitan.models.common.linear.linear.spmd_dense_sp_enabled",
                         return_value=True,
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd_mesh_group",
+                        "torchtitan.models.common.linear.linear.spmd_mesh_group",
                         return_value=object(),
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd.redistribute",
+                        "torchtitan.models.common.linear.linear.spmd.redistribute",
                         new=counted_redistribute,
                     ),
                 ):
@@ -887,15 +887,15 @@ class TestRematRegions(unittest.TestCase):
 
                 with (
                     patch(
-                        "torchtitan.models.common.linear.spmd_dense_sp_enabled",
+                        "torchtitan.models.common.linear.linear.spmd_dense_sp_enabled",
                         return_value=True,
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd_mesh_group",
+                        "torchtitan.models.common.linear.linear.spmd_mesh_group",
                         return_value=object(),
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd.redistribute",
+                        "torchtitan.models.common.linear.linear.spmd.redistribute",
                         new=counted_redistribute,
                     ),
                 ):
@@ -954,15 +954,15 @@ class TestRematRegions(unittest.TestCase):
 
                 with (
                     patch(
-                        "torchtitan.models.common.linear.spmd_dense_sp_enabled",
+                        "torchtitan.models.common.linear.linear.spmd_dense_sp_enabled",
                         return_value=True,
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd_mesh_group",
+                        "torchtitan.models.common.linear.linear.spmd_mesh_group",
                         return_value=object(),
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd.redistribute",
+                        "torchtitan.models.common.linear.linear.spmd.redistribute",
                         new=counted_redistribute,
                     ),
                 ):

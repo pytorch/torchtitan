@@ -15,10 +15,14 @@ pytest.importorskip(
 
 
 def test_rl_integration_recipe_runs_dist_moe_on_both_roles():
+    from torchtitan.models.common.moe import RoutedExperts
+
     # The RL integration test guards the Dist-MoE path only if its recipe really
     # puts Dist-MoE on the trainer and on the generator, with graphs and uneven DP.
-    from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
-    from torchtitan.models.common.moe import RoutedExperts
+    from torchtitan.models.common.moe.dist_moe import (
+        DistMoeRoutedExperts,
+        DistMoeRuntime,
+    )
     from torchtitan_recipes.tests.rl.alphabet_sort import (
         rl_grpo_moe_debug_dist_moe_tp2_ep4,
     )

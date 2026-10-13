@@ -33,7 +33,7 @@ from torchtitan.config.transform import (
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_config
 from torchtitan.models.qwen3 import build_model_config
@@ -933,7 +933,7 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     _require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
     from torchtitan.distributed.activation_remat import ActivationRematConfig
-    from torchtitan.models.common.dist_moe import DistMoeRuntime
+    from torchtitan.models.common.moe.dist_moe import DistMoeRuntime
 
     config = rl_grpo_qwen3_moe_debug_varlen()
     # Full activation checkpointing would replay dist_moe's forward in backward and

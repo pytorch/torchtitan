@@ -21,12 +21,12 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import AsyncTensorParallelTransform
 
 from torchtitan.models.common.activation import SwiGLU
-from torchtitan.models.common.async_linear import (
+from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
