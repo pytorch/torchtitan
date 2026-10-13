@@ -99,6 +99,8 @@ class MXFP8LinearConverter(QuantizationConverter):
         Only Linear.Config entries whose FQN contains a match are converted.
         If empty, all Linear modules are converted.
         """
+        activation_quantization_backend: Literal["cuda", "cutedsl"] = "cuda"
+        """Activation cast backend; CuTeDSL requires 128-aligned BF16 matrices."""
         linears_saving_inputs_for_backward_in_mxfp8: list[str] = field(
             default_factory=list
         )
@@ -131,6 +133,10 @@ class MXFP8LinearConverter(QuantizationConverter):
         """
 
         def __post_init__(self) -> None:
+            if self.activation_quantization_backend not in ("cuda", "cutedsl"):
+                raise ValueError(
+                    "activation_quantization_backend must be 'cuda' or 'cutedsl'"
+                )
             if any(not fqn for fqn in self.linears_saving_inputs_for_backward_in_mxfp8):
                 raise ValueError(
                     "MXFP8 linears_saving_inputs_for_backward_in_mxfp8 cannot "
@@ -150,6 +156,13 @@ class MXFP8LinearConverter(QuantizationConverter):
 
         if not has_cuda_capability(10, 0):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")
+
+        if config.activation_quantization_backend == "cutedsl":
+            from torchtitan.quantization.mxfp8.activation import (
+                _require_cutedsl_activation_quantizers,
+            )
+
+            _require_cutedsl_activation_quantizers()
 
     def convert(self, model_config):
         assert MXFP8Linear is not None
@@ -201,6 +214,7 @@ class MXFP8LinearConverter(QuantizationConverter):
                 input_activation_format_for_backward=(
                     "mxfp8" if fqn in mxfp8_fqns else "bf16"
                 ),
+                activation_quantization_backend=self.config.activation_quantization_backend,
                 inplace_wgrad_accum=config.inplace_wgrad_accum,
             )
             if parent is None:
