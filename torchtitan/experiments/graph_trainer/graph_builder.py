@@ -14,7 +14,6 @@ live in ``graph_builder_utils``.
 from __future__ import annotations
 
 import dataclasses
-import warnings
 from collections.abc import Callable
 from typing import Any, cast, Literal, TYPE_CHECKING
 
@@ -184,27 +183,10 @@ class GraphTrainerStageGraphProvider:
     config: "GraphTrainer.Config | GraphTrainerConfigView"
     plan: GraphExecutionPlan
     parallelism_context: ParallelismContext | None = None
-    _warned_cuda_graph: bool = False
     # Calling convention:
     # key = (forward_stage_index, backward_stage_index); the graph is reused
     # across microbatches for that stage pair.
     _overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] | None = None
-
-    def _warn_if_cuda_graph_pass_requested(self) -> None:
-        if self._warned_cuda_graph:
-            return
-        if not self.config.compile.enable_passes:
-            return
-        if "cuda_graph_pass" in self.config.compile.disable_passes:
-            return
-        warnings.warn(
-            "GraphPP compiles extracted stage graphs with use_cuda_graph=False "
-            "even though cuda_graph_pass is enabled. CUDA graph capture needs "
-            "a separate GraphPP runtime integration. Pass "
-            "Add 'cuda_graph_pass' to compile.disable_passes to silence this warning.",
-            stacklevel=3,
-        )
-        self._warned_cuda_graph = True
 
     def prepare_graphs(
         self,
@@ -317,6 +299,7 @@ class GraphTrainerStageGraphProvider:
             self._overlap_graphs = _build_graph_pp_overlap_graphs(
                 schedule,
                 compile_config=self.config.compile,
+                use_cuda_graph=not self.config.training.disable_cuda_graphs,
             )
             overlap_graphs = dict(self._overlap_graphs)
         else:
@@ -331,5 +314,9 @@ class GraphTrainerStageGraphProvider:
             }
 
         for stage in graph_stages:
-            _compile_stage_graphs(stage, compile_config=self.config.compile)
+            _compile_stage_graphs(
+                stage,
+                compile_config=self.config.compile,
+                use_cuda_graph=not self.config.training.disable_cuda_graphs,
+            )
         return overlap_graphs
