@@ -146,6 +146,7 @@ class SDCReplayMismatchTrainer(Trainer):
 def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
     base_config = deepseek_v3_debugmodel(
         seq_len=2048,
+        attn_backend="flex",
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=2, expert_parallel_degree=2
         ),
@@ -710,6 +711,7 @@ def llama3_debugmodel_fused_swiglu_tp2() -> Trainer.Config:
 def deepseek_v3_debugmodel_fused_swiglu_tp2_ep4() -> Trainer.Config:
     config = deepseek_v3_debugmodel(
         seq_len=2048,
+        attn_backend="flex",
         parallelism=ParallelismConfig(
             tensor_parallel_degree=2, expert_parallel_degree=4
         ),
