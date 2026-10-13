@@ -6,6 +6,7 @@
 
 """Grain-backed TorchTitan dataloader."""
 
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from copy import deepcopy
@@ -25,6 +26,8 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable
+
+logger = logging.getLogger(__name__)
 
 
 # NOTE: This class deliberately inherits from `Exception` and not `StopIteration`.
@@ -58,6 +61,13 @@ class BaseDataLoader(Stateful, ABC, Configurable):
             if self.max_num_documents is not None and self.max_num_documents <= 0:
                 raise ValueError("max_num_documents must be positive")
 
+        def _get_attention_document_capacity(
+            self, *, max_context_length: int, num_tokens_per_microbatch: int
+        ) -> int | None:
+            """Return the attention metadata capacity for this data policy."""
+            del max_context_length, num_tokens_per_microbatch
+            return self.max_num_documents
+
     @abstractmethod
     def __iter__(self) -> Iterator[TrainingMicrobatch]:
         ...
@@ -89,6 +99,19 @@ class GrainDataLoader(BaseDataLoader):
         num_prefetch_microbatches: int = 2
         """Collated microbatches queued per rank for trainer consumption."""
 
+        def _get_attention_document_capacity(
+            self, *, max_context_length: int, num_tokens_per_microbatch: int
+        ) -> int | None:
+            """Size unmasked metadata by context rows, not source documents."""
+            if (
+                isinstance(self.collator, TextCollator.Config)
+                and not self.collator.mask_document_boundaries
+            ):
+                return (
+                    num_tokens_per_microbatch + max_context_length - 1
+                ) // max_context_length
+            return self.max_num_documents
+
     def __init__(
         self,
         config: Config,
@@ -114,7 +137,22 @@ class GrainDataLoader(BaseDataLoader):
             )
         self._dp_world_size = dp_world_size
         self._rank_id = f"dp_rank_{dp_rank}"
-        self.max_num_documents = config.max_num_documents
+        self.max_num_documents = config._get_attention_document_capacity(
+            max_context_length=max_context_length,
+            num_tokens_per_microbatch=num_tokens_per_microbatch,
+        )
+        packing_max_num_documents = config.max_num_documents
+        if (
+            isinstance(config.collator, TextCollator.Config)
+            and not config.collator.mask_document_boundaries
+        ):
+            if config.max_num_documents is not None:
+                logger.warning(
+                    "max_num_documents=%s is ignored when document masking is disabled; "
+                    "packing is bounded by the token budget instead.",
+                    config.max_num_documents,
+                )
+            packing_max_num_documents = None
 
         # Build the dataset graph and collator.
         read_options = config.read_options
@@ -123,7 +161,7 @@ class GrainDataLoader(BaseDataLoader):
             max_context_length=max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
             read_options=read_options,
-            max_num_documents=config.max_num_documents,
+            max_num_documents=packing_max_num_documents,
             num_mtp_layers=config.num_mtp_layers,
         )
         dataset_iteration_policy = DatasetIterationPolicy(

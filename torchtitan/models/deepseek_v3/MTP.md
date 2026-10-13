@@ -55,6 +55,14 @@ Eager pipeline parallelism supports DeepSeek-V3 MTP1 through
 
 ## 2. MTP Input Handling
 
+Document boundaries come from position resets, not token IDs or a separate
+batch axis. `TextCollator.Config(mask_document_boundaries=False)` finalizes
+continuous positions within each context row before MTP counting. Attention,
+RoPE and MTP then share that policy: shifted predictions may cross source-
+document boundaries but never the end of a context row. Labels and padding
+remain source/processor-owned and are not rebuilt by this option. See the data
+README for paired dense-attention/data overrides and fused-MLA composition.
+
 ### 2.1 Main Module Inputs
 
 The main module uses the normal trainer inputs:

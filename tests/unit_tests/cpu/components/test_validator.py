@@ -38,8 +38,8 @@ class _ClosableLoader:
 
 
 class _EchoModel(nn.Module):
-    def preprocess_inputs(self, input_dict, *, parallelism_context, parallelism):
-        del parallelism_context, parallelism
+    def preprocess_inputs(self, input_dict, **kwargs):
+        del kwargs
         return input_dict["input"], input_dict["labels"], {}
 
     def forward(self, inputs, **kwargs):
@@ -67,7 +67,11 @@ def _generic_validator(loader):
         dp_cp_enabled=False,
         activate_spmd=lambda **kwargs: nullcontext(),
     )
-    validator.dl_config = SimpleNamespace(build=mock.Mock(return_value=loader))
+    validator.dl_config = SimpleNamespace(
+        build=mock.Mock(return_value=loader),
+        max_num_documents=None,
+        _get_attention_document_capacity=lambda **kwargs: validator.dl_config.max_num_documents,
+    )
     validator.dp_world_size = 1
     validator.dp_rank = 0
     validator.tokenizer = mock.Mock()
@@ -139,6 +143,42 @@ def test_generic_validator_restarts_one_source_across_events(monkeypatch):
             mock.call(loss=1.0, step=1),
             mock.call(loss=1.0, step=10),
         ]
+    finally:
+        validator.close()
+
+
+@pytest.mark.parametrize("mask_documents,expected_capacity", [(True, 8), (False, 1)])
+def test_validation_uses_data_policy_capacity(
+    monkeypatch, mask_documents, expected_capacity
+):
+    from torchtitan.components.data import GrainDataLoader
+    from torchtitan.components.data.collators import TextCollator
+
+    row = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 4),
+        labels=torch.ones(1, 4, dtype=torch.long),
+        positions=torch.arange(4).reshape(1, 4),
+        padding_mask=torch.zeros(1, 4, dtype=torch.bool),
+        loss_token_counts=torch.tensor(4),
+        routing_token_counts=torch.tensor([4]),
+    )
+    loader = _ClosableLoader([row])
+    validator = _generic_validator(loader)
+    validator.dl_config = GrainDataLoader.Config(
+        dataset=mock.Mock(),
+        max_num_documents=8,
+        collator=TextCollator.Config(mask_document_boundaries=mask_documents),
+    )
+    monkeypatch.setattr(GrainDataLoader.Config, "build", lambda *args, **kwargs: loader)
+    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
+    model = _EchoModel()
+    preprocess = mock.Mock(wraps=model.preprocess_inputs)
+    monkeypatch.setattr(model, "preprocess_inputs", preprocess)
+    try:
+        validator.validate([model], step=1)
+        assert preprocess.call_args.kwargs["max_num_documents"] == expected_capacity
+        assert preprocess.call_args.kwargs["max_context_length"] == 4
+        assert validator.dl_config.max_num_documents == 8
     finally:
         validator.close()
 
