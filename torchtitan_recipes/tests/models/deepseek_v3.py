@@ -30,7 +30,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 
 from torchtitan.models.deepseek_v3 import build_model_config
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
@@ -330,7 +330,7 @@ def configure_dist_moe_fsdp2_ep2(config: Trainer.Config) -> Trainer.Config:
 
     ``config`` must be built with ``dist_moe_fsdp2_ep2_parallelism()``.
     """
-    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+    from torchtitan.models.common.moe.dist_moe.runtime import DistMoeRuntime
 
     runtime_config = config.dist_moe_runtime
     assert isinstance(runtime_config, DistMoeRuntime.Config)

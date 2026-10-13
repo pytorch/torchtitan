@@ -40,7 +40,9 @@ from . import _dist_moe as dist_moe
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallelism_context import ParallelismContext
-    from torchtitan.models.common.dist_moe.routed_experts import DistMoeRoutedExperts
+    from torchtitan.models.common.moe.dist_moe.routed_experts import (
+        DistMoeRoutedExperts,
+    )
 
 
 logger = logging.getLogger(__name__)

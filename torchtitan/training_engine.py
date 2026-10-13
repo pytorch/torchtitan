@@ -50,7 +50,7 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 
 
 if TYPE_CHECKING:
-    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+    from torchtitan.models.common.moe.dist_moe.runtime import DistMoeRuntime
 
 
 logger = logging.getLogger(__name__)

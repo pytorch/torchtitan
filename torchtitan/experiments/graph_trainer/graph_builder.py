@@ -62,7 +62,7 @@ from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
 
 if TYPE_CHECKING:
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-    from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
+    from torchtitan.models.common.moe.dist_moe.runtime import _DistMoeForwardContext
 
 
 UnshardPlacement = Literal["first_microbatch", "schedule", "every_microbatch"]

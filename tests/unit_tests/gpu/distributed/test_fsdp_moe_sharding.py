@@ -25,7 +25,7 @@ from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.utils import clip_grad_norm_
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe_sharding import replicated_param_placement_sparse
+from torchtitan.models.common.moe.sharding import replicated_param_placement_sparse
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3Model
 

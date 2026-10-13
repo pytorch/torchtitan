@@ -15,11 +15,11 @@ from torch.autograd.function import once_differentiable
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
-from torchtitan.models.common.inplace_wgrad_accum import (
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear.inplace_wgrad_accum import (
     running_grad,
     uses_inplace_wgrad_accum,
 )
-from torchtitan.models.common.linear import Linear
 
 # Shape suffix legend for HiMidLoLinear:
 #   T = num tokens, D = model dimension, O = output features, P = grad_output pieces (2 or 3)

@@ -4052,7 +4052,9 @@ class TestChunkPasses(TestCase):
         )
 
     def test_moe_ep_annotations_cover_all_to_all_dispatcher(self):
-        from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+        from torchtitan.models.common.moe.token_dispatcher import (
+            AllToAllTokenDispatcher,
+        )
 
         annotate_moe_ep_regions()
 

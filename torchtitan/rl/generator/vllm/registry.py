@@ -33,7 +33,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.common.moe.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
 # Model-agnostic name used for vLLM model registration.

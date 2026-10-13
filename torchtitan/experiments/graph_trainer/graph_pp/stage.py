@@ -21,7 +21,7 @@ from torch.distributed.pipelining.stage import PipelineStage
 
 
 if TYPE_CHECKING:
-    from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
+    from torchtitan.models.common.moe.dist_moe.runtime import _DistMoeForwardContext
 
 
 class StageGraphs(Protocol):

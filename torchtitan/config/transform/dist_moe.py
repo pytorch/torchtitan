@@ -14,14 +14,14 @@ from typing import Any, Literal
 from torchtitan.models.base.module import Module
 
 from torchtitan.models.common.activation import ClampedSwiGLU, SwiGLU
-from torchtitan.models.common.dist_moe import (
+from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.moe.dist_moe import (
     _dist_moe as dist_moe,
     DistMoeRoutedExperts,
     MXFP8DistMoeRoutedExperts,
 )
-from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from .base import ModelConfigTransform
 
 

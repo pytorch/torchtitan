@@ -13,7 +13,7 @@ import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor
 
-from torchtitan.models.common.moe_state_dict_adapter import MoEStateDictAdapter
+from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
 
 from torchtitan.models.common.rope import ComplexRoPE
 

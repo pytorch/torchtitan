@@ -40,10 +40,6 @@ from torchtitan.config.transform import (
     transform_model_config_,
 )
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.common.async_linear import (
-    AsyncColumnParallelLinear,
-    AsyncRowParallelLinear,
-)
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
@@ -51,6 +47,10 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear.async_linear import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 
 DIM = 256
 N_HEADS = 8

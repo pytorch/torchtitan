@@ -30,8 +30,8 @@ from torchtitan.models.common.moe import (
     QuantileBalancedTopKRouter,
     register_moe_quantile_balancing_hook,
 )
-from torchtitan.models.common.moe_sharding import _tokens_per_expert_placement
-from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
+from torchtitan.models.common.moe.sharding import _tokens_per_expert_placement
+from torchtitan.models.common.moe.token_dispatcher import LocalTokenDispatcher
 
 
 @pytest.mark.multi_gpu

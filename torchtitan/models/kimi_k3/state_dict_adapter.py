@@ -15,7 +15,7 @@ import torch
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.attention.kda import KDA
-from torchtitan.models.common.moe_state_dict_adapter import MoEStateDictAdapter
+from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
 
 if TYPE_CHECKING:
     from .model import KimiK3Model
