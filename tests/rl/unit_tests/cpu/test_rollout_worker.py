@@ -264,6 +264,9 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             finish_reason="stop",
         )
 
+    async def release_session_fn(**kwargs) -> None:
+        pass
+
     async def run() -> None:
         for rollout_id in range(20):
             renderer = _RewritingRenderer(rng)
@@ -273,6 +276,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             )
             rollout = await worker._run_single_rollout(
                 generate_fn=generate_fn,
+                release_session_fn=release_session_fn,
                 env=env,
                 sampling=SamplingConfig(),
                 group_id=0,

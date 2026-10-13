@@ -56,13 +56,6 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
     fx_trace_precompile_dir = tempfile.mkdtemp(prefix="fx_trace_precompile_")
     dsv3_fx_trace_precompile_dir = tempfile.mkdtemp(prefix="dsv3_fx_trace_precompile_")
     return [
-        # Uses the SDPA backend: the default FlexInnerAttention backend bakes a
-        # BlockMask into the precompiled artifact, whose mask_mod closures are
-        # Python code objects that pickle.dumps cannot serialize ("TypeError:
-        # cannot pickle code objects" in precompile_fx_trace_save). SDPA carries
-        # no such object, so it exercises the precompile machinery cleanly.
-        # TODO: re-test on FlexInnerAttention once BlockMask is excluded/rebuilt at
-        # load time (or becomes picklable).
         PrecompileTestDefinition(
             config=llama3_precompile_fsdp_tp,
             artifact_dir=fx_trace_precompile_dir,

@@ -31,6 +31,8 @@ from torchtitan.models.muse_glimmer.model import MuseGlimmerModel
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 # Multimodal special tokens for the Muse Glimmer debug flavor. The debug tokenizer asset
 # (``./tests/assets/tokenizer``) already defines these (IDs 2004-2008, all <
@@ -114,11 +116,17 @@ def _muse_glimmer_mm_dataloader(
 
 def muse_glimmer_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
+    num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
     # The output soft-cap lives in the SoftCappedLinear lm_head, so it is applied
     # per-chunk inside ChunkedLossWrapper just as it would be in the full model
     # forward.
@@ -132,6 +140,11 @@ def muse_glimmer_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=(
+                c4_document_capacity(num_tokens_per_microbatch_per_dp_rank)
+                if attn_backend == "varlen"
+                else None
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
@@ -147,7 +160,7 @@ def muse_glimmer_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
@@ -159,6 +172,8 @@ def muse_glimmer_debugmodel(
 
 def muse_glimmer_debugmodel_mm(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     """Multimodal debug training config.
 
@@ -174,7 +189,10 @@ def muse_glimmer_debugmodel_mm(
     """
     parallelism = ParallelismConfig()
     mm_model_spec = build_model_config(
-        "debugmodel_mm", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "debugmodel_mm",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -217,9 +235,8 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         context_parallel_degree=1,
         pipeline_parallel_degree=1,
     )
-    model_config = build_model_config(
-        "30B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
-    )
+    model_config = build_model_config("30B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
@@ -232,6 +249,9 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -241,7 +261,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
@@ -259,7 +279,7 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
         pipeline_parallel_degree=1,
     )
     model_config = build_model_config(
-        "30B_mm", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "30B_mm", seq_len=seq_len, parallelism=parallelism
     )
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;

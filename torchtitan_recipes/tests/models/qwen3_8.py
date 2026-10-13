@@ -38,6 +38,8 @@ from torchtitan.models.qwen3_8 import build_model_config, QWEN3_8_SPECIAL_TOKENS
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 def _multimodal_collator_config(
     dataset_config: SingleDatasetConfig,
@@ -57,7 +59,7 @@ def qwen38_debugmodel(
 ) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -121,7 +123,7 @@ def qwen38_debugmodel_moe(
         tensor_parallel_degree=2,
     )
     model_config = build_model_config(
-        "debugmodel_moe", seq_len=seq_len, parallelism=parallelism
+        "debugmodel_moe", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -161,7 +163,9 @@ def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
         data_parallel_shard_degree=-1,
         tensor_parallel_degree=4,
     )
-    model_config = build_model_config("27B", seq_len=seq_len, parallelism=parallelism)
+    model_config = build_model_config(
+        "27B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -203,6 +207,7 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
     model_config = build_model_config(
         "2.4T-A95B", seq_len=seq_len, parallelism=parallelism
     )
+    num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -212,6 +217,9 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.8-2.4T-A95B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -221,7 +229,7 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,

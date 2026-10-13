@@ -14,6 +14,8 @@ import pytest
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import ModelConfigConverter
+from torchtitan.models.common.attention import InnerAttention, VarlenInnerAttention
+from torchtitan.models.common.decoder import Decoder
 
 _MODELS = [
     "llama3",
@@ -29,6 +31,31 @@ _MODELS = [
     "muse_glimmer",
     "flux",
 ]
+
+
+@pytest.mark.parametrize(
+    "model", [name for name in _MODELS if name not in ("deepseek_v4", "kimi_k2_7")]
+)
+def test_model_defaults_to_varlen(model):
+    module = importlib.import_module(f"torchtitan.models.{model}")
+    config = module.build_model_config(
+        next(iter(module.MODEL_FLAVORS)), parallelism=ParallelismConfig()
+    )
+    layers = (
+        [layer.attention for layer in config.layers if layer.attention is not None]
+        if isinstance(config, Decoder.Config)
+        else [config]
+    )
+    attention_configs = [
+        attention
+        for layer in layers
+        for _, attention, _, _ in layer.traverse(InnerAttention.Config)
+    ]
+    assert attention_configs
+    assert all(
+        isinstance(attention, VarlenInnerAttention.Config)
+        for attention in attention_configs
+    )
 
 
 class _ReplaceRootConverter(ModelConfigConverter):
