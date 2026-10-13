@@ -87,6 +87,8 @@ def _preserve_moe_attributes(original_model, parallel_model):
             par_moe.moe_enabled = orig_moe.moe_enabled
         if hasattr(orig_moe, "load_balance_coeff"):
             par_moe.load_balance_coeff = orig_moe.load_balance_coeff
+        # The balancing hooks read this flag; AutoParallel's MoE has no frozen bias.
+        par_moe.freeze_expert_bias = False
 
 
 def parallelize_autoparallel_deepseekv3(

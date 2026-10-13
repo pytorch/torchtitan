@@ -28,7 +28,6 @@ from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     BatchInvariantFlexConverter,
-    LMHeadFP32OutputConverter,
     ModelConfigConverter,
     MXFP8LinearConverter,
 )
@@ -81,11 +80,7 @@ def _qwen3_rl_model_configs(
     generator_parallelism: InferenceParallelismConfig,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> tuple[Decoder.Config, Decoder.Config]:
-    """Qwen3 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits.
-
-    RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadFP32OutputConverter`` on top of whatever converters it passes.
-    """
+    """Qwen3 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
     return build_rl_model_configs(
         build_model_config,
         flavor,
@@ -93,7 +88,7 @@ def _qwen3_rl_model_configs(
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=[*(converters or []), LMHeadFP32OutputConverter.Config()],
+        converters=converters,
     )
 
 
@@ -328,7 +323,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         "20b",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -558,7 +552,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         "30B-A3B",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -741,11 +734,7 @@ def _qwen3_5_rl_model_configs(
     generator_parallelism: InferenceParallelismConfig,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> tuple[Decoder.Config, Decoder.Config]:
-    """Qwen3.5 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits.
-
-    RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadFP32OutputConverter`` on top of whatever converters it passes.
-    """
+    """Qwen3.5 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
     return build_rl_model_configs(
         build_qwen3_5_model_config,
         flavor,
@@ -753,7 +742,7 @@ def _qwen3_5_rl_model_configs(
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=[*(converters or []), LMHeadFP32OutputConverter.Config()],
+        converters=converters,
     )
 
 

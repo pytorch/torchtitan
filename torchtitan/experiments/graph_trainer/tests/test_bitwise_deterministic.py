@@ -26,6 +26,7 @@ from tests.utils import hash_gradient, hash_model
 from torch.nn.attention.flex_attention import flex_attention
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -114,7 +115,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         self.parallelism_context = self.enterContext(
             single_device_parallelism_context()
         )
-
         # Disable max_autotune for FlexInnerAttention to ensure bitwise-identical
         # results between eager (torch.compile) and traced (regional_inductor)
         # paths. max_autotune causes kernel config divergence between the two.
@@ -139,6 +139,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         )
         Trainer.Config(
             model=self.model_config,
+            dataloader=BaseDataLoader.Config(max_num_documents=BATCH_SIZE),
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=NUM_TOKENS,
                 max_context_length=SEQ_LEN,
@@ -170,7 +171,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         if not isinstance(self.model_config, Decoder.Config):
             return {}
-        attention_metadata = model._get_attention_metadata(self.positions)
+        attention_metadata = model._get_attention_metadata(
+            self.positions,
+            max_num_documents=BATCH_SIZE,
+            max_context_length=SEQ_LEN,
+        )
         return {"attention_metadata": attention_metadata}
 
     def _run_steps(
@@ -205,7 +210,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
             compile_numerics_changing_optim=numerics_changing_optim,
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
             parallelism_context=self.parallelism_context,
+            max_num_documents=BATCH_SIZE,
         )
+        trainer.config.training.max_context_length = SEQ_LEN
         global_loss_token_counts = torch.tensor(
             NUM_TOKENS, dtype=torch.float, device="cuda"
         )
@@ -252,7 +259,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.passes import (
             apply_graph_passes,
             compile_time_passes,
-            construct_default_graph_passes,
         )
         from torchtitan.experiments.graph_trainer.precompile import (
             flatten_runtime_inputs,
@@ -321,21 +327,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 storage,
                 expected_fingerprint="",
                 example_inputs=example_inputs,
-            )
-
-        # Step 4: Apply load-time passes (CUDA graph)
-        if enable_passes:
-            load_config = SimpleNamespace(
-                model=self.model_config,
-                compile=GraphTrainerCompileConfig(
-                    precompile_artifact_dir="precompiled",
-                ),
-            )
-            passes = construct_default_graph_passes(loaded_result, load_config)
-            loaded_result.gm = apply_graph_passes(
-                loaded_result.gm,
-                loaded_result.example_inputs,
-                passes,
             )
 
         # Step 4: Run training steps using the loaded artifact
@@ -416,9 +407,6 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    @unittest.skip(
-        "Precompiled artifacts do not provide example inputs for CUDA graph setup"
-    )
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         if self.attn_backend == "flex":
@@ -447,6 +435,10 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
+@unittest.skipUnless(
+    has_cuda_capability(9, 0),
+    "FA2 requires matching Q/K and V head dimensions; DeepSeek MLA uses 192 and 128",
+)
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DeepSeek-v3 debug model."""
 

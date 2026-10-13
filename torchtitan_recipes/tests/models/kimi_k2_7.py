@@ -9,6 +9,7 @@
 from dataclasses import dataclass, replace
 from typing import cast
 
+import torch
 from torch.distributed.tensor import Shard
 
 from torchtitan.components.data import (
@@ -297,6 +298,7 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
                 MeshAxisName.DP_SHARD.value: Shard(0),
                 f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Shard(0),
             },
+            compute_dtype=torch.bfloat16,
         )
 
     # Preserve exact EP-first DTensor ownership. If an EP-local expert count is
@@ -312,6 +314,7 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
         shard_order_by_tensor_dim={
             0: (MeshAxisName.EP.value, MeshAxisName.EDP_SHARD.value),
         },
+        compute_dtype=torch.bfloat16,
     )
 
 
@@ -327,6 +330,7 @@ def _dist_muon_optimizer(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: Owned(),
         },
+        compute_dtype=torch.bfloat16,
     )
     # Kimi runs Newton-Schulz per logical projection within each MLA head.
     per_query_head = ComputeLayout(
@@ -337,6 +341,7 @@ def _dist_muon_optimizer(
                 block_sizes=(attention.qk_nope_head_dim, attention.qk_rope_head_dim),
             )
         },
+        compute_dtype=torch.bfloat16,
     )
     kv_latent_and_rope = ComputeLayout(
         shardings_by_mesh_axis={
@@ -346,6 +351,7 @@ def _dist_muon_optimizer(
                 block_sizes=(attention.kv_lora_rank, attention.qk_rope_head_dim),
             )
         },
+        compute_dtype=torch.bfloat16,
     )
     per_key_value_head = ComputeLayout(
         shardings_by_mesh_axis={
@@ -355,6 +361,7 @@ def _dist_muon_optimizer(
                 block_sizes=(attention.qk_nope_head_dim, attention.v_head_dim),
             )
         },
+        compute_dtype=torch.bfloat16,
     )
     per_expert = _per_expert_compute_layout(parallelism)
     query_shardings: dict[str, ComputeLayout] = (
@@ -374,6 +381,7 @@ def _dist_muon_optimizer(
     feed_forward_shardings = {
         "w13": ComputeLayout(
             shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
+            compute_dtype=torch.bfloat16,
         ),
         "w2": owned,
     }

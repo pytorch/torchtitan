@@ -161,6 +161,7 @@ def _build_test_stage_graphs(
         loss_fn=stage.loss_fn,
         config=types.SimpleNamespace(
             compile=stage.compile_config,
+            training=types.SimpleNamespace(disable_cuda_graphs=False),
             parallelism=None,
             model=None,
         ),
@@ -545,7 +546,10 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         ctx = _PipelineContext(schedule, [()] * 4, [{} for _ in range(4)], None, [])
         provider = GraphTrainerStageGraphProvider(
             loss_fn=lambda pred, target: pred.sum(),
-            config=types.SimpleNamespace(compile=GraphTrainerCompileConfig()),
+            config=types.SimpleNamespace(
+                compile=GraphTrainerCompileConfig(),
+                training=types.SimpleNamespace(disable_cuda_graphs=False),
+            ),
             plan=GraphExecutionPlan(
                 pp_enabled=True,
                 num_microbatches=4,
@@ -637,7 +641,10 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         ctx = _PipelineContext(schedule, arg_mbs, kwarg_mbs, None, [])
         provider = GraphTrainerStageGraphProvider(
             loss_fn=lambda pred, target: pred.sum(),
-            config=types.SimpleNamespace(compile=GraphTrainerCompileConfig()),
+            config=types.SimpleNamespace(
+                compile=GraphTrainerCompileConfig(),
+                training=types.SimpleNamespace(disable_cuda_graphs=False),
+            ),
             plan=_make_test_pp_plan(),
         )
 
@@ -907,18 +914,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         }
         self.assertIs(handlers[WAIT_REDUCE_GRAD].__self__, runtime)
         handlers[WAIT_REDUCE_GRAD](mock.Mock(), mock.Mock())
-
-    def test_graph_pp_warns_when_cuda_graph_pass_is_enabled(self) -> None:
-        provider = GraphTrainerStageGraphProvider(
-            loss_fn=lambda pred, target: (pred.sum(), {}),
-            config=types.SimpleNamespace(
-                compile=GraphTrainerCompileConfig(enable_passes=True)
-            ),
-            plan=_make_test_pp_plan(),
-        )
-
-        with self.assertWarnsRegex(UserWarning, "use_cuda_graph=False"):
-            provider._warn_if_cuda_graph_pass_requested()
 
     def test_single_stage_schedule_hard_errors(self) -> None:
         with self.assertRaisesRegex(ValueError, "runtime PP schedule"):
@@ -1650,12 +1645,13 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 gm,
                 compile_config=compile_config,
                 graph_name="test_graph",
+                use_cuda_graph=True,
             )
 
         self.assertIs(compiled, gm)
         final_inductor_passes.assert_called_once_with(
             compile_config,
-            use_cuda_graph=False,
+            use_cuda_graph=True,
             boxed_codegen=True,
         )
         apply_graph_passes.assert_called_once()
@@ -1720,11 +1716,12 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         with mock.patch(
             "torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder."
             "_compile_graph_pp_module",
-            side_effect=lambda gm, *, compile_config, graph_name: gm,
+            side_effect=lambda gm, *, compile_config, graph_name, use_cuda_graph: gm,
         ) as compile_graph:
             overlap_graphs = _build_graph_pp_overlap_graphs(
                 schedule,
                 compile_config=full_compile,
+                use_cuda_graph=True,
             )
 
         self.assertIn((0, 1), overlap_graphs)
@@ -1754,6 +1751,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             _build_graph_pp_overlap_graphs(
                 schedule,
                 compile_config=GraphTrainerCompileConfig(enable_passes=False),
+                use_cuda_graph=True,
             )
 
     def test_multiplexed_graph_copies_backward_meta_to_forward_fake_mode(
@@ -2114,6 +2112,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         overlap_graphs = _build_graph_pp_overlap_graphs(
             schedule,
             compile_config=compile_config,
+            use_cuda_graph=True,
         )
 
         self.assertIn((0, 1), overlap_graphs)

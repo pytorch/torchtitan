@@ -55,10 +55,15 @@ def _multimodal_collator_config(
 
 def qwen35_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    attn_backend: str = "flex",
 ) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -139,7 +144,7 @@ def qwen35_debugmodel_moe(
             tensor_parallel_degree=2,
         )
     model_config = build_model_config(
-        "debugmodel_moe", seq_len=seq_len, parallelism=parallelism
+        "debugmodel_moe", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(

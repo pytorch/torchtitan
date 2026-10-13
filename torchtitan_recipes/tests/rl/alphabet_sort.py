@@ -28,7 +28,6 @@ from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    LMHeadFP32OutputConverter,
     ModelConfigConverter,
     TokenDispatcherTransform,
 )
@@ -86,7 +85,6 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         "debugmodel",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -183,7 +181,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         "debugmodel",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -281,7 +278,6 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         "debugmodel_moe",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -430,7 +426,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         "debugmodel_moe",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -623,7 +618,7 @@ def _kimi_k3_rl_model_configs(
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=[*(converters or []), LMHeadFP32OutputConverter.Config()],
+        converters=converters,
     )
     for model_config in (trainer_model, generator_model):
         model_config.local_compile_regions = []
@@ -812,7 +807,6 @@ def rl_grpo_moe_debug_tp4_ep4() -> Controller.Config:
         "debugmodel",
         seq_len=1024,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
     )

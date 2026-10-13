@@ -69,7 +69,7 @@ def _configure_fsdp_numerics(config: Trainer.Config) -> Trainer.Config:
 
 
 def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=512)
+    config = llama3_debugmodel(attn_backend="flex", seq_len=512)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -101,7 +101,7 @@ def llama3_debugmodel_region_ac_fsdp2_tp2_cp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=512)
+    config = llama3_debugmodel(attn_backend="flex", seq_len=512)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
@@ -115,7 +115,9 @@ def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_mtp_fsdp4_ep2() -> Trainer.Config:
     config = deepseek_v3_debugmodel_mtp(
-        seq_len=2048, parallelism=ParallelismConfig(expert_parallel_degree=2)
+        attn_backend="flex",
+        seq_len=2048,
+        parallelism=ParallelismConfig(expert_parallel_degree=2),
     )
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
@@ -129,7 +131,9 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2() -> Trainer.Config:
 def deepseek_v3_debugmodel_mtp_cp2(
     *, parallelism: ParallelismConfig | None = None
 ) -> Trainer.Config:
-    config = deepseek_v3_debugmodel_mtp(seq_len=512, parallelism=parallelism)
+    config = deepseek_v3_debugmodel_mtp(
+        attn_backend="flex", seq_len=512, parallelism=parallelism
+    )
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.context_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
@@ -160,14 +164,18 @@ def deepseek_v3_debugmodel_mtp_tp2_cp2() -> Trainer.Config:
 def deepseek_v3_debugmodel_fsdp8_ep8() -> Trainer.Config:
     return _configure_fsdp_numerics(
         deepseek_v3_debugmodel(
-            seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=8)
+            attn_backend="flex",
+            seq_len=512,
+            parallelism=ParallelismConfig(expert_parallel_degree=8),
         )
     )
 
 
 def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config = deepseek_v3_debugmodel(
-        seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=8)
+        attn_backend="flex",
+        seq_len=512,
+        parallelism=ParallelismConfig(expert_parallel_degree=8),
     )
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -189,7 +197,9 @@ def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
     config = deepseek_v3_debugmodel(
-        seq_len=2048, parallelism=ParallelismConfig(expert_parallel_degree=4)
+        attn_backend="flex",
+        seq_len=2048,
+        parallelism=ParallelismConfig(expert_parallel_degree=4),
     )
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.pipeline_parallel_degree = 2
@@ -213,7 +223,9 @@ def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_hsdp2x2_ep2() -> Trainer.Config:
     config = deepseek_v3_debugmodel(
-        seq_len=2048, parallelism=ParallelismConfig(expert_parallel_degree=2)
+        attn_backend="flex",
+        seq_len=2048,
+        parallelism=ParallelismConfig(expert_parallel_degree=2),
     )
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_replicate_degree = 2
@@ -241,7 +253,9 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_fused_mla_swiglu_fsdp4_ep2() -> Trainer.Config:
     config = deepseek_v3_debugmodel(
-        seq_len=2048, parallelism=ParallelismConfig(expert_parallel_degree=2)
+        attn_backend="flex",
+        seq_len=2048,
+        parallelism=ParallelismConfig(expert_parallel_degree=2),
     )
     _set_spmd_typechecking(config, typechecking=True)
     config.override.imports = [
@@ -255,8 +269,11 @@ def deepseek_v3_debugmodel_fused_mla_swiglu_fsdp4_ep2() -> Trainer.Config:
 
 def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config = qwen3_debugmodel_moe_param_groups(
-        seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=8)
+        attn_backend="flex",
+        seq_len=512,
+        parallelism=ParallelismConfig(expert_parallel_degree=8),
     )
+    config.dataloader.max_num_documents = None
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -276,7 +293,8 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
 
 
 def qwen3_debugmodel_moe_param_groups_seed() -> Trainer.Config:
-    config = qwen3_debugmodel_moe_param_groups()
+    config = qwen3_debugmodel_moe_param_groups(attn_backend="flex")
+    config.dataloader.max_num_documents = None
     config.checkpointer = CheckpointManager.Config(export_dtype="float16")
     return config
 
@@ -284,7 +302,9 @@ def qwen3_debugmodel_moe_param_groups_seed() -> Trainer.Config:
 def qwen3_debugmodel_fsdp2_tp2_cp2(
     *, parallelism: ParallelismConfig | None = None
 ) -> Trainer.Config:
-    config = qwen3_debugmodel(seq_len=2048, parallelism=parallelism)
+    config = qwen3_debugmodel(
+        attn_backend="flex", seq_len=2048, parallelism=parallelism
+    )
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -482,13 +502,15 @@ def kimi_k2_5_debugmodel_seed_checkpoint() -> Trainer.Config:
 def muse_glimmer_debugmodel_fsdp8() -> Trainer.Config:
     from torchtitan_recipes.tests.models.muse_glimmer import muse_glimmer_debugmodel
 
-    return _configure_fsdp_numerics(muse_glimmer_debugmodel(seq_len=512))
+    config = muse_glimmer_debugmodel(attn_backend="flex", seq_len=512)
+    config.dataloader.max_num_documents = None
+    return _configure_fsdp_numerics(config)
 
 
 def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     from torchtitan_recipes.tests.models.muse_glimmer import muse_glimmer_debugmodel
 
-    config = muse_glimmer_debugmodel(seq_len=512)
+    config = muse_glimmer_debugmodel(attn_backend="flex", seq_len=512)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -527,7 +549,9 @@ def muse_glimmer_debugmodel_mm_fsdp2_tp2() -> Trainer.Config:
 def muse_glimmer_debugmodel_mm_tp2_cp2_pp2() -> Trainer.Config:
     from torchtitan_recipes.tests.models.muse_glimmer import muse_glimmer_debugmodel_mm
 
-    config = muse_glimmer_debugmodel_mm()
+    config = muse_glimmer_debugmodel_mm(
+        attn_backend="flex",
+    )
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.context_parallel_degree = 2
