@@ -115,9 +115,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         self.parallelism_context = self.enterContext(
             single_device_parallelism_context()
         )
-        if self.attn_backend == "varlen":
-            self.enterContext(torch.autocast("cuda", dtype=torch.bfloat16))
-
         # Disable max_autotune for FlexInnerAttention to ensure bitwise-identical
         # results between eager (torch.compile) and traced (regional_inductor)
         # paths. max_autotune causes kernel config divergence between the two.
@@ -457,6 +454,10 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
+@unittest.skipUnless(
+    has_cuda_capability(9, 0),
+    "FA2 requires matching Q/K and V head dimensions; DeepSeek MLA uses 192 and 128",
+)
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DeepSeek-v3 debug model."""
 
