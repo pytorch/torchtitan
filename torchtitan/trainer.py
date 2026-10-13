@@ -373,19 +373,30 @@ class Trainer(Configurable):
             else local_loss_token_counts[0]
         )
         sl.log_trace_scalar({"local_valid_tokens": int(local_main_loss_token_count)})
-        num_loss_objectives = local_loss_token_counts.numel()
-        global_token_counts = torch.cat(
-            (
-                local_loss_token_counts.reshape(-1),
-                local_routing_token_counts.reshape(-1),
+        owns_loss = not parallelism_context.pp_enabled or engine.pp_has_last_stage
+        num_loss_objectives = local_loss_token_counts.numel() if owns_loss else 0
+        # Routing denominators belong to every MoE stage. Loss denominators
+        # belong only to stages that evaluate the loss.
+        global_token_counts = (
+            torch.cat(
+                (
+                    local_loss_token_counts.reshape(-1),
+                    local_routing_token_counts.reshape(-1),
+                )
             )
+            if owns_loss
+            else local_routing_token_counts.reshape(-1)
         ).to(engine.device)
         if parallelism_context.dp_enabled:
             global_token_counts = dist_utils.dist_sum_tensor(
                 global_token_counts, parallelism_context.get_mesh("dp")
             )
-        global_loss_token_counts = global_token_counts[:num_loss_objectives].reshape(
-            local_loss_token_counts.shape
+        global_loss_token_counts = (
+            global_token_counts[:num_loss_objectives].reshape(
+                local_loss_token_counts.shape
+            )
+            if owns_loss
+            else local_loss_token_counts.to(engine.device)
         )
         global_routing_token_counts = global_token_counts[num_loss_objectives:].reshape(
             local_routing_token_counts.shape

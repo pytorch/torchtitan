@@ -222,7 +222,8 @@ class Validator(BaseValidator):
 
             # All-reduce token count across DP ranks while keeping it on device.
             local_loss_token_count = local_loss_token_count.to(device_type)
-            if parallelism_context.dp_enabled:
+            owns_loss = not parallelism_context.pp_enabled or self.pp_has_last_stage
+            if parallelism_context.dp_enabled and owns_loss:
                 dp_mesh = parallelism_context.get_mesh("dp")
                 global_valid_tokens = dist_utils.dist_sum_tensor(
                     local_loss_token_count, dp_mesh, None
