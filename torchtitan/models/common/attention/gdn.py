@@ -36,10 +36,14 @@ from torchtitan.models.common.attn_gym import (
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
-from .attention import BaseAttention, InnerAttention, local_head_split
+from .attention import (
+    create_varlen_metadata_for_document,
+    InnerAttention,
+    local_head_split,
+)
 from .linear_attention import (
-    build_linear_attention_metadata,
     chunk_kernel_options,
+    LinearAttention,
     LinearAttentionMetadata,
 )
 
@@ -283,12 +287,14 @@ class InnerGDN(InnerAttention):
             max_context_length: int | None = None,
         ) -> LinearAttentionMetadata:
             """Build packed-sequence metadata consumed by Gated DeltaNet."""
-            return build_linear_attention_metadata(
-                positions,
-                conv_kernel_size=self.conv_kernel_size,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
+            return LinearAttentionMetadata(
+                varlen=create_varlen_metadata_for_document(
+                    positions,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                ),
+                num_conv_history_tokens=self.conv_kernel_size - 1,
             )
 
     def __init__(self, config: Config):
@@ -453,7 +459,7 @@ class InnerGDN(InnerAttention):
         )
 
 
-class GatedDeltaNet(BaseAttention):
+class GDN(LinearAttention):
     """Gated DeltaNet linear attention.
 
     Uses recurrent state + gated delta rule instead of softmax attention.
@@ -464,7 +470,7 @@ class GatedDeltaNet(BaseAttention):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
+    class Config(LinearAttention.Config):
         key_head_dim: int
         value_head_dim: int
         conv_kernel_size: int = 4
@@ -479,19 +485,13 @@ class GatedDeltaNet(BaseAttention):
         conv_q: Conv1d.Config
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
-        inner_attention: InnerAttention.Config
         norm: GatedRMSNorm.Config
         out_proj: Linear.Config
-
-        @property
-        def is_linear_attention(self) -> bool:
-            return True
 
     def __init__(self, config: Config):
         super().__init__()
         self.key_head_dim = config.key_head_dim
         self.value_head_dim = config.value_head_dim
-        value_dim = config.in_proj_v.out_features
 
         self.in_proj_q = config.in_proj_q.build()
         self.in_proj_k = config.in_proj_k.build()
@@ -504,9 +504,8 @@ class GatedDeltaNet(BaseAttention):
         self.conv_k = config.conv_k.build()
         self.conv_v = config.conv_v.build()
 
-        n_value_heads = value_dim // config.value_head_dim
-        self.A_log = nn.Parameter(torch.empty(n_value_heads))
-        self.dt_bias = nn.Parameter(torch.empty(n_value_heads))
+        self.A_log = nn.Parameter(torch.empty(config.n_heads))
+        self.dt_bias = nn.Parameter(torch.empty(config.n_heads))
 
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()

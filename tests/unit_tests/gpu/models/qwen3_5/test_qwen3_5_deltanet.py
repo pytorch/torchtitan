@@ -25,7 +25,7 @@ from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
 from torchtitan.models.common.attention.cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
 )
-from torchtitan.models.common.attention.gdn import GatedDeltaNet, InnerGDN
+from torchtitan.models.common.attention.gdn import GDN, InnerGDN
 
 # Tensor shape suffixes: B batch, L seq len, H heads, K key head dim,
 # V value head dim.
@@ -140,7 +140,7 @@ class ReferenceGatedDeltaKernel(nn.Module):
     """Drop-in replacement for GDNKernel backed by the reference math.
 
     Mirrors GDNKernel.forward's interface, including the grouped-query
-    Q/K head expansion, so tests can swap it onto a built GatedDeltaNet and
+    Q/K head expansion, so tests can swap it onto a built GDN and
     exercise the full varlen plumbing (flattening, conv resets, host-offset
     contract) on CPU.
     """
@@ -369,11 +369,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
     ):
         try:
             from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, SiLU
-            from torchtitan.models.common.attention.gdn import (
-                GatedDeltaNet,
-                GDNKernel,
-                InnerGDN,
-            )
+            from torchtitan.models.common.attention.gdn import GDN, GDNKernel, InnerGDN
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
                 f"Qwen3.5 optional dependency unavailable: {exc.name}"
@@ -398,7 +394,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 bias=False,
             )
 
-        model = GatedDeltaNet.Config(
+        model = GDN.Config(
             n_heads=num_value_heads,
             key_head_dim=key_head_dim,
             value_head_dim=value_head_dim,
@@ -649,7 +645,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         deltanet_only_config.layers = [
             layer
             for layer in deltanet_only_config.layers
-            if isinstance(layer.attention, GatedDeltaNet.Config)
+            if isinstance(layer.attention, GDN.Config)
         ]
         deltanet_only_model = deltanet_only_config.build()
         deltanet_only_masks = deltanet_only_model._get_attention_metadata(positions)

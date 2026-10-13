@@ -41,8 +41,8 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import BaseAttention
-from torchtitan.models.common.attention.gdn import GatedDeltaNet
+from torchtitan.models.common.attention import Attention, LinearAttention
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
@@ -69,9 +69,8 @@ def _replace_vllm_layer_configs(model_config):
         new_layer_cfg = layer_cfg
 
         attention_cfg = getattr(layer_cfg, "attention", None)
-        if (
-            isinstance(attention_cfg, BaseAttention.Config)
-            and not attention_cfg.is_linear_attention
+        if isinstance(attention_cfg, Attention.Config) and not isinstance(
+            attention_cfg, LinearAttention.Config
         ):
             (
                 num_heads,
@@ -96,7 +95,7 @@ def _replace_vllm_layer_configs(model_config):
                 ),
             )
 
-        elif isinstance(attention_cfg, GatedDeltaNet.Config):
+        elif isinstance(attention_cfg, GDN.Config):
             delta_net_cfg = attention_cfg
             from torchtitan.rl.generator.vllm.gdn import VLLMInnerGatedDeltaNet
 
@@ -573,11 +572,11 @@ class VLLMModelWrapper(Module):
         """Give each gpt-oss attention's vLLM backend its sink-rescale hook."""
         from torchtitan.models.gpt_oss.model import (
             apply_attention_sink_rescale,
-            Attention,
+            GptOssAttention,
         )
 
         for module in self.model.modules():
-            if not isinstance(module, Attention):
+            if not isinstance(module, GptOssAttention):
                 continue
             # Read sinks per call: FSDP swaps the parameter between its sharded
             # and unsharded tensors and frees the sharded storage after unsharding.

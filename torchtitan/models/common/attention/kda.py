@@ -32,10 +32,14 @@ from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
 
-from .attention import BaseAttention, InnerAttention, local_head_split
+from .attention import (
+    create_varlen_metadata_for_document,
+    InnerAttention,
+    local_head_split,
+)
 from .linear_attention import (
-    build_linear_attention_metadata,
     chunk_kernel_options,
+    LinearAttention,
     LinearAttentionMetadata,
 )
 
@@ -158,12 +162,14 @@ class InnerKDA(InnerAttention):
             max_context_length: int | None = None,
         ) -> LinearAttentionMetadata:
             """Build packed-sequence metadata consumed by KDA."""
-            return build_linear_attention_metadata(
-                positions,
-                conv_kernel_size=self.conv_kernel_size,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
+            return LinearAttentionMetadata(
+                varlen=create_varlen_metadata_for_document(
+                    positions,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                ),
+                num_conv_history_tokens=self.conv_kernel_size - 1,
             )
 
     def __init__(self, config: Config):
@@ -301,11 +307,11 @@ class InnerKDA(InnerAttention):
         )
 
 
-class KDA(BaseAttention):
+class KDA(LinearAttention):
     """Kimi Delta Attention with checkpoint-compatible Kimi K3 parameters."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
+    class Config(LinearAttention.Config):
         head_dim: int
         conv_kernel_size: int
         q_proj: Linear.Config
@@ -318,18 +324,13 @@ class KDA(BaseAttention):
         forget_b: Linear.Config
         beta: Linear.Config
         output_gate: Linear.Config
-        inner_attention: InnerAttention.Config
         output_norm: GatedRMSNorm.Config
         output_proj: Linear.Config
-
-        @property
-        def is_linear_attention(self) -> bool:
-            return True
 
         def __post_init__(self):
             if self.n_heads < 1:
                 raise ValueError(f"n_heads must be positive, got {self.n_heads}")
-            BaseAttention.Config.__post_init__(self)
+            LinearAttention.Config.__post_init__(self)
             if self.head_dim != 128:
                 raise ValueError(
                     "Attention Gym KDA requires head_dim=128, " f"got {self.head_dim}."

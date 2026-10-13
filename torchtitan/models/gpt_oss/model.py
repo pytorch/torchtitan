@@ -19,7 +19,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import (
-    BaseAttention,
+    Attention,
     FlexAttentionMetadata,
     InnerAttention,
     QKVLinear,
@@ -47,13 +47,13 @@ def apply_attention_sink_rescale(
     return out * sink_scale.to(out.dtype)
 
 
-class Attention(BaseAttention):
+class GptOssAttention(Attention):
     """
     Multi-head attention (MLA) module with sink attention.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
+    class Config(Attention.Config):
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
@@ -148,7 +148,7 @@ class GptOssTransformerBlock(TransformerBlock):
 
     def __init__(self, config: Config):
         super().__init__()
-        assert isinstance(config.attention, Attention.Config)
+        assert isinstance(config.attention, GptOssAttention.Config)
         self.attention = config.attention.build()
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
