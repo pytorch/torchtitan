@@ -12,6 +12,7 @@ import pytest
 from torchtitan.config import OverrideConfig
 from torchtitan.rl import train
 from torchtitan.rl.controller import AsyncLoopConfig
+from torchtitan.rl.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.observability.rollout_recorder import RolloutSampleRecorder
@@ -71,7 +72,7 @@ class _FakeConfig:
     generator = SimpleNamespace(
         parallelism=None,
         cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
-        kv_offload_gib=0.0,
+        cpu_kv_offload=None,
     )
     num_generators = 1
 
@@ -215,26 +216,23 @@ def test_main_passes_configured_num_generators(monkeypatch, stub_mesh_provisioni
 
 
 @pytest.mark.parametrize(
-    "offload_gib, generator_env",
+    "cpu_kv_offload, generator_env",
     [
-        (0.0, {}),
+        (None, {}),
         (
-            16.0,
+            CPUKVOffload.Config(size_gib=16),
             {
                 "PYTORCH_ALLOC_CONF": "expandable_segments:False",
                 "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False,max_split_size_mb:512",
                 "PYTHONHASHSEED": "0",
-                # 2 one-proc generators on this host (the /dev/shm check)
-                "TORCHTITAN_GENERATOR_PROCS_ON_HOST": "2",
             },
         ),
     ],
 )
 def test_main_launches_kv_offload_generators_without_expandable_segments(
-    monkeypatch, stub_mesh_provisioning, offload_gib, generator_env
+    monkeypatch, stub_mesh_provisioning, cpu_kv_offload, generator_env
 ):
-    """Offload needs expandable_segments off (other allocator options stay), PYTHONHASHSEED=0, and
-    the generator procs on the host."""
+    """Offload needs expandable_segments off (other allocator options stay) and PYTHONHASHSEED=0."""
     monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:True")
     monkeypatch.setenv(
         "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:512"
@@ -247,8 +245,7 @@ def test_main_launches_kv_offload_generators_without_expandable_segments(
         or ("trainer_mesh", ["generator_mesh_0"]),
     )
     _FakeConfigLoader.config = _FakeConfig(
-        generator=SimpleNamespace(parallelism=None, kv_offload_gib=offload_gib),
-        num_generators=2,
+        generator=SimpleNamespace(parallelism=None, cpu_kv_offload=cpu_kv_offload)
     )
     _FakeController.instances = []
     monkeypatch.setattr(train, "ConfigLoader", _FakeConfigLoader)

@@ -17,6 +17,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.request import RequestStatus
 
 from torchtitan.config import Configurable
+from torchtitan.rl.cpu_kv_offload import CPUKVOffload
 
 
 class VLLMSessionKVHolder(Configurable):
@@ -70,8 +71,9 @@ class VLLMSessionKVHolder(Configurable):
 
     Args:
         scheduler: The vLLM v1 scheduler of this rank's in-process engine.
-        hold: Hold sessions' GPU blocks. False: only ended sessions' CPU chunks are evicted first.
-        offload_policy: vLLM's CPU offload `LRUCachePolicy`; None without CPU offload.
+        hold: Hold sessions' GPU blocks. False: only track sessions, so that with CPU offload
+            ended sessions' chunks are evicted first.
+        cpu_kv_offload: The CPU KV offload attached to this engine; None without it.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -84,7 +86,7 @@ class VLLMSessionKVHolder(Configurable):
         *,
         scheduler: Any,
         hold: bool = True,
-        offload_policy: Any | None = None,
+        cpu_kv_offload: CPUKVOffload | None = None,
     ) -> None:
         del config
         if hold:
@@ -98,16 +100,6 @@ class VLLMSessionKVHolder(Configurable):
                 raise ValueError(
                     "session_kv_holder does not support speculative decoding"
                 )
-        if offload_policy is not None:
-            # Imported here: runs without CPU offload never load vLLM's offload code.
-            from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-
-            # `release` reorders the LRU's private `evictable_chunks` (pinned vLLM version).
-            if not isinstance(offload_policy, LRUCachePolicy):
-                raise RuntimeError(
-                    "CPU KV offload needs vLLM's LRUCachePolicy, got "
-                    f"{type(offload_policy).__name__}"
-                )
         self._scheduler = scheduler
         kv_cache_manager = scheduler.kv_cache_manager
         self._coordinator = kv_cache_manager.coordinator
@@ -118,7 +110,7 @@ class VLLMSessionKVHolder(Configurable):
             for group in kv_cache_manager.kv_cache_config.kv_cache_groups
         )
         self._hold_enabled = hold
-        self._offload_policy = offload_policy
+        self._cpu_kv_offload = cpu_kv_offload
         # Requests in vLLM: internal request id -> (session, group, prefill seen).
         self._live: dict[str, tuple[str, int, bool]] = {}
         # Held blocks per session, idle longest first.
@@ -156,7 +148,7 @@ class VLLMSessionKVHolder(Configurable):
                 self._live[internal_id] = (session_id, group_id, True)
                 self._session_groups[session_id] = group_id
                 self._group_sessions.setdefault(group_id, set()).add(session_id)
-                if self._offload_policy is not None:
+                if self._cpu_kv_offload is not None:
                     self._session_hashes[session_id] = request.block_hashes
                 if self._hold_enabled:
                     self._hold(request, session_id)
@@ -217,9 +209,7 @@ class VLLMSessionKVHolder(Configurable):
                 self._group_sessions.get(group_id, set()).discard(session_id)
 
         # ======== CPU offload: the ended sessions' chunks are evicted first ========
-        if self._offload_policy is not None:
-            from vllm.v1.kv_offload.base import make_offload_key
-
+        if self._cpu_kv_offload is not None:
             ended_hashes = [
                 block_hash
                 for session_id in released_in_order
@@ -236,18 +226,11 @@ class VLLMSessionKVHolder(Configurable):
                 ended = session_id in released or group_id in dropped_groups
                 if not prefill_seen and not ended and request is not None:
                     live_hashes.update(request.block_hashes)
-            # One key per block and KV cache group. Keys vLLM never stored, or is still storing
-            # or loading, are skipped.
-            # TODO: a chunk whose store finishes after the release (the last turn's final blocks,
-            # stored on the next engine step) keeps its LRU place; evict it first once stored.
-            evictable_chunks = self._offload_policy.evictable_chunks
-            for block_hash in ended_hashes:
-                if block_hash in live_hashes:
-                    continue
-                for group_idx in range(self._num_kv_cache_groups):
-                    key = make_offload_key(block_hash, group_idx)
-                    if key in evictable_chunks:
-                        evictable_chunks.move_to_end(key, last=False)
+            self._cpu_kv_offload.evict_first(
+                block_hash
+                for block_hash in ended_hashes
+                if block_hash not in live_hashes
+            )
 
         # A request still before its prefill must not re-hold a released session.
         for internal_id, (session_id, group_id, prefill_seen) in list(

@@ -8,11 +8,13 @@
 groups, 16-token blocks standing in for Qwen3.5's 1,152."""
 
 from types import SimpleNamespace
-from typing import cast
+from typing import cast, NamedTuple
 
 import pytest
 import torch
+import vllm.distributed.parallel_state as vllm_parallel_state
 
+from torchtitan.rl.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.session_kv_holder import VLLMSessionKVHolder
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
@@ -127,7 +129,7 @@ def _holder(
     waiting=(),
     skipped_waiting=(),
     hold=True,
-    offload_policy=None,
+    cpu_kv_offload=None,
 ) -> VLLMSessionKVHolder:
     scheduler = _scheduler(
         manager,
@@ -140,7 +142,7 @@ def _holder(
         VLLMSessionKVHolder.Config(),
         scheduler=scheduler,
         hold=hold,
-        offload_policy=offload_policy,
+        cpu_kv_offload=cpu_kv_offload,
     )
     holder.free_floor_blocks = floor
     return holder
@@ -321,6 +323,32 @@ def _cpu_tier() -> CPUOffloadingManager:
     return CPUOffloadingManager(num_chunks=1000)
 
 
+class _ConnectorConfig(NamedTuple):
+    num_workers: int
+
+
+def _cpu_kv_offload(monkeypatch, manager, cpu_tier) -> CPUKVOffload:
+    """CPUKVOffload attached, at TP=1, to vLLM's real KV cache manager and CPU tier."""
+    monkeypatch.setattr(
+        vllm_parallel_state, "get_tp_group", lambda: SimpleNamespace(world_size=1)
+    )
+    connector_scheduler = SimpleNamespace(
+        config=_ConnectorConfig(num_workers=1), manager=cpu_tier
+    )
+    scheduler = _scheduler(
+        manager, connector=SimpleNamespace(connector_scheduler=connector_scheduler)
+    )
+    offload = CPUKVOffload.Config(size_gib=1).build()
+    offload.attach(
+        SimpleNamespace(
+            engine_core=SimpleNamespace(
+                engine_core=SimpleNamespace(scheduler=scheduler)
+            )
+        )
+    )
+    return offload
+
+
 def _store(cpu_tier: CPUOffloadingManager, keys) -> None:
     """Store `keys` as vLLM's write-through does: prepare the store, then complete it."""
     keys = list(keys)
@@ -340,10 +368,11 @@ def _eviction_order(cpu_tier: CPUOffloadingManager) -> list[OffloadKey]:
 
 
 def test_release_evicts_an_ended_session_first_except_the_prefix_a_live_sibling_uses(
-    manager,
+    monkeypatch, manager
 ):
     requests, cpu_tier = {}, _cpu_tier()
-    holder = _holder(manager, requests, offload_policy=cpu_tier._policy)
+    offload = _cpu_kv_offload(monkeypatch, manager, cpu_tier)
+    holder = _holder(manager, requests, cpu_kv_offload=offload)
     prompt = list(range(48))  # 3 blocks both siblings share
     s1 = _finished_turn(manager, holder, requests, "s1", prompt + list(range(100, 134)))
     s2 = _finished_turn(manager, holder, requests, "s2", prompt + list(range(200, 234)))
@@ -366,9 +395,12 @@ def test_release_evicts_an_ended_session_first_except_the_prefix_a_live_sibling_
     assert set(order[: len(shared) + len(s2_own)]) == set(shared + s2_own)
 
 
-def test_a_sibling_before_its_first_prefill_keeps_the_shared_prefix_in_place(manager):
+def test_a_sibling_before_its_first_prefill_keeps_the_shared_prefix_in_place(
+    monkeypatch, manager
+):
     requests, cpu_tier = {}, _cpu_tier()
-    holder = _holder(manager, requests, hold=False, offload_policy=cpu_tier._policy)
+    offload = _cpu_kv_offload(monkeypatch, manager, cpu_tier)
+    holder = _holder(manager, requests, hold=False, cpu_kv_offload=offload)
     prompt = list(range(48))  # 3 blocks both siblings share
     s1 = _finished_turn(manager, holder, requests, "s1", prompt + list(range(100, 134)))
     # s2's first turn is in vLLM but not prefilled yet.
@@ -383,9 +415,10 @@ def test_a_sibling_before_its_first_prefill_keeps_the_shared_prefix_in_place(man
     assert order[8] == _CHURN
 
 
-def test_completion_blocks_of_an_ended_session_are_evicted_first(manager):
+def test_completion_blocks_of_an_ended_session_are_evicted_first(monkeypatch, manager):
     requests, cpu_tier = {}, _cpu_tier()
-    holder = _holder(manager, requests, hold=False, offload_policy=cpu_tier._policy)
+    offload = _cpu_kv_offload(monkeypatch, manager, cpu_tier)
+    holder = _holder(manager, requests, hold=False, cpu_kv_offload=offload)
     turn = _request("t1", list(range(50)))
     requests["t1"] = turn
     holder.track("t1", session_id="s", group_id=0)
@@ -404,9 +437,12 @@ def test_completion_blocks_of_an_ended_session_are_evicted_first(manager):
     assert _eviction_order(cpu_tier)[-1] == _CHURN
 
 
-def test_offload_without_hold_holds_nothing_and_evicts_a_finished_group_first(manager):
+def test_offload_without_hold_holds_nothing_and_evicts_a_finished_group_first(
+    monkeypatch, manager
+):
     requests, cpu_tier = {}, _cpu_tier()
-    holder = _holder(manager, requests, hold=False, offload_policy=cpu_tier._policy)
+    offload = _cpu_kv_offload(monkeypatch, manager, cpu_tier)
+    holder = _holder(manager, requests, hold=False, cpu_kv_offload=offload)
     free_before = manager.block_pool.get_num_free_blocks()
     s1 = _finished_turn(manager, holder, requests, "s1", list(range(50)), group_id=5)
     s2 = _finished_turn(manager, holder, requests, "s2", list(range(500, 550)), 5)
@@ -419,10 +455,13 @@ def test_offload_without_hold_holds_nothing_and_evicts_a_finished_group_first(ma
     assert _eviction_order(cpu_tier)[-1] == _CHURN
 
 
-def test_free_floor_release_keeps_the_cpu_chunks_of_a_live_session(manager):
+def test_free_floor_release_keeps_the_cpu_chunks_of_a_live_session(
+    monkeypatch, manager
+):
     """A session dropped from GPU for room is still alive: its CPU copy is what it reloads."""
     requests, cpu_tier = {}, _cpu_tier()
-    holder = _holder(manager, requests, offload_policy=cpu_tier._policy)
+    offload = _cpu_kv_offload(monkeypatch, manager, cpu_tier)
+    holder = _holder(manager, requests, cpu_kv_offload=offload)
     old = _finished_turn(manager, holder, requests, "old", list(range(50)))
     _finished_turn(manager, holder, requests, "new", list(range(500, 550)))
     _store(cpu_tier, _offload_keys(old) + [_CHURN])
@@ -435,11 +474,12 @@ def test_free_floor_release_keeps_the_cpu_chunks_of_a_live_session(manager):
     assert _eviction_order(cpu_tier) == order_before
 
 
-def test_offload_needs_vllm_lru_policy(manager):
+def test_offload_needs_vllm_lru_policy(monkeypatch, manager):
+    cpu_tier = SimpleNamespace(_policy=ARCCachePolicy(cache_capacity=8))
     with pytest.raises(
         RuntimeError, match="needs vLLM's LRUCachePolicy, got ARCCachePolicy"
     ):
-        _holder(manager, {}, offload_policy=ARCCachePolicy(cache_capacity=8))
+        _cpu_kv_offload(monkeypatch, manager, cpu_tier)
 
 
 def test_free_floor_is_the_watermark_plus_one_prefill_chunk(manager):

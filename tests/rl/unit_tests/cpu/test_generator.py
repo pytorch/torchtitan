@@ -32,6 +32,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import torchtitan.rl.cpu_kv_offload as cpu_kv_offload_module
 import torchtitan.rl.generator as generator_module
 import vllm.distributed.parallel_state as vllm_parallel_state
 from torchstore import RankRole
@@ -40,6 +41,7 @@ from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common.attention import VarlenInnerAttention
+from torchtitan.rl.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrategy
@@ -71,6 +73,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 
 
@@ -588,52 +591,19 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_weight_sync():
         )
 
 
-def test_kv_offload_rejects_kv_cache_reset_on_weight_sync():
+def test_cpu_kv_offload_rejects_kv_cache_reset_on_weight_sync():
     with pytest.raises(ValueError, match="needs reset_kv_cache_on_weight_sync=False"):
         VLLMGenerator.Config(
             model=_MODEL_CONFIG,
             parallelism=_PARALLELISM,
-            kv_offload_gib=16,
+            cpu_kv_offload=CPUKVOffload.Config(size_gib=16),
             reset_kv_cache_on_weight_sync=True,
         )
 
 
-def test_kv_offload_gib_rejects_negative_sizes():
-    with pytest.raises(ValueError, match="kv_offload_gib must be >= 0, got -1"):
-        VLLMGenerator.Config(
-            model=_MODEL_CONFIG, parallelism=_PARALLELISM, kv_offload_gib=-1
-        )
-
-
-@pytest.mark.parametrize(
-    "kv_offload_gib, generator_world_size, procs_on_host, raises",
-    [
-        (128, 1, "4", True),  # 4 one-proc generators: 512 GiB
-        (96, 1, "4", False),  # 384 GiB
-        (128, 8, "4", False),  # half of an 8-proc generator: 64 GiB
-        (512, 1, None, True),  # no launcher value: this generator alone
-    ],
-)
-def test_kv_offload_must_fit_in_dev_shm_with_the_hosts_other_generators(
-    monkeypatch, kv_offload_gib, generator_world_size, procs_on_host, raises
-):
-    monkeypatch.setattr(
-        generator_module.shutil,
-        "disk_usage",
-        lambda path: SimpleNamespace(total=445 * (1 << 30)),
-    )
-    if procs_on_host is None:
-        monkeypatch.delenv(generator_module.GENERATOR_PROCS_ON_HOST_ENV, raising=False)
-    else:
-        monkeypatch.setenv(generator_module.GENERATOR_PROCS_ON_HOST_ENV, procs_on_host)
-    with (
-        pytest.raises(ValueError, match="but /dev/shm is 445 GiB: lower kv_offload_gib")
-        if raises
-        else nullcontext()
-    ):
-        generator_module._check_kv_offload_fits_in_dev_shm(
-            kv_offload_gib, generator_world_size
-        )
+def test_cpu_kv_offload_rejects_non_positive_sizes():
+    with pytest.raises(ValueError, match="size_gib must be > 0, got 0"):
+        CPUKVOffload.Config(size_gib=0)
 
 
 def test_qwen36_27b_perf_config():
@@ -677,26 +647,6 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: VLLMGenerator.Config) ->
     return engine_args.call_args.kwargs
 
 
-def test_kv_offload_checks_dev_shm_before_the_engine_build(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        generator_module.shutil,
-        "disk_usage",
-        lambda path: SimpleNamespace(total=8 * (1 << 30)),
-    )
-    monkeypatch.setattr(generator_module, "EngineArgs", Mock())
-    monkeypatch.setattr(generator_module, "register_to_vllm", Mock())
-    monkeypatch.setattr(generator_module, "init_logger", Mock())
-    monkeypatch.setattr(generator_module, "sl", Mock())
-    with pytest.raises(ValueError, match="but /dev/shm is 8 GiB: lower kv_offload_gib"):
-        VLLMGenerator(
-            VLLMGenerator.Config(model=_MODEL_CONFIG, kv_offload_gib=16),
-            model_path="unused",
-            max_num_seqs=8,
-            output_dir=str(tmp_path),
-            rank=0,
-        )
-
-
 def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
     engine_kwargs = _build_engine_kwargs(
         monkeypatch,
@@ -709,17 +659,22 @@ def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
     assert engine_kwargs["scheduling_policy"] == "fcfs"
 
 
-def test_kv_offload_sets_vllm_cpu_offload(monkeypatch, tmp_path):
+def test_cpu_kv_offload_names_vllms_offloading_connector(monkeypatch, tmp_path):
     engine_kwargs = _build_engine_kwargs(
         monkeypatch,
         tmp_path,
-        VLLMGenerator.Config(model=_MODEL_CONFIG, kv_offload_gib=16),
+        VLLMGenerator.Config(
+            model=_MODEL_CONFIG, cpu_kv_offload=CPUKVOffload.Config(size_gib=16)
+        ),
     )
-    assert engine_kwargs["kv_offloading_size"] == 16
-    # vLLM adds cpu_bytes_to_use from kv_offloading_size when it builds its config.
-    assert engine_kwargs["kv_transfer_config"].kv_connector_extra_config == {
+    kv_transfer_config = engine_kwargs["kv_transfer_config"]
+    # Named, not set through kv_offloading_size: vLLM's in-process config checks see it, so vLLM
+    # rejects router replay with it.
+    assert kv_transfer_config.kv_connector == "OffloadingConnector"
+    assert kv_transfer_config.is_kv_transfer_instance
+    assert kv_transfer_config.kv_connector_extra_config == {
+        "cpu_bytes_to_use": 16 << 30,
         "offload_prompt_only": False,
-        "eviction_policy": "lru",
     }
 
     engine_kwargs = _build_engine_kwargs(
@@ -739,7 +694,7 @@ def test_kv_offload_sets_vllm_cpu_offload(monkeypatch, tmp_path):
             r"use VLLMGenerator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use VLLMGenerator\.Config\.debug\.seed"),
-        ("kv_offloading_size", r"use VLLMGenerator\.Config\.kv_offload_gib"),
+        ("kv_offloading_size", r"use VLLMGenerator\.Config\.cpu_kv_offload"),
     ],
 )
 def test_extra_vllm_engine_args_rejects_torchtitan_owned_keys(key, match):
@@ -749,7 +704,7 @@ def test_extra_vllm_engine_args_rejects_torchtitan_owned_keys(key, match):
     assert engine_kwargs == {"scheduling_policy": "fcfs"}
 
 
-# --- CPU KV offload with several vLLM workers (_enable_multi_worker_kv_offload) ---
+# --- CPU KV offload with several vLLM workers (CPUKVOffload.attach) ---
 
 
 class _ConnectorConfig(NamedTuple):
@@ -768,17 +723,20 @@ def _multi_worker_engine(
     hash_randomization: int = 0,
     input_processor: Any = None,
 ):
-    """A fake engine set up by `_enable_multi_worker_kv_offload` as TP rank 0 of DP=2 x TP.
+    """A fake engine set up by `CPUKVOffload.attach` as TP rank 0 of DP=2 x TP.
 
     `peer_entry(own_entry)` returns TP rank 1's part of each all-gather. Returns the engine, what
     the scheduler's `update_from_output` received, and what this rank contributed to each gather.
     """
     received, gathers = [], []
     connector_scheduler = SimpleNamespace(
-        config=_ConnectorConfig(num_workers=2 * tp_size), _job_counter=0
+        config=_ConnectorConfig(num_workers=2 * tp_size),
+        _job_counter=0,
+        manager=SimpleNamespace(_policy=LRUCachePolicy(cache_capacity=8)),
     )
     scheduler = SimpleNamespace(
         connector=SimpleNamespace(connector_scheduler=connector_scheduler),
+        kv_cache_manager=SimpleNamespace(num_kv_cache_groups=1),
         requests={},
         update_from_output=lambda scheduler_output, output: received.append(output),
     )
@@ -790,14 +748,14 @@ def _multi_worker_engine(
     tp_group = SimpleNamespace(world_size=tp_size, rank_in_group=0, cpu_group=None)
     monkeypatch.setattr(vllm_parallel_state, "get_tp_group", lambda: tp_group)
     flags = SimpleNamespace(hash_randomization=hash_randomization)
-    monkeypatch.setattr(generator_module, "sys", SimpleNamespace(flags=flags))
+    monkeypatch.setattr(cpu_kv_offload_module, "sys", SimpleNamespace(flags=flags))
 
     def all_gather_object(gathered, own_entry, group):
         gathers.append(own_entry)
         gathered[0], gathered[1] = own_entry, peer_entry(own_entry)
 
     monkeypatch.setattr(dist, "all_gather_object", all_gather_object)
-    generator_module._enable_multi_worker_kv_offload(cast(Any, engine))
+    CPUKVOffload.Config(size_gib=1).build().attach(engine)
     return engine, received, gathers
 
 

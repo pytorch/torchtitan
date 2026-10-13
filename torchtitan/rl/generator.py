@@ -10,15 +10,12 @@ import asyncio
 import concurrent.futures
 import enum
 import gc
-import itertools
 import logging
 import math
 import os
-import shutil
-import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
 import cloudpickle
@@ -27,7 +24,7 @@ import torch.distributed as dist
 import torchstore as ts
 from torchstore import RankRole
 from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config import AttentionConfig, CompilationConfig, KVTransferConfig
+from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.exceptions import VLLMClientError
 from vllm.outputs import RequestOutput
@@ -42,6 +39,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
+from torchtitan.rl.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
@@ -77,7 +75,7 @@ def add_extra_vllm_engine_args(
         "max_num_batched_tokens": "max_num_batched_tokens",
         "compilation_config": "cuda_graph",
         "seed": "debug.seed",
-        "kv_offloading_size": "kv_offload_gib",
+        "kv_offloading_size": "cpu_kv_offload",
     }
     owned_keys = sorted(
         extra_vllm_engine_args.keys()
@@ -96,119 +94,6 @@ def add_extra_vllm_engine_args(
             f"extra_vllm_engine_args cannot set EngineArgs that TorchTitan controls: {details}"
         )
     engine_kwargs.update(extra_vllm_engine_args)
-
-
-def _enable_multi_worker_kv_offload(engine: Any) -> None:
-    """Make CPU KV offload work with TP > 1 or DP > 1 under external_launcher.
-
-    vLLM's offload marks a CPU load or store done once every worker of its scheduler has finished
-    it, and only its multiprocess executor merges the workers' finished transfers. Here each rank
-    runs its own scheduler with one worker, so:
-
-    1. Each scheduler waits for its own TP group only (vLLM's world size also counts DP).
-    2. With TP > 1, each engine step all-gathers the TP ranks' finished transfers before the
-       scheduler reads them, and merges them as the multiprocess executor does:
-
-           step s    rank 0: load 7 done   rank 1: -            both schedulers: 1 of 2
-           step s+1  rank 0: -             rank 1: load 7 done  both schedulers: done
-
-    3. The TP ranks' schedulers must stay identical. Request ids get a counter suffix instead of
-       vLLM's random one, generator procs run with PYTHONHASHSEED=0 (vLLM iterates sets), and
-       each step's gather compares a scheduler fingerprint across ranks.
-    """
-    from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-    from vllm.distributed.parallel_state import get_tp_group
-
-    scheduler = engine.engine_core.engine_core.scheduler
-    connector_scheduler = scheduler.connector.connector_scheduler
-    tp_group = get_tp_group()
-    connector_scheduler.config = connector_scheduler.config._replace(
-        num_workers=tp_group.world_size
-    )
-    if tp_group.world_size == 1:
-        return
-    if sys.flags.hash_randomization:
-        raise ValueError(
-            "kv_offload_gib with tensor_parallel_degree > 1 needs PYTHONHASHSEED=0 in generator "
-            "procs (train.py sets it): TP ranks iterate the same sets and must agree on the order"
-        )
-
-    request_counter = itertools.count()
-
-    def assign_request_id(request) -> None:
-        # Replaces vLLM's "<request_id>-<8 random chars>", which differs per rank.
-        request.external_req_id = request.request_id
-        request.request_id = f"{request.request_id}-{next(request_counter)}"
-
-    if not hasattr(engine.input_processor, "assign_request_id"):
-        raise RuntimeError(
-            "vLLM's InputProcessor has no assign_request_id to replace; update "
-            "_enable_multi_worker_kv_offload for this vLLM version"
-        )
-    engine.input_processor.assign_request_id = assign_request_id
-
-    aggregator = KVOutputAggregator(expected_finished_count=tp_group.world_size)
-    update_from_output = scheduler.update_from_output
-
-    def update_from_merged_output(scheduler_output, model_runner_output):
-        fingerprint = (
-            hash(tuple(scheduler_output.num_scheduled_tokens.items())),
-            connector_scheduler._job_counter,
-        )
-        gathered: list[Any] = [None] * tp_group.world_size
-        # Every rank gathers on every step, even with nothing finished, or the ranks deadlock.
-        dist.all_gather_object(
-            gathered,
-            (fingerprint, model_runner_output.kv_connector_output),
-            group=tp_group.cpu_group,
-        )
-        fingerprints, kv_connector_outputs = zip(*gathered)
-        if any(rank_fingerprint != fingerprint for rank_fingerprint in fingerprints):
-            raise RuntimeError(
-                "TP ranks' vLLM schedulers diverged; (scheduled requests hash, offload jobs) "
-                f"per rank: {fingerprints}"
-            )
-        # A copy per rank: aggregate() writes into its output_rank entry, and steps without work
-        # share vLLM's EMPTY_MODEL_RUNNER_OUTPUT.
-        merged = aggregator.aggregate(
-            [
-                replace(model_runner_output, kv_connector_output=kv_connector_output)
-                for kv_connector_output in kv_connector_outputs
-            ],
-            output_rank=tp_group.rank_in_group,
-        )
-        return update_from_output(scheduler_output, merged)
-
-    scheduler.update_from_output = update_from_merged_output
-
-
-# The most generator procs on one host, set by `train.generator_launch_env` for the /dev/shm check.
-GENERATOR_PROCS_ON_HOST_ENV = "TORCHTITAN_GENERATOR_PROCS_ON_HOST"
-
-
-def _check_kv_offload_fits_in_dev_shm(
-    kv_offload_gib: float, generator_world_size: int
-) -> None:
-    """Raise if the CPU KV tiers of this host's generator procs add up to more than `/dev/shm`.
-
-    vLLM checks one tier at a time against free space, but a host's generators start together and
-    each rank fills its share of its generator's `kv_offload_gib`:
-
-        4 generators x 1 proc,  128 GiB each, /dev/shm 445 GiB  -> 512 GiB          raises
-        4 generators x 1 proc,   96 GiB each, /dev/shm 445 GiB  -> 384 GiB          passes
-        1 generator x 8 procs over 2 hosts, 128 GiB             ->  64 GiB per host
-    """
-    procs_on_host = int(
-        os.environ.get(GENERATOR_PROCS_ON_HOST_ENV, generator_world_size)
-    )
-    needed_gib = kv_offload_gib / generator_world_size * procs_on_host
-    shm_gib = shutil.disk_usage("/dev/shm").total / (1 << 30)
-    if needed_gib > shm_gib:
-        raise ValueError(
-            f"{procs_on_host} generator procs on this host pin {needed_gib:.0f} GiB of /dev/shm "
-            f"(kv_offload_gib={kv_offload_gib:g} per {generator_world_size}-proc generator), "
-            f"but /dev/shm is {shm_gib:.0f} GiB: lower kv_offload_gib"
-        )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -989,15 +874,10 @@ class VLLMGenerator(Configurable):
         """Keep each multi-turn session's cached prefix on GPU between its turns (see
         `VLLMSessionKVHolder`). None: off."""
 
-        kv_offload_gib: float = 0.0
-        """Host RAM (GiB) per generator for vLLM's native CPU KV offload, split across its DP x TP
-        ranks; 0 disables it.
-        - vLLM copies every computed KV block to CPU; a turn whose history left the GPU reloads it.
-        - Ended sessions' chunks are evicted first (see `VLLMSessionKVHolder`).
-        - vLLM pins it in ``/dev/shm``: ``kv_offload_gib`` x generators per host must fit in its
-          size (checked at engine build).
-        - Generator procs need ``expandable_segments:False`` and ``PYTHONHASHSEED=0``
-          (``train.py`` sets both)."""
+        cpu_kv_offload: CPUKVOffload.Config | None = None
+        """vLLM's native CPU KV offload: a turn whose history left the GPU reloads it from host RAM
+        instead of recomputing it; ended sessions' chunks are evicted first (see `CPUKVOffload`).
+        None: off."""
 
         def __post_init__(self):
             if (
@@ -1008,13 +888,9 @@ class VLLMGenerator(Configurable):
                     "session_kv_holder needs reset_kv_cache_on_weight_sync=False: vLLM cannot "
                     "reset the prefix cache while blocks are held"
                 )
-            if self.kv_offload_gib < 0:
+            if self.cpu_kv_offload is not None and self.reset_kv_cache_on_weight_sync:
                 raise ValueError(
-                    f"kv_offload_gib must be >= 0, got {self.kv_offload_gib}"
-                )
-            if self.kv_offload_gib > 0 and self.reset_kv_cache_on_weight_sync:
-                raise ValueError(
-                    "kv_offload_gib needs reset_kv_cache_on_weight_sync=False (so no "
+                    "cpu_kv_offload needs reset_kv_cache_on_weight_sync=False (so no "
                     "batch_invariant): vLLM cannot reset the prefix cache while a request waits "
                     "on a CPU load"
                 )
@@ -1183,23 +1059,12 @@ class VLLMGenerator(Configurable):
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
             engine_kwargs["seed"] = config.debug.seed
-        if config.kv_offload_gib > 0:
-            engine_kwargs["kv_offloading_size"] = config.kv_offload_gib
-            engine_kwargs["kv_transfer_config"] = KVTransferConfig(
-                kv_connector_extra_config={
-                    # vLLM's default stores prompt blocks only, but the next turn's prompt also
-                    # holds this turn's completion.
-                    "offload_prompt_only": False,
-                    # VLLMSessionKVHolder reorders this LRU so ended sessions are evicted first.
-                    "eviction_policy": "lru",
-                }
-            )
+        self._cpu_kv_offload: CPUKVOffload | None = None
+        if config.cpu_kv_offload is not None:
+            self._cpu_kv_offload = config.cpu_kv_offload.build()
+            engine_kwargs.update(self._cpu_kv_offload.engine_kwargs())
         add_extra_vllm_engine_args(engine_kwargs, config.extra_vllm_engine_args)
         engine_args = EngineArgs(**engine_kwargs)
-        if config.kv_offload_gib > 0:
-            _check_kv_offload_fits_in_dev_shm(
-                config.kv_offload_gib, self._dp_degree * tp_degree
-            )
 
         with sl.log_trace_span("vllm_init"):
             logger.info("Initializing LLMEngine from EngineArgs...")
@@ -1275,8 +1140,8 @@ class VLLMGenerator(Configurable):
                 f"({self._dp_rank}) != vLLM data_parallel_rank "
                 f"({vllm_parallel_config.data_parallel_rank})"
             )
-        if config.kv_offload_gib > 0:
-            _enable_multi_worker_kv_offload(self._engine)
+        if self._cpu_kv_offload is not None:
+            self._cpu_kv_offload.attach(self._engine)
 
         self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the
@@ -1309,20 +1174,15 @@ class VLLMGenerator(Configurable):
         # Engine-loop queue (rank 0): messages the endpoints put; the loop takes them off to decide.
         self._engine_loop_queue = EngineLoopQueue(self._engine_event_loop)
 
-        # Every rank holds the same blocks in its own scheduler; only the engine thread touches them.
+        # Every rank tracks the same sessions in its own scheduler; only the engine thread touches
+        # them. CPU offload alone still tracks them, to evict ended sessions' CPU chunks first.
         self._session_kv: VLLMSessionKVHolder | None = None
-        if config.session_kv_holder is not None or config.kv_offload_gib > 0:
-            scheduler = self._engine.engine_core.engine_core.scheduler
+        if config.session_kv_holder is not None or self._cpu_kv_offload is not None:
             self._session_kv = VLLMSessionKVHolder(
                 config.session_kv_holder or VLLMSessionKVHolder.Config(),
-                scheduler=scheduler,
+                scheduler=self._engine.engine_core.engine_core.scheduler,
                 hold=config.session_kv_holder is not None,
-                # Built by vLLM from kv_connector_extra_config above.
-                offload_policy=(
-                    scheduler.connector.connector_scheduler.manager._policy
-                    if config.kv_offload_gib > 0
-                    else None
-                ),
+                cpu_kv_offload=self._cpu_kv_offload,
             )
 
         # `_engine_loop` running on the engine thread's event loop, as a future any thread can await;
@@ -1375,11 +1235,7 @@ class VLLMGenerator(Configurable):
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
-        if (
-            self._session_kv is not None
-            and self.config.session_kv_holder is not None
-            and self._rank == 0
-        ):
+        if self.config.session_kv_holder is not None and self._rank == 0:
             logger.info(
                 "Session KV at step %d: %d sessions held, %d evicted so far",
                 step,
@@ -1801,7 +1657,7 @@ class VLLMGenerator(Configurable):
 
     async def release_sessions(self, session_ids: list[str]) -> None:
         """Release the held KV of sessions whose rollout ended; their CPU-offloaded KV is evicted
-        first (rank 0; a no-op without ``session_kv_holder`` or ``kv_offload_gib``).
+        first (rank 0; a no-op without ``session_kv_holder`` or ``cpu_kv_offload``).
 
         Args:
             session_ids: Routing session ids with no more generation calls.
