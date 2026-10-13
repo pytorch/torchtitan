@@ -56,11 +56,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         self.attention = cfg.attention.build()
         self.attention_norm = cfg.attention_norm.build()
         self.ffn_norm = cfg.ffn_norm.build()
-        ffn = cfg.feed_forward.build()
-        if isinstance(ffn, MoE):
-            self.moe = ffn
-        else:
-            self.feed_forward = ffn
+        self.feed_forward = cfg.feed_forward.build()
 
         self.hc_attn_pre = cfg.hc_attn_pre.build()
         self.hc_ffn_pre = cfg.hc_ffn_pre.build()
@@ -102,17 +98,17 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         x = self.hc_post(x, residual, post, comb)
         residual = x
         x, post, comb = self.hc_ffn_pre(x)
-        if hasattr(self, "moe"):
+        if isinstance(self.feed_forward, MoE):
             ffn_input = self.ffn_norm(x)
-            if getattr(self.moe.router, "hash", False):
-                x = self.moe(
+            if getattr(self.feed_forward.router, "hash", False):
+                x = self.feed_forward(
                     ffn_input,
                     padding_mask_T=padding_mask,
                     aux_loss_denominator=aux_loss_denominator,
                     input_ids_T=input_ids_T,
                 )
             else:
-                x = self.moe(
+                x = self.feed_forward(
                     ffn_input,
                     padding_mask_T=padding_mask,
                     aux_loss_denominator=aux_loss_denominator,

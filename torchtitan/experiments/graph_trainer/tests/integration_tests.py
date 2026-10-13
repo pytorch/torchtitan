@@ -164,7 +164,7 @@ def deepseek_v3_regional_ep_overlap_moe_batch():
     return _deepseek_v3_ep_overlap(
         inductor_compilation="regional",
         chunk_dim="batch",
-        module_fqn="layers.*.moe",
+        module_fqn="layers.*.feed_forward",
     )
 
 
@@ -172,7 +172,7 @@ def deepseek_v3_regional_ep_overlap_moe_seq():
     return _deepseek_v3_ep_overlap(
         inductor_compilation="regional",
         chunk_dim="seq",
-        module_fqn="layers.*.moe",
+        module_fqn="layers.*.feed_forward",
     )
 
 
@@ -186,13 +186,13 @@ def deepseek_v3_full_ep_overlap_moe_batch():
     return _deepseek_v3_ep_overlap(
         inductor_compilation="full",
         chunk_dim="batch",
-        module_fqn="layers.*.moe",
+        module_fqn="layers.*.feed_forward",
     )
 
 
 def deepseek_v3_full_ep_overlap_moe_seq():
     return _deepseek_v3_ep_overlap(
-        inductor_compilation="full", chunk_dim="seq", module_fqn="layers.*.moe"
+        inductor_compilation="full", chunk_dim="seq", module_fqn="layers.*.feed_forward"
     )
 
 

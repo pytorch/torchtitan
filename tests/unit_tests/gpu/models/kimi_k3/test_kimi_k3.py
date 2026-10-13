@@ -143,15 +143,23 @@ class TestKimiK3(unittest.TestCase):
 
         self.assertTrue(
             any(
-                fqn.endswith("moe.routed_experts.w13.weight") for fqn in compute_layouts
+                fqn.endswith("feed_forward.routed_experts.w13.weight")
+                for fqn in compute_layouts
             )
         )
         self.assertTrue(
-            any(fqn.endswith("moe.routed_experts.w2.weight") for fqn in compute_layouts)
+            any(
+                fqn.endswith("feed_forward.routed_experts.w2.weight")
+                for fqn in compute_layouts
+            )
         )
         self.assertFalse(any("inner_experts" in fqn for fqn in compute_layouts))
-        self.assertRegex("layers.1.moe.routed_experts.w13.weight", muon_config.pattern)
-        self.assertRegex("layers.1.moe.routed_experts.w2.weight", muon_config.pattern)
+        self.assertRegex(
+            "layers.1.feed_forward.routed_experts.w13.weight", muon_config.pattern
+        )
+        self.assertRegex(
+            "layers.1.feed_forward.routed_experts.w2.weight", muon_config.pattern
+        )
 
     def test_flex_attention_mask(self):
         config = _small_model_config()
@@ -283,12 +291,13 @@ class TestKimiK3(unittest.TestCase):
         self.assertIsInstance(model.layers["0"].attention, KDA)
         self.assertIsInstance(model.layers["1"].attention, KimiMLAAttention)
         self.assertIsInstance(model.layers["0"].feed_forward, FeedForward)
-        self.assertIsInstance(model.layers["1"].moe, KimiLatentMoE)
+        self.assertIsInstance(model.layers["1"].feed_forward, KimiLatentMoE)
         self.assertIs(config.first_feed_forward, config.layers[0].feed_forward)
         self.assertIs(config.first_moe, config.layers[1].feed_forward)
         self.assertTrue(all(not hasattr(layer, "moe") for layer in config.layers))
-        self.assertFalse(hasattr(model.layers["0"], "moe"))
-        self.assertFalse(hasattr(model.layers["1"], "feed_forward"))
+        self.assertTrue(
+            all(not hasattr(layer, "moe") for layer in model.layers.values())
+        )
         self.assertTrue(
             all(not hasattr(layer, "moe_enabled") for layer in model.layers.values())
         )
@@ -301,7 +310,7 @@ class TestKimiK3(unittest.TestCase):
         adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
         hf_state_dict = adapter.to_hf(state_dict)
         self.assertIn(
-            "layers.1.moe.routed_experts.w13.weight",
+            "layers.1.feed_forward.routed_experts.w13.weight",
             state_dict,
         )
         self.assertIn(

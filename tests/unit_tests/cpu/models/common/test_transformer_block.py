@@ -35,7 +35,7 @@ from torchtitan.models.qwen3 import build_model_config
         ("qwen3_8", "debugmodel_moe"),
     ],
 )
-def test_feed_forward_registration_preserves_module_names(model_name, flavor):
+def test_feed_forward_registration_matches_config_paths(model_name, flavor):
     module = importlib.import_module(f"torchtitan.models.{model_name}")
     config = module.build_model_config(
         flavor,
@@ -47,11 +47,11 @@ def test_feed_forward_registration_preserves_module_names(model_name, flavor):
         model = config.build()
 
     for layer_config, layer in zip(config.layers, model.layers.values(), strict=True):
-        is_moe = isinstance(layer_config.feed_forward, MoE.Config)
-        expected_name = "moe" if is_moe else "feed_forward"
-        other_name = "feed_forward" if is_moe else "moe"
-        assert expected_name in layer._modules
-        assert not hasattr(layer, other_name)
+        expected_type = (
+            MoE if isinstance(layer_config.feed_forward, MoE.Config) else FeedForward
+        )
+        assert isinstance(layer.feed_forward, expected_type)
+        assert not hasattr(layer, "moe")
         assert not hasattr(layer_config, "moe")
 
     # Checkpoint conversion and FQN-based transforms consume these paths.
@@ -68,7 +68,7 @@ def test_moe_traversal_preserves_config_replacement_field():
     )
     layer = config.layers[0]
     [(fqn, moe, parent, attr)] = list(layer.traverse(MoE.Config, _prefix="layers.0"))
-    assert fqn == "layers.0.moe"
+    assert fqn == "layers.0.feed_forward"
     assert parent is layer
     assert attr == "feed_forward"
     replacement = replace(moe, load_balance_coeff=None)
@@ -76,7 +76,7 @@ def test_moe_traversal_preserves_config_replacement_field():
     assert layer.feed_forward is replacement
 
 
-def test_mtp_preserves_moe_module_name():
+def test_mtp_uses_feed_forward_for_moe():
     config = build_deepseek_v3_model_config(
         "debugmodel",
         seq_len=128,
@@ -86,6 +86,8 @@ def test_mtp_preserves_moe_module_name():
     )
     with torch.device("meta"):
         model = config.build()
-    assert isinstance(model.mtp_layers[0].moe, MoE)
-    assert not hasattr(model.mtp_layers[0], "feed_forward")
-    assert "mtp_layers.0.moe" in {fqn for fqn, *_ in config.traverse(MoE.Config)}
+    assert isinstance(model.mtp_layers[0].feed_forward, MoE)
+    assert not hasattr(model.mtp_layers[0], "moe")
+    assert "mtp_layers.0.feed_forward" in {
+        fqn for fqn, *_ in config.traverse(MoE.Config)
+    }
