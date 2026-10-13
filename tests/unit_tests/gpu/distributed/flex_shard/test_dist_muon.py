@@ -106,6 +106,7 @@ class TestDistMuon(DTensorTestBase):
                                 block_sizes=block_sizes,
                             )
                         },
+                        compute_dtype=torch.bfloat16,
                     ),
                 },
                 bucket_configs=[
@@ -302,6 +303,7 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             compute_sharding_by_fqn={
                 fqn: ComputeLayout(
                     shardings_by_mesh_axis={"dp_shard": compute_sharding},
+                    compute_dtype=torch.bfloat16,
                 )
             },
             bucket_configs=[BucketConfig(patterns=(fqn,))],
@@ -430,6 +432,7 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
                             "ep": Shard(0),
                         },
                         shard_order_by_tensor_dim=shard_order_by_tensor_dim,
+                        compute_dtype=torch.bfloat16,
                     )
                 },
                 bucket_configs=[BucketConfig(patterns=(fqn,))],

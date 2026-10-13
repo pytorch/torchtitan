@@ -294,10 +294,11 @@ class DistMuon(Optimizer):
             compute_dtype = compute_layout.compute_dtype
             if compute_dtype is None:
                 compute_dtype = param.dtype
-            elif compute_dtype not in (param.dtype, torch.bfloat16):
+            if compute_dtype is not torch.bfloat16:
                 raise NotImplementedError(
-                    f"compute_dtype {compute_dtype} for {fqn!r}: DistMuon supports "
-                    f"the storage dtype {param.dtype} or torch.bfloat16"
+                    f"{fqn!r} would compute in {compute_dtype}: DistMuon runs "
+                    "Newton-Schulz in torch.bfloat16, set compute_dtype="
+                    "torch.bfloat16 on its ComputeLayout"
                 )
             compute_layouts.append(
                 _ParameterComputeLayout(
