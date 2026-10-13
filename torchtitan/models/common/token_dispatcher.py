@@ -25,8 +25,8 @@ class LocalDispatchMetadata:
 
     token_indices_experts_sorted_N: torch.Tensor  # noqa: N815
     topk_scores_experts_sorted_N: torch.Tensor  # noqa: N815
-    # Inference only (no autograd), set by a compiled dispatch: each flat route's row
-    # in the expert-sorted order and the unsorted scores, for the gather-sum combine.
+    # Set by a compiled dispatch (inference or training): each flat route's row in the
+    # expert-sorted order and the unsorted scores, for the gather-sum combine.
     row_of_route_N: torch.Tensor | None = None  # noqa: N815
     topk_scores_TK: torch.Tensor | None = None  # noqa: N815
 
@@ -129,8 +129,8 @@ class LocalTokenDispatcher(Module):
         # R = N (no EP all-to-all)
         if not torch.is_grad_enabled():
             # Inference: each token owns exactly top_k expert rows, so a compiled
-            # combine gathers them back instead of scatter-adding (no index_put
-            # accumulate or asserts); dispatch also returns each route's row.
+            # combine gathers them back instead of scatter-adding. No autograd, so the
+            # token gather fuses into the sort region.
             (
                 routed_input_RD,
                 token_indices_experts_sorted_N,
@@ -149,14 +149,38 @@ class LocalTokenDispatcher(Module):
                 topk_scores_TK=topk_scores_TK,
             )
             return routed_input_RD, num_local_tokens_per_expert_E, metadata
+        # Training: the same sort, without the token gather, which autograd needs.
         (
-            routed_input_RD,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
-        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
+            row_of_route_N,
+        ) = _sort_routes_for_training(
+            topk_scores_TK=topk_scores_TK,
+            topk_expert_ids_TK=topk_expert_ids_TK,
+            num_experts=self.num_experts,
+        )
+        if row_of_route_N is None:
+            # Eager: the old ops (argsort, gathers), combined by the scatter-add.
+            metadata = LocalDispatchMetadata(
+                token_indices_experts_sorted_N=token_indices_experts_sorted_N,
+                topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
+            )
+            return (
+                x_TD[token_indices_experts_sorted_N],
+                num_local_tokens_per_expert_E,
+                metadata,
+            )
+        # Compiled: a gather whose backward sums each token's routes, and a combine
+        # (_CombineGatherSum) with its own backward, so no scatter-add or index_put
+        # accumulate runs. The sorted scores feed only that backward.
+        routed_input_RD = _DispatchGather.apply(
+            x_TD, token_indices_experts_sorted_N, row_of_route_N, self.top_k
+        )
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
+            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N.detach(),
+            row_of_route_N=row_of_route_N,
+            topk_scores_TK=topk_scores_TK,
         )
         return routed_input_RD, num_local_tokens_per_expert_E, metadata
 
@@ -166,7 +190,7 @@ class LocalTokenDispatcher(Module):
         metadata: LocalDispatchMetadata,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
-        """Score and scatter_add routed expert outputs.
+        """Weight routed expert outputs by their scores and sum each token's routes.
 
         Args:
             routed_output_RD: ``(R, D)`` expert outputs
@@ -175,17 +199,17 @@ class LocalTokenDispatcher(Module):
         Returns:
             out_TD: ``(T, D)`` combined output.
         """
-        if metadata.row_of_route_N is not None:
-            return _gather_weighted_sum(
-                routed_output_ND=routed_output_RD,
-                row_of_route_N=metadata.row_of_route_N,
-                topk_scores_TK=metadata.topk_scores_TK,
-                topk_scores_experts_sorted_N=metadata.topk_scores_experts_sorted_N,
-                token_indices_experts_sorted_N=metadata.token_indices_experts_sorted_N,
-                x_TD=x_TD,
-            )
-        # The scatter-add reads the expert outputs with bare ops.
+        # Both combines read the expert outputs with bare ops.
         remat.recompute_needs_tensor(routed_output_RD)
+        if metadata.row_of_route_N is not None:
+            return _CombineGatherSum.apply(
+                routed_output_RD,
+                metadata.topk_scores_TK,
+                metadata.row_of_route_N,
+                metadata.token_indices_experts_sorted_N,
+                metadata.topk_scores_experts_sorted_N,
+                x_TD,
+            )
         return self._score_and_scatter_add(
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
@@ -232,10 +256,6 @@ def _sort_routes_and_gather(
     returns ``row_of_route_N``, each route's row in the expert-sorted order, for the
     compiled combine; eager returns ``None`` and combine scatter-adds as before.
 
-        compiled, N * E <= 16384 * 256:  one-hot cumsum, fused with the gathers
-        otherwise:                       argsort(stable=True), same order
-                                         (the cumsum is ~30x slower in eager)
-
     Returns:
         routed_input_ND, token_indices_experts_sorted_N, topk_scores_experts_sorted_N,
         row_of_route_N.
@@ -244,7 +264,44 @@ def _sort_routes_and_gather(
         expert ids [[2, 0], [0, 1]] sort the flat routes as 1, 2, 3, 0, so
         row_of_route_N = [3, 0, 1, 2] and token_indices_experts_sorted_N = [0, 1, 1, 0].
     """
-    top_k = topk_expert_ids_TK.shape[1]
+    expert_sort_N, row_of_route_N = _sort_routes(topk_expert_ids_TK, num_experts)
+    token_indices_experts_sorted_N = expert_sort_N // topk_expert_ids_TK.shape[1]
+    return (
+        x_TD[token_indices_experts_sorted_N],
+        token_indices_experts_sorted_N,
+        topk_scores_TK.reshape(-1)[expert_sort_N],
+        row_of_route_N,
+    )
+
+
+@local_compile("moe_dispatch", batch_invariant=False)
+def _sort_routes_for_training(
+    topk_scores_TK: torch.Tensor, topk_expert_ids_TK: torch.Tensor, num_experts: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """``_sort_routes_and_gather`` without the token gather, which training differentiates.
+
+    Returns:
+        token_indices_experts_sorted_N, topk_scores_experts_sorted_N, row_of_route_N
+        (``None`` in eager).
+    """
+    expert_sort_N, row_of_route_N = _sort_routes(topk_expert_ids_TK, num_experts)
+    return (
+        expert_sort_N // topk_expert_ids_TK.shape[1],
+        topk_scores_TK.reshape(-1)[expert_sort_N],
+        row_of_route_N,
+    )
+
+
+def _sort_routes(
+    topk_expert_ids_TK: torch.Tensor, num_experts: int
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Return the stable expert sort of the flat routes and, compiled, each route's row.
+
+    compiled, N * E <= 16384 * 256:  one-hot cumsum, fused with the caller's gathers
+    compiled, larger:                argsort(stable=True), same order, then its inverse
+    eager:                           argsort(stable=True); row None (the cumsum is
+                                     ~30x slower in eager, and eager combine scatters)
+    """
     expert_ids_N = topk_expert_ids_TK.reshape(-1)
     compiling = torch.compiler.is_compiling()
     if compiling and expert_ids_N.numel() * num_experts <= (
@@ -267,21 +324,15 @@ def _sort_routes_and_gather(
         expert_sort_N[row_of_route_N] = torch.arange(
             expert_ids_N.numel(), device=expert_ids_N.device
         )
-    else:
-        expert_sort_N = torch.argsort(expert_ids_N, stable=True)
-        row_of_route_N = None
-        if compiling:
-            row_of_route_N = torch.empty_like(expert_sort_N)
-            row_of_route_N[expert_sort_N] = torch.arange(
-                expert_ids_N.numel(), device=expert_ids_N.device
-            )
-    token_indices_experts_sorted_N = expert_sort_N // top_k
-    return (
-        x_TD[token_indices_experts_sorted_N],
-        token_indices_experts_sorted_N,
-        topk_scores_TK.reshape(-1)[expert_sort_N],
-        row_of_route_N,
-    )
+        return expert_sort_N, row_of_route_N
+    expert_sort_N = torch.argsort(expert_ids_N, stable=True)
+    row_of_route_N = None
+    if compiling:
+        row_of_route_N = torch.empty_like(expert_sort_N)
+        row_of_route_N[expert_sort_N] = torch.arange(
+            expert_ids_N.numel(), device=expert_ids_N.device
+        )
+    return expert_sort_N, row_of_route_N
 
 
 @local_compile("moe_combine", batch_invariant=False)
@@ -320,6 +371,124 @@ def _gather_weighted_sum(
     for k in range(1, top_k):
         out_TD = out_TD + rows_TKD[:, k].float() * scores_TK[:, k : k + 1]
     return out_TD.to(routed_output_ND.dtype)
+
+
+@local_compile("moe_dispatch", batch_invariant=False)
+def _sum_routes_per_token(
+    grad_routed_ND: torch.Tensor,
+    row_of_route_N: torch.Tensor,
+    num_tokens: int,
+    top_k: int,
+) -> torch.Tensor:
+    """Sum each token's ``top_k`` expert-sorted rows in float32: the backward of
+    ``x_TD[token_indices]``, reached only from a compiled training dispatch."""
+    rows_TKD = grad_routed_ND[row_of_route_N].view(
+        num_tokens, top_k, grad_routed_ND.shape[-1]
+    )
+    out_TD = rows_TKD[:, 0].float()
+    for k in range(1, top_k):
+        out_TD = out_TD + rows_TKD[:, k].float()
+    return out_TD.to(grad_routed_ND.dtype)
+
+
+@local_compile("moe_combine", batch_invariant=False)
+def _gather_weighted_sum_backward(
+    grad_out_TD: torch.Tensor,
+    routed_output_ND: torch.Tensor,
+    topk_scores_TK: torch.Tensor,
+    row_of_route_N: torch.Tensor,
+    token_indices_experts_sorted_N: torch.Tensor,
+    topk_scores_experts_sorted_N: torch.Tensor,
+    needs_score_grad: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Gradients of ``_gather_weighted_sum`` w.r.t. the expert outputs and the scores.
+
+    grad_routed[n] = grad_out[token[n]] * score_sorted[n]
+    grad_score_sorted[n] = <rows[n], grad_out[token[n]]>  (float32), then unsorted
+
+    Reached only from a compiled training dispatch (eager training keeps the
+    scatter-add and autograd's backward of it).
+    """
+    grad_out_ND = grad_out_TD[token_indices_experts_sorted_N].float()
+    grad_routed_ND = (grad_out_ND * topk_scores_experts_sorted_N.float()[:, None]).to(
+        routed_output_ND.dtype
+    )
+    if not needs_score_grad:
+        return grad_routed_ND, None
+    grad_scores_sorted_N = (routed_output_ND.float() * grad_out_ND).sum(-1)
+    grad_scores_TK = grad_scores_sorted_N[row_of_route_N].view(topk_scores_TK.shape)
+    return grad_routed_ND, grad_scores_TK.to(topk_scores_TK.dtype)
+
+
+class _DispatchGather(torch.autograd.Function):
+    """``x_TD[token_indices]`` whose backward is ``_sum_routes_per_token``."""
+
+    @staticmethod
+    def forward(ctx, x_TD, token_indices_experts_sorted_N, row_of_route_N, top_k):
+        ctx.save_for_backward(row_of_route_N)
+        ctx.num_tokens, ctx.top_k = x_TD.shape[0], top_k
+        return x_TD[token_indices_experts_sorted_N]
+
+    @staticmethod
+    def backward(ctx, grad_routed_ND):
+        (row_of_route_N,) = ctx.saved_tensors
+        grad_x_TD = _sum_routes_per_token(
+            grad_routed_ND=grad_routed_ND.contiguous(),
+            row_of_route_N=row_of_route_N,
+            num_tokens=ctx.num_tokens,
+            top_k=ctx.top_k,
+        )
+        return grad_x_TD, None, None, None
+
+
+class _CombineGatherSum(torch.autograd.Function):
+    """``_gather_weighted_sum`` with a gather-based backward."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        routed_output_ND,
+        topk_scores_TK,
+        row_of_route_N,
+        token_indices_experts_sorted_N,
+        topk_scores_experts_sorted_N,
+        x_TD,
+    ):
+        ctx.save_for_backward(
+            routed_output_ND,
+            topk_scores_TK,
+            row_of_route_N,
+            token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N,
+        )
+        return _gather_weighted_sum(
+            routed_output_ND=routed_output_ND,
+            row_of_route_N=row_of_route_N,
+            topk_scores_TK=topk_scores_TK,
+            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
+            token_indices_experts_sorted_N=token_indices_experts_sorted_N,
+            x_TD=x_TD,
+        )
+
+    @staticmethod
+    def backward(ctx, grad_out_TD):
+        (
+            routed_output_ND,
+            topk_scores_TK,
+            row_of_route_N,
+            token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N,
+        ) = ctx.saved_tensors
+        grad_routed_ND, grad_scores_TK = _gather_weighted_sum_backward(
+            grad_out_TD=grad_out_TD.contiguous(),
+            routed_output_ND=routed_output_ND,
+            topk_scores_TK=topk_scores_TK,
+            row_of_route_N=row_of_route_N,
+            token_indices_experts_sorted_N=token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
+            needs_score_grad=ctx.needs_input_grad[1],
+        )
+        return grad_routed_ND, grad_scores_TK, None, None, None, None
 
 
 class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
