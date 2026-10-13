@@ -388,6 +388,7 @@ def _merged_weight(module: _LoRAMixin, base: torch.Tensor) -> torch.Tensor:
     grouped = isinstance(module, _LoRAGroupedLinearMixin)
     lora_a, lora_b, weight = module.lora_a.weight, module.lora_b.weight, base
     if isinstance(base, DTensor):
+        assert isinstance(lora_a, DTensor) and isinstance(lora_b, DTensor)
         # B shares the base's output sharding; A is only cut on its rank dim, by FSDP.
         rank_dim = 1 if grouped else 0
         lora_a = lora_a.redistribute(
