@@ -57,9 +57,10 @@ class Linear(nn.Linear, Module):
         """Whether a later WGRAD (a microbatch with gradient sync disabled, or a
         ``ChunkedLossWrapper`` chunk) is added into the existing ``weight.grad``
         in the GEMM epilogue instead of a separate AccumulateGrad add and its
-        full-size temporary. Tracing cannot represent this, so torch.compile and
-        GraphTrainer must set it to False; forward raises if it is traced with
-        this on. Subclasses whose compute cannot do it reject True."""
+        full-size temporary. Tracing cannot represent this: torch.compile
+        ignores it, and GraphTrainer must set it to False (forward raises under
+        make_fx with this on). Subclasses whose compute cannot do it reject
+        True."""
 
     def __init__(self, config: Config):
         super().__init__(

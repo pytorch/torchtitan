@@ -426,11 +426,41 @@ class TestLinearInplaceWgradAccum(unittest.TestCase):
                 inplace(torch.randn(6, 8))
             reference(torch.randn(6, 8))
 
-    def test_raises_when_traced(self):
+    def test_ignored_under_torch_compile(self):
+        # fullgraph: Dynamo traces F.linear rather than breaking the graph.
         inplace, reference = _linear_pair()
-        with self.assertRaisesRegex(RuntimeError, "inplace_wgrad_accum=False"):
-            torch.compile(inplace, backend="eager", fullgraph=True)(torch.randn(6, 8))
-        torch.compile(reference, backend="eager", fullgraph=True)(torch.randn(6, 8))
+        inputs = [torch.randn(6, 8) for _ in range(2)]
+        for module in (inplace, reference):
+            compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+            for x in inputs:
+                compiled(x).sum().backward()
+        self.assertTrue(torch.equal(inplace.weight.grad, reference.weight.grad))
+
+    def test_full_ac_under_torch_compile(self):
+        # A compiled checkpointed block must trace every Linear the same way in
+        # the forward and the recompute.
+        from torchtitan.distributed.activation_checkpoint import FullAC
+        from torchtitan.models.common.feed_forward import FeedForward
+
+        class Model(nn.Module):
+            def __init__(self, layer: nn.Module) -> None:
+                super().__init__()
+                self.layers = nn.ModuleDict({"0": layer})
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return self.layers["0"](x)
+
+        model = Model(
+            FeedForward.Config(
+                w13=Linear.Config(in_features=8, out_features=16, num_linears=2),
+                w2=Linear.Config(in_features=16, out_features=8),
+            ).build()
+        )
+        FullAC.Config().build().apply(model)
+        x = torch.randn(2, 3, 8, requires_grad=True)
+        compiled = torch.compile(model, backend="aot_eager")
+        compiled(x).sum().backward()
+        self.assertIsNotNone(x.grad)
 
 
 if __name__ == "__main__":

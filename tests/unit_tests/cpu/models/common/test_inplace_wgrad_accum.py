@@ -42,7 +42,14 @@ class TestUsesInplaceWgradAccum(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "not the leaf parameter"):
             uses_inplace_wgrad_accum(True, stacked.flatten(0, -2), self.module)
 
-    def test_raises_while_tracing(self):
+    def test_off_under_torch_compile(self):
+        @torch.compile(backend="eager", fullgraph=True)
+        def compiled(x):
+            return x, uses_inplace_wgrad_accum(True, self.param, self.module)
+
+        self.assertFalse(compiled(torch.zeros(1))[1])
+
+    def test_raises_under_make_fx(self):
         def traced(x):
             uses_inplace_wgrad_accum(True, self.param, self.module)
             return x
