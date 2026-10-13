@@ -4,30 +4,38 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Hold each multi-turn session's reusable KV between its turns; ended sessions' CPU copies are
-evicted first."""
+"""Hold each multi-turn session's reusable KV between its turns."""
 
 from __future__ import annotations
 
 from collections import Counter, OrderedDict
+from dataclasses import dataclass
 from typing import Any
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.request import RequestStatus
 
+from torchtitan.config import Configurable
+from torchtitan.rl.cpu_kv_offload import CPUKVOffload
 
-class SessionKVHolder:
-    """Keeps a session's reusable prefix out of vLLM's free pool until its next turn or its end.
 
-    vLLM frees a finished turn's blocks to an LRU free queue, where any new request can evict them;
-    the session's next turn then recomputes its history. In vLLM's hybrid "align" mode the prompt-end
-    Gated-DeltaNet state even leaves the request when decode starts. So right after a request's
-    prefill, this holds the blocks vLLM's own prefix lookup says a continuation would hit (attention
-    blocks and the matching GDN state blocks), and lets go of the session's previous hold. Held blocks
-    count as used in vLLM's ``kv_cache_usage``.
+class VLLMSessionKVHolder(Configurable):
+    """Keeps each multi-turn session's cached prefix on GPU between its turns.
 
-    It releases whole idle sessions, idle longest first:
-    - before each step, while fewer than ``floor`` blocks are free (it can't act inside a step);
+    Between turns (a tool call, an env step) a session has no request in vLLM, so its blocks sit in
+    vLLM's free queue, where any new request can take them; the next turn then recomputes its
+    history. The holder takes a reference on them instead:
+
+        turn 1 prefill done  ->  hold the blocks turn 2 would hit (attention + Gated-DeltaNet state)
+        tool call            ->  held: no other request can take them
+        turn 2 prefill done  ->  hold the blocks turn 3 would hit, drop turn 1's hold
+        rollout ends         ->  release: the blocks go back to vLLM's free queue, still cached
+
+    It holds at prefill, not at the turn's end: in vLLM's hybrid "align" mode the prompt-end GDN
+    state leaves the request when decode starts.
+
+    When memory runs short, it releases whole idle sessions, idle longest first:
+    - before each step, while fewer than ``floor`` blocks are free;
     - after a step where nothing runs and requests wait: vLLM refused the head for lack of blocks.
 
     The floor is vLLM's watermark plus the most blocks the next step can add to running requests
@@ -38,15 +46,12 @@ class SessionKVHolder:
         floor = free_floor_blocks
             + num_kv_cache_groups x len(running)  # a block each at a block boundary
 
-    Too small, and vLLM preempts a running request (a recompute, not a hang); too big only holds
-    fewer sessions.
+    - Held blocks count as used in vLLM's ``kv_cache_usage``.
+    - Every mutating method runs on every rank's engine thread in the same order, so the TP ranks'
+      schedulers stay identical.
 
-    A release only demotes: the blocks go to vLLM's LRU free queue and stay prefix hits until reused.
-    Every mutating method must run on the engine thread of every rank, in the same order, so the
-    schedulers of all TP ranks stay identical.
-
-    With CPU offload, vLLM also copies every computed block to CPU. When a session ends
-    (`release`), its CPU chunks are evicted first, except the chunks a live session also uses:
+    With `CPUKVOffload`, a session's CPU chunks are evicted first when it ends (`release`), except
+    the chunks a live session also uses:
 
         CPU eviction queue, evicted first on the left; GRPO siblings s1, s2 share prompt chunk p
             [churn, p, s1, s2]
@@ -55,7 +60,7 @@ class SessionKVHolder:
 
     Example:
 
-        holder = SessionKVHolder(scheduler)
+        holder = VLLMSessionKVHolder.Config().build(scheduler=scheduler)
         internal_id = engine.add_request(request_id="group=3/rollout=0/turn=2", ...)
         holder.track(internal_id, session_id="group=3/rollout=0", group_id=3)
         holder.evict_until_free()  # before each engine.step()
@@ -65,25 +70,34 @@ class SessionKVHolder:
 
     Args:
         scheduler: The vLLM v1 scheduler of this rank's in-process engine.
-        hold: Hold sessions' GPU blocks. False: only ended sessions' CPU chunks are evicted first.
-        offload_policy: vLLM's CPU offload `LRUCachePolicy`; None without CPU offload.
+        hold: Hold sessions' GPU blocks. False: only track sessions, so that with CPU offload
+            ended sessions' chunks are evicted first.
+        cpu_kv_offload: The CPU KV offload attached to this engine; None without it.
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
 
     def __init__(
         self,
+        config: Config,
+        *,
         scheduler: Any,
         hold: bool = True,
-        offload_policy: Any | None = None,
+        cpu_kv_offload: CPUKVOffload | None = None,
     ) -> None:
-        if offload_policy is not None:
-            # Imported here: runs without CPU offload never load vLLM's offload code.
-            from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-
-            # `release` reorders the LRU's private `evictable_chunks` (pinned vLLM version).
-            if not isinstance(offload_policy, LRUCachePolicy):
-                raise RuntimeError(
-                    "CPU KV offload needs vLLM's LRUCachePolicy, got "
-                    f"{type(offload_policy).__name__}"
+        del config
+        if hold:
+            # Partial-block prefix hits or speculative decoding move the replay point away from the
+            # prompt-end block this holds.
+            if scheduler.kv_cache_manager.coordinator.enable_partial_hash_hits:
+                raise ValueError(
+                    "session_kv_holder does not support partial-block prefix hits"
+                )
+            if scheduler.vllm_config.speculative_config is not None:
+                raise ValueError(
+                    "session_kv_holder does not support speculative decoding"
                 )
         self._scheduler = scheduler
         kv_cache_manager = scheduler.kv_cache_manager
@@ -95,7 +109,7 @@ class SessionKVHolder:
             for group in kv_cache_manager.kv_cache_config.kv_cache_groups
         )
         self._hold_enabled = hold
-        self._offload_policy = offload_policy
+        self._cpu_kv_offload = cpu_kv_offload
         # Requests in vLLM: internal request id -> (session, group, prefill seen).
         self._live: dict[str, tuple[str, int, bool]] = {}
         # Held blocks per session, idle longest first.
@@ -218,9 +232,7 @@ class SessionKVHolder:
         ]
 
         # ======== CPU offload: the ended sessions' chunks are evicted first ========
-        if self._offload_policy is not None:
-            from vllm.v1.kv_offload.base import make_offload_key
-
+        if self._cpu_kv_offload is not None:
             # Chunks a live session uses keep their place: sessions past their first prefill,
             # and requests still before it (e.g. a GRPO sibling's first turn).
             # TODO: rebuilt on every release: 0.6 ms for 250 live Qwen3.5 sessions of 16k tokens,
@@ -232,18 +244,11 @@ class SessionKVHolder:
                 ended = session_id in released or group_id in dropped_groups
                 if not prefill_seen and not ended and request is not None:
                     live_hashes.update(request.block_hashes)
-            # One key per block and KV cache group. Keys vLLM never stored, or is still storing
-            # or loading, are skipped.
-            # TODO: a chunk whose store finishes after the release (the last turn's final blocks,
-            # stored on the next engine step) keeps its LRU place; evict it first once stored.
-            evictable_chunks = self._offload_policy.evictable_chunks
-            for block_hash in ended_hashes:
-                if block_hash in live_hashes:
-                    continue
-                for group_idx in range(self._num_kv_cache_groups):
-                    key = make_offload_key(block_hash, group_idx)
-                    if key in evictable_chunks:
-                        evictable_chunks.move_to_end(key, last=False)
+            self._cpu_kv_offload.evict_first(
+                block_hash
+                for block_hash in ended_hashes
+                if block_hash not in live_hashes
+            )
 
         # A request still before its prefill must not re-hold a released session.
         for internal_id, (session_id, group_id, prefill_seen) in list(
@@ -251,10 +256,6 @@ class SessionKVHolder:
         ):
             if session_id in released or group_id in dropped_groups:
                 self._live[internal_id] = (session_id, group_id, True)
-
-    def cpu_used_fraction(self) -> float:
-        """Fraction of the CPU tier's chunks that hold KV (stored or being stored)."""
-        return len(self._offload_policy.chunks) / self._offload_policy.cache_capacity
 
     def _hold(self, request: Any, session_id: str) -> None:
         # The prompt's last token is recomputed for its logits, so a continuation hits at most
