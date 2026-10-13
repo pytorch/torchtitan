@@ -5,12 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
-import dataclasses
 import os
 
 from tests.integration_tests import IntegrationTestDefinition
 from tests.integration_tests.run_tests import run_tests
 from torchtitan_recipes.graph_trainer.llama3 import graph_trainer_llama3_8b
+from torchtitan_recipes.tests import _route_round_robin
 
 from torchtitan_recipes.tests.graph_trainer import (
     b200 as b200_recipes,
@@ -18,11 +18,6 @@ from torchtitan_recipes.tests.graph_trainer import (
     llama3 as llama3_recipes,
     muse_glimmer as muse_glimmer_recipes,
     qwen3 as qwen3_recipes,
-)
-
-from torchtitan.models.common.moe import (
-    RoundRobinTokenChoiceTopKRouter,
-    TokenChoiceTopKRouter,
 )
 
 # TODO: Re-enable after regional_inductor can trace the CP load balancer's
@@ -222,13 +217,7 @@ def _deepseek_v3_graph_pp(schedule: str):
 
 def _round_robin_routing(config):
     """Route token-expert assignments round-robin, with exact balance."""
-    router_fields = dataclasses.fields(TokenChoiceTopKRouter.Config)
-    for layer in config.model.layers:
-        if getattr(layer, "moe", None) is not None:
-            router = layer.moe.router
-            layer.moe.router = RoundRobinTokenChoiceTopKRouter.Config(
-                **{f.name: getattr(router, f.name) for f in router_fields}
-            )
+    _route_round_robin(config)
     return config
 
 

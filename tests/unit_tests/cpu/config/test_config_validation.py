@@ -11,7 +11,10 @@ import pytest
 
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import PagedAC
+from torchtitan.distributed.deepep.paged_stash import PagedStashConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
@@ -199,3 +202,49 @@ def test_cpu_offload_requires_distinct_dp_shard_seeds() -> None:
         training=TrainingConfig(enable_cpu_offload=True),
         debug=DebugConfig(distinct_seed_mesh_axes=["pp", "dp_shard"]),
     )
+
+
+def test_paged_stash_validation() -> None:
+    def config_with_paged_stash():
+        config = deepseek_v3_debugmodel_hybridep()
+        config.parallelism.expert_parallel_degree = 2
+        # Paging is the checkpointing policy, so there is no AC to cross-check.
+        config.activation_checkpoint = PagedAC.Config()
+        return config
+
+    with _cuda_graphs_supported(True):
+        config_with_paged_stash().__post_init__()
+
+        config = config_with_paged_stash()
+        config.model = llama3_debugmodel().model
+        with pytest.raises(ValueError, match="has no MoE"):
+            config.__post_init__()
+
+        config = config_with_paged_stash()
+        config.parallelism.expert_parallel_degree = 1
+        with pytest.raises(ValueError, match="expert_parallel_degree"):
+            config.__post_init__()
+
+        config = config_with_paged_stash()
+        for _, dispatcher, _, _ in config.model.traverse(
+            HybridEPTokenDispatcher.Config
+        ):
+            dispatcher.non_blocking_capacity_factor = None
+        config.training.disable_cuda_graphs = True
+        with pytest.raises(ValueError, match="static-capacity token dispatch"):
+            config.__post_init__()
+
+    # The region policy outside the paged regions is free; only paging's own
+    # selection is fixed.
+    PagedAC.Config(save_regions=["*"], recompute_regions=["*routed_experts.w13*"])
+    with pytest.raises(ValueError, match="at least one pattern"):
+        PagedAC.Config(page_regions=[])
+    with pytest.raises(ValueError, match="page_regions instead"):
+        PagedAC.Config(paged_stash=PagedStashConfig(module_fqn="layers.*.moe"))
+
+    with pytest.raises(ValueError, match="Dist-MoE"):
+        TrainingEngine.Config(
+            training=TrainingConfig(mixed_precision_param="bfloat16"),
+            dist_moe_runtime=DistMoeRuntime.Config(),
+            activation_checkpoint=PagedAC.Config(),
+        )

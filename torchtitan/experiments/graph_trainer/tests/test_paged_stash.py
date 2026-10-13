@@ -4,37 +4,27 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for MoE paged stashing.
+"""Unit tests for GraphTrainer's MoE paged stashing frontend.
 
-* the ops and kernels: exact round trips, eagerly and replayed from a CUDA
-  graph; host spill and the sticky overflow flag; how long a paged activation
-  lives;
-* sizing: one pool of live pages per ``(dtype, hidden_size)``, and the GraphPP
-  schedule replay;
-* the schedule: the paged-layer schedule read off GraphPP's actions, which
-  stashes stay resident, and reloads prefetched one schedule entry ahead,
-  across pipeline actions;
-* the graph pass: slot dims, the paged-stash region and what is paged in it,
-  where Megatron's stash points land, the warning for a padded activation left
+* its custom ops: exact round trips through them, eagerly and replayed from a
+  CUDA graph;
+* the GraphPP schedule: the actions it reads, and a backward it cannot match;
+* the graph pass: the paged-stash region and what is paged in it, where
+  Megatron's stash points land, the warning for a padded activation left
   unpaged, and the GraphPP partition of the stash ops;
-* the overflow check: blocking with an unpaged rerun of a step captured in a
-  CUDA graph, or deferred and fatal, skipping the optimizer steps before the
-  raise on device; and the optimizers each mode accepts.
+* the blocking overflow check under GraphTrainer's CUDA graph pass, which
+  reruns an overflowing step unpaged.
 
-End-to-end training with CUDA graphs and with GraphPP is covered by
-``integration_tests.py``.
+The runtime they share with the eager trainer is covered by
+``tests/unit_tests/gpu/test_paged_stash.py``. End-to-end training with CUDA
+graphs and with GraphPP is covered by ``integration_tests.py``.
 
 Run with::
 
     pytest torchtitan/experiments/graph_trainer/tests/test_paged_stash.py
 """
 
-import copy
-import gc
 import operator
-import weakref
-from collections.abc import Callable
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -42,25 +32,43 @@ import pytest
 import torch
 import torch.fx as fx
 import torch.nn as nn
-from torch._subclasses.fake_tensor import FakeTensorMode
-from torch.distributed.pipelining.schedules import (
-    _Action,
-    BACKWARD_INPUT,
-    BACKWARD_WEIGHT,
-    FORWARD,
-    FULL_BACKWARD,
-    RECV_F,
-    SEND_F,
+
+from tests.unit_tests.gpu.paged_stash_utils import (
+    actions,
+    assert_live_rows_equal,
+    BF16,
+    capture_round_trip,
+    E4M3,
+    E8M0,
+    fresh_manager,
+    HIDDEN,
+    make_slots,
+    MAX_TOKENS,
+    optimizers,
+    PAGE_SIZE,
+    pages,
+    round_trip,
+    setup_stash,
 )
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.distributed.pipelining.schedules import _Action
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.traceback import preserve_node_meta
 from torch.utils.checkpoint import CheckpointPolicy
 
-from torchtitan.components.optim.optimizer import AdamW, OptimizersContainer
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     NUM_CUDA_GRAPH_WARMUP_STEPS,
+    reset_cuda_graphs,
     wrap_fwd_bwd_with_cuda_graph,
+)
+from torchtitan.distributed.deepep.paged_stash.runtime import (
+    check_paged_stash_overflow,
+    OverbudgetProbe,
+    paged_layer_schedule,
+    PagedStashManager,
+    PagedStashRunner,
+    ScheduleEntry,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
@@ -76,93 +84,20 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     annotate_paged_stash_region,
     apply_graph_pp_schedule,
     apply_paged_stash_pass,
-    check_paged_stash_host_spill,
-    check_paged_stash_overflow,
-    infer_slot_dims,
-    max_live_stash_generations,
-    OverbudgetProbe,
-    paged_layer_schedule,
     PAGED_STASH_REGION,
     PAGED_STASH_TAG,
-    PagedStashBuffer,
-    PagedStashManager,
-    PagedStashRunner,
-    replay_schedule_page_peak,
-    ScheduleEntry,
-    StashSlot,
     tag_paged_stash_activations,
-    warmup_paged_stash_kernels,
 )
 
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="paged stash requires CUDA"
 )
 
-BF16 = torch.bfloat16
-E4M3 = torch.float8_e4m3fn
-E8M0 = torch.float8_e8m0fnu
-MAX_TOKENS = 4096  # capacity-padded rows per activation: the worst case
-HIDDEN = 256
-PAGE_SIZE = 64
-KEY = (BF16, HIDDEN)
-
 
 @pytest.fixture
 def manager():
-    """The process-wide manager, reset and enabled on cuda:0."""
-    PagedStashManager.reset_instance()
-    manager = PagedStashManager.get_instance()
-    manager.enabled = True
-    manager.device = torch.device("cuda:0")
-    manager.page_size = PAGE_SIZE
-    yield manager
-    PagedStashManager.reset_instance()
-
-
-def _make_slots(
-    manager: PagedStashManager,
-    count: int,
-    *,
-    dtype: torch.dtype = BF16,
-    token_divisor: int = 1,
-    max_tokens: int = MAX_TOKENS,
-    stage_index: int = 0,
-) -> list[StashSlot]:
-    """One slot per layer, as the graph pass registers them."""
-    slots = []
-    for layer in range(count):
-        slot = StashSlot(
-            slot_id=manager.next_slot_id(),
-            dtype=dtype,
-            hidden_size=HIDDEN,
-            max_num_tokens=max_tokens,
-            token_divisor=token_divisor,
-            layer_id=layer,
-            node_name=f"s{stage_index}l{layer}",
-            stage_index=stage_index,
-        )
-        manager.register_slot(slot)
-        slots.append(slot)
-    return slots
-
-
-def _pages(rows: int) -> int:
-    return -(-rows // PAGE_SIZE)
-
-
-def _random_activation(slot: StashSlot) -> torch.Tensor:
-    """A padded activation of random bit patterns; flat for block scales."""
-    itemsize = torch.empty((), dtype=slot.dtype).element_size()
-    shape = (slot.max_stash_tokens, HIDDEN * itemsize)
-    rows = torch.randint(0, 256, shape, dtype=torch.uint8, device="cuda")
-    rows = rows.view(slot.dtype)
-    return rows.reshape(-1) if slot.token_divisor > 1 else rows
-
-
-def _live_bytes(tensor: torch.Tensor, slot: StashSlot, num_tokens: int):
-    """The bytes of the rows ``num_tokens`` live tokens occupy."""
-    rows = tensor.reshape(-1, slot.hidden_size).view(torch.uint8)
-    return rows[: num_tokens // slot.token_divisor]
+    with fresh_manager() as manager:
+        yield manager
 
 
 def _stash(slot, tensor, num_tokens, *, prefetch=0) -> torch.Tensor:
@@ -170,7 +105,7 @@ def _stash(slot, tensor, num_tokens, *, prefetch=0) -> torch.Tensor:
     into a handle sized as the graph pass sizes it: page ids and a spill flag.
     The handle starts as -1s, so whatever the op does not write shows."""
     handle = torch.full(
-        (_pages(slot.max_stash_tokens) + 1,), -1, dtype=torch.int64, device="cuda"
+        (pages(slot.max_stash_tokens) + 1,), -1, dtype=torch.int64, device="cuda"
     )
     torch.ops.paged_stash.stash_(handle, tensor, num_tokens, slot.slot_id, prefetch)
     return handle
@@ -184,496 +119,72 @@ def _reload(slot, handle, num_tokens, like: torch.Tensor) -> torch.Tensor:
     return torch.ops.paged_stash.wait_reload(out)
 
 
-def _round_trip(slots, tensors, counts) -> list[torch.Tensor]:
-    """Stash every activation, then reload them all: one forward/backward."""
-    handles = [_stash(*args) for args in zip(slots, tensors, counts, strict=True)]
-    return [
-        _reload(*args) for args in zip(slots, handles, counts, tensors, strict=True)
-    ]
-
-
-def _assert_live_rows_equal(slots, expected, actual, live) -> None:
-    for slot, want, got, n in zip(slots, expected, actual, live, strict=True):
-        assert torch.equal(_live_bytes(got, slot, n), _live_bytes(want, slot, n))
-
-
-def _setup_stash(manager, slots, live: list[int]):
-    """Take ``slots`` through the measure step with ``live`` tokens each.
-
-    Returns the activations, their counts, and what the measure step's reloads
-    handed back; the buffers are allocated and their kernels compiled.
-    """
-    tensors = [_random_activation(slot) for slot in slots]
-    counts = [torch.tensor(n, dtype=torch.int64, device="cuda") for n in live]
-    manager.begin_step()
-    assert not manager.active, "the first step must run in measure mode"
-    measured = _round_trip(slots, tensors, counts)
-    manager.begin_step()
-    assert manager.active, "buffers must exist after the measure step"
-    warmup_paged_stash_kernels()
-    return tensors, counts, measured
-
-
-def _capture_round_trip(manager, slots, tensors, counts):
-    """Capture one round trip in a CUDA graph.
-
-    Returns what the graph reloads into, and a function that replays it on
-    fresh activations with the given live token counts.
-    """
-    manager.begin_step()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        outputs = _round_trip(slots, tensors, counts)
-
-    def replay(live: list[int]) -> None:
-        for slot, tensor, count, n in zip(slots, tensors, counts, live, strict=True):
-            tensor.copy_(_random_activation(slot))
-            count.fill_(n)
-        manager.begin_step()
-        graph.replay()
-        torch.cuda.synchronize()
-
-    return outputs, replay
-
-
-def _actions(spec: str) -> list[_Action]:
-    """``"F0.1 B1.0"``: forward of stage 0 microbatch 1, then full backward of
-    stage 1 microbatch 0. ``I``/``W`` split the backward into its input and
-    weight halves; ``S``/``R`` are forward sends and receives."""
-    kinds = {
-        "F": FORWARD,
-        "B": FULL_BACKWARD,
-        "I": BACKWARD_INPUT,
-        "W": BACKWARD_WEIGHT,
-        "S": SEND_F,
-        "R": RECV_F,
-    }
-    actions = []
-    for token in spec.split():
-        stage, microbatch = token[1:].split(".")
-        actions.append(_Action(int(stage), kinds[token[0]], int(microbatch)))
-    return actions
-
-
 # ---------------------------------------------------------------------------
-# Ops and kernels
+# The custom ops
 # ---------------------------------------------------------------------------
 
 
 @requires_cuda
-def test_round_trip_is_exact(manager):
-    """Paging out and back is bit-exact for the live rows of every slot kind,
-    eagerly and replayed from a CUDA graph.
-
-    Data slots address one row per token; a block-scale slot is a flat e8m0
-    buffer with one row per 32 tokens, paged in its own (uint8) pool. Live
-    counts that are not page multiples leave partial pages. The measure step
-    hands back the original activation, so it is numerically identical to a
-    run without paged stashing. The kernels read the live counts and the
-    freelists from device memory, so one capture serves steps with different
-    counts, provided ``begin_step`` resets the freelists (outside the graph)
-    before each replay.
-    """
-    slots = _make_slots(manager, 2) + _make_slots(
+def test_ops_round_trip_is_exact(manager):
+    """The stash and reload ops page out and back bit-exactly, eagerly and
+    replayed from a CUDA graph, for data and block-scale slots."""
+    slots = make_slots(manager, 2) + make_slots(
         manager, 1, dtype=E8M0, token_divisor=32
     )
-    live = [1997, 700, 1024]  # block scales cover whole 32-token blocks
-    tensors, counts, measured = _setup_stash(manager, slots, live)
-    assert all(out is tensor for out, tensor in zip(measured, tensors))
-    assert len(manager.stash_buffers) == 2, "one pool per (dtype, hidden_size)"
+    live = [1997, 700, 1024]
+    ops = {"stash": _stash, "reload": _reload}
+    tensors, counts, measured = setup_stash(manager, slots, live, **ops)
+    assert_live_rows_equal(slots, tensors, measured, live)
 
     manager.begin_step()
-    _assert_live_rows_equal(slots, tensors, _round_trip(slots, tensors, counts), live)
-    assert not check_paged_stash_overflow().item()
-
-    outputs, replay = _capture_round_trip(manager, slots, tensors, counts)
+    assert_live_rows_equal(
+        slots, tensors, round_trip(slots, tensors, counts, **ops), live
+    )
+    outputs, replay = capture_round_trip(manager, slots, tensors, counts, **ops)
     for live in ([900, 1500, 2048], [64, 1997, 32]):
         replay(live)
-        _assert_live_rows_equal(slots, tensors, outputs, live)
+        assert_live_rows_equal(slots, tensors, outputs, live)
         assert not check_paged_stash_overflow().item()
 
 
-@requires_cuda
-def test_host_spill_and_overflow(manager):
-    """Out of CUDA pages a stash spills to pinned host pages; out of both, the
-    kernels flag an overflow. Both are decided on device from the live counts
-    and the freelists, so one captured step serves steps that fit, spill or
-    overflow, and spilled rows round trip exactly. Every step starts from full
-    freelists and a clear spill flag, but the overflow stays flagged."""
-    manager.buffer_size_factor_cuda = 0.5  # 16 pages: one 1024-token stash
-    manager.buffer_size_factor_cpu = 0.5  # and one more on the host
-    slots = _make_slots(manager, 2)
-    tensors, counts, _ = _setup_stash(manager, slots, [1024, 1024])
-    outputs, replay = _capture_round_trip(manager, slots, tensors, counts)
-
-    # 1024 + 1024 and 512 + 1000 tokens outgrow the 16 CUDA pages, so the second
-    # stash spills; 64 + 900 tokens fit exactly.
-    for live, spills in (
-        ([1024, 1024], True),
-        ([512, 1000], True),
-        ([64, 900], False),
-    ):
-        replay(live)
-        _assert_live_rows_equal(slots, tensors, outputs, live)
-        assert check_paged_stash_host_spill().item() == spills
-        assert not check_paged_stash_overflow().item(), "a spill is not an overflow"
-
-    replay([2048, 2048])  # 32 pages each: neither fits in either pool
-    assert check_paged_stash_overflow().item(), "expected the overflow flag"
-    manager.begin_step()
-    assert check_paged_stash_overflow().item(), "the overflow flag is sticky"
-    assert not check_paged_stash_host_spill().item()
-    buffer = manager.get_buffer(BF16, HIDDEN)
-    assert buffer.free_list_head.tolist() == [0, 0]
-    assert buffer.free_list_tail.tolist() == [
-        buffer.num_cuda_pages,
-        buffer.num_host_pages,
-    ]
-
-
-@requires_cuda
-def test_paged_activation_lives_until_its_copy_is_joined(manager):
-    """A paged stash holds its padded activation only until its copy is joined:
-    at the next paged layer's group start, or -- for the last stash before
-    backward -- at backward's first reload, as Megatron's backward start joins
-    it. That release is what keeps padding from accumulating across layers;
-    the rows come back from the pages."""
-    slots = _make_slots(manager, 2)
-    tensors, counts, _ = _setup_stash(manager, slots, [1000, 1000])
-
-    def stash(slot, count):
-        """Stash a fresh activation and drop it. Returns the handle, the live
-        rows, and a weak reference to the activation."""
-        activation = _random_activation(slot)
-        rows = _live_bytes(activation, slot, 1000).clone()
-        return _stash(slot, activation, count), rows, weakref.ref(activation)
-
-    def released(ref: weakref.ref) -> bool:
-        gc.collect()
-        return ref() is None
-
-    handle_0, rows_0, ref_0 = stash(slots[0], counts[0])
-    assert not released(ref_0), "released before its copy was joined"
-    torch.ops.paged_stash.group_start(tensors[1])  # the next layer's
-    assert released(ref_0), "the next group start did not release it"
-
-    handle_1, rows_1, ref_1 = stash(slots[1], counts[1])
-    assert not released(ref_1), "released before its copy was joined"
-    restored_1 = _reload(slots[1], handle_1, counts[1], tensors[1])
-    assert released(ref_1), "backward's first reload did not release it"
-    restored_0 = _reload(slots[0], handle_0, counts[0], tensors[0])
-    torch.cuda.synchronize()
-    assert torch.equal(_live_bytes(restored_1, slots[1], 1000), rows_1)
-    assert torch.equal(_live_bytes(restored_0, slots[0], 1000), rows_0)
-
-    # Under capture the release is what the feature turns on: an activation
-    # held past its join would keep its padding in the graph's private pool for
-    # the life of the graph, which is the per-layer residency paging removes.
-    manager.begin_step()
-    with torch.cuda.graph(torch.cuda.CUDAGraph()):
-        _, _, ref = stash(slots[0], counts[0])
-        assert not released(ref), "released before its copy was joined"
-        torch.ops.paged_stash.group_start(tensors[1])
-        assert released(ref), "capture kept the padded activation past its join"
-
-
 # ---------------------------------------------------------------------------
-# Sizing
+# The GraphPP schedule
 # ---------------------------------------------------------------------------
 
 
-@requires_cuda
-def test_sizing_keeps_one_pool_of_live_pages(manager):
-    """Paging replaces ``layers x padded`` residency with one pool per
-    ``(dtype, hidden_size)`` holding live pages, however many layers or stages.
-
-    The live count is not a page multiple, so summing tokens -- Megatron's
-    accounting -- would come out short of the pages the stashes occupy. Under
-    GraphPP each stage contributes its live pages to the schedule replay from
-    its forward until the backward that consumes them: a full or input
-    backward releases them, a weight backward does not.
-    """
-    actual, padded = 1000, 4000  # capacity factor 4, partial last page
-    manager.buffer_size_factor_cuda = 1.0
-    slots = [
-        slot
-        for stage, layers in enumerate((4, 2))
-        for slot in _make_slots(manager, layers, max_tokens=padded, stage_index=stage)
-    ]
-    manager.begin_step()
-    for slot in slots:
-        manager.record_stash(slot, actual)
-    for slot in reversed(slots):
-        manager.record_reload(slot, actual)
-    footprint = manager.stage_page_footprint()
-    manager.begin_step()  # allocates from the measured peak
-    (pool,) = manager.stash_buffers.values()
-    assert pool.num_cuda_pages == len(slots) * _pages(actual)
-
-    stage_pages = {0: 4 * _pages(actual), 1: 2 * _pages(actual)}
-    assert footprint == {stage: {KEY: pages} for stage, pages in stage_pages.items()}
-    actions = _actions("F0.0 F1.0 I0.0 W0.0 F0.1 F0.2 F1.1")
-    peak = 2 * stage_pages[0] + 2 * stage_pages[1]
-    assert replay_schedule_page_peak(actions, footprint) == {KEY: peak}
-    assert max_live_stash_generations(actions) == 4
-
-    # ``O(layers x worst_case)`` -> ``O(worst_case + actual)``. Un-paged, every
-    # layer holds its own padded buffer; a captured step pins all of them in the
-    # graph pool at once. Paged, the padded buffer dies at ``wait_stash_``, so
-    # only the dispatching layer's is live, and the pool holds the rest as live
-    # pages. The decomposition is what matters: the worst-case term is one
-    # buffer whatever the depth, so only the pool term follows the layer count.
-    worst_case = padded * HIDDEN * torch.empty((), dtype=BF16).element_size()
-    unpaged = len(slots) * worst_case
-    paged = worst_case + pool.nbytes()
-    assert paged - pool.nbytes() == worst_case, "the worst-case term must be one buffer"
-    assert pool.nbytes() == len(slots) * _pages(actual) * PAGE_SIZE * HIDDEN * 2
-    assert paged < unpaged
-
-
-# ---------------------------------------------------------------------------
-# The schedule: skipping stashes and prefetching reloads
-# ---------------------------------------------------------------------------
-
-
-def _entries(schedule: list[ScheduleEntry]) -> list[str]:
-    """``"F0.3.1"``: forward of stage 0's layer 3 for microbatch 1."""
-    return [
-        f"{'F' if e.forward else 'B'}{e.stage_index}.{e.layer_id}.{e.microbatch}"
-        for e in schedule
-    ]
-
-
-def test_paged_layer_schedule():
-    """Megatron's schedule, read off a rank's actions: every paged layer's
-    forward and backward in execution order, layers ascending in a forward and
-    descending in a backward. Stages without paged layers, communication, and
-    weight-gradient backwards add nothing. A forward whose backward goes by
-    another name -- GraphRuntime's executed schedule renames ``FULL_BACKWARD``
-    -- is rejected rather than read as keeping its stashes live to the end of
-    the step."""
-    actions = _actions("F0.0 F1.0 S1.0 F0.1 R1.1 B1.0 I0.0 W0.0 B0.1 F2.0 B2.0")
-    layers = {0: (3, 4), 2: (9,)}  # stage 1 is dense
-    assert _entries(paged_layer_schedule(actions, layers)) == [
-        "F0.3.0", "F0.4.0", "F0.3.1", "F0.4.1",
-        "B0.4.0", "B0.3.0", "B0.4.1", "B0.3.1",
-        "F2.9.0", "B2.9.0",
-    ]  # fmt: skip
-
-    renamed = _actions("F0.0 F0.1 B0.0") + [_Action(0, BACKWARD_WITH_REDUCE_GRAD, 1)]
+def test_paged_layer_schedule_rejects_a_renamed_backward():
+    """A forward whose backward goes by another name -- GraphRuntime's executed
+    schedule renames ``FULL_BACKWARD`` -- is rejected rather than read as
+    keeping its stashes live to the end of the step."""
+    layers = {0: (3, 4), 2: (9,)}
+    renamed = actions("F0.0 F0.1 B0.0") + [_Action(0, BACKWARD_WITH_REDUCE_GRAD, 1)]
     with pytest.raises(ValueError, match=r"unmatched .*: \[\(0, 1\)\]"):
         paged_layer_schedule(renamed, layers)
 
 
 @requires_cuda
-def test_schedule_decides_which_stashes_stay_resident(manager):
-    """A forward keeps a layer resident exactly when the next schedule entry is
-    that layer's own backward (Megatron's ``remove_paged_tensor_from_stash``),
-    which only a stage's last paged layer can satisfy. A resident stash copies
-    nothing and takes no pages, and its reload hands back the original
-    storage. The decision is per microbatch, and capture decides as an eager
-    step does: the trainer captures the whole step, each microbatch at its
-    own place in the schedule.
-    """
-    slots = _make_slots(manager, 2)  # stage 0, layers 0 and 1
-    tensors, counts, _ = _setup_stash(manager, slots, [1000, 1000])
+def test_graph_pp_schedule_is_this_pipeline_ranks(manager):
+    """The schedule is looked up by pipeline rank: with DP alongside PP it
+    differs from the global rank."""
+    make_slots(manager, 2)  # stage 0, layers 0 and 1
     manager.skip_immediate_backward = True
-
-    def skips(microbatch: int) -> list[bool]:
-        return [
+    order = {
+        0: actions("F0.0 F0.1 B0.0 B0.1"),
+        1: actions("F0.0 F1.0 B1.0 B0.0 F0.1 F0.2 B0.1 B0.2"),
+    }
+    apply_graph_pp_schedule(SimpleNamespace(rank=1, pipeline_order_with_comms=order))
+    assert [
+        [
             manager.should_skip_stash(ScheduleEntry(True, 0, layer, microbatch))
             for layer in (0, 1)
         ]
-
-    # Without pipeline parallelism every forward is followed by its backward.
-    assert skips(0) == skips(5) == [False, True]
-    buffer = manager.get_buffer(BF16, HIDDEN)
-    free_pages = (buffer.free_list_tail - buffer.free_list_head).clone()
-    handle = _stash(slots[1], tensors[1], counts[1])
-    assert torch.equal(buffer.free_list_tail - buffer.free_list_head, free_pages)
-    assert not handle.any(), "a resident stash must leave its handle zeroed"
-    resident = _reload(slots[1], handle, counts[1], tensors[1])
-    assert resident.data_ptr() == tensors[1].data_ptr()
-
-    # The schedule is looked up by pipeline rank: with DP alongside PP it
-    # differs from the global rank. A dense stage between a forward and its
-    # backward adds no entry, as dense layers add none in Megatron.
-    order = {
-        0: _actions("F0.0 F0.1 B0.0 B0.1"),
-        1: _actions("F0.0 F1.0 B1.0 B0.0 F0.1 F0.2 B0.1 B0.2"),
-    }
-    apply_graph_pp_schedule(SimpleNamespace(rank=1, pipeline_order_with_comms=order))
-    assert [skips(m) for m in range(3)] == [
-        [False, True],
-        [False, False],
-        [False, False],
-    ]
-
-    scratch = torch.zeros(8, device="cuda")
-    torch.cuda.synchronize()
-
-    def decide_under_capture(microbatch: int) -> list[bool]:
-        with torch.cuda.graph(torch.cuda.CUDAGraph()):
-            scratch.add_(1)
-            return skips(microbatch)
-
-    assert [decide_under_capture(m) for m in range(3)] == [
-        [False, True],
-        [False, False],
-        [False, False],
-    ]
-    manager.set_pipeline_actions(None)
-    assert decide_under_capture(0) == [False, True]
-
-    manager.skip_immediate_backward = False
-    assert skips(0) == [False, False]
-
-
-class _PopLog:
-    """Labels every pop the stash buffers launch with the current ``phase``."""
-
-    def __init__(self, monkeypatch):
-        self.phase = ""
-        self.launched: list[str] = []
-        launch_pop = PagedStashBuffer.launch_pop
-
-        def logged_launch_pop(buffer, *args, **kwargs):
-            self.launched.append(self.phase)
-            return launch_pop(buffer, *args, **kwargs)
-
-        monkeypatch.setattr(PagedStashBuffer, "launch_pop", logged_launch_pop)
-
-
-@requires_cuda
-def test_reloads_are_prefetched_one_schedule_entry_ahead(manager, monkeypatch):
-    """Each backward's reloads are issued at the schedule entry before it, as
-    Megatron issues them: a forward's group commit when a backward runs next,
-    or the end of the previous layer's expert MLP backward -- in the same
-    backward or in another pipeline action. The reload then hands backward the
-    prefetched tensor without popping again, and the rows are exact. Without a
-    prefetch, each reload pops its pages when backward reaches it.
-
-    Layer 1 pages two tensors and ends its expert MLP backward before reading
-    the second, as a weight gradient that runs after the input gradient does.
-    """
-    slots = _make_slots(manager, 2)  # stage 0, layers 0 and 1
-    slots.append(replace(slots[1], slot_id=manager.next_slot_id(), node_name="w"))
-    manager.register_slot(slots[2])
-    live = [1000, 700, 500]
-    manager.buffer_size_factor_cuda = 2.0  # room for two microbatches
-    tensors, counts, _ = _setup_stash(manager, slots, live)
-    order = {0: _actions("F0.0 F0.1 B0.0 B0.1")}
-    apply_graph_pp_schedule(SimpleNamespace(rank=0, pipeline_order_with_comms=order))
-    log = _PopLog(monkeypatch)
-    reload_next = torch.ops.paged_stash.reload_next
-
-    handles = []
-    for microbatch in range(2):
-        log.phase = f"F0.{microbatch}"
-        # Layer 1's last stash is its group commit, which prefetches.
-        handles.append(
-            [
-                _stash(slot, tensor, count, prefetch=int(slot is slots[2]))
-                for slot, tensor, count in zip(slots, tensors, counts, strict=True)
-            ]
-        )
-
-    restored = []
-
-    def reload(microbatch: int, i: int) -> torch.Tensor:
-        log.phase = f"B0.{microbatch} reloads {slots[i].node_name}"
-        out = _reload(slots[i], handles[microbatch][i], counts[i], tensors[i])
-        restored.append((i, out))
-        return out
-
-    for microbatch in range(2):
-        out = reload(microbatch, 1)
-        log.phase = f"B0.{microbatch} ends layer 1"
-        reload_next(out, slots[2].slot_id, 1)  # before slot 2's reload
-        reload(microbatch, 2)
-        out = reload(microbatch, 0)
-        log.phase = f"B0.{microbatch} ends layer 0"
-        reload_next(out, slots[0].slot_id, 1)
-    torch.cuda.synchronize()
-    assert log.launched == [
-        "F0.1",  # B0.0's layer 1: the next action
-        "F0.1",
-        "B0.0 ends layer 1",  # B0.0's layer 0
-        "B0.0 ends layer 0",  # B0.1's layer 1: the next action
-        "B0.0 ends layer 0",
-        "B0.1 ends layer 1",  # B0.1's layer 0
-    ], "every reload is issued one schedule entry ahead, none on demand"
-    for i, out in restored:
-        assert torch.equal(
-            _live_bytes(out, slots[i], live[i]),
-            _live_bytes(tensors[i], slots[i], live[i]),
-        )
-    assert not check_paged_stash_overflow().item()
-
-    manager.begin_step()
-    log.launched.clear()
-    log.phase = "on demand"
-    handles = [_stash(*args) for args in zip(slots, tensors, counts, strict=True)]
-    for i in (1, 2, 0):
-        _reload(slots[i], handles[i], counts[i], tensors[i])
-    torch.cuda.synchronize()
-    assert log.launched == ["on demand"] * 3
-
-    # Prefetching is how the stash runs under the trainer's graph, so the pops
-    # the schedule placed have to survive capture: they are recorded where
-    # prefetching put them, and a replay reloads the same rows without the
-    # schedule being consulted again.
-    manager.begin_step()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        captured = [
-            _stash(slot, tensor, count, prefetch=int(slot is slots[2]))
-            for slot, tensor, count in zip(slots, tensors, counts, strict=True)
-        ]
-        out = _reload(slots[1], captured[1], counts[1], tensors[1])
-        reload_next(out, slots[2].slot_id, 1)
-        replayed = [
-            _reload(slots[i], captured[i], counts[i], tensors[i]) for i in (2, 0)
-        ]
-    for slot, tensor in zip(slots, tensors, strict=True):
-        tensor.copy_(_random_activation(slot))
-    manager.begin_step()
-    graph.replay()
-    torch.cuda.synchronize()
-    for out, i in zip(replayed, (2, 0), strict=True):
-        assert torch.equal(
-            _live_bytes(out, slots[i], live[i]),
-            _live_bytes(tensors[i], slots[i], live[i]),
-        ), "a replayed prefetched reload returned the wrong rows"
-    assert not check_paged_stash_overflow().item()
+        for microbatch in range(3)
+    ] == [[False, True], [False, False], [False, False]]
 
 
 # ---------------------------------------------------------------------------
 # The graph pass and the GraphPP partition
 # ---------------------------------------------------------------------------
-
-
-def test_slot_dims_are_inferred():
-    """How the stash addresses a tensor as rows: ``(token_divisor, hidden)``."""
-    cases = [
-        # A data tensor's rows are what the copy kernel addresses...
-        ((2048, 256), E4M3, 2048, (1, 256)),
-        # ...so the right element count with the wrong leading dim is
-        # rejected: its live rows would not be a prefix.
-        ((256, 2048), E4M3, 2048, None),
-        # e8m0 block scales carry no token axis, only 32 tokens per row.
-        ((2048 // 32 * 256,), E8M0, 2048, (32, 256)),
-        # A shaped scale buffer whose rows are not 32-token blocks may be
-        # stored column by column, so its own shape rejects it; a flat
-        # reshape of it can still vouch for it (test_annotated_region_is_paged).
-        ((2048 // 32 * 256 // 512, 512), E8M0, 2048, None),
-        # Indivisible element counts, and padding that is not whole blocks.
-        ((1000,), E8M0, 2048, None),
-        ((64,), E8M0, 100, None),
-    ]
-    for shape, dtype, padded, dims in cases:
-        tensor = torch.empty(shape, dtype=dtype, device="meta")
-        assert infer_slot_dims(tensor, padded) == dims, (shape, dtype, padded)
 
 
 def test_region_annotation_covers_the_module_subtree():
@@ -1065,7 +576,7 @@ def test_graphpp_partition_keeps_stashes_in_forward_and_reloads_in_backward(mana
     graph's results.
     """
     ops = torch.ops.paged_stash
-    (slot,) = _make_slots(manager, 1, dtype=torch.float32, max_tokens=8)
+    (slot,) = make_slots(manager, 1, dtype=torch.float32, max_tokens=8)
     num_tokens = torch.tensor(8)
 
     class _StashedSquare(torch.autograd.Function):
@@ -1073,7 +584,7 @@ def test_graphpp_partition_keeps_stashes_in_forward_and_reloads_in_backward(mana
         @staticmethod
         def forward(ctx, h):
             squared = ops.group_start(h) * h
-            handle = torch.empty(_pages(slot.max_stash_tokens) + 1, dtype=torch.int64)
+            handle = torch.empty(pages(slot.max_stash_tokens) + 1, dtype=torch.int64)
             ops.stash_(handle, h, num_tokens, slot.slot_id, 1)
             ctx.save_for_backward(handle)
             return squared
@@ -1125,77 +636,27 @@ def test_graphpp_partition_keeps_stashes_in_forward_and_reloads_in_backward(mana
 
 
 # ---------------------------------------------------------------------------
-# Overflow verdict
+# Overflow verdict under GraphTrainer's CUDA graph pass
 # ---------------------------------------------------------------------------
-
-
-# AdamW implementations, as their AdamW config fields.
-_ADAMW_IMPLEMENTATIONS: dict[str, dict[str, Any]] = {
-    "fused": {"fused": True},
-    "fused_bf16_moments": {"fused": True, "moment_dtype": "bfloat16"},
-    "foreach": {"fused": False, "foreach": True},
-    "for_loop": {"fused": False, "foreach": False},
-}
-
-
-def _optimizers(model: nn.Module, implementation: str = "fused") -> OptimizersContainer:
-    """AdamW over every parameter of ``model``."""
-    config = OptimizersContainer.Config(
-        optimizers=[
-            AdamW.Config(
-                pattern=r".*", lr=0.1, **_ADAMW_IMPLEMENTATIONS[implementation]
-            )
-        ]
-    )
-    return config.build(model_parts=[model])
 
 
 def _runner(
     manager: PagedStashManager,
     mode: str,
     *,
-    optimizers: OptimizersContainer | None = None,
+    optimizers: Any = None,
     **kwargs: Any,
 ) -> PagedStashRunner:
-    """A runner whose optimizers, unless given, own a parameter no step uses."""
+    """A runner as ``build_paged_stash_runner`` builds it for GraphTrainer."""
     if manager.overflow is None:
         manager.overflow = torch.zeros(1, dtype=torch.int64, device="cuda")
         manager.host_spill = torch.zeros(1, dtype=torch.int64, device="cuda")
-    if optimizers is None:
-        optimizers = _optimizers(nn.Linear(1, 1, device="cuda"))
-    return PagedStashRunner(optimizers, overflow_check=mode, **kwargs)
-
-
-def _activate(manager: PagedStashManager) -> None:
-    """Give the manager one small buffer, as the measure step would."""
-    manager.status = "captured"
-    manager.stash_buffers = {
-        KEY: PagedStashBuffer(
-            PAGE_SIZE,
-            HIDDEN,
-            PAGE_SIZE,
-            manager.device,
-            manager.overflow,
-            manager.host_spill,
-            BF16,
-        )
-    }
-
-
-def _drains_the_stream(fn: Callable[[], Any]) -> tuple[Any, bool]:
-    """Call ``fn`` behind ~1.7s of queued GPU work.
-
-    Returns its result and whether that work had drained by the time ``fn``
-    returned, which is what a host synchronization inside ``fn`` would cause.
-    """
-    torch.cuda.synchronize()
-    end = torch.cuda.Event()
-    torch.cuda._sleep(2_000_000_000)
-    result = fn()
-    end.record()
-    drained = end.query()
-    torch.cuda.synchronize()
-    return result, drained
+    return PagedStashRunner(
+        optimizers,
+        overflow_check=mode,
+        config_path="compile.paged_stash",
+        **kwargs,
+    )
 
 
 @requires_cuda
@@ -1206,17 +667,20 @@ def test_blocking_mode(manager, caplog):
     the runner outside it, as here, so one test covers both. A HybridEP token
     drop comes from the capacity factor, which is compiled into the graph, so
     it is reported and the step kept; the flag accumulates over every dispatch
-    and is reset in place for the next step. A stash overflow instead drops the
-    graph through ``reset_cuda_graphs``, along with the pages it points into,
-    and reruns the step eagerly with paging disabled. The rebuilt wrapper runs
-    the next step eagerly too, over reallocated buffers of the same size, and
-    captures on the one after. Every step's gradient is exact, including the
-    replay that adds into its own output buffer.
+    and is reset in place for the next step. A stash overflow instead resets
+    the graph through ``reset_cuda_graphs``, along with the pages it points
+    into, and reruns the step eagerly with paging disabled. That rerun is the
+    one eager call the reset asks for, and it measures the step's live pages,
+    so the next step pages again over buffers grown to fit them and captures.
+    Every step's gradient is exact, including the replay that adds into its own
+    output buffer.
     """
     from torchtitan.distributed.deepep import hybridep
 
-    slots = _make_slots(manager, 1)
-    tensors, counts, _ = _setup_stash(manager, slots, [1000])
+    slots = make_slots(manager, 1)
+    tensors, counts, _ = setup_stash(
+        manager, slots, [1000], stash=_stash, reload=_reload
+    )
     tensors[0].copy_(torch.randn_like(tensors[0]))  # finite, so sums compare
     holder = nn.Module()
     holder.weight = nn.Parameter(torch.empty(HIDDEN, device="cuda"))
@@ -1228,31 +692,26 @@ def test_blocking_mode(manager, caplog):
 
     def forward_backward(tensor: torch.Tensor, count: torch.Tensor) -> torch.Tensor:
         paged.append(manager.active)
-        grad = _round_trip(slots, [tensor], [count])[0][:PAGE_SIZE].float().sum(0)
+        reloaded = round_trip(slots, [tensor], [count], stash=_stash, reload=_reload)
+        grad = reloaded[0][:PAGE_SIZE].float().sum(0)
         accumulate_param_grads_([weight], [grad])
         return grad
 
-    def wrap() -> Callable[..., torch.Tensor]:
-        return wrap_fwd_bwd_with_cuda_graph(
-            forward_backward,
-            parameters=[weight],
-            num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
-        )
-
-    graphed = [wrap()]
-
-    def reset_cuda_graphs() -> None:
-        cuda_graph_teardown()
-        graphed[0] = wrap()
-
+    graphed = wrap_fwd_bwd_with_cuda_graph(
+        forward_backward,
+        parameters=[weight],
+        num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+    )
     probe = OverbudgetProbe(
         hybridep.check_hybridep_over_budget, hybridep.reset_hybridep_over_budget
     )
     runner = _runner(
         manager,
         "blocking",
-        optimizers=_optimizers(holder),
+        optimizers=optimizers(holder),
         overbudget_probes=[probe],
+        # The whole-step graph is a CUDAGraphWrapper, so the reset that keeps
+        # the shared pool is the one that reaches it.
         reset_cuda_graphs=reset_cuda_graphs,
     )
 
@@ -1268,7 +727,7 @@ def test_blocking_mode(manager, caplog):
                 hybridep._record_over_budget(
                     torch.tensor([flag], dtype=torch.int32, device="cuda")
                 )
-            return graphed[0](tensors[0], counts[0])
+            return graphed(tensors[0], counts[0])
 
         runner(attempt)
         assert weight.grad is not None and torch.equal(weight.grad, expected)
@@ -1284,151 +743,18 @@ def test_blocking_mode(manager, caplog):
         assert "over budget" in caplog.text
         over_budget = hybridep.check_hybridep_over_budget()
 
-        pages = manager.get_buffer(BF16, HIDDEN).num_cuda_pages
         counts[0].fill_(1200)  # 19 pages; the buffer holds int(16 * 1.10) = 17
         assert step() == [False], "the rerun must run eagerly, with paging disabled"
         assert not over_budget.item(), "the drop flag must be reset in place"
 
         counts[0].fill_(1000)
-        assert step() == [True], "the rebuilt wrapper runs eagerly over new buffers"
-        assert step() == [True], "then captures again"
-        assert manager.get_buffer(BF16, HIDDEN).num_cuda_pages == pages
+        # The rerun was the one eager call the reset asked for, so the next
+        # step pages again and captures, over buffers the rerun re-measured to
+        # fit the step that overflowed.
+        assert step() == [True], "the next step pages again, and captures"
+        assert manager.get_buffer(BF16, HIDDEN).num_cuda_pages == int(
+            pages(1200) * 1.10
+        )
         assert step() == [], "a replay added into its own output"
     finally:
         cuda_graph_teardown()
-
-
-@requires_cuda
-def test_deferred_mode(manager):
-    """The verdict for a step is read on a later step once its copy has
-    landed, never blocking, and an overflow is fatal when it is read. The flag
-    is sticky, so when the CPU runs ahead and a step's copy is overwritten
-    before it is read, the next copy still carries the overflow; and the check
-    at shutdown reads the final step's verdict, which no later step would."""
-    runner = _runner(manager, "deferred")
-    _activate(manager)
-
-    def step(overflow: bool = False) -> torch.Tensor:
-        if overflow:
-            manager.overflow.fill_(1)  # as the copy kernel does when out of pages
-        return torch.zeros((), device="cuda")
-
-    step(overflow=True)  # load every kernel a step launches: a kernel's first
-    manager.overflow.zero_()  # launch would wait out the queued work below
-    for _ in range(3):
-        runner(step)
-    runner.final_overflow_check()  # clean steps report nothing
-
-    torch.cuda._sleep(2_000_000_000)  # keep the GPU busy: the CPU runs ahead
-    runner(lambda: step(overflow=True))
-    assert not runner._flags_event.query(), "the deferred check waited for the GPU"
-    runner(step)  # overwrites the overflowing step's copy before it is read
-    torch.cuda.synchronize()
-    with pytest.raises(RuntimeError, match="Paged stash buffer overflow"):
-        runner(step)  # reads a copy that has landed
-
-    manager.overflow.zero_()  # a fresh run
-    runner(step)
-    runner(lambda: step(overflow=True))
-    with pytest.raises(RuntimeError, match="Paged stash buffer overflow"):
-        runner.final_overflow_check()
-
-    # The same around a step the trainer captured, which is how the default
-    # policy runs. The verdict is read on the host, outside the graph, so
-    # capture does not change when it lands -- but a replayed step launches no
-    # Python, so the flag a replay raises has to be read on a later step.
-    manager.overflow.zero_()
-    runner = _runner(manager, "deferred")
-    scratch = torch.zeros((), device="cuda")
-    graphed = wrap_fwd_bwd_with_cuda_graph(
-        lambda: scratch.add_(1),
-        parameters=(),
-        num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
-    )
-    try:
-        for _ in range(NUM_CUDA_GRAPH_WARMUP_STEPS + 2):
-            runner(graphed)  # two eager warmups, the capture, then a replay
-        runner.final_overflow_check()  # clean replays report nothing
-        manager.overflow.fill_(1)  # as a replayed step's copy kernel does
-        runner(graphed)
-        torch.cuda.synchronize()
-        with pytest.raises(RuntimeError, match="Paged stash buffer overflow"):
-            runner(graphed)
-    finally:
-        cuda_graph_teardown()
-
-
-@requires_cuda
-@pytest.mark.parametrize("implementation", ["fused", "fused_bf16_moments"])
-def test_deferred_mode_skips_overflowed_optimizer_steps(manager, implementation):
-    """A clean step updates exactly as without the runner. While an overflow is
-    flagged, the optimizer step leaves the parameters and their state as they
-    were and puts back the expert bias that the load-balancing pre-hook moved,
-    all on device; the next step raises the overflow."""
-    model = nn.Linear(HIDDEN, HIDDEN, device="cuda")
-    reference = copy.deepcopy(model)
-    optimizers = _optimizers(model, implementation)
-    reference_optimizers = _optimizers(reference, implementation)
-    expert_bias = torch.zeros(8, device="cuda")
-
-    def update_expert_bias(*_: Any) -> None:  # the MoE load-balancing hook
-        expert_bias.add_(1.0)
-
-    # Registered before the runner's hooks, as the trainer registers it.
-    optimizers.register_step_pre_hook(update_expert_bias)
-    runner = _runner(
-        manager, "deferred", optimizers=optimizers, expert_biases=[expert_bias]
-    )
-    _activate(manager)
-    inputs = torch.randn(4, HIDDEN, device="cuda")
-
-    def train_step(overflow: bool = False) -> None:
-        def forward_backward() -> torch.Tensor:
-            if overflow:
-                manager.overflow.fill_(1)  # as the copy kernel does
-            loss = model(inputs).sum()
-            loss.backward()
-            return loss
-
-        runner(forward_backward)
-        optimizers.step()
-        optimizers.zero_grad()
-
-    manager.overflow.fill_(1)  # load every kernel the timed step launches: a
-    manager.overflow.zero_()  # kernel's first launch would wait out the sleep
-    train_step()
-    reference(inputs).sum().backward()
-    reference_optimizers.step()
-    params = zip(model.parameters(), reference.parameters(), strict=True)
-    for param, expected in params:
-        assert torch.equal(param, expected), "a clean step must be unchanged"
-    assert expert_bias.eq(1.0).all()
-
-    state = optimizers.optimizers[0].state[model.weight]
-    before = [t.clone() for t in (model.weight, *state.values(), expert_bias)]
-    _, drained = _drains_the_stream(lambda: train_step(overflow=True))
-    assert not drained, "skipping the step drained the stream"
-    after = [model.weight, *state.values(), expert_bias]
-    for got, want in zip(after, before, strict=True):
-        assert torch.equal(got, want), "the overflowed step was applied"
-    with pytest.raises(RuntimeError, match="skipped its optimizer steps"):
-        train_step()
-
-
-@requires_cuda
-def test_only_blocking_mode_accepts_optimizers_that_cannot_skip_a_step(manager):
-    """Deferred mode skips overflowed steps on device, which only fused Adam and
-    AdamW can do, so it rejects any other optimizer up front and points at
-    blocking mode, which reruns an overflowing step instead and leaves the
-    optimizer alone."""
-    model = nn.Linear(HIDDEN, HIDDEN, device="cuda")
-    _runner(manager, "deferred", optimizers=_optimizers(model, "fused_bf16_moments"))
-    for implementation in ("foreach", "for_loop"):
-        optimizers = _optimizers(model, implementation)
-        with pytest.raises(
-            ValueError, match="non-fused AdamW.*overflow_check = 'blocking'"
-        ):
-            _runner(manager, "deferred", optimizers=optimizers)
-        _runner(manager, "blocking", optimizers=optimizers)
-        model(torch.randn(4, HIDDEN, device="cuda")).sum().backward()
-        optimizers.step()  # a found_inf it cannot honor would assert here

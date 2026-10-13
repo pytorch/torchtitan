@@ -14,7 +14,29 @@ that are slow to import are imported inside the function that uses them, so
 selecting any single configuration stays cheap.
 """
 
+import dataclasses
+
 from torchtitan.trainer import Trainer
+
+
+def _route_round_robin(config: Trainer.Config) -> None:
+    """Route every MoE layer's tokens to experts round-robin, with exact
+    balance, so that every step routes the same token counts."""
+    from torchtitan.models.common.moe import (
+        RoundRobinTokenChoiceTopKRouter,
+        TokenChoiceTopKRouter,
+    )
+
+    router_fields = dataclasses.fields(TokenChoiceTopKRouter.Config)
+    for layer in config.model.layers:
+        moe = getattr(layer, "moe", None)
+        if moe is not None:
+            moe.router = RoundRobinTokenChoiceTopKRouter.Config(
+                **{
+                    field.name: getattr(moe.router, field.name)
+                    for field in router_fields
+                }
+            )
 
 
 def _set_spmd_typechecking(config: Trainer.Config, *, typechecking: bool) -> None:

@@ -8,8 +8,9 @@
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from typing import cast
 
 import torch
@@ -17,6 +18,7 @@ import torch.nn as nn
 import torch_remat as remat
 
 from torchtitan.config import Configurable
+from torchtitan.distributed.deepep.paged_stash import PagedStashConfig
 from torchtitan.models.base.module import Module
 
 
@@ -246,6 +248,147 @@ class SelectiveAC(RegionAC):
             )
 
 
+_DEFAULT_PAGE_REGIONS = ["*routed_experts*"]
+
+
+def paged_stash_regions(
+    model_part: nn.Module, page_regions: Sequence[str]
+) -> dict[int, tuple[str, nn.Module]]:
+    """Return ``{layer id: (qualified fqn, module)}`` for this model part's
+    paged regions.
+
+    Patterns are matched against block-relative module FQNs, the same names
+    ``save_regions`` and ``recompute_regions`` match, so ``"*routed_experts*"``
+    selects every transformer block's routed experts. A pattern names the root
+    of a region: everything below a matched module belongs to it, so the search
+    does not descend into one.
+
+    Raises:
+        ValueError: If a transformer block holds more than one paged region.
+            Paged stashing schedules its regions by layer, so it needs at most
+            one per layer.
+    """
+    regions: dict[int, tuple[str, nn.Module]] = {}
+    for layer_id, block in model_part.get_submodule("layers").named_children():
+        owner: str | None = None
+        for fqn, module in block.named_modules():
+            if not fqn or (owner is not None and fqn.startswith(f"{owner}.")):
+                continue
+            if not any(fnmatch(fqn, pattern) for pattern in page_regions):
+                continue
+            qualified = f"layers.{layer_id}.{fqn}"
+            if owner is not None:
+                raise ValueError(
+                    f"page_regions {list(page_regions)} matches both "
+                    f"{regions[int(layer_id)][0]} and {qualified}, which are not "
+                    "nested. Paged stashing schedules its regions by layer, so it "
+                    "needs at most one per layer."
+                )
+            owner = fqn
+            regions[int(layer_id)] = (qualified, module)
+    return regions
+
+
+def _own_paged_region(module: nn.Module) -> None:
+    """Retain every region inside a paged region, and recompute none of it.
+
+    Paging replaces recompute rather than composing with it: the activations a
+    paged region retains are copied into the page pool and read back, so
+    recomputing any of it would rerun the expert GEMMs and the all-to-alls the
+    pages already hold. Ownership is stated in ``RegionAC``'s own vocabulary --
+    save patterns that match every region the subtree declares, recompute
+    patterns that match none -- rather than overriding another policy's
+    decision from inside a saved-tensor hook.
+    """
+    for submodule in module.modules():
+        if isinstance(submodule, Module):
+            submodule._remat_save_patterns = ("*",)
+            submodule._remat_recompute_patterns = ()
+
+
+class PagedAC(RegionAC):
+    """A ``RegionAC`` policy that pages what its paged regions retain.
+
+    A MoE token dispatcher running with a static capacity factor, as a CUDA
+    graph requires, sizes its permuted activations for the worst case while only
+    ``sum(tokens_per_expert)`` rows hold data. Those activations are retained
+    from forward until backward, once per in-flight microbatch under pipeline
+    parallelism. ``PagedAC`` copies their live rows into a pool of fixed-size
+    pages, frees the padded tensors, and pages them back in before backward
+    reads them, which turns ``O(layers x worst case)`` residency into
+    ``O(worst case + actual usage)``.
+
+    The regions ``page_regions`` names are *owned*: every region inside one is
+    retained and none is recomputed (see :func:`_own_paged_region`). Outside
+    them this is an ordinary ``RegionAC``, so ``save_regions`` and
+    ``recompute_regions`` choose the policy for the rest of the block.
+
+    The engine installs the paging runtime -- page buffers, the paged-layer
+    schedule and the overflow runner -- around each training step; this policy
+    owns the selection and the save-or-recompute decision only. See
+    ``torchtitan/distributed/deepep/paged_stash/eager.py``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RegionAC.Config):
+        save_regions: list[str] = field(default_factory=lambda: ["*"])
+
+        page_regions: list[str] = field(
+            default_factory=lambda: list(_DEFAULT_PAGE_REGIONS)
+        )
+        """
+        Glob patterns naming the regions to page, relative to a transformer
+        block. A pattern names a region's root module: every activation the
+        subtree below it retains for backward, and that the stash can hold, is
+        paged. The default covers the whole routed-expert subtree, including
+        the token dispatch.
+
+        Selection within a region is by storage layout, not by pattern: a
+        retained tensor is paged when its storage reads as rows of the
+        dispatch's static capacity, so weights and offsets stay resident.
+        """
+
+        paged_stash: PagedStashConfig = field(default_factory=PagedStashConfig)
+        """Page size, buffer headroom, prefetch depth and overflow policy for
+        the paging runtime, shared with GraphTrainer's memory policy."""
+
+        def __post_init__(self) -> None:
+            super(PagedAC.Config, self).__post_init__()
+            if not self.page_regions:
+                raise ValueError(
+                    "PagedAC pages the regions page_regions names, so it needs "
+                    "at least one pattern. Use RegionAC for a policy that pages "
+                    "nothing."
+                )
+            if self.paged_stash.module_fqn != PagedStashConfig().module_fqn:
+                raise ValueError(
+                    "PagedAC selects the regions it pages with page_regions. "
+                    "paged_stash.module_fqn is GraphTrainer's selection and has "
+                    "no effect here; set page_regions instead."
+                )
+
+    def apply(self, model: nn.Module) -> None:
+        super().apply(model)
+        config = cast("PagedAC.Config", self.config)
+        regions = paged_stash_regions(model, config.page_regions)
+        for _, module in regions.values():
+            _own_paged_region(module)
+        if not regions:
+            # A pipeline stage may legitimately hold no paged region; the
+            # frontend raises if no stage on this rank has one.
+            logger.info(
+                "PagedAC found no region matching %s in this model part",
+                config.page_regions,
+            )
+            return
+        logger.info(
+            "PagedAC owns %d paged region(s) matching %s: %s",
+            len(regions),
+            config.page_regions,
+            ", ".join(fqn for fqn, _ in regions.values()),
+        )
+
+
 ActivationCheckpointingConfig = (
-    SelectiveAC.Config | RegionAC.Config | FullAC.Config | None
+    SelectiveAC.Config | RegionAC.Config | FullAC.Config | PagedAC.Config | None
 )

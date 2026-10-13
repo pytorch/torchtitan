@@ -255,6 +255,10 @@ class _CUDAGraphManager:
     def register(self, wrapper: "CUDAGraphWrapper") -> None:
         self._wrappers.append(wrapper)
 
+    def reset(self) -> None:
+        for wrapper in self._wrappers:
+            wrapper.reset()
+
     def teardown(self) -> None:
         if not self._initialized:
             return
@@ -273,6 +277,19 @@ _manager = _CUDAGraphManager()
 def cuda_graph_teardown() -> None:
     """Destroy all CUDA graphs and release the shared memory pool."""
     _manager.teardown()
+
+
+def reset_cuda_graphs() -> None:
+    """Return every CUDA graph wrapper to its initial state, keeping the shared
+    pool and stream.
+
+    Each drops its captured graph, runs its next call eagerly, and captures
+    again on the one after, so the memory a graph points into can be freed, and
+    the next call can do work a capture cannot, without ending training.
+    ``cuda_graph_teardown`` is for shutdown: it also destroys the shared pool
+    and stream, after which a wrapper cannot capture again.
+    """
+    _manager.reset()
 
 
 def get_cuda_graph_annotations() -> dict[int, list[Any]]:
@@ -449,6 +466,14 @@ class CUDAGraphWrapper:
         self._output = None
         self._static_input_addresses.clear()
         self._non_tensor_inputs.clear()
+
+    def reset(self) -> None:
+        """Drop the captured graph; run the next call eagerly and capture on
+        the one after."""
+        non_tensor_inputs = dict(self._non_tensor_inputs)
+        self.teardown()
+        self._non_tensor_inputs.update(non_tensor_inputs)
+        self._warmup_remaining = 1
 
 
 class _ForwardBackwardCUDAGraphWrapper(CUDAGraphWrapper):
