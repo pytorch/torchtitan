@@ -22,6 +22,7 @@ from .module import Module
 if TYPE_CHECKING:
     from torchtitan.components.optim import OptimizersContainer
     from torchtitan.distributed.activation_remat import ActivationRematConfig
+    from torchtitan.distributed.pipeline_parallel import PipelineResult
 
     from .state_dict_adapter import BaseStateDictAdapter
 
@@ -96,6 +97,9 @@ class BaseModel(Module, ABC):
         FlexAttention manages its own compilation and is not controlled by this list.
         """
 
+        supports_mtp_pipeline_parallel: ClassVar[bool] = False
+        """Whether this model config implements MTP with pipeline parallelism."""
+
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             pass
@@ -105,7 +109,7 @@ class BaseModel(Module, ABC):
     pipeline_last_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
     supports_pipeline_parallel: ClassVar[bool] = True
 
-    def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
+    def pipeline(self, **kwargs: Any) -> PipelineResult:
         """Partition the model and build its pipeline schedule."""
         if not self.supports_pipeline_parallel:
             raise RuntimeError(

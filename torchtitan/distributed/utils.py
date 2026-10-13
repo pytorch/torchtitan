@@ -506,6 +506,7 @@ def clip_grad_norm_(
     error_if_nonfinite: bool = False,
     foreach: bool | None = None,
     pp_mesh: DeviceMesh | None = None,
+    norm_parameters: Iterable[torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.
@@ -537,6 +538,9 @@ def clip_grad_norm_(
             fall back to the slow implementation for other device types.
             Default: ``None``
         pp_mesh: Pipeline Parallel device mesh. If not None, will reduce gradient norm across PP stages.
+        norm_parameters: Optional logical parameter subset used to compute the
+            norm. The resulting clipping coefficient is still applied to every
+            entry in ``parameters``.
 
     Returns:
         Total norm of the parameter gradients (viewed as a single vector).
@@ -544,6 +548,8 @@ def clip_grad_norm_(
     """
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
+    else:
+        parameters = list(parameters)
 
     # get_total_norm stacks per-parameter norms, so all gradients passed to it
     # must be on the same mesh. Meshes can differ even over the same devices:
@@ -555,9 +561,17 @@ def clip_grad_norm_(
             mesh = p.grad.device_mesh if isinstance(p.grad, DTensor) else None
             params_by_mesh[mesh].append(p)
 
+    norm_params_by_mesh = params_by_mesh
+    if norm_parameters is not None:
+        norm_params_by_mesh = defaultdict(list)
+        for p in norm_parameters:
+            if p.grad is not None:
+                mesh = p.grad.device_mesh if isinstance(p.grad, DTensor) else None
+                norm_params_by_mesh[mesh].append(p)
+
     norms = []
     # An empty list yields tensor(0.), e.g. on a PP rank without gradients.
-    for params in params_by_mesh.values() or [[]]:
+    for params in norm_params_by_mesh.values() or [[]]:
         norm = torch.nn.utils.get_total_norm(
             [p.grad for p in params if p.grad is not None],
             norm_type,

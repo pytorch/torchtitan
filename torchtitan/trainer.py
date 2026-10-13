@@ -104,6 +104,15 @@ class Trainer(Configurable):
                     activation_remat=self.activation_remat,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
+                if (
+                    getattr(self.model, "mtp_layers", None)
+                    and self.parallelism.pipeline_parallel_degree > 1
+                    and self.checkpointer is not None
+                ):
+                    raise NotImplementedError(
+                        "Checkpointing is not supported with MTP and pipeline "
+                        "parallelism."
+                    )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}
