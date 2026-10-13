@@ -95,6 +95,27 @@ class OffsetRMSNorm(Module):
         return ((1.0 + self.weight.float()) * x).to(input_dtype)
 
 
+@local_compile(
+    "residual_norm",
+    batch_invariant=False,
+    # The separate add rounds the sum to the residual dtype before the norm reads it.
+    options={"emulate_precision_casts": True},
+)
+def _residual_add_norm(
+    x_TD: torch.Tensor, h_TD: torch.Tensor, norm: OffsetRMSNorm
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``x + h`` and ``norm(x + h)``: one kernel compiled, the separate ops in eager.
+
+    Shared by training and generation. Compiled, the two gradients of ``x + h`` are
+    summed in FP32 and rounded once (eager rounds each): within one BF16 ulp of eager.
+
+    Example:
+        >>> x_TD, normed_TD = _residual_add_norm(x_TD, attn_out_TD, block.ffn_norm)
+    """
+    x_TD = x_TD + h_TD
+    return x_TD, norm(x_TD)
+
+
 class Qwen35Attention(BaseAttention):
     """Full attention with output gating and partial RoPE for Qwen3.5.
 
@@ -274,9 +295,7 @@ class Qwen35TransformerBlock(Module):
             h_TD = self.attn(h_TD, attention_metadata)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(h_TD)
-        x_TD = x_TD + h_TD
-
-        h_TD = self.ffn_norm(x_TD)
+        x_TD, h_TD = _residual_add_norm(x_TD, h_TD, self.ffn_norm)
         if self.moe_enabled:
             h_TD = self.moe(
                 h_TD,
@@ -365,6 +384,7 @@ class Qwen35Model(MultimodalModel):
                 "moe_dispatch",
                 "moe_combine",
                 "expert_counts",
+                "residual_norm",
             ]
         )
 
