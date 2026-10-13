@@ -23,6 +23,7 @@ from torchtitan.models.common.activation import UnaryActivationFn
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     GQAttention,
+    InnerAttention,
     QKVLinear,
     VarlenInnerAttention,
 )
@@ -89,7 +90,7 @@ def decoder_vocab_size(model_config: Module.Config) -> int:
 
 def get_attention_config(
     backend: str,
-) -> Module.Config:
+) -> InnerAttention.Config:
     """Map backend string to an inner_attention config.
 
     Language models always use block_causal masking (the dataloaders always
@@ -229,7 +230,7 @@ def make_gqa_config(
     n_heads: int,
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
-    inner_attention: Module.Config,
+    inner_attention: InnerAttention.Config,
     rope: RoPE.Config | None,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,

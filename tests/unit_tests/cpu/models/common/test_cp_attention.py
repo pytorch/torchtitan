@@ -140,7 +140,7 @@ class TestDecoderCpSharding(unittest.TestCase):
             )
         model = SimpleNamespace(
             config=SimpleNamespace(
-                first_attention=sliding_attention,
+                first_non_linear_attention=sliding_attention,
                 layers=layers,
             )
         )

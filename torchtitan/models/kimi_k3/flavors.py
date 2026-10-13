@@ -314,7 +314,7 @@ def _kda_config(
         )
 
     return KDA.Config(
-        num_heads=num_heads,
+        n_heads=num_heads,
         head_dim=head_dim,
         conv_kernel_size=conv_kernel_size,
         q_proj=colwise_linear(dim, projection_dim),

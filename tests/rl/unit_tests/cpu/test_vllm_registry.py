@@ -85,7 +85,7 @@ def test_kda_hybrid_model_registers_state_copy_funcs(monkeypatch):
 
     kda_config = Mock(
         spec=KDA.Config,
-        num_heads=8,
+        n_heads=8,
         head_dim=128,
         conv_kernel_size=4,
     )
@@ -135,7 +135,7 @@ def test_batch_invariant_kda_registers_attention_gym_replay_state(monkeypatch):
 
     kda_config = Mock(
         spec=KDA.Config,
-        num_heads=8,
+        n_heads=8,
         head_dim=128,
         conv_kernel_size=4,
     )

@@ -31,12 +31,13 @@ from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     BaseAttention,
     FlexAttentionMetadata,
+    InnerAttention,
     LinearAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.attention.gdn import GatedDeltaNet
-from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
@@ -122,7 +123,7 @@ class Qwen35Attention(BaseAttention):
         wo: Linear.Config
         q_norm: OffsetRMSNorm.Config
         k_norm: OffsetRMSNorm.Config
-        inner_attention: Module.Config
+        inner_attention: InnerAttention.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -218,7 +219,7 @@ class Qwen35Attention(BaseAttention):
         return xq_THK, xk_THK
 
 
-class Qwen35TransformerBlock(Module):
+class Qwen35TransformerBlock(TransformerBlock):
     """Hybrid transformer block for Qwen3.5.
 
     Each layer uses either full attention (Qwen35Attention) or linear
@@ -227,17 +228,13 @@ class Qwen35TransformerBlock(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        attention: Qwen35Attention.Config | GatedDeltaNet.Config
-        feed_forward: Module.Config | None = None
-        moe: Module.Config | None = None
-        attention_norm: OffsetRMSNorm.Config
-        ffn_norm: OffsetRMSNorm.Config
+    class Config(TransformerBlock.Config):
+        pass
 
     def __init__(self, config: Config):
         super().__init__()
         self.full_attn = isinstance(config.attention, Qwen35Attention.Config)
-        self.attn = config.attention.build()
+        self.attention = config.attention.build()
 
         self.moe_enabled = config.moe is not None
         if self.moe_enabled:
@@ -261,9 +258,9 @@ class Qwen35TransformerBlock(Module):
     ) -> torch.Tensor:
         h_TD = self.attention_norm(x_TD)
         if self.full_attn:
-            h_TD = self.attn(h_TD, attention_metadata, positions)
+            h_TD = self.attention(h_TD, attention_metadata, positions)
         else:
-            h_TD = self.attn(h_TD, attention_metadata)
+            h_TD = self.attention(h_TD, attention_metadata)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(h_TD)
         x_TD = x_TD + h_TD
@@ -732,7 +729,11 @@ class Qwen35Model(MultimodalModel):
                 x,
                 (
                     attention_metadata.get(
-                        type(cast(Qwen35TransformerBlock, layer).attn.inner_attention)
+                        type(
+                            cast(
+                                Qwen35TransformerBlock, layer
+                            ).attention.inner_attention
+                        )
                     )
                     if attention_metadata is not None
                     else None

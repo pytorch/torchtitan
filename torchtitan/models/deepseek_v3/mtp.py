@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -200,6 +200,8 @@ class MTPDecoder(Decoder):
     shifted token embeddings.
     """
 
+    mtp_layers: ModuleList[MTPTransformerBlock] | None
+
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         mtp_layers: list = field(default_factory=list)
@@ -390,9 +392,7 @@ class MTPDecoder(Decoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    type(cast(TransformerBlock, layer).attention.inner_attention)
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             h = layer(
                 h,
@@ -419,9 +419,7 @@ class MTPDecoder(Decoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    type(cast(TransformerBlock, layer).attention.inner_attention)
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             with spmd.no_typecheck():
                 aux_loss_denominator = (

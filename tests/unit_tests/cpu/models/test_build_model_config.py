@@ -21,7 +21,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.attention.gdn import GatedDeltaNet
 from torchtitan.models.common.attention.kda import KDA
-from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 
 _MODELS = [
     "llama3",
@@ -52,6 +52,7 @@ def test_model_defaults_to_varlen(model):
             layer.attention
             for layer in config.layers
             if isinstance(layer.attention, BaseAttention.Config)
+            and not layer.attention.is_linear_attention
         ]
         if isinstance(config, Decoder.Config)
         else [config]
@@ -73,19 +74,25 @@ def test_hybrid_layers_have_one_attention_config(model):
     module = importlib.import_module(f"torchtitan.models.{model}")
     config = module.build_model_config("debugmodel", parallelism=ParallelismConfig())
     for layer in config.layers:
-        assert isinstance(
-            layer.attention, (BaseAttention.Config, GatedDeltaNet.Config, KDA.Config)
-        )
+        assert isinstance(layer, TransformerBlock.Config)
+        assert isinstance(layer.attention, BaseAttention.Config)
+        assert layer.attention.n_heads > 0
+        if isinstance(layer.attention, GatedDeltaNet.Config):
+            assert layer.attention.n_heads == (
+                layer.attention.in_proj_v.out_features // layer.attention.value_head_dim
+            )
+        elif isinstance(layer.attention, KDA.Config):
+            assert layer.attention.n_heads * layer.attention.head_dim == (
+                layer.attention.v_proj.out_features
+            )
         assert not hasattr(layer, "delta_net")
         assert not hasattr(layer, "delta_attention")
-    assert isinstance(config.first_attention, BaseAttention.Config)
+    assert isinstance(config.first_non_linear_attention, BaseAttention.Config)
     config.layers = [
-        layer
-        for layer in config.layers
-        if not isinstance(layer.attention, BaseAttention.Config)
+        layer for layer in config.layers if layer.attention.is_linear_attention
     ]
     assert config.layers
-    assert config.first_attention is None
+    assert config.first_non_linear_attention is None
 
 
 class _ReplaceRootConverter(ModelConfigConverter):

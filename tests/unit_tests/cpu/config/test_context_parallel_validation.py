@@ -70,6 +70,50 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         config = self._config(cp=1)
         config.__post_init__()
 
+    def test_hybrid_linear_attention_requires_cp_transform(self):
+        from torchtitan.config import ParallelismConfig
+        from torchtitan.config.validation import validate_context_parallel
+        from torchtitan.models.common.attention.cp_attention import (
+            KVAllGatherCPFlexInnerAttention,
+        )
+        from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
+        from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
+        from torchtitan.models.common.attention.gdn import InnerGDN
+        from torchtitan.models.common.attention.kda import InnerKDA
+
+        for name, linear, cp_linear in (
+            ("qwen3_5", InnerGDN, ContextParallelInnerGDN),
+            ("kimi_k3", InnerKDA, ContextParallelInnerKDA),
+        ):
+            with self.subTest(model=name):
+                module = importlib.import_module(f"torchtitan.models.{name}")
+                model = module.build_model_config(
+                    "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+                )
+                parallelism = ParallelismConfig(context_parallel_degree=2)
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                        linear: cp_linear,
+                    }
+                ).transform(model)
+                validate_context_parallel(model, parallelism)
+                linear_attention = next(
+                    layer.attention
+                    for layer in model.layers
+                    if layer.attention.is_linear_attention
+                )
+                plain_model = module.build_model_config(
+                    "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+                )
+                linear_attention.inner_attention = next(
+                    layer.attention.inner_attention
+                    for layer in plain_model.layers
+                    if layer.attention.is_linear_attention
+                )
+                with self.assertRaisesRegex(ValueError, "must use CPInnerAttention"):
+                    validate_context_parallel(model, parallelism)
+
     def test_rejects_cp_kernel_without_cp(self):
         config = self._config(cp=1, cp_kernel=True)
         with self.assertRaisesRegex(ValueError, "context parallel degree is 1"):

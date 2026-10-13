@@ -12,9 +12,9 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.components.optim import DistMuon
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import LinearAttentionMetadata
-from torchtitan.models.common.attention.kda import KDAKernel
+from torchtitan.models.common.attention.kda import KDA, KDAKernel
 from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
-from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.model import KimiK3Model, KimiMLAAttention
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan_recipes.tests.models.kimi_k3 import _dist_muon_optimizer
 
@@ -114,8 +114,9 @@ def _kda_recurrent_reference(
 class TestKimiK3(unittest.TestCase):
     def test_dist_muon_config_uses_native_grouped_linear_fqns(self):
         """DistMuon buckets reference the native routed W13 and W2 parameters."""
+        model_config = _small_model_config()
         optimizer = _dist_muon_optimizer(
-            _small_model_config(),
+            model_config,
             muon_lr=1e-3,
             adamw_lr=1e-3,
             parallelism=ParallelismConfig(),
@@ -126,6 +127,17 @@ class TestKimiK3(unittest.TestCase):
             if isinstance(config, DistMuon.Config)
         )
         compute_layouts = muon_config.compute_sharding_by_fqn
+        with torch.device("meta"):
+            model = model_config.build()
+        parameter_names = dict(model.named_parameters()).keys()
+        self.assertTrue(compute_layouts.keys() <= parameter_names)
+        for fqn in compute_layouts:
+            self.assertRegex(fqn, muon_config.pattern)
+        for fqn in (
+            "layers.0.attention.q_proj.weight",
+            "layers.1.attention.wq_a.weight",
+        ):
+            self.assertIn(fqn, compute_layouts)
 
         self.assertTrue(
             any(
@@ -147,12 +159,12 @@ class TestKimiK3(unittest.TestCase):
         full_attention_backend = next(
             type(layer.attention.inner_attention)
             for layer in model.layers.values()
-            if layer.attention is not None
+            if isinstance(layer.attention, KimiMLAAttention)
         )
         kda_backend = next(
-            type(layer.delta_attention.inner_attention)
+            type(layer.attention.inner_attention)
             for layer in model.layers.values()
-            if layer.delta_attention is not None
+            if isinstance(layer.attention, KDA)
         )
         # MLA layers read the BlockMask; KDA layers read document offsets.
         self.assertIsInstance(attention_metadata[full_attention_backend], BlockMask)
@@ -173,9 +185,9 @@ class TestKimiK3(unittest.TestCase):
         padding_mask[7:] = True
         masks = model._get_attention_metadata(positions, padding_mask=padding_mask)
         kda_backend = next(
-            type(layer.delta_attention.inner_attention)
+            type(layer.attention.inner_attention)
             for layer in model.layers.values()
-            if layer.delta_attention is not None
+            if isinstance(layer.attention, KDA)
         )
         assert isinstance(masks[kda_backend], LinearAttentionMetadata)
         assert masks[kda_backend].varlen is not None
@@ -266,6 +278,13 @@ class TestKimiK3(unittest.TestCase):
         model = config.build()
         model.init_states()
 
+        self.assertIsInstance(model.layers["0"].attention, KDA)
+        self.assertIsInstance(model.layers["1"].attention, KimiMLAAttention)
+        self.assertTrue(
+            all(
+                not hasattr(layer, "delta_attention") for layer in model.layers.values()
+            )
+        )
         state_dict = model.state_dict()
         adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
         hf_state_dict = adapter.to_hf(state_dict)

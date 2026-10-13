@@ -13,10 +13,10 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttentionMetadata,
+    InnerAttention,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import TransformerBlock
@@ -57,7 +57,7 @@ class DeepSeekMLAAttention(BaseAttention):
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
         rope: RoPE.Config
-        inner_attention: Module.Config
+        inner_attention: InnerAttention.Config
         mscale: float = 1.0
 
     def __init__(self, config: Config):

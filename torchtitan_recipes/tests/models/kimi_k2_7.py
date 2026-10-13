@@ -325,7 +325,9 @@ def _dist_muon_optimizer(
     adamw_lr: float,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
-    attention = cast(DeepSeekMLAAttention.Config, model_config.first_attention)
+    attention = cast(
+        DeepSeekMLAAttention.Config, model_config.first_non_linear_attention
+    )
     owned = ComputeLayout(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: Owned(),
