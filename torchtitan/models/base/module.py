@@ -610,6 +610,9 @@ class ModuleDict(nn.ModuleDict, Module, Generic[_ModuleT]):
 
     if TYPE_CHECKING:
 
+        def __getitem__(self, key: str) -> _ModuleT:
+            ...
+
         def values(self) -> ValuesView[_ModuleT]:
             ...
 
