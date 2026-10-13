@@ -133,11 +133,7 @@ class RoutedExperts(Module):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
-        offsets_E = torch.cumsum(
-            num_global_tokens_per_local_expert_e,
-            dim=0,
-            dtype=torch.int32,
-        )
+        offsets_E = _group_offsets(num_global_tokens_per_local_expert_e)
 
         with maybe_set_sparse_mesh():
             # w13 and w2 declare their own remat regions (<fqn>.grouped_mm).
@@ -179,6 +175,18 @@ def _count_tokens_per_expert(routing_map_TE: torch.Tensor) -> torch.Tensor:
         tensor([2, 1])
     """
     return routing_map_TE.sum(dim=0)
+
+
+# One scan kernel under compile; eager runs an int32 cast copy plus a two-kernel cub scan.
+@local_compile("expert_counts", batch_invariant=False)
+def _group_offsets(num_tokens_per_group_E: torch.Tensor) -> torch.Tensor:
+    """Return each group's exclusive row end for the grouped GEMMs, ``(E,)`` int32.
+
+    Example:
+        >>> _group_offsets(torch.tensor([2, 0, 3]))
+        tensor([2, 2, 5], dtype=torch.int32)
+    """
+    return torch.cumsum(num_tokens_per_group_E, dim=0, dtype=torch.int32)
 
 
 class TokenChoiceTopKRouter(Module):
