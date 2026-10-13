@@ -29,18 +29,15 @@ is applied during model parallelization.
 | `batch_invariant.py` | Batch-invariant (bitwise-reproducible) kernels. |
 | `offloading.py` | NUMA binding of each rank to the CPU node local to its GPU. |
 
-## Environment settings
+## First optimizer update
 
-**`NCCL_RUNTIME_CONNECT=0` by default.** `init_distributed()` sets this before
-process-group creation and preserves explicit environment values. NCCL connects
-collective peers and allocates their buffers at communicator initialization.
-This reduces allocation failures when PyTorch holds unused cached memory that
-NCCL cannot reclaim. See [issue #5019](https://github.com/pytorch/torchtitan/issues/5019).
-Initialization can take longer and allocate buffers for unused communication
-paths, leaving less memory for training. This does not force PyTorch to create
-every NCCL communicator early or prevent all later allocations, including P2P
-connections. Communicators created after memory pressure rises can still fail.
-Set `NCCL_RUNTIME_CONNECT=1` before launch to use runtime connection setup.
+`Optim.step()` releases unused CUDA cache on its first call, before gradient
+clipping. This leaves GPU memory for NCCL buffers initialized during clipping.
+The release runs outside optimizer CUDA graph capture and does not depend on
+the restored step number. See [issue #5019](https://github.com/pytorch/torchtitan/issues/5019).
+Allocations before this point or later in the run can still fail.
+
+## Environment settings
 
 **`TORCH_NCCL_AVOID_RECORD_STREAMS=1` with tensor parallelism.** TP issues async
 collectives to overlap communication with compute. By default the process group
