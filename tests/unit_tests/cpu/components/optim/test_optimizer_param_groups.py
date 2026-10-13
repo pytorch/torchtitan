@@ -233,7 +233,7 @@ class TestOptimizerConfig(unittest.TestCase):
             torch.tensor([0, 0]),
         )
 
-    def test_moe_load_balancing_frozen_bias_only_zeroes_counts(self):
+    def test_moe_load_balancing_skips_a_frozen_bias(self):
         model = FakeMoEModel()
         for block in model.layers.values():
             block.moe.freeze_expert_bias = True
@@ -247,13 +247,30 @@ class TestOptimizerConfig(unittest.TestCase):
 
         container.step()
 
-        for block in model.layers.values():
+        # No hook ran: the bias and the counts keep their values.
+        for block, tokens in zip(model.layers.values(), ([10, 0], [0, 10])):
             torch.testing.assert_close(block.moe.expert_bias_E, torch.zeros(2))
             torch.testing.assert_close(
-                block.moe.router.tokens_per_expert_E, torch.tensor([0, 0])
+                block.moe.router.tokens_per_expert_E, torch.tensor(tokens)
             )
 
-    def test_moe_quantile_balancing_frozen_bias_only_zeroes_counts(self):
+    def test_moe_load_balancing_rejects_inconsistent_frozen_bias(self):
+        model = FakeMoEModel()
+        model.layers["0"].moe.freeze_expert_bias = True
+        config = OptimizersContainer.Config(
+            optimizers=[
+                AdamW.Config(pattern=r".*", fused=False, lr=0.0, weight_decay=0.0),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        with self.assertRaisesRegex(
+            ValueError, "freeze_expert_bias must be configured consistently"
+        ):
+            register_moe_load_balancing_hook(
+                container, [model], FakeParallelismContext()
+            )
+
+    def test_moe_quantile_balancing_skips_a_frozen_bias(self):
         moe = MoE.__new__(MoE)
         nn.Module.__init__(moe)
         moe.router = QuantileBalancedTopKRouter.Config(
@@ -276,13 +293,14 @@ class TestOptimizerConfig(unittest.TestCase):
 
         container.step()
 
+        # No hook ran: the bias, the histogram and the counts keep their values.
         torch.testing.assert_close(
             moe.expert_bias_E, torch.tensor([0.3, -0.1, 0.0, -0.2])
         )
-        self.assertEqual(
-            moe.router.quantile_balancer.required_bias_histogram_EB.count_nonzero(), 0
+        self.assertTrue(
+            moe.router.quantile_balancer.required_bias_histogram_EB.eq(1).all()
         )
-        self.assertEqual(moe.router.tokens_per_expert_E.count_nonzero(), 0)
+        self.assertTrue(moe.router.tokens_per_expert_E.eq(5).all())
 
     def test_moe_load_balancing_rejects_inconsistent_coeffs(self):
         model = FakeMoEModel(load_balance_coeffs=(None, 0.2))

@@ -6,13 +6,17 @@
 
 """Model config helpers shared by the RL recipes."""
 
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import Any, cast
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import LMHeadFP32OutputConverter
+from torchtitan.config.transform import (
+    FreezeMoERoutingTransform,
+    LMHeadFP32OutputConverter,
+    ModelConfigTransform,
+    transform_model_config_,
+)
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.moe import MoE
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 
 
@@ -23,7 +27,8 @@ def build_rl_model_configs(
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
     fp32_lm_head: bool = True,
-    freeze_moe_routing: bool = True,
+    # TODO: consider enabling router training, but with a lower lr
+    shared_transforms: Sequence[ModelConfigTransform] = (FreezeMoERoutingTransform(),),
     **kwargs: Any,
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Build the ``(trainer, generator)`` model configs of an RL recipe.
@@ -32,10 +37,11 @@ def build_rl_model_configs(
     they share the architecture; each is sharded for its own role's
     parallelism. Changes made to one afterwards must be made to the other.
 
-    RL defaults, applied to both (pass False to skip one):
-        fp32_lm_head        lm_head -> HiMidLoLinear (fp32 logits)
-        freeze_moe_routing  frozen expert bias and router gate, no aux loss,
-                            so the trainer and generator pick the same experts
+    RL defaults, applied to both:
+        fp32_lm_head       lm_head -> HiMidLoLinear (fp32 logits); False skips it
+        shared_transforms  FreezeMoERoutingTransform, so trainer and generator expert
+                           choices don't drift apart; () trains the router
+    Per-role transforms go through ``apply_transforms(config.generator, ...)``.
     """
     if fp32_lm_head:
         kwargs["converters"] = [
@@ -48,11 +54,12 @@ def build_rl_model_configs(
             flavor, parallelism=generator_parallelism.to_training(), **kwargs
         ),
     )
-    # TODO: consider enabling router training, but with a lower lr
-    if freeze_moe_routing:
-        for model_config in model_configs:
-            for _fqn, moe_config, _parent, _attr in model_config.traverse(MoE.Config):
-                moe_config.freeze_expert_bias = True
-                moe_config.router.freeze_gate = True
-                moe_config.router.aux_loss = None
-    return model_configs
+    # A transform may return a new root (e.g. LoRA), so keep what it returns.
+    trainer_model, generator_model = (
+        cast(
+            Decoder.Config,
+            transform_model_config_(model_config, list(shared_transforms)),
+        )
+        for model_config in model_configs
+    )
+    return trainer_model, generator_model
