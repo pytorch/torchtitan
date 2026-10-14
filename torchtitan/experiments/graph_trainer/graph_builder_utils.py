@@ -30,6 +30,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.fx as fx
 
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     BOXED_CODEGEN_META,
@@ -44,6 +45,9 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     example_inputs_from_placeholders,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+    PagedStashManager,
+)
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     canonicalize_graph_pass,
@@ -53,10 +57,11 @@ from torchtitan.experiments.graph_trainer.passes import (
     eliminate_dead_code_pass,
     final_inductor_compile_passes,
 )
-from torchtitan.protocols.model import BaseModel
+from torchtitan.models.base.model import BaseModel
 
 
 if TYPE_CHECKING:
+    from torchtitan.distributed import ParallelismContext
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
 
@@ -69,12 +74,13 @@ class GraphTrainerConfigView:
 
     GraphPP is entered through TorchTitan's generic pipelining function API,
     which passes decomposed config fields instead of the full
-    ``GraphTrainer.Config``. PP graph construction reads only ``compile``,
-    ``parallelism``, and ``model``, so GraphPP exposes exactly those fields
-    instead of synthesizing a fake full trainer config. Both SPMD paths pass
-    the full ``GraphTrainer.Config``, which has the same fields.
+    ``GraphTrainer.Config``. PP graph construction reads only ``training``,
+    ``compile``, ``parallelism``, and ``model``, so GraphPP exposes exactly
+    those fields instead of synthesizing a fake full trainer config. Both SPMD
+    paths pass the full ``GraphTrainer.Config``, which has the same fields.
     """
 
+    training: TrainingConfig
     compile: GraphTrainerCompileConfig
     parallelism: ParallelismConfig
     model: BaseModel.Config
@@ -227,6 +233,7 @@ def _compile_graph_pp_module(
     *,
     compile_config: GraphTrainerCompileConfig,
     graph_name: str,
+    use_cuda_graph: bool,
 ) -> fx.GraphModule:
     """Compile one extracted GraphPP callable with GraphTrainer Inductor passes."""
     if compile_config is None or not compile_config.enable_passes:
@@ -238,7 +245,7 @@ def _compile_graph_pp_module(
         example_inputs,
         final_inductor_compile_passes(
             compile_config,
-            use_cuda_graph=False,
+            use_cuda_graph=use_cuda_graph,
             boxed_codegen=True,
         ),
         compile_config=compile_config,
@@ -261,6 +268,7 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
     traced: TracedResult,
     *,
     config: "GraphTrainer.Config | GraphTrainerConfigView",
+    parallelism_context: ParallelismContext | None,
     split_fsdp_param_unshard: bool,
     split_fsdp_grad_reduction: bool,
 ) -> Callable | None:
@@ -278,6 +286,11 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
 
     The returned pass is later configured for each extracted action graph.
     """
+    # Paged stash sizes its buffers by replaying the PP schedule over a
+    # per-stage footprint, so the slots this stage's passes register have to be
+    # attributed to this stage.
+    PagedStashManager.get_instance().current_stage_index = stage.stage_index
+
     compile_config: GraphTrainerCompileConfig = config.compile
     traced.gm = apply_graph_passes(
         traced.gm,
@@ -304,7 +317,7 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
     passes = compile_time_passes(
         traced,
         config,
-        use_cuda_graph=False,
+        parallelism_context=parallelism_context,
         include_inductor=False,
         include_mandatory_normalization=False,
     )

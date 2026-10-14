@@ -13,7 +13,7 @@ import torch
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 
 from .common_utils import annotate_graph_trainer_model, apply_simple_fsdp
 from .compile import apply_compile
@@ -36,13 +36,10 @@ class GraphTrainerModel:
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         compile_config: GraphTrainerCompileConfig,
-        ac_config: ActivationCheckpointingConfig | None,
+        activation_remat: ActivationRematConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ):
-        del ac_config
-        if skip_dp:
-            raise ValueError("GraphTrainer models do not support skip_dp=True.")
+        del activation_remat
         if (
             training.num_tokens_per_microbatch_per_dp_rank
             % parallelism_context.seq_len_divisor

@@ -6,7 +6,7 @@ This directory contains the implementation of the [FLUX](https://github.com/blac
 ## Prerequisites
 Install the required dependencies:
 ```bash
-pip install -r requirements-flux.txt
+pip install -r .ci/docker/requirements-flux.txt
 ```
 
 ## Usage
@@ -25,6 +25,15 @@ MODULE=torchtitan_recipes.tests.models.flux CONFIG=flux_debugmodel ./run_train.s
 If you want to train with other configs, run the following command:
 ```bash
 MODULE=torchtitan_recipes.models.flux CONFIG=flux_schnell ./run_train.sh
+```
+
+To generate images from a trained checkpoint, launch the inference entrypoint
+with the same launcher. Prompts are read from `config.inference.prompts_path`
+(default: [`inference/prompts.txt`](inference/prompts.txt)):
+```bash
+ENTRYPOINT=torchtitan.models.flux.inference.infer \
+MODULE=torchtitan_recipes.tests.models.flux CONFIG=flux_debugmodel_inference \
+./run_train.sh
 ```
 
 
@@ -84,6 +93,7 @@ def my_custom_mxfp8() -> FluxTrainer.Config:
     config = flux_schnell()  # or flux_dev()
     config.model = build_model_config(
         "flux-schnell",  # or "flux-dev" with flux_dev()
+        parallelism=config.parallelism,
         converters=[
             MXFP8LinearConverter.Config(
                 fqns=[

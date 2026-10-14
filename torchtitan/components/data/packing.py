@@ -122,6 +122,7 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
         input_parts: list[np.ndarray] = []
         label_parts: list[np.ndarray] = []
         position_parts: list[np.ndarray] = []
+        mask_parts: list[np.ndarray] = []
         num_tokens = 0
 
         while (
@@ -165,6 +166,12 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
             input_parts.append(np.asarray(sequence.input_ids[token_slice]))
             label_parts.append(np.asarray(sequence.labels[token_slice]))
             position_parts.append(np.arange(num_segment_tokens, dtype=np.int64))
+            # Keep padding from an upstream packer marked as padding.
+            mask_parts.append(
+                np.zeros(num_segment_tokens, dtype=np.bool_)
+                if sequence.padding_mask is None
+                else np.asarray(sequence.padding_mask[token_slice], dtype=np.bool_)
+            )
             num_tokens += num_segment_tokens
             self._remainder_offset += num_segment_tokens
             if self._remainder_offset == len(sequence.input_ids):
@@ -178,7 +185,7 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
         input_ids = np.concatenate(input_parts)
         labels = np.concatenate(label_parts)
         positions = np.concatenate(position_parts)
-        padding_mask = np.zeros(num_tokens, dtype=np.bool_)
+        padding_mask = np.concatenate(mask_parts)
         pad_len = self._num_tokens_per_row - num_tokens
         if pad_len:
             padding_positions = (

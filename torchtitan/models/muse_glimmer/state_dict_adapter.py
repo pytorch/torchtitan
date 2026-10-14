@@ -62,8 +62,9 @@ torchtitan mid-layer name note: torchtitan exposes the pre-FFN norm as
 import re
 from typing import Any, TYPE_CHECKING
 
+from torchtitan.models.base.state_dict_adapter import dtensor_safe, StateDictAdapter
+
 from torchtitan.models.common.rope import ComplexRoPE
-from torchtitan.protocols.state_dict_adapter import dtensor_safe, StateDictAdapter
 
 if TYPE_CHECKING:
     from .model import MuseGlimmerModel
@@ -209,7 +210,14 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
         ve = self.model_config.vision_encoder
         return ve.num_heads if ve is not None else None
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
+        if to_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         state_dict = self._native_fused_linears_to_hf(state_dict)
         n_heads, n_kv_heads, dim, head_dim = self._attn_geometry()
         v_heads = self._vision_num_heads()
@@ -247,7 +255,14 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
+        if is_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         self._validate_hf_rope_config(ComplexRoPE.Config)
 
         n_heads, n_kv_heads, dim, head_dim = self._attn_geometry()

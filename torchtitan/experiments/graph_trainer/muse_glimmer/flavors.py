@@ -8,22 +8,27 @@
 
 from dataclasses import fields
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
+from ..common_utils import disable_inplace_wgrad_accum
 from .model import GraphTrainerMuseGlimmerModel
 
 
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig,
     seq_len: int | None = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "varlen",
 ) -> GraphTrainerMuseGlimmerModel.Config:
     base = build_muse_glimmer_model_config(
-        flavor, seq_len=seq_len, attn_backend=attn_backend
+        flavor, parallelism=parallelism, seq_len=seq_len, attn_backend=attn_backend
     )
     config = GraphTrainerMuseGlimmerModel.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )
+    # GraphTrainer traces the backward.
+    disable_inplace_wgrad_accum(config)
     return config

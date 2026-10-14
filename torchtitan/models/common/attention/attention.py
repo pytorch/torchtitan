@@ -18,13 +18,10 @@ from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
-import torch.nn.functional as F
 import torch_remat as remat
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
-    sdpa_kernel,
-    SDPBackend,
 )
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
@@ -43,22 +40,22 @@ from torch.nn.attention.varlen import (
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
 if TYPE_CHECKING:
-    from .kda import KDAAttentionMetadata
+    from . import AttentionMetadata
 
 __all__ = [
+    "BaseAttention",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
     "InnerAttention",
     "QKVLinear",
-    "ScaledDotProductInnerAttention",
     "SlidingWindowFlexInnerAttention",
     "VarlenInnerAttention",
     "VarlenAttentionMetadata",
@@ -151,7 +148,7 @@ class InnerAttention(Module):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata | None":
+        ) -> "AttentionMetadata | None":
             """Build metadata consumed by this inner attention, if any.
 
             Inner attentions that do not require metadata inherit the default
@@ -253,10 +250,16 @@ class VarlenInnerAttention(InnerAttention):
 
         varlen_attn_fn = varlen_attn if out_transform is None else varlen_attn_with_lse
 
+        # Align Q/K with V while preserving its FP16/BF16 projection dtype.
+        attn_dtype = v_THV.dtype
+        if attn_dtype not in (torch.float16, torch.bfloat16):
+            # Preserve the legacy BF16 conversion for full-precision callers.
+            attn_dtype = torch.bfloat16
+
         result = varlen_attn_fn(
-            q_THK.to(torch.bfloat16),
-            k_THK.to(torch.bfloat16),
-            v_THV.to(torch.bfloat16),
+            q_THK.to(attn_dtype),
+            k_THK.to(attn_dtype),
+            v_THV.to(attn_dtype),
             cu_seq_q,
             cu_seq_k,
             max_q,
@@ -498,71 +501,6 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
                 # for batch invariance, we disable this optimization
                 separate_full_blocks=not is_in_batch_invariant_mode(),
             )
-
-
-# TODO: Verify whether SDPA support can be removed without losing performance
-# after folding: https://github.com/pytorch/torchtitan/pull/4218#pullrequestreview-4977638012
-class ScaledDotProductInnerAttention(InnerAttention):
-    """Inner attention using ``F.scaled_dot_product_attention`` with CP support.
-
-    ``forward()`` adapts Q/K from ``(B, L, H, K)`` to ``(B, H, L, K)`` and V
-    from ``(B, L, H, V)`` to ``(B, H, L, V)``, then converts the result back to
-    ``(B, L, H, V)``.
-
-    Note:
-        The forward function must have q, k, v as the first three arguments to be
-        compatible with _ContextParallel.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(InnerAttention.Config):
-        pass
-
-    sdpa_backends: list[SDPBackend] = []
-
-    def __init__(self, config: Config) -> None:
-        if config is None:
-            config = ScaledDotProductInnerAttention.Config()
-        super().__init__()
-        if not self.sdpa_backends:
-            self.sdpa_backends = [
-                SDPBackend.CUDNN_ATTENTION,
-                SDPBackend.FLASH_ATTENTION,
-                SDPBackend.MATH,
-            ]
-
-    def forward(
-        self,
-        q_BLHK: torch.Tensor,
-        k_BLHK: torch.Tensor,
-        v_BLHV: torch.Tensor,
-        *,
-        attention_metadata: None = None,
-        scale: float | None = None,
-        enable_gqa: bool = False,
-        is_causal: bool = True,
-        **kwargs,
-    ) -> torch.Tensor:
-        if attention_metadata is not None:
-            raise ValueError(
-                "ScaledDotProductInnerAttention does not support attention_metadata; it "
-                "only supports causal/non-causal attention via is_causal."
-            )
-        q_BHLK, k_BHLK, v_BHLV = (
-            q_BLHK.transpose(1, 2),
-            k_BLHK.transpose(1, 2),
-            v_BLHV.transpose(1, 2),
-        )
-        with sdpa_kernel(self.sdpa_backends, set_priority=True):
-            out_BHLV = F.scaled_dot_product_attention(
-                q_BHLK,
-                k_BHLK,
-                v_BHLV,
-                scale=scale,
-                is_causal=is_causal,
-                enable_gqa=enable_gqa,
-            )
-        return out_BHLV.transpose(1, 2)
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:

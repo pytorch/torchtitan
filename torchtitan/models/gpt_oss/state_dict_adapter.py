@@ -12,8 +12,9 @@ from typing import Any, TYPE_CHECKING
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
+from torchtitan.models.common.moe_state_dict_adapter import MoEStateDictAdapter
+
 from torchtitan.models.common.rope import CosSinRoPE
-from torchtitan.models.utils import MoEStateDictAdapter
 
 if TYPE_CHECKING:
     from .model import GptOssModel
@@ -82,7 +83,9 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             )
         return super().get_hf_storage_reader(path, thread_count=thread_count)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """
         Convert from a tt model state dict to a hf format state dict.
 
@@ -123,7 +126,9 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """
         Convert from hf format state dict to tt model state dict.
         """

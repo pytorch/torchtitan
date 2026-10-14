@@ -9,6 +9,11 @@
 from dataclasses import replace
 
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
+from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.mm_datasets import (
+    MM_DATASETS,
+    VisionProcessor,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -20,9 +25,7 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, LoRATransform
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS, VisionProcessor
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -50,8 +53,16 @@ def _multimodal_collator_config(
 
 def qwen35_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    attn_backend: str = "flex",
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -62,6 +73,7 @@ def qwen35_debugmodel(
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
+        parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
@@ -84,7 +96,7 @@ def qwen35_debugmodel(
             steps=10,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -107,7 +119,10 @@ def qwen35_debugmodel_varlen_attn(
 ) -> Trainer.Config:
     config = qwen35_debugmodel(seq_len=seq_len)
     config.model = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        parallelism=config.parallelism,
     )
     config.training.disable_cuda_graphs = True
     return config
@@ -115,8 +130,20 @@ def qwen35_debugmodel_varlen_attn(
 
 def qwen35_debugmodel_moe(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel_moe", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig(
+            data_parallel_shard_degree=2,
+            pipeline_parallel_degree=2,
+            num_pp_microbatches=2,
+            expert_parallel_degree=4,
+            tensor_parallel_degree=2,
+        )
+    model_config = build_model_config(
+        "debugmodel_moe", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -144,22 +171,18 @@ def qwen35_debugmodel_moe(
             steps=10,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=2,
-            pipeline_parallel_degree=2,
-            num_pp_microbatches=2,
-            expert_parallel_degree=4,
-            tensor_parallel_degree=2,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
 def qwen35_debugmodel_moe_lora(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    config = qwen35_debugmodel_moe(seq_len=seq_len)
+    config = qwen35_debugmodel_moe(seq_len=seq_len, parallelism=parallelism)
     return apply_transforms(
         config,
         [

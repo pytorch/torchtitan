@@ -13,6 +13,7 @@ schedule actions onto bound stage graph executors.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from enum import Enum
 from typing import Any, cast, TYPE_CHECKING
 
@@ -33,6 +34,7 @@ from torch.distributed.pipelining.schedules import (
     WAIT_REDUCE_GRAD,
 )
 from torch.distributed.pipelining.stage import _normalize_model_output_as_tuple
+from torch.utils.hooks import RemovableHandle
 
 from torchtitan.experiments.graph_trainer.common_utils import accumulate_param_grads_
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
@@ -460,6 +462,13 @@ class GraphRuntime:
     def pipeline_liveness_schedule(self) -> _PipelineScheduleRuntime:
         """Return the pre-rewrite schedule used for activation liveness."""
         return self._liveness_schedule
+
+    def register_post_metadata_inference_cleanup(
+        self,
+        callback: Callable[[], None],
+    ) -> RemovableHandle:
+        """Register cleanup on the schedule that executes metadata inference."""
+        return self.schedule.register_post_metadata_inference_cleanup(callback)
 
     def set_dist_moe_forward_context(
         self,

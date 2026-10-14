@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.protocols.module import Module
+from torchtitan.models.base.module import Module
 
 
 class HcSplitSinkhorn(Module):

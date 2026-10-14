@@ -6,6 +6,10 @@
 
 """Rank-wide memory and pipeline runtime for standalone Dist-MoE experts.
 
+With ``Config.inference`` set, the runtime serves a vLLM generator, which runs no
+backward and no pipeline: it plans scratch memory only, and each call carries
+only the rows its step needs (see ``set_num_local_input_tokens_per_call``).
+
 Shape suffixes in this file use ``T`` for local input tokens, ``K`` for selected
 experts, ``E`` for local experts, ``F`` for the expert intermediate dimension,
 and ``D`` for the model dimension.
@@ -29,6 +33,7 @@ from torch.distributed.pipelining.schedules import PipelineScheduleMulti
 from torch.utils.hooks import RemovableHandle
 
 from torchtitan.config import Configurable
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 
 from . import _dist_moe as dist_moe
 
@@ -43,6 +48,12 @@ logger = logging.getLogger(__name__)
 __all__ = ["DistMoeRuntime"]
 
 PPActivationSlotPolicy = Literal["stage_microbatch", "microbatch"]
+
+# Inference picks its BF16 expert-GEMM schedule from the call size, and some
+# schedules round a row differently depending on the call size or on the other
+# rows of its expert group. Batch-invariant mode fixes the schedule to the tile
+# shape of the trainer's fixed schedule.
+_BATCH_INVARIANT_BF16_GROUPED_GEMM_PRESET = "2cta2mma_bm512_bn256"
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,8 +161,13 @@ class DistMoeRuntime(Configurable):
         device: CUDA device that owns the Annex context and buffers.
         num_tokens_per_microbatch_per_dp_rank: Unsharded token count used to
             derive the exact local routing-input shape after CP and TP.
-        pp_schedule: Original runtime schedule used for activation-liveness
-            analysis, or ``None`` without pipeline parallelism.
+        pp_schedule: Schedule used for activation-liveness analysis, or
+            ``None`` without pipeline parallelism. Eager PP also executes
+            metadata inference on this schedule.
+        register_post_metadata_inference_cleanup: Optional registrar for the
+            schedule that executes metadata inference when it differs from
+            ``pp_schedule``. GraphPP uses this to retain its pre-rewrite
+            liveness schedule while registering cleanup on its runtime schedule.
         set_forward_context: GraphPP-owned setter for its slot resolver. Eager
             PP leaves this unset and the runtime registers directly on each
             local stage. Passing ``None`` to the setter removes the GraphPP
@@ -188,6 +204,10 @@ class DistMoeRuntime(Configurable):
                 as soon as each stage's backward releases its state.
                 ``"microbatch"`` retains one slot across all local stages for a
                 microbatch.
+            inference: Specialize the context for a vLLM generator: scratch-only
+                planning with no saved activations, and a per-step row count
+                instead of the planned maximum. The activation-slot controls
+                must stay ``None``; ``dist_moe`` rejects them for inference.
         """
 
         activation_slot_bytes: int | None = None
@@ -195,6 +215,7 @@ class DistMoeRuntime(Configurable):
         scratch_capacity_factor: float = 1.0
         vmm_capacity_factor: float | None = None
         pp_activation_slot_policy: PPActivationSlotPolicy = "stage_microbatch"
+        inference: bool = False
 
         def __post_init__(self) -> None:
             if (
@@ -251,6 +272,9 @@ class DistMoeRuntime(Configurable):
         device: torch.device,
         num_tokens_per_microbatch_per_dp_rank: int,
         pp_schedule: PipelineScheduleMulti | None,
+        register_post_metadata_inference_cleanup: (
+            Callable[[Callable[[], None]], RemovableHandle] | None
+        ) = None,
         set_forward_context: (
             Callable[[_DistMoeForwardContext | None], None] | None
         ) = None,
@@ -259,8 +283,10 @@ class DistMoeRuntime(Configurable):
         from .routed_experts import DistMoeRoutedExperts
 
         self.config = config
+        self._num_local_input_tokens_per_call: int | None = None
         self._closed = False
         self._forward_context_handles: list[RemovableHandle] = []
+        self._metadata_inference_cleanup_handle: RemovableHandle | None = None
         self._set_forward_context = set_forward_context
         self._modules = tuple(
             dict.fromkeys(
@@ -287,7 +313,7 @@ class DistMoeRuntime(Configurable):
             raise ValueError(
                 "Dist-MoE input tokens must divide evenly across CP and TP"
             )
-        num_local_input_tokens = (
+        max_num_local_input_tokens = (
             num_tokens_per_microbatch_per_dp_rank // num_token_shards
         )
 
@@ -334,7 +360,7 @@ class DistMoeRuntime(Configurable):
 
         context_config = self._resolve_context_config(
             self._modules[0],
-            num_local_input_tokens=num_local_input_tokens,
+            max_num_local_input_tokens=max_num_local_input_tokens,
             max_live_activation_slots=max_live_activation_slots,
             max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
             wgrad_dtype=wgrad_dtype,
@@ -342,7 +368,7 @@ class DistMoeRuntime(Configurable):
         for module in self._modules[1:]:
             candidate = self._resolve_context_config(
                 module,
-                num_local_input_tokens=num_local_input_tokens,
+                max_num_local_input_tokens=max_num_local_input_tokens,
                 max_live_activation_slots=max_live_activation_slots,
                 max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
                 wgrad_dtype=wgrad_dtype,
@@ -367,6 +393,14 @@ class DistMoeRuntime(Configurable):
         )
         try:
             if pp_schedule is not None:
+                cleanup_registrar = register_post_metadata_inference_cleanup
+                if cleanup_registrar is None:
+                    cleanup_registrar = (
+                        pp_schedule.register_post_metadata_inference_cleanup
+                    )
+                self._metadata_inference_cleanup_handle = cleanup_registrar(
+                    self.context.reset
+                )
                 if set_forward_context is None:
                     for stage in pp_schedule._stages:
                         self._forward_context_handles.append(
@@ -377,6 +411,9 @@ class DistMoeRuntime(Configurable):
             for module in self._modules:
                 module._runtime = self
         except Exception:
+            if self._metadata_inference_cleanup_handle is not None:
+                self._metadata_inference_cleanup_handle.remove()
+                self._metadata_inference_cleanup_handle = None
             for handle in reversed(self._forward_context_handles):
                 handle.remove()
             if set_forward_context is not None:
@@ -388,7 +425,7 @@ class DistMoeRuntime(Configurable):
         self,
         module: DistMoeRoutedExperts,
         *,
-        num_local_input_tokens: int,
+        max_num_local_input_tokens: int,
         max_live_activation_slots: int,
         max_moe_layers_per_activation_slot: int,
         wgrad_dtype: torch.dtype | None = None,
@@ -401,8 +438,16 @@ class DistMoeRuntime(Configurable):
                 total_scratch_capacity_factor=self.config.vmm_capacity_factor
             )
         )
+        activation_options: dict[str, float] = {}
+        if module.activation == "swiglu_clamped":
+            assert module.swiglu_alpha is not None
+            assert module.swiglu_limit is not None
+            activation_options = {
+                "swiglu_alpha": module.swiglu_alpha,
+                "swiglu_limit": module.swiglu_limit,
+            }
         return dist_moe.Config(
-            num_local_input_tokens=num_local_input_tokens,
+            max_num_local_input_tokens=max_num_local_input_tokens,
             hidden_dim=module.hidden_dim,
             intermediate_dim=module.intermediate_dim,
             top_k=module.top_k,
@@ -415,10 +460,24 @@ class DistMoeRuntime(Configurable):
             ),
             num_activation_slots=max_live_activation_slots,
             vmm=vmm,
-            bf16_grouped_gemm_preset=module.bf16_grouped_gemm_preset,
+            bf16_grouped_gemm_preset=self._bf16_grouped_gemm_preset(module),
             block_scaled=module.block_scaled_config,
+            activation=module.activation,
             wgrad_dtype=wgrad_dtype,
+            inference=self.config.inference,
+            **activation_options,
         )
+
+    def _bf16_grouped_gemm_preset(self, module: DistMoeRoutedExperts) -> str | None:
+        """Return the module's preset, or a fixed one for batch-invariant inference."""
+        if (
+            module.bf16_grouped_gemm_preset is None
+            and module.block_scaled_config is None
+            and self.config.inference
+            and is_in_batch_invariant_mode()
+        ):
+            return _BATCH_INVARIANT_BF16_GROUPED_GEMM_PRESET
+        return module.bf16_grouped_gemm_preset
 
     def _plan_pp_activation_slots(
         self,
@@ -477,10 +536,58 @@ class DistMoeRuntime(Configurable):
             ),
         )
 
+    def set_num_local_input_tokens_per_call(self, num_tokens: int) -> None:
+        """Set the row count every EP rank passes to the annex in this step.
+
+        Inference only. The caller must pass the same value on every EP rank,
+        e.g. the largest TP-local token count across vLLM DP replicas, so a
+        small decode step calls the annex at its own size.
+
+        In batch-invariant mode small calls are raised above
+        ``SCALE_AND_SUM_TILE_D_MAX_TOKENS`` rows: at or below it the annex's
+        post-expert top-k reduction uses another, equally correct, accumulation
+        order, so a token's output would depend on how many tokens share its
+        step. The extra rows are ``-1`` routes, which cost no dispatch or expert
+        work.
+        """
+        if not self.config.inference:
+            raise RuntimeError("Only Dist-MoE inference supports a per-call size")
+        max_num_tokens = self.context.max_num_local_input_tokens
+        if not 1 <= num_tokens <= max_num_tokens:
+            raise ValueError(
+                f"Per-call Dist-MoE token count {num_tokens} must be in "
+                f"[1, {max_num_tokens}]"
+            )
+        if is_in_batch_invariant_mode():
+            from dist_moe.kernels.triton.broadcast_n_reduction import (
+                SCALE_AND_SUM_TILE_D_MAX_TOKENS,
+            )
+
+            num_tokens = max(
+                num_tokens, min(SCALE_AND_SUM_TILE_D_MAX_TOKENS + 1, max_num_tokens)
+            )
+        self._num_local_input_tokens_per_call = num_tokens
+
+    def num_local_input_tokens_for_call(self, num_tokens: int) -> int:
+        """Return the row count every EP rank passes to the annex for a call.
+
+        Training passes its ``num_tokens`` local rows unchanged: every EP rank
+        runs the same microbatch shape. Inference uses the count the generator
+        set for this step, or the context maximum before the first step sets one.
+        """
+        if not self.config.inference:
+            return num_tokens
+        if self._num_local_input_tokens_per_call is None:
+            return self.context.max_num_local_input_tokens
+        return self._num_local_input_tokens_per_call
+
     def close(self) -> None:
         """Remove PP registrations, detach modules, and close Annex state."""
         if self._closed:
             return
+        if self._metadata_inference_cleanup_handle is not None:
+            self._metadata_inference_cleanup_handle.remove()
+            self._metadata_inference_cleanup_handle = None
         for handle in reversed(self._forward_context_handles):
             handle.remove()
         self._forward_context_handles.clear()
