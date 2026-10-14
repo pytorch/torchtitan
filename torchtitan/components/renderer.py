@@ -22,14 +22,14 @@ class RendererConfig(Configurable.Config):
 
     `RenderersConfigAdapter` adapts library configs, including in-tree renderers
     selected with `CustomRendererConfig`. A renderer usable with Verifiers exports
-    a library config through `to_renderers`.
+    a library config through `get_renderers_config`.
     """
 
     # pyrefly: ignore[bad-override]
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
         raise NotImplementedError
 
-    def to_renderers(self) -> PrimeRendererConfig:
+    def get_renderers_config(self) -> PrimeRendererConfig:
         """Return the config Verifiers can serialize and rebuild in its workers."""
         raise ValueError(
             f"{type(self).__name__} cannot be used with Verifiers: use "
@@ -73,9 +73,6 @@ class RenderersConfigAdapter(RendererConfig):
 
     def get_renderers_config(self) -> PrimeRendererConfig:
         return self.renderers_config
-
-    def to_renderers(self) -> PrimeRendererConfig:
-        return self.get_renderers_config()
 
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
         if self.renderers_config.name == "auto":
