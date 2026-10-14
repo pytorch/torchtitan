@@ -24,8 +24,8 @@ from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.controller_state import MirroredState
 from torchtitan.rl.trainer.rdma_microbatch import (
-    MicrobatchStream,
     MonarchRDMAMicrobatch,
+    RDMAMicrobatchPrefetcher,
 )
 from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.trainer import Trainer as DatasetTrainer
@@ -257,7 +257,9 @@ def test_forward_backward_uses_global_token_count() -> None:
         garbage_collector=SimpleNamespace(run=MagicMock()),
         optim=SimpleNamespace(zero_grad=MagicMock()),
         config=SimpleNamespace(
-            training=SimpleNamespace(disable_cuda_graphs=True),
+            training=SimpleNamespace(
+                disable_cuda_graphs=True, preprocess_microbatch_groups_lazily=False
+            ),
             parallelism=SimpleNamespace(
                 fsdp_defer_gradient_reduction=False,
                 fsdp_reshard_after_forward="default",
@@ -274,7 +276,6 @@ def test_forward_backward_uses_global_token_count() -> None:
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
         ),
         _cuda_graph_per_accumulation_group_enabled=False,
-        _preprocess_groups_lazily=False,
         sdc_replayer=None,
     )
     microbatch_groups = [[object()], [object()], [object()]]
@@ -290,7 +291,9 @@ def test_forward_backward_uses_global_token_count() -> None:
     engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
     assert engine.num_accumulation_steps == 3
-    engine._preprocess_microbatch_groups.assert_called_once_with(microbatch_groups)
+    engine._preprocess_microbatch_groups.assert_called_once_with(
+        microbatch_groups, global_routing_token_counts=torch.tensor([19])
+    )
 
 
 def test_close_stops_training_engine() -> None:
@@ -407,9 +410,9 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             global_loss_token_counts=torch.tensor([3]),
             global_routing_token_counts=torch.tensor([2]),
         )
-        # MonarchRDMAMicrobatches are read through the stream; by value, the column is passed as is.
+        # MonarchRDMAMicrobatches are read through the prefetcher; by value, the column is passed as is.
         groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
-        assert isinstance(groups, MicrobatchStream) == rdma
+        assert isinstance(groups, RDMAMicrobatchPrefetcher) == rdma
         assert list(groups) == [[batch], [batch]]
         assert trainer._step_num_tokens_per_dp_rank == (
             2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
