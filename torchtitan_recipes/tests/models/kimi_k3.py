@@ -149,7 +149,7 @@ def _dist_muon_optimizer(
     adamw_lr: float,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
-    attention = cast(KimiMLAAttention.Config, model_config.first_non_linear_attention)
+    attention = cast(KimiMLAAttention.Config, model_config.first_full_attention)
     delta_attention = next(
         layer.attention
         for layer in model_config.layers

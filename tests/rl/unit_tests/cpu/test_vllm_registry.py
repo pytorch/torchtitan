@@ -7,9 +7,11 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.attention import LinearAttention, VarlenInnerAttention
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.qwen3_5 import build_model_config
@@ -33,6 +35,42 @@ def test_hf_config_adds_no_stop_token():
         )
     )
     assert GenerationConfig.from_model_config(hf_config).eos_token_id is None
+
+
+def test_hf_config_uses_full_attention_after_sliding_attention(monkeypatch):
+    from torchtitan.models.llama3 import build_model_config as build_llama3_config
+    from torchtitan.rl.generator.vllm import attention
+
+    config = build_llama3_config("debugmodel", parallelism=ParallelismConfig())
+    config.layers[0].attention.inner_attention = VarlenInnerAttention.Config(
+        window_size=(128, 0)
+    )
+    get_dimensions = Mock(wraps=attention.get_attention_dimensions)
+    monkeypatch.setattr(attention, "get_attention_dimensions", get_dimensions)
+
+    model_config_to_hf_config_dict(config)
+
+    get_dimensions.assert_called_once_with(config.layers[1].attention, config.dim)
+
+
+@pytest.mark.parametrize("attention_type", ["sliding", "linear"])
+def test_hf_config_requires_full_attention(attention_type):
+    config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+    if attention_type == "linear":
+        config.layers = [
+            layer
+            for layer in config.layers
+            if isinstance(layer.attention, LinearAttention.Config)
+        ]
+    else:
+        for layer in config.layers:
+            if not isinstance(layer.attention, LinearAttention.Config):
+                layer.attention.inner_attention = VarlenInnerAttention.Config(
+                    window_size=(128, 0)
+                )
+
+    with pytest.raises(ValueError, match="no full attention layer"):
+        model_config_to_hf_config_dict(config)
 
 
 def test_gdn_hybrid_model_registers_state_copy_funcs(monkeypatch):

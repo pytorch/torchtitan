@@ -79,7 +79,7 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
         for layer_idx, layer in enumerate(tt_config.layers)
         if isinstance(layer.attention, KDA.Config)
     ]
-    mla = tt_config.first_non_linear_attention
+    mla = tt_config.first_full_attention
     kda = next(
         layer.attention
         for layer in tt_config.layers

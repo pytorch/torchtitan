@@ -130,17 +130,15 @@ class TestDecoderCpSharding(unittest.TestCase):
             SimpleNamespace(attention=None),
             SimpleNamespace(attention=sliding_attention),
         ]
+        full_attention = None
         if full_type in attention_metadata:
-            layers.append(
-                SimpleNamespace(
-                    attention=mock.Mock(
-                        spec=Attention.Config, inner_attention=full_type.Config()
-                    )
-                )
+            full_attention = mock.Mock(
+                spec=Attention.Config, inner_attention=full_type.Config()
             )
+            layers.append(SimpleNamespace(attention=full_attention))
         model = SimpleNamespace(
             config=SimpleNamespace(
-                first_non_linear_attention=sliding_attention,
+                first_full_attention=full_attention,
                 layers=layers,
             )
         )
@@ -189,15 +187,56 @@ class TestDecoderCpSharding(unittest.TestCase):
             attention_metadata=expected_metadata,
         )
 
-    def test_ptrr_uses_sliding_metadata_when_full_metadata_is_absent(self):
-        sliding_metadata = object.__new__(BlockMask)
+    def test_no_full_attention_disables_load_balancing(self):
+        from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
+        from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
 
-        self._assert_selected_ptrr_metadata(
-            attention_metadata={
-                KVAllGatherCPSlidingWindowFlexInnerAttention: sliding_metadata
-            },
-            expected_metadata=sliding_metadata,
-        )
+        model = SimpleNamespace(config=SimpleNamespace(first_full_attention=None))
+        for inner_attention in (
+            KVAllGatherCPSlidingWindowFlexInnerAttention,
+            ContextParallelInnerGDN,
+            ContextParallelInnerKDA,
+        ):
+            for load_balancer_type in (
+                HeadTailCPLoadBalancer,
+                PTRRFlexAttentionCPLoadBalancer,
+            ):
+                with self.subTest(
+                    attention=inner_attention.__name__,
+                    load_balancer=load_balancer_type.__name__,
+                ):
+                    metadata = object()
+                    input_dict = {
+                        "input": torch.arange(8),
+                        "attention_metadata": {inner_attention: metadata},
+                    }
+                    parallelism = SimpleNamespace(
+                        context_parallel_load_balancer=load_balancer_type.Config()
+                    )
+                    with mock.patch.object(
+                        load_balancer_type.Config, "build"
+                    ) as build_load_balancer, mock.patch.object(
+                        inner_attention,
+                        "prepare_cp_metadata",
+                        return_value=metadata,
+                    ) as prepare_metadata, mock.patch.object(
+                        context_parallel, "shard_tensors", return_value=input_dict
+                    ) as shard_tensors, mock.patch(
+                        "torchtitan.models.common.decoder.warn_once"
+                    ) as warn:
+                        Decoder._cp_shard(
+                            cast(Any, model),
+                            input_dict,
+                            input_shardings=decoder_input_sharding(),
+                            parallelism_context=cast(Any, SimpleNamespace()),
+                            parallelism=cast(Any, parallelism),
+                        )
+
+                    build_load_balancer.assert_not_called()
+                    prepare_metadata.assert_called_once_with(metadata, permutation=None)
+                    self.assertIsNone(shard_tensors.call_args.kwargs["permutation"])
+                    warn.assert_called_once()
+                    self.assertIn("no full attention", warn.call_args.args[1])
 
     def test_ptrr_prefers_full_metadata(self):
         full_metadata = object.__new__(BlockMask)
