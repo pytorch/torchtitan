@@ -251,10 +251,6 @@ class LRSchedulersContainer(Stateful, Configurable):
     schedulers: list[_HostLRScheduler]
 
     def __init__(self, optimizers: OptimizersContainer, lr_lambda: Callable) -> None:
-        assert (
-            len(optimizers) > 0
-        ), "Must have at least one optimizer to create LRScheduler"
-
         self.schedulers = [
             _HostLambdaLR(optimizer, lr_lambda) for optimizer in optimizers
         ]
@@ -302,6 +298,8 @@ class LRSchedulersContainer(Stateful, Configurable):
         # its own optimizer's base_lrs on load. Per-scheduler state (base_lrs,
         # _last_lr) is not saved because it's reconstructed from the optimizer
         # config at construction time.
+        if not self.schedulers:
+            return {}
         return {"last_epoch": self.schedulers[0].last_epoch}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -314,6 +312,8 @@ class LRSchedulersContainer(Stateful, Configurable):
         # of (last_epoch, base_lr) — LambdaLR with a pure lambda. If a stateful
         # scheduler (e.g. ReduceLROnPlateau) is added, this method must be updated
         # to restore additional state.
+        if not self.schedulers:
+            return
         last_epoch = state_dict["last_epoch"]
         for scheduler in self.schedulers:
             scheduler.last_epoch = last_epoch

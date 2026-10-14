@@ -177,6 +177,40 @@ class TestOptimizerConfig(unittest.TestCase):
         self.assertEqual(groups[0]["lr"], 1e-3)
         self.assertEqual(groups[0]["weight_decay"], 0.1)
 
+    def test_frozen_model_part_gets_no_optimizer(self):
+        """A model part without trainable parameters is skipped, the others still train."""
+        frozen, trained = SimpleModel(), SimpleModel()
+        frozen.requires_grad_(False)
+        config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, fused=False)]
+        )
+
+        container = config.build(model_parts=[frozen, trained])
+
+        self.assertEqual(len(container), 1)
+        optimized = {
+            id(p)
+            for group in container.optimizers[0].param_groups
+            for p in group["params"]
+        }
+        self.assertEqual(optimized, {id(p) for p in trained.parameters()})
+
+    def test_model_with_nothing_to_train_gets_an_empty_optimizer(self):
+        """Without trainable parameters the container is an Optimizer with one empty group."""
+        frozen = SimpleModel()
+        frozen.requires_grad_(False)
+        config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, fused=False)]
+        )
+
+        container = config.build(model_parts=[frozen])
+
+        self.assertEqual(len(container), 0)
+        self.assertEqual([group["params"] for group in container.param_groups], [[]])
+        container.zero_grad()
+        container.step()
+        self.assertEqual(container.state_dict(), {})
+
     def test_default_adam(self):
         """All parameters can use a configured Adam optimizer."""
         model = SimpleModel()
