@@ -239,7 +239,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization(
         parallelism=config.parallelism,
         training=config.training,
         debug=config.debug,
-        activation_checkpoint=config.activation_checkpoint,
+        activation_remat=config.activation_remat,
         max_num_documents=None,
     )
 

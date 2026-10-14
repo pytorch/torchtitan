@@ -24,7 +24,7 @@ from torchtitan.components.loss import LossFunction
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.pipeline_parallel import (
     _build_get_mesh_callback,
     _build_pipeline_schedule,
@@ -768,7 +768,7 @@ def graph_pipeline_llm(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: GraphTrainerCompileConfig,
-    ac_config: ActivationCheckpointingConfig,
+    activation_remat: ActivationRematConfig | None,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
@@ -782,7 +782,7 @@ def graph_pipeline_llm(
         training: Training config used for local batch size.
         parallelism: Parallelism config used for PP schedule and module split.
         compile_config: GraphTrainer compile config.
-        ac_config: Activation checkpointing config forwarded to the model.
+        activation_remat: Activation remat config forwarded to the model.
         dump_folder: Artifact/debug output directory.
         device: Local device for the stage.
         model_config: Model config consumed by stage graph passes.
@@ -827,7 +827,7 @@ def graph_pipeline_llm(
             training=training,
             parallelism=parallelism,
             compile_config=compile_config,
-            ac_config=ac_config,
+            activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
         logger.info(
