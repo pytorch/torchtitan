@@ -50,7 +50,7 @@ from torchtitan.rl.model.vllm_registry import (
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
 from torchtitan.rl.rollout.types import Completion
-from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.tools.utils import device_type, has_cuda_capability
 
 logger = logging.getLogger(__name__)
 
@@ -956,6 +956,10 @@ class VLLMGenerator(Configurable):
 
         # Build vLLM engine
         enable_ep = config.parallelism.expert_parallel_degree > 1
+        # CUDA graphs and vLLM's FLEX/CUSTOM backends are CUDA-only.
+        on_xpu = device_type == "xpu"
+        if on_xpu and config.cuda_graph.mode != "NONE":
+            logger.warning("XPU: ignoring cuda_graph.mode")
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
             # config is sourced from TorchTitan's model config via
@@ -982,10 +986,12 @@ class VLLMGenerator(Configurable):
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
-            enforce_eager=config.cuda_graph.mode == "NONE",
+            enforce_eager=on_xpu or config.cuda_graph.mode == "NONE",
             attention_config=AttentionConfig(
                 backend=(
-                    AttentionBackendEnum.FLEX_ATTENTION
+                    None  # vLLM picks its own backend
+                    if on_xpu
+                    else AttentionBackendEnum.FLEX_ATTENTION
                     if isinstance(attention_backend, FlexInnerAttention.Config)
                     else AttentionBackendEnum.CUSTOM
                 ),
@@ -1023,11 +1029,15 @@ class VLLMGenerator(Configurable):
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
         expert_sequence_parallel_size = config.parallelism.expert_sequence_parallel_size
-        vllm_compilation_config = config.cuda_graph.get_vllm_compilation_config(
-            max_num_seqs=self._max_num_seqs,
-            max_num_batched_tokens=config.max_num_batched_tokens,
-            expert_sequence_parallel_size=expert_sequence_parallel_size,
-            enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
+        vllm_compilation_config = (
+            None
+            if on_xpu
+            else config.cuda_graph.get_vllm_compilation_config(
+                max_num_seqs=self._max_num_seqs,
+                max_num_batched_tokens=config.max_num_batched_tokens,
+                expert_sequence_parallel_size=expert_sequence_parallel_size,
+                enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
+            )
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config

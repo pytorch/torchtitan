@@ -55,6 +55,7 @@ from torchtitan.rl.generator import (
     VLLMCudaGraphConfig,
     VLLMGenerator,
 )
+from torchtitan.rl.model import vllm_worker
 from torchtitan.rl.model.vllm_registry import register_to_vllm
 from torchtitan.rl.model.vllm_worker import (
     TorchTitanGPUModelRunner,
@@ -65,6 +66,7 @@ from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 
 
 class _FakeRenderer:
@@ -734,14 +736,26 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
     )
 
 
-def test_only_weights_use_cumem_allocator(monkeypatch):
-    base_worker_cls = TorchTitanGPUWorker.__mro__[1]
+# The XPU worker classes are defined only when the device is XPU.
+_ON_XPU = hasattr(vllm_worker, "TorchTitanXPUWorker")
+xpu_only = pytest.mark.skipif(not _ON_XPU, reason="XPU worker is defined on XPU only")
+if _ON_XPU:
+    from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+    from vllm.v1.worker.xpu_worker import XPUWorker
+
+
+@pytest.mark.parametrize(
+    ("worker_cls", "base_worker_cls"),
+    [(TorchTitanGPUWorker, GPUWorker)]
+    + ([(vllm_worker.TorchTitanXPUWorker, XPUWorker)] if _ON_XPU else []),
+)
+def test_only_weights_use_cumem_allocator(monkeypatch, worker_cls, base_worker_cls):
     monkeypatch.setattr(
         base_worker_cls,
         "_maybe_get_memory_pool_context",
         lambda self, tag: nullcontext(tag),
     )
-    worker = object.__new__(TorchTitanGPUWorker)
+    worker = object.__new__(worker_cls)
 
     with worker._maybe_get_memory_pool_context("kv_cache") as value:
         assert value is None
@@ -749,6 +763,40 @@ def test_only_weights_use_cumem_allocator(monkeypatch):
         assert value == "weights"
     with worker._maybe_get_memory_pool_context("other") as value:
         assert value is None
+
+
+@xpu_only
+def test_xpu_model_runner_keeps_torchtitan_overrides():
+    # TorchTitan overrides win over XPUModelRunner, which still precedes GPUModelRunner.
+    TorchTitanXPUModelRunner = vllm_worker.TorchTitanXPUModelRunner
+    mro = TorchTitanXPUModelRunner.__mro__
+    assert mro.index(TorchTitanGPUModelRunner) < mro.index(XPUModelRunner)
+    for name in ("load_model", "_pad_for_sequence_parallelism"):
+        assert getattr(TorchTitanXPUModelRunner, name) is getattr(
+            TorchTitanGPUModelRunner, name
+        )
+
+
+@xpu_only
+def test_xpu_worker_builds_torchtitan_runner(monkeypatch):
+    TorchTitanXPUModelRunner = vllm_worker.TorchTitanXPUModelRunner
+    TorchTitanXPUWorker = vllm_worker.TorchTitanXPUWorker
+    built = []
+    monkeypatch.setattr(
+        TorchTitanXPUModelRunner,
+        "__init__",
+        lambda self, vllm_config, device: built.append((vllm_config, device)),
+    )
+    worker = object.__new__(TorchTitanXPUWorker)
+    worker.vllm_config, worker.device = "cfg", "xpu:0"
+
+    worker.use_v2_model_runner = False
+    assert isinstance(worker._make_model_runner(), TorchTitanXPUModelRunner)
+    assert built == [("cfg", "xpu:0")]
+
+    worker.use_v2_model_runner = True
+    with pytest.raises(ValueError, match="V1 model runner"):
+        worker._make_model_runner()
 
 
 def test_cuda_graph_default_mode_is_full():
