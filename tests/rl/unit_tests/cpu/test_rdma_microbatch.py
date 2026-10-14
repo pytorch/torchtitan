@@ -17,20 +17,20 @@ import numpy as np
 import pytest
 import torch
 from torch.utils import _pytree as pytree
-from torchtitan.rl.components.batcher import Batcher, TrainingMicrobatch
-from torchtitan.rl.components.training_sample_builder import (
-    TrainingSample,
-    TrainingSampleGroup,
-)
+from torchtitan.rl.rollout.types import RolloutTurnID
 
-from torchtitan.rl.distributed import rdma_microbatch
-from torchtitan.rl.distributed.rdma_microbatch import (
+from torchtitan.rl.trainer import rdma_microbatch
+from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
+from torchtitan.rl.trainer.rdma_microbatch import (
     _NUM_MICROBATCHES_READ_AHEAD,
     _TensorRef,
     MicrobatchStream,
     MonarchRDMAMicrobatch,
 )
-from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.trainer.training_sample_builder import (
+    TrainingSample,
+    TrainingSampleGroup,
+)
 
 
 class _FakeRDMABuffer:
