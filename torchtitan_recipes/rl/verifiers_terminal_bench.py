@@ -505,7 +505,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
                 max_context_length=max_context_length,
             ),
             parallelism=trainer_parallelism,
-            activation_checkpoint=FullAC.Config(),
+            activation_remat=FullActivationRematConfig(),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=20,

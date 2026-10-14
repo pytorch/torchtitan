@@ -297,7 +297,7 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
     assert config.generator.sampling.max_tokens == 4096
     assert config.rollouter.verifiers_env_server.environment.agent.max_turns == 8
     assert config.generator.cuda_graph.mode == "NONE"
-    assert isinstance(config.trainer.activation_checkpoint, FullAC.Config)
+    assert isinstance(config.trainer.activation_remat, FullActivationRematConfig)
     assert _num_kv_heads(config.generator.model) == 2
     assert config.trainer.parallelism.tensor_parallel_degree == 2
     assert config.generator.parallelism.tensor_parallel_degree == 2
