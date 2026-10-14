@@ -271,27 +271,32 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
+        # HiMidLoLinear returns FP32, so configured scoring runs in FP32.
+        gate_TE = self.gate(x_TD)
+        # The scoring function reads the router gate projection output with bare ops.
+        remat.recompute_needs_tensor(gate_TE)
+
         if padding_mask_T is not None:
             if padding_mask_T.dtype != torch.bool:
                 raise ValueError(
                     "padding_mask_T must have dtype bool, "
                     f"got {padding_mask_T.dtype}."
                 )
-            if padding_mask_T.shape != x_TD.shape[:-1]:
+            if padding_mask_T.shape != gate_TE.shape[:-1]:
                 raise ValueError(
                     "padding_mask_T must have shape matching the routing-map "
-                    f"token axis, got {tuple(padding_mask_T.shape)} for input "
-                    f"{tuple(x_TD.shape)}."
+                    f"token axis, got {tuple(padding_mask_T.shape)} for gate output "
+                    f"{tuple(gate_TE.shape)}."
                 )
 
-        # HiMidLoLinear returns FP32, so configured scoring runs in FP32. It stays
-        # out of the router region: its in-place weight-grad accumulation can't be traced.
-        gate_TE = self.gate(x_TD)
-        # The scoring function reads the router gate projection output with bare ops.
-        remat.recompute_needs_tensor(gate_TE)
-        scores_TE, topk_scores_TK, topk_expert_ids_TK, routing_map_TE = self._route(
-            gate_TE,
-            expert_bias_E,
+        (
+            scores_TE,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            routing_map_TE,
+        ) = self._score_and_select_experts(
+            gate_TE=gate_TE,
+            expert_bias_E=expert_bias_E,
             padding_mask_T=padding_mask_T,
             **router_kwargs,
         )
@@ -323,12 +328,8 @@ class TokenChoiceTopKRouter(Module):
             routing_map_TE,
         )
 
-    # Compiled only when "router" is listed in the model's local_compile_regions.
-    # The expert counts and the aux loss stay in forward: under compile
-    # torch_remat.is_recomputing() is always False, so a RegionAC recompute pass
-    # would count them twice.
-    @local_compile("router", batch_invariant=False)
-    def _route(
+    @local_compile("moe_router_topk", batch_invariant=False)
+    def _score_and_select_experts(
         self,
         gate_TE: torch.Tensor,
         expert_bias_E: torch.Tensor | None,
@@ -336,7 +337,19 @@ class TokenChoiceTopKRouter(Module):
         padding_mask_T: torch.Tensor | None,
         **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Score the gate logits and pick experts: ``forward`` after the gate, without side effects.
+        """Score the gate output and pick each token's experts.
+
+            gate -> [score, top-k, gather, normalize, routing map] -> counts, aux loss
+            eager    this region                                      eager
+
+        Outside the region:
+        - gate: ``HiMidLoLinear`` raises when traced with ``inplace_wgrad_accum=True`` (the
+          default); with it off, a compiled region would round its fp32 weight grad to bf16.
+        - counts, aux loss: they update buffers. Compiled, ``remat.is_recomputing()`` is
+          always False, so a recompute pass would count them twice.
+        Don't enable the region (``local_compile_regions``) for a router whose
+        ``_select_experts`` updates state, such as ``QuantileBalancedTopKRouter``'s
+        histogram: a recompute pass would update it twice.
 
         Returns:
             scores_TE: Router scores ``(T, E)`` in FP32.
@@ -561,7 +574,11 @@ def _microbatch_load_balance_local_stats(
 
 @local_compile("moe_aux_loss", batch_invariant=False)
 def _expert_counts(routing_map_TE: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    """Routed-token count per expert ``(E,)`` over this rank's tokens, in ``dtype``."""
+    """Routed-token count per expert ``(E,)`` over this rank's tokens, in ``dtype``.
+
+    Compiled, the cast fuses into the sum: no ``[T, E]`` float copy
+    (16k tokens, E=256, H100: 32 -> 6 us).
+    """
     # Cast before summing: casting a Partial tensor is non-linear and
     # rejected by spmd_types.
     return routing_map_TE.to(dtype).sum(dim=0)
@@ -734,7 +751,7 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
         # must match the original forward even if later microbatches' forwards
         # run before this one's checkpoint replay (pipeline schedules). A
         # retained torch_remat region skips the update, the count all-reduce,
-        # and the snapshot read during RegionAC recompute and reuses the
+        # and the snapshot read during recompute and reuses the
         # original snapshot.
         cumulative_counts_E = remat.region(
             self._accumulate_expert_counts,

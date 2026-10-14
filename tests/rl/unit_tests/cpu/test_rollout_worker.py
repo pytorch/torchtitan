@@ -15,15 +15,15 @@ from renderers import ParsedResponse, Qwen3RendererConfig
 from torchtitan.components.renderer import from_renderers
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 
-from torchtitan.rl.generator import SamplingConfig
+from torchtitan.rl.generator.generator import SamplingConfig
 from torchtitan.rl.rollout import RolloutStatus
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.rollouter import RolloutWorker
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 
 class _Config:

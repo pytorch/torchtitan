@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 90
     container:
       image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04
-      # TorchStore stages same-host weight syncs in /dev/shm; Docker's 64 MiB
+      # TorchStore stages same-host model state dict transfers in /dev/shm; Docker's 64 MiB
       # default cannot hold the Dist-MoE test model's weights (~600 MB in bf16).
       options: --gpus all --shm-size=16g
     steps:

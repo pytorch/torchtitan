@@ -123,8 +123,15 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 if not hf_key.startswith("model.visual.")
             }
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """Convert torchtitan state dict to HuggingFace Qwen3.5 format."""
+        if to_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         state_dict = self._native_fused_linears_to_hf(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
@@ -248,8 +255,15 @@ class Qwen35StateDictAdapter(StateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """Convert HuggingFace Qwen3.5 state dict to torchtitan format."""
+        if is_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         tt_state_dict = {}
 
         # HF ties lm_head with embed_tokens — copy if missing

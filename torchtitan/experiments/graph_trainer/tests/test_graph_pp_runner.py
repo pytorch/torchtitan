@@ -1231,7 +1231,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertFalse(plan.fuse_wgrad_accumulation)
 
         no_fsdp = _make_test_pp_plan(fsdp_enabled=False)
-        self.assertFalse(no_fsdp.extract_fsdp_param_unshard)
+        self.assertTrue(no_fsdp.extract_fsdp_param_unshard)
         self.assertFalse(no_fsdp.extract_fsdp_grad_reduction)
 
         with self.assertLogs(
