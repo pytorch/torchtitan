@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Opt-in RDMA fast path for trainer microbatches (`Batcher.Config.rdma_min_tensor_bytes`): the
-process that registers them keeps the large tensors, and each trainer rank reads its own column.
+"""Opt-in RDMA path for trainer microbatches (`Batcher.Config.rdma_min_tensor_bytes`): the process
+that registers them keeps the large tensors, and each trainer rank reads its own column.
 """
 
 from __future__ import annotations

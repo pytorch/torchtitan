@@ -103,7 +103,8 @@ def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
 
 
 def _build_batcher(rdma_min_tensor_bytes: int | None) -> Batcher:
-    # One group per batch, one 256-token microbatch: `input` and `labels` (int64, 2 KiB) pass 1 KiB.
+    # One group per batch, one 256-token microbatch: the int64 (2 KiB) and float32 (1 KiB) fields
+    # reach 1 KiB; the bool masks and token counts stay in the message.
     return Batcher.Config(rdma_min_tensor_bytes=rdma_min_tensor_bytes).build(
         num_tokens_per_microbatch_per_dp_rank=256,
         max_context_length=256,
