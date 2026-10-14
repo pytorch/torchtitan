@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import pytest
 import torch
 from torch.distributed.tensor import DTensor
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -17,6 +18,8 @@ from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.lora import _LoRAMixin, merge_lora_state_dict
 from torchtitan.models.llama3 import build_model_config
+
+pytestmark = pytest.mark.multi_gpu
 
 
 class TestMergeLoRAStateDictFSDPTensorParallel(DTensorTestBase):

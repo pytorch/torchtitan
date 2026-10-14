@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import pytest
 import torch
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -12,6 +13,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.utils import clip_grad_norm_
+
+pytestmark = pytest.mark.multi_gpu
 
 
 class TestClipGradNormPipelineRankWithoutGradients(DTensorTestBase):
