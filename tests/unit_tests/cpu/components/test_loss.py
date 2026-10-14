@@ -922,9 +922,9 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
     def test_frozen_features_accumulate_head_gradients(self):
         """Head-only training matches cross entropy across chunks and microbatches."""
-        torch.manual_seed(42)
         for num_chunks in (1, 2, 4):
             with self.subTest(num_chunks=num_chunks):
+                torch.manual_seed(42)
                 head = nn.Linear(5, 17)
                 reference_head = nn.Linear(5, 17)
                 reference_head.load_state_dict(head.state_dict())
@@ -933,25 +933,57 @@ class TestChunkedLossWrapper(unittest.TestCase):
                 )
                 chunked_loss.set_lm_head(head)
                 for _ in range(2):
-                    hidden = torch.randn(8, 5)
+                    hidden_TD = torch.randn(8, 5)
                     labels = torch.randint(0, 17, (8,))
                     labels[1] = IGNORE_INDEX
                     token_count = (labels != IGNORE_INDEX).sum()
                     reference_loss = (
-                        F.cross_entropy(reference_head(hidden), labels, reduction="sum")
+                        F.cross_entropy(
+                            reference_head(hidden_TD), labels, reduction="sum"
+                        )
                         / token_count
                     )
 
-                    loss, _ = chunked_loss(hidden, labels, token_count)
+                    loss, _ = chunked_loss(hidden_TD, labels, token_count)
                     loss.backward()
                     reference_loss.backward()
 
                     torch.testing.assert_close(loss, reference_loss)
-                    self.assertIsNone(hidden.grad)
+                    self.assertIsNone(hidden_TD.grad)
                     for actual, expected in zip(
                         head.parameters(), reference_head.parameters(), strict=True
                     ):
                         torch.testing.assert_close(actual.grad, expected.grad)
+
+    def test_detached_chunk_loss_with_trainable_features_raises(self):
+        """A detached chunk must not silently shift later decoder gradients."""
+        for detached_chunk in (0, 1, 2):
+            for constant_loss in (False, True):
+                with self.subTest(
+                    detached_chunk=detached_chunk, constant_loss=constant_loss
+                ):
+                    torch.manual_seed(42)
+                    _, chunked_loss = self._make_model_and_loss(5, 17, 3)
+                    inner_loss = chunked_loss.loss_fn
+                    chunk_index = 0
+
+                    def loss_fn(*args, **kwargs):
+                        nonlocal chunk_index
+                        loss, metrics = inner_loss(*args, **kwargs)
+                        if chunk_index == detached_chunk:
+                            loss = (
+                                loss.new_zeros(()) if constant_loss else loss.detach()
+                            )
+                        chunk_index += 1
+                        return loss, metrics
+
+                    chunked_loss.loss_fn = loss_fn
+                    hidden_TD = torch.randn(6, 5, requires_grad=True)
+                    labels = torch.randint(0, 17, (6,))
+
+                    with self.assertRaisesRegex(RuntimeError, "does not require grad"):
+                        chunked_loss(hidden_TD, labels)
+                    self.assertIsNone(hidden_TD.grad)
 
     def test_no_grad_leaves_head_and_features_unchanged(self):
         """Validation does not backpropagate even with trainable input tensors."""

@@ -575,14 +575,15 @@ class ChunkedLossWrapper(BaseLoss):
         with ``_skip_lm_head=True``. Tensor inputs must be paired with tensor
         labels; tuple inputs must contain one labels tensor per prediction.
 
-        Per-chunk backward runs when the loss requires gradients, including
-        training the lm_head on frozen decoder outputs. Under ``no_grad``,
-        runs chunked forward only.
+        Per-chunk backward runs when the decoder outputs or loss require
+        gradients, including training the lm_head on frozen decoder outputs.
+        Under ``no_grad``, runs chunked forward only.
 
         Returns a differentiable loss and metrics. When ``.backward()`` is called
         on the loss, it triggers backward through the decoder via a custom
-        autograd Function. With frozen decoder outputs, head gradients are
-        already accumulated and the final backward is a no-op.
+        autograd Function. With frozen decoder outputs and a trainable head,
+        head gradients are already accumulated. The returned loss is a leaf
+        whose backward accumulates only its own gradient.
         """
         from torch.distributed._composable.fsdp import FSDPModule
 
@@ -719,7 +720,7 @@ class ChunkedLossWrapper(BaseLoss):
                 metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
                 total_loss = total_loss + chunk_loss.detach()
 
-                if chunk_loss.requires_grad:
+                if requires_grad or chunk_loss.requires_grad:
                     requires_backward = True
                     with spmd.no_typecheck():
                         chunk_loss.backward()
@@ -736,6 +737,7 @@ class ChunkedLossWrapper(BaseLoss):
                 lm_head.set_reshard_after_backward(True)
                 lm_head.reshard()
             if not requires_grad:
+                # Scaling this leaf cannot rescale already accumulated head gradients.
                 return total_loss.requires_grad_(requires_backward), metrics
 
             accumulated_grads = tuple(
