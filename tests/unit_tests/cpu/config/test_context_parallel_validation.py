@@ -29,8 +29,10 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
             llama3_debugmodel_varlen_attn,
         )
 
-        config = (llama3_debugmodel_varlen_attn if varlen else llama3_debugmodel)(
-            seq_len=512
+        config = (
+            llama3_debugmodel_varlen_attn(seq_len=512)
+            if varlen
+            else llama3_debugmodel(seq_len=512, attn_backend="flex")
         )
         if cp_kernel:
             # Apply the transform without its final validation.
@@ -113,7 +115,7 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         )
         from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
-        config = llama3_debugmodel(seq_len=512)
+        config = llama3_debugmodel(seq_len=512, attn_backend="flex")
         attention = config.model.layers[0].attention
         if n_heads is not None:
             attention.n_heads = n_heads
@@ -225,7 +227,7 @@ class TestHeadDivisibility(unittest.TestCase):
     ):
         from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
-        config = llama3_debugmodel(seq_len=512)
+        config = llama3_debugmodel(seq_len=512, attn_backend="flex")
         attention = config.model.layers[0].attention
         attention.n_heads = n_heads
         attention.n_kv_heads = n_kv_heads
@@ -301,7 +303,7 @@ class TestShippedCpRecipes(unittest.TestCase):
             deepseek_v3_debugmodel_mtp,
         )
 
-        config = deepseek_v3_debugmodel_mtp()
+        config = deepseek_v3_debugmodel_mtp(attn_backend="flex")
         config.parallelism.context_parallel_degree = 2
         apply_transforms(
             config,

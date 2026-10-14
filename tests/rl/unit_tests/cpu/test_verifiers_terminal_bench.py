@@ -138,8 +138,8 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert config.generation_server.max_rollout_tokens == MAX_CONTEXT_LENGTH
     assert environment.agent.max_turns == MAX_TURNS
     assert environment.agent.timeout.rollout == 7200
-    assert environment.taskset == config.train_dataset.verifiers_taskset
-    assert config.train_dataset.verifiers_taskset.dataset == TRAIN_DATASET
+    assert environment.taskset == config.training_dataloader.dataset.verifiers_taskset
+    assert config.training_dataloader.dataset.verifiers_taskset.dataset == TRAIN_DATASET
     assert config.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
     assert config.verifiers_env_server.local_taskset_module == taskset.__name__
     worker_config = resolve_env_config(env_config_data(environment))
@@ -252,7 +252,10 @@ def test_training_recipe_uses_separate_datasets() -> None:
     assert config.generator.cuda_graph.mode == "FULL_DECODE_ONLY"
     assert config.num_generators == 8
     assert config.generator.parallelism.data_parallel_degree == 1
-    assert config.rollouter.train_dataset.verifiers_taskset.dataset == TRAIN_DATASET
+    assert (
+        config.rollouter.training_dataloader.dataset.verifiers_taskset.dataset
+        == TRAIN_DATASET
+    )
     assert config.rollouter.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
 
 
