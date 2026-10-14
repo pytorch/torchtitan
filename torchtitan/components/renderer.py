@@ -71,7 +71,7 @@ class RenderersConfigAdapter(RendererConfig):
     def to_dict(self) -> dict[str, Any]:
         return {"renderers_config": self.renderers_config.model_dump(mode="json")}
 
-    def to_renderers_config(self) -> PrimeRendererConfig:
+    def get_renderers_config(self) -> PrimeRendererConfig:
         return self.renderers_config
 
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
