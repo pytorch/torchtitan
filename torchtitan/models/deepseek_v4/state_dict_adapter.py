@@ -169,7 +169,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             return self._abstract_key(key, count=count) in self.from_hf_map
         return False
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         state_dict = self._native_fused_linears_to_hf(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
@@ -190,7 +192,11 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                 hf_state_dict[key] = value
 
         if delegated_state_dict:
-            hf_state_dict.update(super().to_hf(delegated_state_dict))
+            hf_state_dict.update(
+                super().to_hf(
+                    delegated_state_dict, to_quantized_layout=to_quantized_layout
+                )
+            )
         # The shared V3 conversion numbers MTP layers after the main layers.
         for key in list(hf_state_dict):
             if key.startswith("layers."):
@@ -204,7 +210,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                     hf_state_dict[mtp_key] = hf_state_dict.pop(key)
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         state_dict = {}
         delegated_hf_state_dict = {}
 
@@ -232,5 +240,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                 state_dict[key] = value
 
         if delegated_hf_state_dict:
-            state_dict.update(super().from_hf(delegated_hf_state_dict))
+            state_dict.update(
+                super().from_hf(
+                    delegated_hf_state_dict, is_quantized_layout=is_quantized_layout
+                )
+            )
         return self._native_fused_linears_from_hf(state_dict)

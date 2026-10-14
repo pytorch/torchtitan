@@ -11,8 +11,8 @@ import torch
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention.kda import InnerKDA
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.model import gdn, kda
-from torchtitan.rl.model.vllm_registry import model_config_to_hf_config_dict
+from torchtitan.rl.generator.vllm import gdn, kda
+from torchtitan.rl.generator.vllm.registry import model_config_to_hf_config_dict
 
 from transformers import GenerationConfig, PretrainedConfig
 

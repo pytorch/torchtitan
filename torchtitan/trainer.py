@@ -101,7 +101,7 @@ class Trainer(Configurable):
                     parallelism=self.parallelism,
                     training=self.training,
                     debug=self.debug,
-                    activation_checkpoint=self.activation_checkpoint,
+                    activation_remat=self.activation_remat,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
 
@@ -162,7 +162,7 @@ class Trainer(Configurable):
             parallelism=config.parallelism,
             training=config.training,
             debug=config.debug,
-            activation_checkpoint=config.activation_checkpoint,
+            activation_remat=config.activation_remat,
             max_num_documents=config.dataloader.max_num_documents,
         )
 
