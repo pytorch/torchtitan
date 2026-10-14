@@ -17,8 +17,8 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from torchtitan.rl.model.vllm_worker import TorchTitanGPUModelRunner
-from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
+from torchtitan.rl.generator.vllm.model_wrapper import VLLMModelWrapper
+from torchtitan.rl.generator.vllm.worker import TorchTitanGPUModelRunner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -36,7 +36,7 @@ class _RecordingModel:
 @pytest.fixture(autouse=True)
 def _forward_context_without_dp():
     with patch(
-        "torchtitan.rl.model.vllm_wrapper.get_forward_context",
+        "torchtitan.rl.generator.vllm.model_wrapper.get_forward_context",
         return_value=SimpleNamespace(dp_metadata=None),
     ):
         yield
@@ -131,7 +131,7 @@ def test_dist_moe_call_size_uses_the_largest_dp_replica(
         )
     )
     with patch(
-        "torchtitan.rl.model.vllm_wrapper.get_forward_context",
+        "torchtitan.rl.generator.vllm.model_wrapper.get_forward_context",
         return_value=SimpleNamespace(dp_metadata=dp_metadata),
     ):
         assert wrapper._dist_moe_num_local_input_tokens(12) == expected

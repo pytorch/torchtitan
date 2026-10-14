@@ -40,20 +40,28 @@ from torchtitan.models.muse_glimmer import (
 )
 from torchtitan.models.muse_glimmer.renderer import MuseGlimmerRendererConfig
 from torchtitan.models.qwen3 import build_model_config
-from torchtitan.rl.components.data import IterableRLDataLoader
-from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.rl.controller.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
 from torchtitan.rl.examples.search_r1.data import SearchR1Dataset
 from torchtitan.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.rl.examples.search_r1.rubric import RewardExactMatch
-from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
-from torchtitan.rl.losses import DAPOLoss
+from torchtitan.rl.generator.generator import (
+    SamplingConfig,
+    VLLMCudaGraphConfig,
+    VLLMGenerator,
+)
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
+from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.trainer.losses import DAPOLoss
+from torchtitan.rl.trainer.trainer import Trainer
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -210,7 +218,7 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
         ),
         parallelism=trainer_parallelism,
     )
-    # 0.6 (vs the 0.9 default) reserves room for the weight-sync memory spike, which
+    # 0.6 (vs the 0.9 default) reserves room for the model state dict load memory spike, which
     # OOMs the 8B generator otherwise.
     # TODO(@meetv18): the spike is likely GPU-Direct weight transfer being on by default;
     # make the transfer device configurable (CPU default) so this cap can be raised.
