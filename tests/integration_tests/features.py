@@ -33,7 +33,10 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validator import Validator
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_remat import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.attention.cp_attention import (
@@ -317,7 +320,7 @@ def _muse_glimmer_debugmodel_pp2_max_outstanding_sends(
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = schedule
     config.parallelism.pipeline_parallel_max_outstanding_sends = 2
-    config.activation_checkpoint = None
+    config.activation_remat = None
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     return config
@@ -415,7 +418,7 @@ def llama3_debugmodel_pp4_zero_bubble() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "InterleavedZeroBubble"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.activation_checkpoint = FullAC.Config()
+    config.activation_remat = FullActivationRematConfig()
     config.debug.deterministic = True
     config.debug.seed = 42
     return config
@@ -427,7 +430,7 @@ def llama3_debugmodel_pp2_zbv() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "ZBVZeroBubble"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.activation_checkpoint = FullAC.Config()
+    config.activation_remat = FullActivationRematConfig()
     config.debug.deterministic = True
     config.debug.seed = 42
     return config
@@ -441,7 +444,7 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule_csv = (
         "./tests/assets/custom_schedule.csv"
     )
-    config.activation_checkpoint = FullAC.Config()
+    config.activation_remat = FullActivationRematConfig()
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.debug.deterministic = True
     config.debug.seed = 42
@@ -726,7 +729,7 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     config = llama3_debugmodel_varlen_attn(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
-    config.activation_checkpoint = SelectiveAC.Config()
+    config.activation_remat = DefaultActivationRematConfig()
     return config
 
 
