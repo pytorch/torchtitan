@@ -20,6 +20,8 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 def llama3_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
     """Build the MXFP8 policy shared by eager and GraphTrainer recipes."""
@@ -34,6 +36,7 @@ def llama3_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
 def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config("8B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -51,11 +54,14 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpointer=None,
@@ -67,6 +73,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
 def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
     parallelism = ParallelismConfig(tensor_parallel_degree=8)
     model_config = build_model_config("70B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -83,11 +90,14 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         parallelism=parallelism,

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""BatcherActor, in its own process, returns the in-process builder + batcher's batch as RDMAMicrobatches."""
+"""BatcherActor, in its own process, returns the same batches as an in-process builder + batcher."""
 
 import asyncio
 import dataclasses
@@ -89,20 +89,18 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
         mesh = this_host().spawn_procs(per_host={"cpus": 1})
         try:
             spawn_kwargs = dict(
-                training_sample_builder_config=TrainingSampleBuilder.Config(),
-                batcher_config=Batcher.Config(),
-                batcher_kwargs=_BATCHER_KWARGS,
+                **_BATCHER_KWARGS,
                 output_dir=str(tmp_path),
                 enable_structured_logging=False,
             )
             actor = mesh.spawn(
-                "batcher", BatcherActor, rdma_fast_path_threshold=1024, **spawn_kwargs
+                "batcher",
+                BatcherActor,
+                Batcher.Config(rdma_min_tensor_bytes=1024),
+                **spawn_kwargs,
             )
             by_value = mesh.spawn(
-                "batcher_by_value",
-                BatcherActor,
-                rdma_fast_path_threshold=None,
-                **spawn_kwargs,
+                "batcher_by_value", BatcherActor, Batcher.Config(), **spawn_kwargs
             )
             results = [
                 await actor.add_group.call_one(rollout_group=group) for group in groups
@@ -112,7 +110,7 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
                 for group in groups
             ]
             # Release A once: B, still held, must read back exactly, as a trainer rank reads it.
-            await actor.release_oldest_batch.call_one()
+            await actor.maybe_release_oldest_batch.call_one()
             microbatches_b = [
                 [await rdma_microbatch.read() for rdma_microbatch in row]
                 for row in results[4][0].microbatches

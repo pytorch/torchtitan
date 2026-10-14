@@ -109,7 +109,6 @@ from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.components.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.components.checkpointer import DATALOADER_STATE_KEY
-from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
@@ -184,21 +183,8 @@ class AsyncLoopConfig(Configurable.Config):
     `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
     ``torchtitan/rl/components/WINDOWED_FIFO.md``."""
 
-    rdma_fast_path_threshold: int | None = None
-    """Trainer microbatches travel in Monarch RPC messages. With a value, tensors of at least that many
-    bytes go as Monarch RDMA buffers instead, and each trainer rank reads only its own microbatches:
-        None (default): no RDMA; every tensor in the message.
-        e.g. 1024: tensors of 1 KiB or more stay in the sender; token counts (8 B) and empty tensors
-            stay in the message.
-    Monarch uses ibverbs where the host has it, else TCP. A host that lists ibverbs devices it can't
-    use fails instead of falling back; MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process,
-    weight sync included."""
-
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
-    )
-    training_sample_builder: TrainingSampleBuilder.Config = field(
-        default_factory=TrainingSampleBuilder.Config
     )
     batcher: Batcher.Config = field(default_factory=Batcher.Config)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
@@ -216,14 +202,6 @@ class AsyncLoopConfig(Configurable.Config):
         if self.windowed_fifo_batches is not None and self.windowed_fifo_batches < 1:
             raise ValueError(
                 f"windowed_fifo_batches must be None or >= 1, got {self.windowed_fifo_batches}"
-            )
-        if (
-            self.rdma_fast_path_threshold is not None
-            and self.rdma_fast_path_threshold < 1
-        ):
-            raise ValueError(
-                "rdma_fast_path_threshold must be None or >= 1 (RDMABuffer rejects empty tensors), "
-                f"got {self.rdma_fast_path_threshold}"
             )
 
     @property
@@ -623,7 +601,7 @@ class Controller(Configurable):
             # loop for the controller's GIL.
             router_mesh = this_host().spawn_procs(per_host={"cpus": 1})
             # Same for the batcher: build + pack would contend for the controller's GIL.
-            # It drops its own buffers (release_oldest_batch): Monarch's drop must run on the owner's host.
+            # It drops its own buffers (maybe_release_oldest_batch): Monarch's drop must run on the owner's host.
             batcher_mesh = this_host().spawn_procs(per_host={"cpus": 1})
             # Store proc meshes for cleanup
             self._proc_meshes = [
@@ -672,19 +650,15 @@ class Controller(Configurable):
             self.batcher = batcher_mesh.spawn(
                 "batcher",
                 BatcherActor,
-                training_sample_builder_config=async_loop.training_sample_builder,
-                batcher_config=async_loop.batcher,
-                batcher_kwargs=dict(
-                    num_tokens_per_microbatch_per_dp_rank=(
-                        config.trainer.training.num_tokens_per_microbatch_per_dp_rank
-                    ),
-                    max_context_length=config.trainer.training.max_context_length,
-                    num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
-                    dp_degree=self.trainer_dp_degree,
-                    pad_id=self.tokenizer.eos_id,
-                    temperature=self._sampling.temperature,
+                async_loop.batcher,
+                num_tokens_per_microbatch_per_dp_rank=(
+                    config.trainer.training.num_tokens_per_microbatch_per_dp_rank
                 ),
-                rdma_fast_path_threshold=async_loop.rdma_fast_path_threshold,
+                max_context_length=config.trainer.training.max_context_length,
+                num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
+                dp_degree=self.trainer_dp_degree,
+                pad_id=self.tokenizer.eos_id,
+                temperature=self._sampling.temperature,
                 output_dir=config.dump_folder,
                 enable_structured_logging=config.trainer.debug.enable_structured_logging,
             )
@@ -924,11 +898,7 @@ class Controller(Configurable):
 
         # training_sample_batcher_loop
         batcher_task = asyncio.create_task(
-            self._batcher_loop(
-                group_buffer=self._group_buffer,
-                batcher=self.batcher,
-                training_batch_queue=training_batch_queue,
-            ),
+            self._batcher_loop(training_batch_queue=training_batch_queue),
             name="batcher",
         )
 
@@ -1091,8 +1061,6 @@ class Controller(Configurable):
     async def _batcher_loop(
         self,
         *,
-        group_buffer: RolloutGroupWorkBuffer,
-        batcher: BatcherActor,
         training_batch_queue: "asyncio.Queue[TrainerStepBatch | None]",
     ) -> None:
         """Send finalized groups to the batcher actor and queue each training batch it returns.
@@ -1108,7 +1076,7 @@ class Controller(Configurable):
             unblocked by: _trainer_loop training_batch_queue.get()
         """
         while True:
-            rollout_group = await group_buffer.take_finalized()
+            rollout_group = await self._group_buffer.take_finalized()
             if rollout_group is None:  # closed and drained
                 logger.info("Buffer drained; batcher loop stopping")
                 break
@@ -1118,9 +1086,11 @@ class Controller(Configurable):
                 (
                     maybe_training_batch,
                     group_is_trainable,
-                ) = await batcher.add_group.call_one(rollout_group=rollout_group)
+                ) = await self.batcher.add_group.call_one(rollout_group=rollout_group)
             if not group_is_trainable:
-                await group_buffer.release_active_groups(1, reason="untrainable_group")
+                await self._group_buffer.release_active_groups(
+                    1, reason="untrainable_group"
+                )
             if maybe_training_batch is not None:
                 await training_batch_queue.put(maybe_training_batch)
         await training_batch_queue.put(None)
@@ -1194,8 +1164,8 @@ class Controller(Configurable):
                     step_timer.record("timing/step/forward_backward"),
                 ):
                     # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over
-                    # TCP). Send the RDMAMicrobatches to the trainer during the previous optim_step,
-                    # so each rank reads microbatch 0 then.
+                    # TCP). Send the MonarchRDMAMicrobatches to the trainer during the previous
+                    # optim_step, so each rank reads microbatch 0 then.
                     try:
                         fwd_bwd_metrics = self._get_rank_0_value(
                             await self.trainer.forward_backward.call(
@@ -1205,10 +1175,9 @@ class Controller(Configurable):
                             )
                         )
                     finally:
-                        if self.config.async_loop.rdma_fast_path_threshold is not None:
-                            # Every rank has read its column from the batcher, or the step failed.
-                            # Not awaited: it would wait behind an in-flight add_group.
-                            self.batcher.release_oldest_batch.broadcast()
+                        # With RDMA, every rank has read its column (or the step failed).
+                        # Not awaited: it would wait behind an in-flight add_group.
+                        self.batcher.maybe_release_oldest_batch.broadcast()
 
                     if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                         logger.error("Loss is NaN/Inf; training diverged")

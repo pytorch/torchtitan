@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 # imported from black-forest-labs/FLUX
+# Shape suffixes: B = batch, L = per-sample sequence, T = packed tokens,
+# D = feature dimension, H = heads, K = query/key head dimension, V = value dimension.
 import math
 from dataclasses import dataclass, field
 
@@ -13,12 +15,20 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module, Sequential
 
 from torchtitan.models.common.activation import SiLU
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+from torchtitan.models.common.attention import (
+    VarlenAttentionMetadata,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
+
+DP = MeshAxisName.DP
+CP = MeshAxisName.CP
 
 
 @spmd.local_map(
@@ -33,6 +43,69 @@ def local_split_text_image(
     text_seq_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return combined[:, :text_seq_len], combined[:, text_seq_len:]
+
+
+@spmd.local_map(
+    in_types=(
+        spmd.PartitionSpec(DP, CP, None, None),
+        spmd.PartitionSpec(DP, None, None, None),
+        spmd.PartitionSpec(DP, None, None, None),
+    ),
+    out_types=(
+        spmd.PartitionSpec((DP, CP), None, None),
+        spmd.PartitionSpec(DP, None, None),
+        spmd.PartitionSpec(DP, None, None),
+    ),
+)
+def _pack_attention_inputs(
+    q_BLHK: torch.Tensor, k_BLHK: torch.Tensor, v_BLHV: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return q_BLHK.flatten(0, 1), k_BLHK.flatten(0, 1), v_BLHV.flatten(0, 1)
+
+
+def _prepare_flux_attention_inputs(
+    q_BLHK: torch.Tensor, k_BLHK: torch.Tensor, v_BLHV: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Gather K/V along sequence before packing to preserve sample boundaries."""
+    # TODO: Use ContextParallelTransform once Flux supports more CP variants.
+    cp_group = spmd_mesh_group(CP)
+    if cp_group is not None:
+        k_BLHK, v_BLHV = (
+            spmd.redistribute(
+                x_BLHD,
+                cp_group,
+                src=spmd.S(1),
+                dst=spmd.R,
+                backward_options={"op_dtype": x_BLHD.dtype},
+            )
+            for x_BLHD in (k_BLHK, v_BLHV)
+        )
+    return _pack_attention_inputs(q_BLHK, k_BLHK, v_BLHV)
+
+
+@spmd.local_map(
+    in_types=(spmd.PartitionSpec((DP, CP), None, None), None),
+    out_types=spmd.PartitionSpec(DP, CP, None, None),
+)
+def _unpack_flux_attention_output(
+    out_THV: torch.Tensor, batch_size: int
+) -> torch.Tensor:
+    return out_THV.unflatten(0, (batch_size, -1))
+
+
+def _varlen_attention(
+    inner_attention: VarlenInnerAttention,
+    q_BLHK: Tensor,
+    k_BLHK: Tensor,
+    v_BLHV: Tensor,
+    *,
+    attention_metadata: VarlenAttentionMetadata,
+) -> Tensor:
+    q_THK, k_THK, v_THV = _prepare_flux_attention_inputs(q_BLHK, k_BLHK, v_BLHV)
+    out_THV = inner_attention(
+        q_THK, k_THK, v_THV, attention_metadata=attention_metadata
+    )
+    return _unpack_flux_attention_output(out_THV, q_BLHK.shape[0])
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -152,8 +225,8 @@ class SelfAttention(Module):
         norm: QKNorm.Config
         num_heads: int = 8
         qkv_bias: bool = False
-        inner_attention: ScaledDotProductInnerAttention.Config = field(
-            default_factory=ScaledDotProductInnerAttention.Config
+        inner_attention: VarlenInnerAttention.Config = field(
+            default_factory=lambda: VarlenInnerAttention.Config(window_size=(-1, -1))
         )
 
     def __init__(self, config: Config):
@@ -164,12 +237,16 @@ class SelfAttention(Module):
         self.proj = config.proj.build()
         self.inner_attention = config.inner_attention.build()
 
-    def forward(self, x: Tensor, pe: Tensor) -> Tensor:
+    def forward(
+        self, x: Tensor, pe: Tensor, *, attention_metadata: VarlenAttentionMetadata
+    ) -> Tensor:
         qkv = self.qkv(x)
         q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
         q, k = apply_rope(q, k, pe)
-        x = self.inner_attention(q, k, v, is_causal=False)
+        x = _varlen_attention(
+            self.inner_attention, q, k, v, attention_metadata=attention_metadata
+        )
         x = rearrange(x, "B L H D -> B L (H D)")
         x = self.proj(x)
         return x
@@ -220,8 +297,8 @@ class DoubleStreamBlock(Module):
         txt_mlp_out: Linear.Config
         mlp_ratio: float = 4.0
         qkv_bias: bool = False
-        inner_attention: ScaledDotProductInnerAttention.Config = field(
-            default_factory=ScaledDotProductInnerAttention.Config
+        inner_attention: VarlenInnerAttention.Config = field(
+            default_factory=lambda: VarlenInnerAttention.Config(window_size=(-1, -1))
         )
 
     def __init__(self, config: Config):
@@ -261,7 +338,13 @@ class DoubleStreamBlock(Module):
         self.inner_attention = config.inner_attention.build()
 
     def forward(
-        self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
+        self,
+        img: Tensor,
+        txt: Tensor,
+        vec: Tensor,
+        pe: Tensor,
+        *,
+        attention_metadata: VarlenAttentionMetadata,
     ) -> tuple[Tensor, Tensor]:
         @spmd.local_map(
             in_types=(
@@ -305,7 +388,9 @@ class DoubleStreamBlock(Module):
         v = _local_concat_text_image_attention_states(txt_v, img_v)
 
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v, is_causal=False)
+        attn = _varlen_attention(
+            self.inner_attention, q, k, v, attention_metadata=attention_metadata
+        )
         attn = rearrange(attn, "B L H D -> B L (H D)")
 
         txt_attn, img_attn = local_split_text_image(attn, txt.shape[1])
@@ -340,8 +425,8 @@ class SingleStreamBlock(Module):
         norm: QKNorm.Config
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
-        inner_attention: ScaledDotProductInnerAttention.Config = field(
-            default_factory=ScaledDotProductInnerAttention.Config
+        inner_attention: VarlenInnerAttention.Config = field(
+            default_factory=lambda: VarlenInnerAttention.Config(window_size=(-1, -1))
         )
 
     def __init__(self, config: Config):
@@ -370,7 +455,14 @@ class SingleStreamBlock(Module):
         self.modulation = config.modulation.build()
         self.inner_attention = config.inner_attention.build()
 
-    def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        vec: Tensor,
+        pe: Tensor,
+        *,
+        attention_metadata: VarlenAttentionMetadata,
+    ) -> Tensor:
         mod, _ = self.modulation(vec)
         x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
         qkv, mlp = torch.split(
@@ -382,7 +474,9 @@ class SingleStreamBlock(Module):
 
         # compute attention
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v, is_causal=False)
+        attn = _varlen_attention(
+            self.inner_attention, q, k, v, attention_metadata=attention_metadata
+        )
         attn = rearrange(attn, "B L H D -> B L (H D)")
 
         # compute activation in mlp stream, cat again and run second linear layer

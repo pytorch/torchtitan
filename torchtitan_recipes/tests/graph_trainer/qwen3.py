@@ -26,9 +26,13 @@ def graph_trainer_qwen3_debugmodel() -> GraphTrainer.Config:
 
 def graph_trainer_qwen3_debugmodel_moe() -> GraphTrainer.Config:
     config = to_graph_trainer_config(
-        qwen3_moe_debug(parallelism=ParallelismConfig(expert_parallel_degree=2)),
+        qwen3_moe_debug(
+            attn_backend="flex",
+            parallelism=ParallelismConfig(expert_parallel_degree=2),
+        ),
         GraphTrainerQwen3Model.Config,
     )
+    config.dataloader.max_num_documents = None
     config.compile = GraphTrainerCompileConfig()
     config.training.disable_cuda_graphs = True
     return config
