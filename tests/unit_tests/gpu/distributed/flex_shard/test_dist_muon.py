@@ -7,15 +7,14 @@
 # @lint-ignore-every CITRINE
 
 import unittest
-from typing import Literal
 from unittest import mock
 
 import pytest
 import torch
+from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp._fully_shard._fsdp_common import _from_local_no_grad
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, OffloadPolicy
 from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
-from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
@@ -545,31 +544,20 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         self.assertTrue(compute_ready_layout.storage_is_compute_ready)
 
 
-def _zeropower_via_newtonschulz_fp32(
-    update: torch.Tensor,
-    *,
-    ns_coefficients: tuple[float, float, float],
-    ns_steps: int,
-    eps: float,
-) -> torch.Tensor:
-    """FP32 copy of DistMuon's Newton-Schulz, so host and device runs agree
-    to FP32 rounding instead of BF16 rounding."""
-    a, b, c = ns_coefficients
-    result = update.to(dtype=torch.float32, copy=True)
-    transposed = result.shape[-2] > result.shape[-1]
-    if transposed:
-        result = result.transpose(-2, -1)
-    result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
-    for _ in range(ns_steps):
-        gram = result @ result.transpose(-2, -1)
-        gram_update = b * gram + c * (gram @ gram)
-        result = a * result + gram_update @ result
-    return result.transpose(-2, -1) if transposed else result
+class _TwoLayerModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList(
+            (nn.Linear(16, 8, bias=False), nn.Linear(8, 16, bias=False))
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layers[1](torch.relu(self.layers[0](x)))
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestDistMuonCpuOffload(DTensorTestBase):
-    """Host-resident shards, as FSDP2 CPU offload leaves them for the optimizer."""
+    """FSDP2 CPU offload with Newton-Schulz staged onto the accelerator."""
 
     @property
     def world_size(self):
@@ -584,65 +572,44 @@ class TestDistMuonCpuOffload(DTensorTestBase):
         return "cpu:gloo,cuda:nccl"
 
     @with_comms
-    def test_cuda_ns_device_matches_host_iteration(self):
-        # TF32 would put device matmuls far outside the FP32 tolerance below.
-        torch.backends.cuda.matmul.allow_tf32 = False
-        lr = 0.03
-        weight_decay = 0.2
+    def test_ns_on_accelerator_matches_gpu_resident_run(self):
         mesh = init_device_mesh(
-            self.device_type,
-            (self.world_size,),
-            mesh_dim_names=("dp_shard",),
+            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
         )
-        fqns = ("layers.0.redistributed", "layers.0.local_blocks")
-        values = (
-            torch.arange(24).reshape(8, 3).float().div_(10).add_(1),
-            torch.arange(24, 72).reshape(16, 3).float().div_(10),
-        )
-        grads = tuple(
-            torch.arange(1, value.numel() + 1).reshape(value.shape).float().div_(17)
-            for value in values
-        )
-
-        def host_dtensor(value: torch.Tensor) -> DTensor:
-            # DTensor.from_local would move the shard onto the CUDA mesh; build
-            # the DTensor directly, as FSDP2 does under CPU offload.
-            local = value.chunk(self.world_size)[self.rank].clone()
-            spec = DTensorSpec(
-                mesh,
-                (Shard(0),),
-                tensor_meta=TensorMeta(value.shape, value.stride(), value.dtype),
-            )
-            return _from_local_no_grad(local, spec)
-
-        def make_parameter(value: torch.Tensor) -> torch.nn.Parameter:
-            param = torch.nn.Parameter(host_dtensor(value))
-            self.assertEqual(param.to_local().device.type, "cpu")
-            return param
-
-        def run(ns_device: Literal["cuda", "cpu"] | None):
-            params = tuple(make_parameter(value) for value in values)
-            optimizer = DistMuon(
-                [{"params": list(params), "param_names": list(fqns)}],
-                compute_sharding_by_fqn={
-                    fqns[0]: ComputeLayout(
-                        shardings_by_mesh_axis={"dp_shard": Owned()},
-                    ),
-                    fqns[1]: ComputeLayout(
-                        shardings_by_mesh_axis={
-                            "dp_shard": BlockShard(dim=0, block_sizes=(4,))
-                        },
-                    ),
+        compute_sharding_by_fqn = {
+            # Redistributed to one owner rank.
+            "layers.0.weight": ComputeLayout(
+                shardings_by_mesh_axis={"dp_shard": Owned()},
+                compute_dtype=torch.bfloat16,
+            ),
+            # Compute-ready: each rank's Shard(0) rows are two complete blocks.
+            "layers.1.weight": ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": BlockShard(dim=0, block_sizes=(4,))
                 },
-                bucket_configs=[
-                    BucketConfig(patterns=("layers.0.*",), name="layers.0")
-                ],
-                lr=lr,
-                weight_decay=weight_decay,
+                compute_dtype=torch.bfloat16,
+            ),
+        }
+        inputs = torch.randn(
+            4, 16, generator=torch.Generator().manual_seed(self.rank)
+        ).to(self.device_type)
+
+        def run(*, offload: bool, ns_on_accelerator: bool):
+            torch.manual_seed(0)
+            model = _TwoLayerModel()
+            policy = CPUOffloadPolicy() if offload else OffloadPolicy()
+            for module in (*model.layers, model):
+                fully_shard(module, mesh=mesh, offload_policy=policy)
+            names, params = zip(*model.named_parameters())
+            optimizer = DistMuon(
+                [{"params": list(params), "param_names": list(names)}],
+                compute_sharding_by_fqn=compute_sharding_by_fqn,
+                bucket_configs=[BucketConfig(patterns=("layers.*",))],
+                lr=0.03,
+                weight_decay=0.2,
                 momentum=0.8,
-                nesterov=True,
                 ns_steps=2,
-                ns_device=ns_device,
+                ns_on_accelerator=ns_on_accelerator,
             )
             ns_devices: list[torch.device] = []
             original = dist_muon_module._compute_muon_direction
@@ -651,44 +618,35 @@ class TestDistMuonCpuOffload(DTensorTestBase):
                 ns_devices.append(prepared.device)
                 return original(prepared, **kwargs)
 
-            with (
-                mock.patch.object(
-                    dist_muon_module, "_compute_muon_direction", record_device
-                ),
-                mock.patch.object(
-                    dist_muon_module,
-                    "_zeropower_via_newtonschulz",
-                    _zeropower_via_newtonschulz_fp32,
-                ),
+            with mock.patch.object(
+                dist_muon_module, "_compute_muon_direction", record_device
             ):
                 for _ in range(2):
-                    for param, grad in zip(params, grads, strict=True):
-                        param.grad = host_dtensor(grad)
+                    model(inputs).square().sum().backward()
                     optimizer.step()
+                    optimizer.zero_grad()
             return params, optimizer, ns_devices
 
-        host_params, _, host_ns_devices = run(None)
-        cuda_params, cuda_optimizer, cuda_ns_devices = run("cuda")
-
-        self.assertTrue(host_ns_devices)
-        self.assertTrue(all(d.type == "cpu" for d in host_ns_devices))
-        self.assertTrue(cuda_ns_devices)
-        self.assertTrue(
-            all(d == torch.device("cuda", self.rank) for d in cuda_ns_devices)
+        gpu_params, _, gpu_ns_devices = run(offload=False, ns_on_accelerator=False)
+        host_params, host_optimizer, host_ns_devices = run(
+            offload=True, ns_on_accelerator=True
         )
-        # Parameters and optimizer state stay on the host.
-        for param in cuda_params:
+
+        rank_device = torch.device(self.device_type, self.rank)
+        self.assertTrue(host_ns_devices)
+        self.assertTrue(all(d == rank_device for d in host_ns_devices))
+        self.assertEqual(host_ns_devices, gpu_ns_devices)
+        # Parameters and momentum stay on the host.
+        for param in host_params:
             self.assertEqual(param.to_local().device.type, "cpu")
-        for state in cuda_optimizer.state.values():
-            for value in state.values():
-                if isinstance(value, torch.Tensor):
-                    local = value.to_local() if isinstance(value, DTensor) else value
-                    self.assertEqual(local.device.type, "cpu")
-        # FP32 Newton-Schulz: host and device differ only by reduction order.
-        # A dropped copy-back would leave the momentum input as the direction.
-        for host_param, cuda_param in zip(host_params, cuda_params, strict=True):
+        for state in host_optimizer.state.values():
+            self.assertEqual(state["momentum_buffer"].to_local().device.type, "cpu")
+        # Both runs use the same GPU kernels, so the offloaded update matches
+        # the GPU-resident one exactly. These matrices are too small for host
+        # Newton-Schulz to differ, so the device check above is what pins it.
+        for host_param, gpu_param in zip(host_params, gpu_params, strict=True):
             torch.testing.assert_close(
-                cuda_param.to_local(), host_param.to_local(), rtol=0, atol=1e-5
+                host_param.to_local(), gpu_param.to_local().cpu(), rtol=0, atol=0
             )
 
 

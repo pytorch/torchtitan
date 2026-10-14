@@ -200,7 +200,13 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         adjust_lr_fn: Literal[
             "original", "match_rms_adamw", "spectral_unclamped"
         ] | None = None
-        ns_device: Literal["cuda", "cpu"] | None = None
+        ns_on_accelerator: bool = False
+        """Where Newton-Schulz runs. ``False`` keeps the storage device, where each
+        parameter's local shard lives (the host under FSDP2 CPU offload).
+        ``True`` copies each matrix to the current accelerator, runs
+        Newton-Schulz there and copies the result back. Momentum, parameters,
+        gradients and the exchange between ranks stay where they are, so this only
+        changes anything when the parameters live on the host."""
 
     def __init__(
         self,
@@ -220,7 +226,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             eps=config.eps,
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
-            ns_device=config.ns_device,
+            ns_on_accelerator=config.ns_on_accelerator,
         )
 
 

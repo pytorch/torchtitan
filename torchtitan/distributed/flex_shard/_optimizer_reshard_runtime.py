@@ -305,7 +305,9 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
     updates its runtime-owned input in place, and ``finalize`` consumes a
     runtime-owned result before reuse. Callbacks run under the stream selected
     by the runtime and must not retain tensors, synchronize, or call
-    ``Tensor.record_stream()``. Local-only buckets are prefetch barriers, so
+    ``Tensor.record_stream()``. The exception: a callback may synchronize when
+    the compute buffers live on the host, because the runtime's CPU streams are
+    no-ops and the gloo collectives already block the host. Local-only buckets are prefetch barriers, so
     no later redistributed ``prepare`` runs before an intervening local bucket.
 
     Any exception is fatal: parameters or optimizer state may already be

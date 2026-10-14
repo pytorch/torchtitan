@@ -13,7 +13,7 @@ import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, cast, Literal, NoReturn, overload
+from typing import Any, cast, NoReturn, overload
 
 import torch
 from torch import Tensor
@@ -159,11 +159,12 @@ class DistMuon(Optimizer):
     time, but bitwise equality across the two kernel schedules is not part of
     the contract.
 
-    ``ns_device`` is the device the Newton-Schulz iteration runs on; ``None``
-    runs it wherever the compute view lives. A compute view that lives
-    elsewhere (e.g. on the host under CPU offload) is staged onto it and the
-    direction copied back; momentum, parameters and redistribution buffers
-    stay where they are.
+    ``ns_on_accelerator`` selects where Newton-Schulz runs. ``False`` keeps the
+    storage device, where each parameter's local shard lives (the host under
+    FSDP2 CPU offload). ``True`` copies each compute view to the current
+    accelerator, runs Newton-Schulz there and copies the result back.
+    Momentum, parameters, gradients and redistribution buffers stay where they
+    are, so this only changes anything when the parameters live on the host.
     """
 
     _specs: tuple[_BucketSpec, ...]
@@ -186,9 +187,9 @@ class DistMuon(Optimizer):
         eps: float = 1e-7,
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
-        ns_device: Literal["cuda", "cpu"] | None = None,
+        ns_on_accelerator: bool = False,
     ) -> None:
-        self._ns_device = self._resolve_ns_device(ns_device)
+        self._ns_device = self._resolve_ns_device(ns_on_accelerator)
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -211,22 +212,14 @@ class DistMuon(Optimizer):
         )
 
     @staticmethod
-    def _resolve_ns_device(ns_device: str | None) -> torch.device | None:
-        """Return the Newton-Schulz device, or ``None`` to run in place."""
-        if ns_device is None:
+    def _resolve_ns_device(ns_on_accelerator: bool) -> torch.device | None:
+        """Return the Newton-Schulz device, or ``None`` to keep the storage device."""
+        if not ns_on_accelerator:
             return None
-        if ns_device == "cpu":
-            return torch.device("cpu")
-        if ns_device != "cuda":
-            raise ValueError(
-                f"ns_device must be 'cuda' or 'cpu', got {ns_device!r}"
-            )
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "ns_device='cuda' but no CUDA device is visible. Use ns_device='cpu' "
-                "to run the iteration on the host instead."
-            )
-        return torch.device("cuda", torch.cuda.current_device())
+        accelerator = torch.accelerator.current_accelerator()
+        if accelerator is None:
+            raise ValueError("ns_on_accelerator=True requires an accelerator")
+        return torch.device(accelerator.type, torch.accelerator.current_device_index())
 
     @overload
     def step(self, closure: None = None) -> None:
