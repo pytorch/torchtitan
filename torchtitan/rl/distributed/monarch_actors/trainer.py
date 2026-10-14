@@ -43,8 +43,9 @@ class _TrainerActorEndpoints:
     @concurrent_endpoint
     async def forward_backward(
         self,
-        training_data: list[list[TrainingMicrobatch]]
-        | list[list[MonarchRDMAMicrobatch]],
+        training_data: (
+            list[list[TrainingMicrobatch]] | list[list[MonarchRDMAMicrobatch]]
+        ),
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
