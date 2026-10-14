@@ -9,7 +9,7 @@
 import math
 from typing import TYPE_CHECKING
 
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 
 
 if TYPE_CHECKING:
@@ -55,7 +55,7 @@ def nvfp4_ffn_submodules(
         (
             layer.feed_forward
             for layer in layers
-            if isinstance(layer.feed_forward, FeedForward.Config)
+            if isinstance(layer.feed_forward, DenseFeedForward.Config)
         ),
         None,
     )

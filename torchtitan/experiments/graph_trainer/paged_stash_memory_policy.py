@@ -257,7 +257,8 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 )
 from torchtitan.experiments.graph_trainer.registry import register_memory_policy
 
-from torchtitan.models.common.moe import get_moe
+from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.moe import MoE
 
 if TYPE_CHECKING:
     from torchtitan.components.optim.optimizer import OptimizersContainer
@@ -3097,8 +3098,10 @@ def moe_expert_biases(model_parts: Sequence[nn.Module]) -> list[torch.Tensor]:
             layer_containers.append(mtp_layers)
         for layers in layer_containers:
             for block in layers.children():
-                moe = get_moe(block)
-                if moe is None:
+                if not isinstance(block, TransformerBlock):
+                    continue
+                moe = block.feed_forward
+                if not isinstance(moe, MoE):
                     continue
                 bias = moe.expert_bias_E
                 if bias is not None:

@@ -17,6 +17,8 @@ from torchtitan.distributed.fsdp import (
     enable_fsdp_symm_mem,
     linear_param_shard_placements,
 )
+from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 
@@ -32,6 +34,10 @@ class _FSDPModule(nn.Module):
 
     def set_symm_mem_for_comm(self) -> None:
         self.symm_mem_enabled = True
+
+
+class _FSDPTransformerBlock(_FSDPModule, TransformerBlock):
+    pass
 
 
 def test_apply_fsdp_to_decoder_forwards_param_dtype_override_fn() -> None:
@@ -82,7 +88,6 @@ def test_stacked_linear_shard_placements_use_num_linears() -> None:
     }
 
 
-@pytest.mark.parametrize("moe_field", ["feed_forward", "moe"])
 @pytest.mark.parametrize(
     ("scope", "dense_enabled", "sparse_enabled"),
     [
@@ -92,17 +97,20 @@ def test_stacked_linear_shard_placements_use_num_linears() -> None:
     ],
 )
 def test_enable_fsdp_symm_mem_scope(
-    scope: FSDPSymmMemScope, dense_enabled: bool, sparse_enabled: bool, moe_field: str
+    scope: FSDPSymmMemScope, dense_enabled: bool, sparse_enabled: bool
 ) -> None:
     model = nn.Module()
-    dense = _FSDPModule()
-    dense.feed_forward = nn.Linear(4, 4)
-    sparse = _FSDPModule()
+    dense = _FSDPTransformerBlock()
+    dense.feed_forward = DenseFeedForward.__new__(DenseFeedForward)
+    nn.Module.__init__(dense.feed_forward)
+    sparse = _FSDPTransformerBlock()
     moe = MoE.__new__(MoE)
     nn.Module.__init__(moe)
-    setattr(sparse, moe_field, moe)
+    sparse.feed_forward = moe
     model.add_module("dense", dense)
     model.add_module("sparse", sparse)
+    other = _FSDPModule()
+    model.add_module("other", other)
 
     with mock.patch("torchtitan.distributed.fsdp.FSDPModule", _FSDPModule):
         enable_fsdp_symm_mem(model, scope)
@@ -111,3 +119,5 @@ def test_enable_fsdp_symm_mem_scope(
     assert dense.symm_mem_enabled == dense_enabled
     assert sparse.force_sum_enabled == sparse_enabled
     assert sparse.symm_mem_enabled == sparse_enabled
+    assert other.force_sum_enabled == dense_enabled
+    assert other.symm_mem_enabled == dense_enabled

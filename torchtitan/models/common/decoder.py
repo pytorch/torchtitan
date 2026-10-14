@@ -27,7 +27,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -45,7 +45,7 @@ class TransformerBlock(Module):
 
     All language model TransformerBlocks share:
     - Attention module (from ``attention.build()``)
-    - FFN or MoE (from ``feed_forward.build()``)
+    - Dense or MoE feed-forward module (from ``feed_forward.build()``)
     - Two normalization modules (``attention_norm``, ``ffn_norm``)
 
     Forward accepts ``aux_loss_denominator``. Dense blocks ignore it; MoE
@@ -55,11 +55,12 @@ class TransformerBlock(Module):
     """
 
     attention: Attention
+    feed_forward: FeedForward
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         attention: Attention.Config  # required, no default
-        feed_forward: FeedForward.Config | MoE.Config
+        feed_forward: FeedForward.Config
         attention_norm: Module.Config
         ffn_norm: Module.Config
 
@@ -103,13 +104,13 @@ class Decoder(BaseModel):
             )
 
         @property
-        def first_feed_forward(self) -> FeedForward.Config | None:
+        def first_feed_forward(self) -> DenseFeedForward.Config | None:
             """First dense feed-forward config, else None."""
             return next(
                 (
                     layer.feed_forward
                     for layer in self.layers
-                    if isinstance(layer.feed_forward, FeedForward.Config)
+                    if isinstance(layer.feed_forward, DenseFeedForward.Config)
                 ),
                 None,
             )

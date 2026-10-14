@@ -21,6 +21,7 @@ from torchtitan.config.transform import (
 )
 from torchtitan.models.common import (
     ComplexRoPE,
+    DenseFeedForward,
     Embedding,
     FeedForward,
     HiMidLoLinear,
@@ -457,7 +458,7 @@ def _make_v4_dense_config(
     dim: int,
     hidden_dim: int,
     enable_sp: bool,
-) -> FeedForward.Config:
+) -> DenseFeedForward.Config:
     return make_ffn_config(
         dim=dim,
         hidden_dim=hidden_dim,
@@ -535,7 +536,7 @@ def _build_v4_layers(
             enable_sp=enable_sp,
         )
 
-        ffn_cfg: FeedForward.Config | MoE.Config
+        ffn_cfg: FeedForward.Config
         if layer_id in dense_layers:
             ffn_cfg = _make_v4_dense_config(
                 layer_id=actual_layer_id,

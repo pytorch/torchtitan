@@ -46,7 +46,7 @@ from torchtitan.components.data.multimodal.utils.image import (
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.attention.kda import InnerKDA, KDA
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.kimi_k3 import build_model_config
 from torchtitan.models.kimi_k3.model import KimiK3Model, KimiMLAAttention
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
@@ -92,7 +92,7 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
     dense_ffn = next(
         layer.feed_forward
         for layer in tt_config.layers
-        if isinstance(layer.feed_forward, FeedForward.Config)
+        if isinstance(layer.feed_forward, DenseFeedForward.Config)
     )
     dense_activation = cast(SiTUGLU.Config, dense_ffn.activation_fn)
     moe = next(

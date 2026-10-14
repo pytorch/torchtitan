@@ -43,7 +43,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 
 from torchtitan.models.kimi_k3 import (
     build_model_config,
@@ -235,7 +235,7 @@ def _dist_muon_optimizer(
                     )
                 }
             )
-        if isinstance(layer.feed_forward, FeedForward.Config):
+        if isinstance(layer.feed_forward, DenseFeedForward.Config):
             shardings.update(
                 {
                     f"{prefix}.feed_forward.{projection}.weight": compute_sharding

@@ -20,7 +20,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LoRATransform
 from torchtitan.distributed import DistributedTopology, ParallelismContext
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
@@ -69,7 +69,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
     # Restore shared registration and distributed state after this test.
     monkeypatch.setattr(import_module("torchtitan.config.override"), "_REGISTRY", {})
 
-    @override(target=FeedForward.Config)
+    @override(target=DenseFeedForward.Config)
     def ffn_lora(config):
         return LoRATransform(rank=1, alpha=1.0).transform(config)
 

@@ -13,7 +13,7 @@ from torchtitan.components.optim import DistMuon
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import LinearAttentionMetadata
 from torchtitan.models.common.attention.kda import KDA, KDAKernel
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.model import KimiK3Model, KimiMLAAttention
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
@@ -290,7 +290,7 @@ class TestKimiK3(unittest.TestCase):
 
         self.assertIsInstance(model.layers["0"].attention, KDA)
         self.assertIsInstance(model.layers["1"].attention, KimiMLAAttention)
-        self.assertIsInstance(model.layers["0"].feed_forward, FeedForward)
+        self.assertIsInstance(model.layers["0"].feed_forward, DenseFeedForward)
         self.assertIsInstance(model.layers["1"].feed_forward, KimiLatentMoE)
         self.assertIs(config.first_feed_forward, config.layers[0].feed_forward)
         self.assertIs(config.first_moe, config.layers[1].feed_forward)

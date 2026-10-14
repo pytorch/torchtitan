@@ -22,8 +22,8 @@ from torchtitan.config.transform import (
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     Conv1d,
+    DenseFeedForward,
     Embedding,
-    FeedForward,
     GatedRMSNorm,
     HiMidLoLinear,
     Linear,
@@ -203,7 +203,7 @@ def _feed_forward_config(
     dim: int,
     hidden_dim: int,
     enable_sp: bool,
-) -> FeedForward.Config:
+) -> DenseFeedForward.Config:
     return replace(
         make_ffn_config(
             dim=dim,

@@ -228,8 +228,8 @@ In `Trainer.__init__`, before any component is built:
 7. Log every replacement.
 
 ```
-INFO: [Override] fused_swiglu: model.layers.0.feed_forward FeedForward.Config -> FeedForward.Config
-INFO: [Override] fused_swiglu: model.layers.1.feed_forward FeedForward.Config -> FeedForward.Config
+INFO: [Override] fused_swiglu: model.layers.0.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
+INFO: [Override] fused_swiglu: model.layers.1.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
 ...
 INFO: Applied 32 override(s)
 ```
@@ -384,7 +384,7 @@ machinery.
 
 | Override Target | Conflicts with a converter? | Notes |
 |-----------------|------------------------------|-------|
-| RoPE / FeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
+| RoPE / DenseFeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
 | GroupedLinear.Config | Possibly | Quantization converters can rewrite this |
 | Linear.Config | Yes | Quantization and LoRA can replace these |
 
@@ -430,7 +430,7 @@ One thing worth stating plainly:
 
 - **Fusion under TP.** Fusing weights can interact subtly with tensor
   parallelism -- the fused tensor's row order must admit a correct shard.
-  The default `FeedForward` stores a `Linear` weight
+  The default `DenseFeedForward` stores a `Linear` weight
   `(2, hidden, dim)`. Sharding dimension 1 gives each TP rank matching feature
   slices of the gate and up projections while keeping their rows in separate
   contiguous slabs. The output retains the same `(2, hidden)` structure. This
@@ -475,7 +475,7 @@ for the full recipe.
 
 - `torchtitan_recipes/overrides/fused_swiglu.py` -- **the custom Triton activation
   example.** It replaces the default torch-native SiLU and multiply operations
-  while retaining the core `FeedForward` parameter layout and checkpoint
+  while retaining the core `DenseFeedForward` parameter layout and checkpoint
   behavior. Because the override targets `SwiGLU.Config`, it also applies to
   grouped experts and dist-GEMM feed-forwards that use that activation.
 - `torchtitan_recipes/overrides/helion_rope.py` — **the custom-kernel example.** Swaps

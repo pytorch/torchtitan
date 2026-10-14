@@ -37,7 +37,7 @@ from .attention import (
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
-from .feed_forward import compute_ffn_hidden_dim, FeedForward
+from .feed_forward import compute_ffn_hidden_dim, DenseFeedForward, FeedForward
 from .linear import ColumnParallelLinear, GroupedLinear, Linear, RowParallelLinear
 from .linear.hi_mid_lo_linear import HiMidLoLinear
 from .moe import BatchWiseLoadBalanceLoss, MicrobatchWiseLoadBalanceLoss, MoE
@@ -58,6 +58,7 @@ __all__ = [
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
+    "DenseFeedForward",
     "Embedding",
     "FeedForward",
     "FlexAttentionMetadata",

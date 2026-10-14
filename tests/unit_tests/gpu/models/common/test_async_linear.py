@@ -45,7 +45,7 @@ from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
     dense_sequence_parallel_placement,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.linear.async_linear import (
     AsyncColumnParallelLinear,
@@ -526,7 +526,7 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
         ).transform(make())
         async_config.activation_fn = fused_swiglu(async_config.activation_fn)
         fused = async_config.build().to(dev)
-        self.assertIsInstance(fused, FeedForward)
+        self.assertIsInstance(fused, DenseFeedForward)
         self.assertIsInstance(fused.w13, AsyncColumnParallelLinear)
         self.assertIsInstance(fused.w2, AsyncRowParallelLinear)
 
