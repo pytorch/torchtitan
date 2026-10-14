@@ -827,7 +827,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
     Dispatch and combine share one remat policy (``ep_communication``) because combine
     consumes the handle produced by dispatch. A remat policy replays both unless
-    ``ep_communication`` is saved (FullAC never saves it); a replay
+    ``ep_communication`` is saved (the full policy never saves it); a replay
     must receive rows in the forward's order, so ``init_buffer`` then makes the buffer
     deterministic (a sort per dispatch).
     """
@@ -866,8 +866,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
     def _replays_communication(self) -> bool:
-        """Whether RegionAC replays dispatch/combine during backward."""
-        # Without RegionAC the remat regions have no fqn and do not affect execution
+        """Whether activation remat replays dispatch/combine during backward."""
+        # Without activation remat the regions have no fqn and do not affect execution
         # (remat_should_recompute is then True, since nothing is saved).
         return bool(self._remat_module_fqn) and self.remat_should_recompute(
             "ep_communication"
@@ -877,7 +877,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         """Eagerly create the DeepEP buffer.
 
         Runs after activation checkpointing is applied, so it can make the buffer
-        deterministic when RegionAC replays dispatch/combine.
+        deterministic when activation remat replays dispatch/combine.
         """
         assert self.ep_mesh is not None
         assert self.hidden_dim is not None

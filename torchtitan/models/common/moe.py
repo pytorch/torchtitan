@@ -183,10 +183,15 @@ class TokenChoiceTopKRouter(Module):
         route_norm_epsilon: float = 1e-20
         route_scale: float = 1.0
         aux_loss: AuxLoss.Config | None = None
+        freeze_gate: bool = False
+        """Keep ``gate.weight`` (and ``gate.bias``, if any) at their loaded values: no gradient,
+        no optimizer state. The gate's input still gets gradients."""
 
     def __init__(self, config: Config):
         super().__init__()
         self.gate = config.gate.build()
+        if config.freeze_gate:
+            self.gate.requires_grad_(False)
         self.num_experts = config.num_experts
         self.top_k = config.top_k
         self.score_func = config.score_func.build()
@@ -672,7 +677,7 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
         # must match the original forward even if later microbatches' forwards
         # run before this one's checkpoint replay (pipeline schedules). A
         # retained torch_remat region skips the update, the count all-reduce,
-        # and the snapshot read during RegionAC recompute and reuses the
+        # and the snapshot read during recompute and reuses the
         # original snapshot.
         cumulative_counts_E = remat.region(
             self._accumulate_expert_counts,
@@ -724,6 +729,9 @@ class MoE(Module):
         routed_experts: RoutedExperts.Config
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
+        freeze_expert_bias: bool = False
+        """Route with ``expert_bias_E`` but never update it: no balancing hook is registered.
+        ``load_balance_coeff=None`` instead removes the bias from routing."""
         shared_experts: FeedForward.Config | None = None
 
         def __post_init__(self) -> None:
@@ -755,6 +763,7 @@ class MoE(Module):
         #       expert_bias_E is updated outside the model in an optimizer step pre hook
         #       to work with gradient accumulation.
         self.load_balance_coeff = config.load_balance_coeff
+        self.freeze_expert_bias = config.freeze_expert_bias
         if self.load_balance_coeff is not None:
             assert self.load_balance_coeff > 0.0
             self.register_buffer(
@@ -932,6 +941,7 @@ class _MoERouterLike(Protocol):
 
 class _MoELike(Protocol):
     load_balance_coeff: float | None
+    freeze_expert_bias: bool
     expert_bias_E: torch.Tensor  # noqa: N815
     router: _MoERouterLike
 
@@ -970,21 +980,6 @@ def register_moe_load_balancing_hook(
                 for transformer_block in layers.children():
                     if getattr(transformer_block, "moe_enabled", False):
                         yield transformer_block, cast(_MoELike, transformer_block.moe)
-
-    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
-        moe_layers = list(_iter_moe_layers(model_parts))
-        if not moe_layers:
-            return False
-
-        load_balance_enabled = moe_layers[0][1].load_balance_coeff is not None
-        for _transformer_block, moe in moe_layers[1:]:
-            if (moe.load_balance_coeff is not None) != load_balance_enabled:
-                raise ValueError(
-                    "MoE load_balance_coeff must be configured consistently "
-                    "across all MoE layers. Either set it for every MoE layer "
-                    "or leave it unset for all MoE layers."
-                )
-        return load_balance_enabled
 
     # for MoE auxiliary-loss-free load balancing
     def _update_expert_bias(
@@ -1034,7 +1029,15 @@ def register_moe_load_balancing_hook(
                 moe.expert_bias_E.add_(expert_bias_delta_E)
                 moe.router.tokens_per_expert_E.zero_()
 
-    if _should_register_moe_balancing_hook(model_parts):
+    moe_layers = [moe for _transformer_block, moe in _iter_moe_layers(model_parts)]
+    balanced_layers = [moe for moe in moe_layers if moe.load_balance_coeff is not None]
+    if 0 < len(balanced_layers) < len(moe_layers):
+        raise ValueError(
+            "MoE load_balance_coeff must be configured consistently "
+            "across all MoE layers. Either set it for every MoE layer "
+            "or leave it unset for all MoE layers."
+        )
+    if _should_register_moe_balancing_hook(balanced_layers):
         optimizers.register_step_pre_hook(
             lambda *args, **kwargs: _update_expert_bias(
                 model_parts, parallelism_context=parallelism_context
@@ -1056,7 +1059,9 @@ def register_moe_quantile_balancing_hook(
             ):
                 moe_layers.append((module, module.router))
 
-    if not moe_layers:
+    if not _should_register_moe_balancing_hook(
+        [cast(_MoELike, moe) for moe, _router in moe_layers]
+    ):
         return
 
     @torch.no_grad()
@@ -1101,3 +1106,26 @@ def register_moe_quantile_balancing_hook(
             router.tokens_per_expert_E.zero_()
 
     optimizers.register_step_pre_hook(lambda *args, **kwargs: _update_expert_bias())
+
+
+def _should_register_moe_balancing_hook(moe_layers: list[_MoELike]) -> bool:
+    """Whether a balancing hook should update these MoE layers' expert biases.
+
+    Example, by ``freeze_expert_bias`` on the layers:
+        no layers       -> False
+        all False       -> True
+        all True        -> False: no hook, so no counts all-reduce
+        mixed           -> ValueError
+    """
+    if not moe_layers:
+        return False
+
+    frozen = moe_layers[0].freeze_expert_bias
+    if any(moe.freeze_expert_bias != frozen for moe in moe_layers):
+        raise ValueError(
+            "MoE freeze_expert_bias must be configured consistently "
+            "across all MoE layers."
+        )
+    # TODO: frozen layers never zero router.tokens_per_expert_E (or the quantile
+    # histogram). Add a zero-only hook once something else reads them.
+    return not frozen

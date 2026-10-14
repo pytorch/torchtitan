@@ -24,6 +24,7 @@ from functools import partial
 import spmd_types as spmd
 import torch
 import torch.nn as nn
+import torch_remat as remat
 
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
@@ -51,7 +52,14 @@ class _HFBatchedMoE(MoE):
     """Adapt HF's singleton batch to Titan MoE's flat token interface."""
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return super().forward(hidden_states.squeeze(0)).unsqueeze(0)
+        out_TD = super().forward(hidden_states.squeeze(0))
+        # Titan blocks consume the MoE output with a retained residual-add
+        # region, but HF decoder layers read it with bare ops (the residual add,
+        # and Gemma4's post-feedforward norm) that checkpoint replay re-runs.
+        # The output comes from a saved region (combine, shared_add, or
+        # tp_output_reduction, depending on the config), so keep it for them.
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD.unsqueeze(0)
 
 
 # ---------------------------------------------------------------------------

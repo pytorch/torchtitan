@@ -28,7 +28,9 @@ from tests.integration_tests import IntegrationTestDefinition
 def kimi_k3_debugmodel_mm() -> Trainer.Config:
     from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
 
-    config = kimi_k3_debugmodel(parallelism=ParallelismConfig(expert_parallel_degree=2))
+    config = kimi_k3_debugmodel(
+        attn_backend="flex", parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
     # DistMuon rejects TP-produced _StridedShard storage, so the TP coverage
     # keeps AdamW; kimi_k3_debugmodel_mm_muon covers the default optimizer.
     config.optim.optimizer = OptimizersContainer.Config(
@@ -46,7 +48,9 @@ def kimi_k3_debugmodel_mm_muon() -> Trainer.Config:
     """Per-head DistMuon with FSDP and EP."""
     from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
 
-    config = kimi_k3_debugmodel(parallelism=ParallelismConfig(expert_parallel_degree=2))
+    config = kimi_k3_debugmodel(
+        attn_backend="flex", parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     return config
