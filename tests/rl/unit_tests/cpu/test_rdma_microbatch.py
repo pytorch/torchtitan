@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for `MonarchRDMAMicrobatch` and `MicrobatchStream`, with Monarch's RDMA classes faked."""
+"""Unit tests for `MonarchRDMAMicrobatch` and `RDMAMicrobatchPrefetcher`, with Monarch's RDMA classes faked."""
 
 import asyncio
 import contextvars
@@ -24,8 +24,8 @@ from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     _NUM_MICROBATCHES_READ_AHEAD,
     _TensorRef,
-    MicrobatchStream,
     MonarchRDMAMicrobatch,
+    RDMAMicrobatchPrefetcher,
 )
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
@@ -188,14 +188,14 @@ def _fake_rdma_microbatch(index: int, started: list[int]) -> SimpleNamespace:
     return SimpleNamespace(read=read)
 
 
-def test_microbatch_stream_yields_in_order_and_reads_two_ahead() -> None:
+def test_prefetcher_yields_in_order_and_reads_two_ahead() -> None:
     started: list[int] = []
-    stream = MicrobatchStream(
+    prefetcher = RDMAMicrobatchPrefetcher(
         [_fake_rdma_microbatch(index, started) for index in range(6)]
     )
 
-    assert len(stream) == 6
-    for [index] in stream:
+    assert len(prefetcher) == 6
+    for [index] in prefetcher:
         # Wait for the expected read, then 20 ms more, so a read too far ahead shows.
         expected = min(index + _NUM_MICROBATCHES_READ_AHEAD, 5)
         deadline = time.monotonic() + 5
@@ -206,19 +206,19 @@ def test_microbatch_stream_yields_in_order_and_reads_two_ahead() -> None:
     assert started == list(range(6))
 
 
-def test_microbatch_stream_read_thread_sees_caller_context() -> None:
+def test_prefetcher_read_thread_sees_caller_context() -> None:
     step = contextvars.ContextVar("step")
     step.set(7)
 
     async def read() -> int:
         return step.get()
 
-    stream = MicrobatchStream([SimpleNamespace(read=read)])
+    prefetcher = RDMAMicrobatchPrefetcher([SimpleNamespace(read=read)])
 
-    assert list(stream) == [[7]]
+    assert list(prefetcher) == [[7]]
 
 
-def test_microbatch_stream_skips_queued_reads_when_training_stops() -> None:
+def test_prefetcher_skips_queued_reads_when_training_stops() -> None:
     started: list[int] = []
     read_1_started, read_1_done = threading.Event(), threading.Event()
 
@@ -228,14 +228,14 @@ def test_microbatch_stream_skips_queued_reads_when_training_stops() -> None:
         read_1_done.set()
         return 1
 
-    stream = MicrobatchStream(
+    prefetcher = RDMAMicrobatchPrefetcher(
         [
             _fake_rdma_microbatch(0, started),
             SimpleNamespace(read=read_1),
             _fake_rdma_microbatch(2, started),
         ]
     )
-    iterator = iter(stream)
+    iterator = iter(prefetcher)
 
     assert next(iterator) == [0]
     assert read_1_started.wait(timeout=5)

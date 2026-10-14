@@ -31,8 +31,8 @@ from torchtitan.rl.controller.metrics import combine_microbatch_metrics
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.controller_state import CONTROLLER_STATE_KEY, MirroredState
 from torchtitan.rl.trainer.rdma_microbatch import (
-    MicrobatchStream,
     MonarchRDMAMicrobatch,
+    RDMAMicrobatchPrefetcher,
 )
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
@@ -282,7 +282,7 @@ class Trainer(Configurable):
         if uses_rdma:
             # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
-            microbatch_groups = MicrobatchStream(microbatches)
+            microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
         result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,
