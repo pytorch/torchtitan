@@ -28,7 +28,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC, RegionAC, SelectiveAC
+from torchtitan.distributed.activation_remat import (
+    ActivationRematConfig,
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.aux_loss import (
@@ -378,12 +382,12 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
         ]
         initial_state = _Model().state_dict()
 
-        def run(ac_config, *, forwards_first: bool = False):
+        def run(activation_remat, *, forwards_first: bool = False):
             model = _Model()
             model.load_state_dict(initial_state)
             model.train()
-            if ac_config is not None:
-                ac_config.build().apply(model)
+            if activation_remat is not None:
+                activation_remat.apply(model)
             if forwards_first:
                 outputs = [model(x_TD).sum() for x_TD in microbatches]
                 for output in outputs:
@@ -399,24 +403,26 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
 
         ref_counts_E, ref_grad = run(None)
         self.assertEqual(ref_counts_E.sum().item(), T * K * len(microbatches))
-        for ac_config in (
-            FullAC.Config(),
-            SelectiveAC.Config(),
-            RegionAC.Config(save_regions=[]),
+        for activation_remat in (
+            FullActivationRematConfig(),
+            DefaultActivationRematConfig(),
+            ActivationRematConfig(save_regions=[]),
         ):
-            with self.subTest(ac=type(ac_config).__qualname__):
-                counts_E, grad = run(ac_config)
+            with self.subTest(ac=type(activation_remat).__qualname__):
+                counts_E, grad = run(activation_remat)
                 torch.testing.assert_close(counts_E, ref_counts_E, rtol=0, atol=0)
                 torch.testing.assert_close(grad, ref_grad)
 
         ref_counts_E, ref_grad = run(None, forwards_first=True)
-        for ac_config in (
-            FullAC.Config(),
-            SelectiveAC.Config(),
-            RegionAC.Config(save_regions=[]),
+        for activation_remat in (
+            FullActivationRematConfig(),
+            DefaultActivationRematConfig(),
+            ActivationRematConfig(save_regions=[]),
         ):
-            with self.subTest(ac=type(ac_config).__qualname__, forwards_first=True):
-                counts_E, grad = run(ac_config, forwards_first=True)
+            with self.subTest(
+                ac=type(activation_remat).__qualname__, forwards_first=True
+            ):
+                counts_E, grad = run(activation_remat, forwards_first=True)
                 torch.testing.assert_close(counts_E, ref_counts_E, rtol=0, atol=0)
                 torch.testing.assert_close(grad, ref_grad)
 

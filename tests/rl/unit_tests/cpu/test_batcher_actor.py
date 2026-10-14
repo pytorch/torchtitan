@@ -13,10 +13,7 @@ import numpy as np
 import pytest
 import torch
 from monarch.actor import ActorError, this_host
-
-from torchtitan.rl.components.batcher import Batcher
-from torchtitan.rl.distributed.monarch_actors.batcher import BatcherActor
-from torchtitan.rl.distributed.rdma_microbatch import _TensorRef
+from torchtitan.rl.actors.monarch.batcher import BatcherActor
 from torchtitan.rl.rollout.types import (
     Rollout,
     RolloutGroup,
@@ -24,6 +21,9 @@ from torchtitan.rl.rollout.types import (
     RolloutTurn,
     RolloutTurnID,
 )
+
+from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.rdma_microbatch import _TensorRef
 
 _BATCHER_KWARGS = dict(
     num_tokens_per_microbatch_per_dp_rank=256,
