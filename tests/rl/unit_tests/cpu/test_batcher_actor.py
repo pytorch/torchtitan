@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""BatcherActor, in its own process, returns the same batches as an in-process builder + batcher."""
+"""BatcherActor, in its own process, returns the same batches as an in-process Batcher."""
 
 import asyncio
 import dataclasses
@@ -15,7 +15,6 @@ import torch
 from monarch.actor import ActorError, this_host
 
 from torchtitan.rl.components.batcher import Batcher
-from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.distributed.monarch_actors.batcher import BatcherActor
 from torchtitan.rl.distributed.rdma_microbatch import _TensorRef
 from torchtitan.rl.rollout.types import (
@@ -76,14 +75,8 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
         _group(4, [1.0, 0.0]),
     ]
 
-    builder = TrainingSampleBuilder.Config().build()
     batcher = Batcher.Config().build(**_BATCHER_KWARGS)
-    expected = [
-        batcher.add_training_samples(
-            training_sample_group=builder.build_from_group(rollout_group=group)
-        )
-        for group in groups
-    ]
+    expected = [batcher.add_group(rollout_group=group) for group in groups]
 
     async def run() -> tuple[list, list, list]:
         mesh = this_host().spawn_procs(per_host={"cpus": 1})
