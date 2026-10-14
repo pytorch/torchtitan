@@ -388,6 +388,9 @@ def configure_nccl_for_ulysses(
         return
 
     from torchtitan.models.common.attention.cp_attention import UlyssesCPInnerAttention
+
+    # TODO: Remove this workaround once supported PyTorch builds ship
+    # NCCL >= 2.32.3.
     if not dist.is_nccl_available() or torch.cuda.nccl.version() >= (2, 32, 3):
         return
 
