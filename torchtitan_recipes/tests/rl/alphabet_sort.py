@@ -924,13 +924,13 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
 
     _require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
-    from torchtitan.distributed.activation_checkpoint import RegionAC
+    from torchtitan.distributed.activation_remat import ActivationRematConfig
     from torchtitan.models.common.dist_moe import DistMoeRuntime
 
     config = rl_grpo_qwen3_moe_debug_varlen()
     # Full activation checkpointing would replay dist_moe's forward in backward and
-    # corrupt its activation planner; RegionAC with no saved regions does not.
-    config.trainer.activation_checkpoint = RegionAC.Config(save_regions=[])
+    # corrupt its activation planner; ActivationRematConfig with no saved regions does not.
+    config.trainer.activation_remat = ActivationRematConfig(save_regions=[])
     config.trainer.dist_moe_runtime = DistMoeRuntime.Config(scratch_capacity_factor=4.0)
     config.generator.dist_moe_runtime = DistMoeRuntime.Config(
         scratch_capacity_factor=4.0, inference=True

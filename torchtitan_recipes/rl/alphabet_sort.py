@@ -31,7 +31,7 @@ from torchtitan.config.transform import (
     ModelConfigConverter,
     MXFP8LinearConverter,
 )
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
@@ -903,7 +903,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
                 ],
             ),
         ),
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
         parallelism=trainer_parallelism,
     )
     config.generator = dataclasses.replace(

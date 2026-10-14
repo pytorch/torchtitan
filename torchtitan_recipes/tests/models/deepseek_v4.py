@@ -80,7 +80,7 @@ def deepseek_v4_debugmodel(
             steps=10,
         ),
         parallelism=parallelism,
-        activation_checkpoint=None,
+        activation_remat=None,
         checkpointer=None,
     )
 
@@ -145,7 +145,7 @@ def deepseek_v4_mtp_debugmodel(
             steps=10,
         ),
         parallelism=parallelism,
-        activation_checkpoint=None,
+        activation_remat=None,
         checkpointer=None,
     )
 
@@ -191,7 +191,7 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
             steps=10,
         ),
         parallelism=parallelism,
-        activation_checkpoint=None,
+        activation_remat=None,
         checkpointer=None,
     )
 
@@ -237,6 +237,6 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
             steps=10,
         ),
         parallelism=parallelism,
-        activation_checkpoint=None,
+        activation_remat=None,
         checkpointer=None,
     )

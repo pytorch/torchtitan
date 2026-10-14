@@ -23,9 +23,9 @@ from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import CommConfig, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
-from torchtitan.distributed.activation_checkpoint import (
-    ActivationCheckpointingConfig,
-    SelectiveAC,
+from torchtitan.distributed.activation_remat import (
+    ActivationRematConfig,
+    DefaultActivationRematConfig,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.distributed.cuda_graph import (
@@ -113,8 +113,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         checkpointer: CheckpointManager.Config | None = None
-        activation_checkpoint: ActivationCheckpointingConfig = field(
-            default_factory=SelectiveAC.Config
+        activation_remat: ActivationRematConfig | None = field(
+            default_factory=DefaultActivationRematConfig
         )
         profiler: Profiler.Config = field(default_factory=Profiler.Config)
         sdc_replayer: SDCReplayer.Config | None = None
@@ -355,7 +355,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 parallelism_context=self.parallelism_context,
                 training=config.training,
                 parallelism=config.parallelism,
-                ac_config=config.activation_checkpoint,
+                activation_remat=config.activation_remat,
                 dump_folder=self.output_dir,
                 device=self.device,
                 model_config=self.model_config,
@@ -369,7 +369,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     parallelism_context=self.parallelism_context,
                     training=config.training,
                     parallelism=config.parallelism,
-                    ac_config=config.activation_checkpoint,
+                    activation_remat=config.activation_remat,
                     dump_folder=self.output_dir,
                     **self._parallelize_compile_kwargs(),
                 )

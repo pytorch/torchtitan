@@ -392,7 +392,7 @@ def test_step_sticky_session_reuses_dp_rank(runner) -> None:
     generator = _bare_generator(
         event_loop=runner.get_loop(),
         dp_size=3,
-        dp_routing_strategy=StickySessionRoutingStrategy.Config(),
+        dp_routing_strategy=StickySessionRoutingStrategy.Config(repin_load_ratio=None),
     )
     pending_engine_requests: list[EngineRequest] = []
     first = _request("r0", routing_session_id="s0")
