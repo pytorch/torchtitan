@@ -335,6 +335,8 @@ class NVFP4Linear(Linear):
     module, sharding, and checkpoint protocols.
     """
 
+    _dtype_pinned_buffers = frozenset({"_sr_seed", "_rht_sign_vector"})
+
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
         """Drop-in replacement for Linear.Config that builds NVFP4Linear."""

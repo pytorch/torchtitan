@@ -24,6 +24,14 @@ def test_rope_frequency_meta_initialization_matches_hf():
     assert not freq.state_dict()
 
 
+def test_rope_frequency_values_survive_rejected_cast():
+    freq = VisionRopeFreq.Config(head_dim=96, rope_theta=10000.0).build()
+    expected = freq.inv_freq.clone()
+    with pytest.raises(ValueError, match="dtype is pinned"):
+        freq.to(torch.bfloat16)
+    torch.testing.assert_close(freq.inv_freq, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("grid_order", ["raster", "legacy_spark"])
 def test_position_sampling_and_permutation_spmd_types(grid_order):
     config = muse_spark_navit_encoder_config(

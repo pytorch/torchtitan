@@ -37,6 +37,10 @@ def _build_hash_routing_table(
 class DeepSeekV4Router(TokenChoiceTopKRouter):
     """DeepSeek V4 router with optional hash-based expert selection."""
 
+    _dtype_pinned_buffers = TokenChoiceTopKRouter._dtype_pinned_buffers | frozenset(
+        {"tid2eid"}
+    )
+
     @dataclass(kw_only=True, slots=True)
     class Config(TokenChoiceTopKRouter.Config):
         vocab_size: int

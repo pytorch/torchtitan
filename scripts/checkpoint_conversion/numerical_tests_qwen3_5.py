@@ -268,17 +268,23 @@ def run_hf(model_path, hf_inputs, device):
 # ============================================================
 
 
+def _build_tt_model(model_flavor):
+    model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
+    with torch.device("meta"):
+        model = model_config.build()
+    # Set precision before materializing and initializing fixed-dtype buffers.
+    model.half()
+    model.to_empty(device="cpu")
+    model.init_states(buffer_device=torch.device("cpu"))
+    return model
+
+
 @torch.no_grad()
 def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
     """Run TT model, return last-token logits per sample."""
     print(f"Loading TorchTitan model on {device} ...")
 
-    model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
-    with torch.device("meta"):
-        model = model_config.build()
-    model.to_empty(device="cpu")
-    model.init_states(buffer_device=torch.device("cpu"))
-    model.half()
+    model = _build_tt_model(model_flavor)
 
     state_dict = ModelWrapper(model)._get_state_dict()
     print(f"  Loading checkpoint: {checkpoint_path}")
