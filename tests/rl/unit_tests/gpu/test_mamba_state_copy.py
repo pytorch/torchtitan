@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from torchtitan.rl.model.mamba_state_copy import chunked_mamba_copy_block
+from torchtitan.rl.generator.vllm.mamba_state_copy import chunked_mamba_copy_block
 
 
 class _Buffer:
