@@ -37,6 +37,29 @@ from torchtitan.rl.rollout.types import Completion, RolloutStatus
 from verifiers.v1.errors import model_error, OverlongPromptError
 
 
+def test_train_client_config_carries_an_in_tree_renderer() -> None:
+    """The renderer config reaches environment-server workers inside Verifiers' client
+    config; an in-tree renderer named by `CustomRendererConfig` survives that trip."""
+    from renderers import CustomRendererConfig
+    from verifiers.v1.configs.client import TrainClientConfig
+
+    from tests.unit_tests.cpu.components.test_renderer import IN_TREE_RENDERER_PATH
+
+    renderer = CustomRendererConfig(
+        import_path=IN_TREE_RENDERER_PATH, enable_thinking=False
+    )
+    sent = TrainClientConfig(
+        base_url="http://127.0.0.1:1",
+        api_key_var="",
+        renderer=renderer,
+        renderer_model_name="tests/assets/tokenizer",
+    )
+
+    received = TrainClientConfig.model_validate_json(sent.model_dump_json())
+
+    assert received.renderer == renderer
+
+
 def test_trainable_token_spans() -> None:
     assert _trainable_token_spans([False, True, True, False, True]) == [
         (1, 3),

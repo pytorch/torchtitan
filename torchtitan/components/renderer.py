@@ -47,12 +47,22 @@ class RenderersConfigAdapter(RendererConfig):
             [{"role": "user", "content": "hi"}],
             add_generation_prompt=True,
         )
+
+    A renderer the library does not ship, such as an in-tree one, is selected with
+    `renderers.CustomRendererConfig(import_path="my_pkg.module.MyRenderer", **options)`.
+    ``MyRenderer.config_class`` names its `renderers.BaseRendererConfig` subclass, which
+    validates ``options``, and the renderer is built as ``MyRenderer(tokenizer, config)``:
+    here with a `RendererTokenizerWrapper`, in Verifiers environment-server workers with a
+    tokenizer the library loads from the checkpoint path. Workers import the class by its
+    path, so it must be importable there. The class implements the library's `Renderer`
+    protocol in full: the library's client calls ``parse_response(token_ids,
+    prompt_ids=..., tools=...)``.
     """
 
     renderers_config: PrimeRendererConfig
     """The library's typed config for the model, e.g. `Qwen3RendererConfig(enable_thinking=False)`.
     Renderers and their options:
-    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.11/docs/renderer-config.md"""
+    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.12/docs/renderer-config.md"""
 
     def to_dict(self) -> dict[str, Any]:
         return {"renderers_config": self.renderers_config.model_dump(mode="json")}
@@ -62,7 +72,8 @@ class RenderersConfigAdapter(RendererConfig):
             raise ValueError(
                 f"AutoRendererConfig resolves by exact match of tokenizer.name_or_path ({tokenizer.tokenizer_path!r}) "
                 "against renderers' MODEL_RENDERER_MAP, else falls back to DefaultRenderer (unsupported here). "
-                "Pick the model's renderer, e.g. Qwen3RendererConfig(...)."
+                "Pick the model's renderer, e.g. Qwen3RendererConfig(...), or name an in-tree renderer with "
+                "CustomRendererConfig(import_path=...)."
             )
         if self.renderers_config.name == "default":
             raise ValueError(
@@ -84,8 +95,8 @@ class RendererTokenizerWrapper:
     """Adapt TorchTitan's loaded tokenizer to `renderers.OffsetTokenizer`.
 
     Protocol and bring-your-own-tokenizer guide:
-    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.11/renderers/base.py#L668-L699
-    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.11/README.md#install
+    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.12/renderers/base.py#L680-L711
+    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.12/README.md#install
 
     `renderers` needs Hugging Face-style special-token attributes, raw encoding
     without automatic BOS/EOS, token-to-id lookup, and character offsets. The

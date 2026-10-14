@@ -180,7 +180,8 @@ class VerifiersRollouter(Rollouter):
             raise ValueError(
                 "Verifiers requires a renderer configured with from_renderers(...) "
                 "so its client can construct the same renderer in the "
-                "environment-server process"
+                "environment-server process; for an in-tree renderer, use "
+                "from_renderers(CustomRendererConfig(import_path=...))"
             )
 
         # Verifiers generates through an HTTP endpoint, while TorchTitan exposes
