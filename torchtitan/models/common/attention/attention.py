@@ -22,6 +22,8 @@ import torch_remat as remat
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
+    sdpa_kernel,
+    SDPBackend,
 )
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
