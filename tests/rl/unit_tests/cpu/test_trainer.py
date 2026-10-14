@@ -405,7 +405,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             global_loss_token_counts=torch.tensor([3]),
             global_routing_token_counts=torch.tensor([2]),
         )
-        # The RDMA fast path reads through the stream; by value, the column is passed as is.
+        # MonarchRDMAMicrobatches are read through the stream; by value, the column is passed as is.
         groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
         assert isinstance(groups, MicrobatchStream) == rdma
         assert list(groups) == [[batch], [batch]]
