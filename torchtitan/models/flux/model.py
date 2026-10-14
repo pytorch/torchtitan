@@ -17,7 +17,7 @@ from torch import nn, Tensor
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import context_parallel
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
@@ -236,14 +236,14 @@ class FluxModel(BaseModel):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         local_compile_regions: list[str],
-        ac_config: ActivationCheckpointingConfig | None,
+        activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> Self:
         """Apply Flux's AC-before-SPMD parallelization lifecycle."""
         # Bind local implementations early; torch.compile traces on first use.
         apply_local_compile(local_compile_regions)
         with parallelism_context.activate_spmd():
-            if ac_config is not None:
+            if activation_remat is not None:
                 # Flux saves no regions under any policy: each block is
                 # recomputed in full. Configuring the block still qualifies
                 # its region names, which must be unique within a checkpoint.

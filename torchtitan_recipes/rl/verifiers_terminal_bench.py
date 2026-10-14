@@ -30,7 +30,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
@@ -241,7 +241,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
                 dtype="float32",
             ),
             parallelism=trainer_parallelism,
-            activation_checkpoint=FullAC.Config(),
+            activation_remat=FullActivationRematConfig(),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=20,
@@ -384,7 +384,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
                 dtype="float32",
             ),
             parallelism=trainer_parallelism,
-            activation_checkpoint=FullAC.Config(),
+            activation_remat=FullActivationRematConfig(),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=20,

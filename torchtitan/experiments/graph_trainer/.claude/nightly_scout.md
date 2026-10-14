@@ -272,7 +272,7 @@ they've been addressed; if not, carry forward.
   have appeared in recent PyTorch releases.
 - **Duplicated logic**: Check if graph_trainer reimplements anything that
   core torchtitan now provides as a shared utility. Common areas:
-  - Activation checkpointing policy (`passes.py` vs `torchtitan/distributed/activation_checkpoint.py`)
+  - Activation checkpointing policy (`passes.py` vs `torchtitan/distributed/activation_remat.py`)
   - FSDP wrapping logic (`simple_fsdp.py` vs `torchtitan/distributed/fsdp.py`)
   - Model parallelization patterns (graph_trainer's `parallelize.py` vs core's)
 - **Config drift**: Run `to_graph_trainer_config()` mentally — are there new

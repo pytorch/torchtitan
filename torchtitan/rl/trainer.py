@@ -101,7 +101,7 @@ class Trainer(Configurable):
             parallelism=config.parallelism,
             training=config.training,
             debug=config.debug,
-            activation_checkpoint=config.activation_checkpoint,
+            activation_remat=config.activation_remat,
             max_num_documents=max_num_documents,
         )
 
