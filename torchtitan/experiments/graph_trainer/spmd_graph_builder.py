@@ -37,7 +37,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 )
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
-    compile_time_passes,
     construct_default_graph_passes,
     construct_mandatory_graph_passes,
 )
@@ -172,17 +171,10 @@ def construct_joint_train_step_passes(
     trainer_config: "GraphTrainer.Config",
     *,
     parallelism_context: ParallelismContext,
-    use_graph_trainer_cuda_graph: bool,
 ) -> list[Callable]:
     """Construct SPMD without gradient accumulation passes from the full
     config."""
     if trainer_config.compile.precompile_artifact_dir:
-        if trainer_config.compile.enable_passes and use_graph_trainer_cuda_graph:
-            return construct_default_graph_passes(
-                traced,
-                trainer_config,
-                parallelism_context=parallelism_context,
-            )
         return []
     if not trainer_config.compile.enable_passes:
         return construct_mandatory_graph_passes()
@@ -192,15 +184,7 @@ def construct_joint_train_step_passes(
         return pipeline_fn(
             traced, trainer_config, parallelism_context=parallelism_context
         )
-
-    if use_graph_trainer_cuda_graph:
-        return construct_default_graph_passes(
-            traced,
-            trainer_config,
-            parallelism_context=parallelism_context,
-        )
-
-    return compile_time_passes(
+    return construct_default_graph_passes(
         traced,
         trainer_config,
         parallelism_context=parallelism_context,
@@ -269,7 +253,6 @@ def _bind_direct_joint_stage_graph(
         traced,
         trainer_config,
         parallelism_context=parallelism_context,
-        use_graph_trainer_cuda_graph=trainer_config.training.disable_cuda_graphs,
     )
     traced.gm = apply_graph_passes(
         traced.gm,

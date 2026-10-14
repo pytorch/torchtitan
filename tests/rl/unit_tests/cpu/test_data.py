@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from torchtitan.rl.components.data import (
+from torchtitan.rl.rollout.data import (
     IterableRLDataLoader,
     MapStyleRLDataLoader,
     RLDataLoader,

@@ -9,7 +9,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from torchtitan.rl.distributed.monarch_actors.rollout_worker import RolloutWorkerActor
+from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 
 from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker

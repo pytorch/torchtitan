@@ -77,7 +77,7 @@ def _gpt_oss_debugmodel(
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=None,
+        activation_remat=None,
         validator=None,
     )
 

@@ -162,6 +162,7 @@ class DistMuon(Optimizer):
 
     _specs: tuple[_BucketSpec, ...]
     _matrix_views_by_fqn: dict[str, tuple[_MatrixBatchView, ...]]
+    _direction_row_scale_by_fqn: dict[str, Tensor]
     _redistribution_runtime: _BucketedRedistributionRuntime[_ParameterComputeLayout]
     _param_groups_frozen: bool
 
@@ -284,11 +285,21 @@ class DistMuon(Optimizer):
 
         compute_layouts = []
         for group_index, fqn, param in parameters:
+            compute_layout = compute_sharding_by_fqn[fqn]
             resolved_transition = _resolve_storage_to_compute_transition(
                 fqn,
                 param,
-                compute_sharding_by_fqn[fqn],
+                compute_layout,
             )
+            compute_dtype = compute_layout.compute_dtype
+            if compute_dtype is None:
+                compute_dtype = param.dtype
+            if compute_dtype is not torch.bfloat16:
+                raise NotImplementedError(
+                    f"{fqn!r} would compute in {compute_dtype}: DistMuon runs "
+                    "Newton-Schulz in torch.bfloat16, set compute_dtype="
+                    "torch.bfloat16 on its ComputeLayout"
+                )
             compute_layouts.append(
                 _ParameterComputeLayout(
                     fqn=fqn,
@@ -305,6 +316,7 @@ class DistMuon(Optimizer):
                     redistribution_storage_mesh_axis=(
                         resolved_transition.redistribution_storage_mesh_axis
                     ),
+                    compute_dtype=compute_dtype,
                 )
             )
         return tuple(compute_layouts)
@@ -324,6 +336,7 @@ class DistMuon(Optimizer):
                 _resolve_muon_redistribution_plans,
                 ns_steps_by_group=ns_steps_by_group,
             ),
+            get_compute_dtype=lambda item: item.compute_dtype,
         )
 
         def build_views(
@@ -364,6 +377,7 @@ class DistMuon(Optimizer):
             )
 
         matrix_views_by_fqn = {}
+        direction_row_scale_by_fqn = {}
         for bucket in result.plans:
             if isinstance(bucket, _LocalBucketPlan):
                 for item in bucket.items:
@@ -379,9 +393,15 @@ class DistMuon(Optimizer):
                     matrix_views_by_fqn[item.fqn] = build_views(
                         item, plan.compute_partition(bucket.group.local_participant)
                     )
+                    row_scale = _direction_row_scale(
+                        item, adjust_lr_fn=self._group(item)["adjust_lr_fn"]
+                    )
+                    if row_scale is not None:
+                        direction_row_scale_by_fqn[item.fqn] = row_scale
         self._bucket_plans = result.plans
         self._parameter_compute_layouts = result.ordered_items
         self._matrix_views_by_fqn = matrix_views_by_fqn
+        self._direction_row_scale_by_fqn = direction_row_scale_by_fqn
 
     def _validate_plan_across_ranks(self) -> None:
         _validate_bucket_plans_across_ranks(
@@ -558,7 +578,11 @@ class DistMuon(Optimizer):
         _compute_muon_direction(
             compute,
             matrix_views=self._matrix_views_by_fqn[compute_layout.fqn],
-            lr_reference_shape=compute_layout.lr_reference_shape,
+            lr_reference_shape=(
+                None
+                if not compute_layout.storage_is_compute_ready
+                else compute_layout.lr_reference_shape
+            ),
             adjust_lr_fn=group["adjust_lr_fn"],
             ns_coefficients=group["ns_coefficients"],
             ns_steps=group["ns_steps"],
@@ -572,6 +596,9 @@ class DistMuon(Optimizer):
         local_param = compute_layout.param.to_local()
         if compute_layout.storage_is_compute_ready:
             local_param = local_param.detach()
+        row_scale = self._direction_row_scale_by_fqn.get(compute_layout.fqn)
+        if row_scale is not None:
+            direction.mul_(row_scale)
         _apply_muon_update(
             local_param,
             direction,
@@ -847,6 +874,7 @@ class _ParameterComputeLayout:
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
     redistribution_storage_mesh_axis: int | None
+    compute_dtype: torch.dtype
 
     @property
     def lr_reference_shape(self) -> tuple[int, ...]:
@@ -1836,14 +1864,18 @@ def _compute_muon_direction(
     prepared: Tensor,
     *,
     matrix_views: Sequence[_MatrixBatchView],
-    lr_reference_shape: torch.Size | tuple[int, ...],
+    lr_reference_shape: torch.Size | tuple[int, ...] | None,
     adjust_lr_fn: str | None,
     ns_coefficients: tuple[float, float, float],
     ns_steps: int,
     eps: float,
 ) -> Tensor:
     """Compute independent matrix directions with relative shape scaling."""
-    reference_ratio = _adjust_muon_learning_rate(1.0, adjust_lr_fn, lr_reference_shape)
+    reference_ratio = (
+        None
+        if lr_reference_shape is None
+        else _adjust_muon_learning_rate(1.0, adjust_lr_fn, lr_reference_shape)
+    )
     for view in matrix_views:
         matrices = view.view_as_matrix_batch(prepared)
         matrices.copy_(
@@ -1854,11 +1886,70 @@ def _compute_muon_direction(
                 eps=eps,
             )
         )
+        if reference_ratio is None:
+            continue
         ratio = _adjust_muon_learning_rate(1.0, adjust_lr_fn, matrices.shape[-2:])
         # Preserve the original update arithmetic when the shape factors match.
         if ratio != reference_ratio:
             matrices.mul_(ratio / reference_ratio)
     return prepared
+
+
+def _block_row_spans(
+    block_shard: BlockShard, row_start: int, row_end: int
+) -> Iterable[tuple[int, int]]:
+    """Yield ``(block_rows, span_rows)`` for the blocks overlapping a row range."""
+    period = sum(block_shard.block_sizes)
+    row = row_start
+    while row < row_end:
+        block_start = (row // period) * period
+        for block_rows in block_shard.block_sizes:
+            block_end = block_start + block_rows
+            if row < block_end:
+                span = min(block_end, row_end) - row
+                yield block_rows, span
+                row += span
+                if row >= row_end:
+                    break
+            block_start = block_end
+
+
+def _direction_row_scale(
+    compute_layout: _ParameterComputeLayout, *, adjust_lr_fn: str | None
+) -> Tensor | None:
+    """Per-row factor the storage side applies to a redistributed direction."""
+    compute_sharding = compute_layout.compute_sharding
+    if type(compute_sharding) is not BlockShard:
+        return None
+    param = compute_layout.param
+    reference_ratio = _adjust_muon_learning_rate(
+        1.0, adjust_lr_fn, compute_layout.lr_reference_shape
+    )
+    columns = param.shape[-1]
+    scale_by_block_rows = {
+        block_rows: (
+            _adjust_muon_learning_rate(1.0, adjust_lr_fn, (block_rows, columns))
+            / reference_ratio
+        )
+        for block_rows in compute_sharding.block_sizes
+    }
+    if all(scale == 1.0 for scale in scale_by_block_rows.values()):
+        return None
+    region = _dtensor_storage_region_for_participant(
+        param, param.device_mesh.get_rank()
+    )
+    row_start = region.offsets[0]
+    scales = [
+        scale_by_block_rows[block_rows]
+        for block_rows, span in _block_row_spans(
+            compute_sharding, row_start, row_start + region.shape[0]
+        )
+        for _ in range(span)
+    ]
+    local = param.to_local()
+    return torch.tensor(scales, dtype=torch.float32, device=local.device).view(
+        -1, *([1] * (local.ndim - 1))
+    )
 
 
 def _apply_muon_update(

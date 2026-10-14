@@ -28,7 +28,6 @@ from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    LMHeadFP32OutputConverter,
     ModelConfigConverter,
     TokenDispatcherTransform,
 )
@@ -38,14 +37,22 @@ from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_config
 from torchtitan.models.qwen3 import build_model_config
-from torchtitan.rl.components.batcher import Batcher
-from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
-from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
-from torchtitan.rl.losses import GRPOLoss
+from torchtitan.rl.controller.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
+from torchtitan.rl.generator.generator import (
+    SamplingConfig,
+    VLLMCudaGraphConfig,
+    VLLMGenerator,
+)
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.losses import GRPOLoss
+from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 from torchtitan_recipes.rl.alphabet_sort import (
     _alphabet_sort_rollouter_config,
@@ -86,7 +93,6 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         "debugmodel",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -183,7 +189,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         "debugmodel",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -251,7 +256,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 max_tokens=50,
             ),
             debug=batch_invariant_config,
-            reset_kv_cache_on_weight_sync=True,
+            reset_kv_cache_on_model_state_dict_load=True,
         ),
     )
 
@@ -281,7 +286,6 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         "debugmodel_moe",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -430,7 +434,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         "debugmodel_moe",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -493,7 +496,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
                 max_tokens=50,
             ),
             debug=_BATCH_INVARIANT_DEBUG,
-            reset_kv_cache_on_weight_sync=True,
+            reset_kv_cache_on_model_state_dict_load=True,
         ),
     )
 
@@ -591,7 +594,7 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_weight_sync=True,
+        reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
         "debugmodel",
@@ -623,7 +626,7 @@ def _kimi_k3_rl_model_configs(
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=[*(converters or []), LMHeadFP32OutputConverter.Config()],
+        converters=converters,
     )
     for model_config in (trainer_model, generator_model):
         model_config.local_compile_regions = []
@@ -722,7 +725,7 @@ def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_weight_sync=True,
+        reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _kimi_k3_rl_model_configs(
         "debugmodel",
@@ -812,7 +815,6 @@ def rl_grpo_moe_debug_tp4_ep4() -> Controller.Config:
         "debugmodel",
         seq_len=1024,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
     )
@@ -930,13 +932,13 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
 
     _require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
-    from torchtitan.distributed.activation_checkpoint import RegionAC
+    from torchtitan.distributed.activation_remat import ActivationRematConfig
     from torchtitan.models.common.dist_moe import DistMoeRuntime
 
     config = rl_grpo_qwen3_moe_debug_varlen()
     # Full activation checkpointing would replay dist_moe's forward in backward and
-    # corrupt its activation planner; RegionAC with no saved regions does not.
-    config.trainer.activation_checkpoint = RegionAC.Config(save_regions=[])
+    # corrupt its activation planner; ActivationRematConfig with no saved regions does not.
+    config.trainer.activation_remat = ActivationRematConfig(save_regions=[])
     config.trainer.dist_moe_runtime = DistMoeRuntime.Config(scratch_capacity_factor=4.0)
     config.generator.dist_moe_runtime = DistMoeRuntime.Config(
         scratch_capacity_factor=4.0, inference=True
