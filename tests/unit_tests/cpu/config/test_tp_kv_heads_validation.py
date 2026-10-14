@@ -61,7 +61,7 @@ def _validate(config: "Llama3Model.Config", tp: int) -> None:
 
 def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Config":
     """Build a minimal Llama3Model.Config with the given head counts."""
-    from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+    from torchtitan.models.common.attention import FlexInnerAttention
     from torchtitan.models.common.config_utils import make_ffn_config, make_gqa_config
 
     _LINEAR_INIT = {"weight": lambda t: t}
@@ -81,7 +81,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
                     n_kv_heads=n_kv_heads,
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_LINEAR_INIT,
-                    inner_attention=ScaledDotProductInnerAttention.Config(),
+                    inner_attention=FlexInnerAttention.Config(),
                     rope=ComplexRoPE.Config(
                         dim=_DIM // n_heads,
                         max_context_length=4096,

@@ -119,7 +119,6 @@ from torchtitan.rl.distributed.monarch_actors.generator import VLLMGeneratorActo
 from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
 from torchtitan.rl.distributed.rdma_microbatch import (
     create_cuda_context_to_silence_monarch_log,
-    RDMAMicrobatch,
 )
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.distributed.torch_elastic import setup_torch_elastic_env
@@ -188,16 +187,6 @@ class AsyncLoopConfig(Configurable.Config):
     `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
     ``torchtitan/rl/components/WINDOWED_FIFO.md``."""
 
-    rdma_fast_path_threshold: int | None = None
-    """Trainer microbatches travel in Monarch RPC messages. With a value, tensors of at least that many
-    bytes go as Monarch RDMA buffers instead, and each trainer rank reads only its own microbatches:
-        None (default): no RDMA; every tensor in the message.
-        e.g. 1024: tensors of 1 KiB or more stay in the sender; token counts (8 B) and empty tensors
-            stay in the message.
-    Monarch uses ibverbs where the host has it, else TCP. A host that lists ibverbs devices it can't
-    use fails instead of falling back; MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process,
-    weight sync included."""
-
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
     )
@@ -220,14 +209,6 @@ class AsyncLoopConfig(Configurable.Config):
         if self.windowed_fifo_batches is not None and self.windowed_fifo_batches < 1:
             raise ValueError(
                 f"windowed_fifo_batches must be None or >= 1, got {self.windowed_fifo_batches}"
-            )
-        if (
-            self.rdma_fast_path_threshold is not None
-            and self.rdma_fast_path_threshold < 1
-        ):
-            raise ValueError(
-                "rdma_fast_path_threshold must be None or >= 1 (RDMABuffer rejects empty tensors), "
-                f"got {self.rdma_fast_path_threshold}"
             )
 
     @property
@@ -714,7 +695,7 @@ class Controller(Configurable):
             )
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
-        if config.async_loop.rdma_fast_path_threshold is not None:
+        if config.async_loop.batcher.rdma_min_tensor_bytes is not None:
             create_cuda_context_to_silence_monarch_log()
 
         # Start each generator's engine loop on all ranks once, before any
@@ -929,7 +910,9 @@ class Controller(Configurable):
         # trainer_loop
         trainer_task = asyncio.create_task(
             self._trainer_loop(
-                training_batch_queue, num_training_steps=num_training_steps
+                training_batch_queue,
+                num_training_steps=num_training_steps,
+                batcher=batcher,
             ),
             name="trainer",
         )
@@ -1133,6 +1116,7 @@ class Controller(Configurable):
         training_batch_queue: "asyncio.Queue[TrainerStepBatch | None]",
         *,
         num_training_steps: int,
+        batcher: Batcher,
     ) -> None:
         """Run num_training_steps optimizer steps: train one packed batch, publish trainer weights,
         then pull them into generators, log metrics.
@@ -1193,43 +1177,20 @@ class Controller(Configurable):
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
-                    # Empty by value (no threshold): the call sends packed.microbatches; the drop frees nothing.
-                    rdma_microbatches: list[list[RDMAMicrobatch]] = []
-                    min_bytes = self.config.async_loop.rdma_fast_path_threshold
-                    if min_bytes is not None:
-                        # Each rank reads its column from this process. Register in a thread: at
-                        # ~0.15 ms per tensor (0.3 s for 2,200), doing it here would stall the rollouts.
-                        # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks
-                        # over TCP). Register in _batcher_loop and send the refs to the trainer
-                        # during the previous optim_step, so each rank reads microbatch 0 then.
-                        rdma_microbatches = await asyncio.to_thread(
-                            lambda: [
-                                [
-                                    RDMAMicrobatch.register(
-                                        microbatch, min_bytes=min_bytes
-                                    )
-                                    for microbatch in row
-                                ]
-                                for row in packed.microbatches
-                            ]
-                        )
+                    # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over
+                    # TCP). Send the MonarchRDMAMicrobatches to the trainer during the previous
+                    # optim_step, so each rank reads microbatch 0 then.
                     try:
                         fwd_bwd_metrics = self._get_rank_0_value(
                             await self.trainer.forward_backward.call(
-                                rdma_microbatches or packed.microbatches,
+                                packed.microbatches,
                                 packed.global_loss_token_counts,
                                 packed.global_routing_token_counts,
                             )
                         )
                     finally:
-                        # Every rank has read its column, or the step failed.
-                        await asyncio.gather(
-                            *(
-                                rdma_microbatch.drop()
-                                for row in rdma_microbatches
-                                for rdma_microbatch in row
-                            )
-                        )
+                        # With RDMA, every rank has read its column (or the step failed).
+                        await batcher.maybe_release_oldest_batch()
 
                     if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                         logger.error("Loss is NaN/Inf; training diverged")

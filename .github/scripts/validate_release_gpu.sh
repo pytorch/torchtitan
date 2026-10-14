@@ -228,7 +228,7 @@ run_h100_tests() {
     python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \
-    --exclude qwen3_fsdp+deepep,deepseek_v3_fsdp+hybridep+compile \
+    --exclude qwen3_fsdp+deepep,deepseek_v3_fsdp+hybridep \
     --gpu_arch_type cuda \
     --ngpu 8 \
     "${ARTIFACTS}/h100/base"; then
@@ -251,7 +251,7 @@ run_h100_tests() {
   if ! python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \
-    --test_name deepseek_v3_fsdp+hybridep+compile \
+    --test_name deepseek_v3_fsdp+hybridep \
     --gpu_arch_type cuda \
     --ngpu 8 \
     "${ARTIFACTS}/h100/hybrid_ep"; then

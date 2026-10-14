@@ -31,11 +31,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    apply_transforms,
-    LMHeadFP32OutputConverter,
-    TokenDispatcherTransform,
-)
+from torchtitan.config.transform import apply_transforms, TokenDispatcherTransform
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
@@ -112,7 +108,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
         "1.7B",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -197,7 +192,6 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
         "8B",
         seq_len=config.trainer.training.max_context_length,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -257,7 +251,6 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         "30B-A3B",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -374,9 +367,6 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
     on load, and the renderer handles Muse Glimmer's harmony chat
     format and ATEM tool calls.
     """
-    # TODO: this head computes bf16 logits. LMHeadFP32OutputConverter can't convert a
-    # SoftCappedLinear (it raises on the extra fields), so this config doesn't apply it; it needs
-    # a HiMidLoLinear-based variant with the soft cap.
     trainer_parallelism = ParallelismConfig(
         data_parallel_shard_degree=3,
         tensor_parallel_degree=2,
@@ -391,6 +381,9 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
+        # TODO: bf16 logits. LMHeadFP32OutputConverter can't convert Muse Glimmer's
+        # SoftCappedLinear head; it needs a HiMidLoLinear-based variant with the soft cap.
+        fp32_lm_head=False,
     )
     return Controller.Config(
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",

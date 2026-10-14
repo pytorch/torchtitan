@@ -82,8 +82,9 @@ class InterGeneratorRouter(Actor, Configurable):
         )
         """Routing strategy, selected by its config type. The default keeps a
         session's requests (one multi-turn rollout) on one generator, so each turn
-        reuses that generator's prefix KV; new sessions go to the least-loaded
-        generator. Other options: ``LeastLoadedRoutingStrategy.Config()``,
+        reuses that generator's prefix KV, unless that generator is overloaded
+        (``repin_load_ratio``); new sessions go to the least-loaded generator.
+        Other options: ``LeastLoadedRoutingStrategy.Config()``,
         ``RoundRobinRoutingStrategy.Config()``."""
 
         hot_swap: bool = True

@@ -29,6 +29,28 @@ is applied during model parallelization.
 | `batch_invariant.py` | Batch-invariant (bitwise-reproducible) kernels. |
 | `offloading.py` | NUMA binding of each rank to the CPU node local to its GPU. |
 
+## First optimizer update
+
+`Optim.step()` releases unused CUDA cache on its first call, before gradient
+clipping. Each new `Optim` instance tracks its own first call, so a restored
+step number does not skip the release. It waits for GPU work to finish before
+releasing cache. Both calls run outside optimizer CUDA graph capture.
+
+NCCL allocates its internal communication buffers outside PyTorch's caching
+allocator. Unused PyTorch cache can block those allocations even when the live
+tensors and NCCL buffers would fit after releasing the cache. See
+[issue #5019](https://github.com/pytorch/torchtitan/issues/5019).
+
+This workaround requires:
+
+- Forward and backward to complete successfully.
+- Enough unused CUDA cache that can be released for the NCCL buffers.
+- The affected NCCL allocation to happen during the first optimizer call.
+
+The release keeps live tensors and active CUDA graph pools. It does not reduce
+NCCL buffer sizes or prevent allocation failures during forward or backward,
+or later in the run. It does not release NCCL host shared memory.
+
 ## Environment settings
 
 **`TORCH_NCCL_AVOID_RECORD_STREAMS=1` with tensor parallelism.** TP issues async

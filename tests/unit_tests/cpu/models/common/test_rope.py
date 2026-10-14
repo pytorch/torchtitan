@@ -320,8 +320,9 @@ class TestPerLayerRoPECache(unittest.TestCase):
             inner_attention=VarlenInnerAttention.Config(),
             rope=ComplexRoPE.Config(dim=head_dim, max_context_length=16),
         ).build()
+        attention.bfloat16()
 
-        x = torch.randn(8, dim)
+        x = torch.randn(8, dim, dtype=torch.bfloat16)
         positions = torch.arange(8)
         attention_metadata = create_varlen_metadata_for_document(positions)
 
