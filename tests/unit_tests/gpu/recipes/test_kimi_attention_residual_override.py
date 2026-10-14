@@ -9,9 +9,12 @@ import unittest
 
 import torch
 
+from torchtitan.models.common import Linear
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan_recipes.overrides.kimi_attention_residual import (
     _attention_residual_forward_op,
     attention_residual_op,
+    TritonAttentionResidual,
 )
 
 
@@ -266,6 +269,47 @@ class TestKimiAttentionResidualOverride(unittest.TestCase):
                     dtype=dtype,
                     input_scale=input_scale,
                 )
+
+    def test_sources_run_the_bank_kernels_and_keep_no_bank(self) -> None:
+        torch.manual_seed(0)
+        dim = 256
+        sources_TD = [
+            torch.randn(4, dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+            for _ in range(5)
+        ]
+        projection = Linear.Config(in_features=dim, out_features=1).build()
+        norm = RMSNorm.Config(normalized_shape=dim).build()
+        projection, norm = projection.cuda().bfloat16(), norm.cuda().bfloat16()
+        assert norm.eps is not None
+        grad_output_TD = torch.randn(4, dim, device="cuda", dtype=torch.bfloat16)
+
+        saved_shapes = []
+        with torch.autograd.graph.saved_tensors_hooks(
+            lambda tensor: saved_shapes.append(tuple(tensor.shape)) or tensor,
+            lambda tensor: tensor,
+        ):
+            output_TD = TritonAttentionResidual.Config().build()(
+                sources_TD, projection, norm
+            )
+        grads = torch.autograd.grad(
+            output_TD, (*sources_TD, projection.weight, norm.weight), grad_output_TD
+        )
+
+        bank_TND = torch.stack([source.detach() for source in sources_TD], dim=1)
+        bank_inputs = (
+            bank_TND.requires_grad_(),
+            projection.weight.detach().requires_grad_(),
+            norm.weight.detach().requires_grad_(),
+        )
+        bank_output_TD = attention_residual_op(None, *bank_inputs, norm.eps)
+        bank_grads = torch.autograd.grad(bank_output_TD, bank_inputs, grad_output_TD)
+
+        self.assertNotIn(tuple(bank_TND.shape), saved_shapes)
+        self.assertTrue(torch.equal(output_TD, bank_output_TD))
+        for grad, bank_grad in zip(
+            grads, (*bank_grads[0].unbind(1), *bank_grads[1:]), strict=True
+        ):
+            self.assertTrue(torch.equal(grad, bank_grad))
 
 
 if __name__ == "__main__":

@@ -61,11 +61,16 @@ class _ExactStage(nn.Module):
             }
         )
 
-    def forward(self, hidden: torch.Tensor, stack: torch.Tensor | None = None):
+    def forward(self, hidden: torch.Tensor, blocks: list[torch.Tensor] | None = None):
         if self.first:
             hidden = F.pad(hidden, (INPUT, 0))
-            stack = hidden.new_zeros(hidden.shape[0], 0, DIM)
-        assert stack is not None
+            blocks = []
+        assert blocks is not None
+        stack = (
+            torch.stack(blocks, 1)
+            if blocks
+            else hidden.new_zeros(hidden.shape[0], 0, DIM)
+        )
         for layer in self.layers:
             if layer % LAYERS_PER_BLOCK == 0:
                 block = self.blocks[str(layer // LAYERS_PER_BLOCK)] * hidden[:, INPUT:]
@@ -75,7 +80,7 @@ class _ExactStage(nn.Module):
                 hidden = hidden + F.pad(read, (READOUT, DIM - READOUT - 1))
         if self.last:
             return hidden[:, READOUT] + _read(stack, HEAD)
-        return hidden, stack
+        return hidden, [block.contiguous() for block in stack.unbind(1)]
 
 
 def _read(stack: torch.Tensor, channel: int) -> torch.Tensor:
@@ -105,7 +110,15 @@ def _block_grads(modules) -> dict[int, torch.Tensor]:
         int(name.split(".")[1]): param.grad.clone()
         for module in modules
         for name, param in module.named_parameters()
+        if param.grad is not None
     }
+
+
+def _freeze(modules, frozen: set[int]) -> None:
+    for module in modules:
+        for name, param in module.named_parameters():
+            if int(name.split(".")[1]) in frozen:
+                param.requires_grad_(False)
 
 
 def _train(modules, step_fn, dtype: torch.dtype):
@@ -121,12 +134,15 @@ def _train(modules, step_fn, dtype: torch.dtype):
     return history
 
 
-def _run_single_device(split: list[list[int]], dtype: torch.dtype):
+def _run_single_device(
+    split: list[list[int]], dtype: torch.dtype, frozen: set[int] = frozenset()
+):
     last = len(split) - 1
     modules = [
         _ExactStage(layers, first=s == 0, last=s == last, dtype=dtype)
         for s, layers in enumerate(split)
     ]
+    _freeze(modules, frozen)
 
     def step(inputs, targets):
         losses = []
@@ -159,6 +175,7 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
         dtype: torch.dtype,
         cache: bool,
         eval_losses: list | None = None,
+        frozen: set[int] = frozenset(),
     ):
         num_stages, last = len(split), len(split) - 1
         mine = range(self.rank, num_stages, self.world_size)
@@ -166,6 +183,7 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
             _ExactStage(split[s], first=s == 0, last=s == last, dtype=dtype)
             for s in mine
         ]
+        _freeze(modules, frozen)
         stages = [
             AttnResPipelineStage(module, s, num_stages, torch.device("cpu"))
             for module, s in zip(modules, mine, strict=True)
@@ -188,7 +206,7 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
         )
         store = PPRankLocalCache()
         for stage in stages:
-            stage.set_routing(layout, store)
+            stage.set_routing(layout, store, wait_sends_at_backward=True)
 
         def step(inputs, targets):
             losses: list[torch.Tensor] = []
@@ -267,6 +285,20 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
                             eval_step_losses, ref_losses, rtol=0, atol=0
                         )
                     self.assertEqual(leftover, 0)
+
+    @with_comms
+    def test_stage_after_a_frozen_prefix_sends_no_gradient(self):
+        split = SPLITS["pp4 x vpp2"]
+        reference = _run_single_device(split, torch.float32, frozen={0})
+        history, _ = self._run_pipeline(split, torch.float32, cache=True, frozen={0})
+        for step in range(STEPS):
+            grads, losses = history[step]
+            ref_grads, ref_losses = reference[step]
+            self.assertNotIn(0, grads)
+            for block, grad in grads.items():
+                torch.testing.assert_close(grad, ref_grads[block], rtol=0, atol=0)
+            if losses:
+                torch.testing.assert_close(losses, ref_losses, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

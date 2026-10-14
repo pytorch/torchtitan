@@ -21,17 +21,12 @@ def _build_modules(dim: int) -> tuple[Linear, RMSNorm]:
 
 
 def _reference(
-    partial_block_TD: torch.Tensor | None,
-    block_residual_TND: torch.Tensor,
+    sources_TD: list[torch.Tensor],
     projection_weight_1D: torch.Tensor,
     norm_weight_D: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    values_TND = (
-        block_residual_TND
-        if partial_block_TD is None
-        else torch.cat((block_residual_TND, partial_block_TD.unsqueeze(1)), dim=1)
-    )
+    values_TND = torch.stack(sources_TD, dim=1)
     values_float_TND = values_TND.float()
     variance_TN1 = values_float_TND.pow(2).mean(dim=-1, keepdim=True)
     keys_TND = values_float_TND * torch.rsqrt(variance_TN1 + eps)
@@ -56,98 +51,51 @@ class TestKimiK3AttentionResidualLocalCompile(unittest.TestCase):
         from torch._inductor.utils import run_fw_bw_and_get_code
 
         projection, norm = _build_modules(128)
-        partial_block_TD = torch.randn(
-            64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
-        )
-        block_residual_TND = torch.randn(
-            64, 3, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
-        )
+        sources_TD = [
+            torch.randn(
+                64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
+            )
+            for _ in range(4)
+        ]
 
         _, codes = run_fw_bw_and_get_code(
-            lambda: self.attention_residual(
-                partial_block_TD,
-                block_residual_TND,
-                projection,
-                norm,
-            )
+            lambda: self.attention_residual(sources_TD, projection, norm)
         )
 
         self.assertGreaterEqual(sum("triton" in code for code in codes), 2)
 
     def test_forward_and_backward_match_reference(self):
+        # Ten source counts, more graphs than dynamo's default recompile limit.
         torch.manual_seed(42)
-        for has_partial_block in (False, True):
-            with self.subTest(has_partial_block=has_partial_block):
-                projection, norm = _build_modules(128)
-                partial_block_TD = (
+        projection, norm = _build_modules(128)
+        assert norm.eps is not None
+        for num_sources in range(1, 11):
+            with self.subTest(num_sources=num_sources):
+                sources_TD = [
                     torch.randn(
-                        64,
-                        128,
-                        device="cuda",
-                        dtype=torch.bfloat16,
-                        requires_grad=True,
+                        64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
                     )
-                    if has_partial_block
-                    else None
-                )
-                block_residual_TND = torch.randn(
-                    64,
-                    3,
-                    128,
-                    device="cuda",
-                    dtype=torch.bfloat16,
-                    requires_grad=True,
-                )
-                grad_output_TD = torch.randn_like(block_residual_TND[:, 0])
+                    for _ in range(num_sources)
+                ]
+                grad_output_TD = torch.randn_like(sources_TD[0])
 
-                output_TD = self.attention_residual(
-                    partial_block_TD,
-                    block_residual_TND,
-                    projection,
-                    norm,
-                )
-                compiled_inputs = (
-                    (partial_block_TD,) if partial_block_TD is not None else ()
-                ) + (block_residual_TND, projection.weight, norm.weight)
+                output_TD = self.attention_residual(sources_TD, projection, norm)
+                compiled_inputs = (*sources_TD, projection.weight, norm.weight)
                 compiled_grads = torch.autograd.grad(
-                    output_TD,
-                    compiled_inputs,
-                    grad_output_TD,
+                    output_TD, compiled_inputs, grad_output_TD
                 )
 
-                reference_partial_block_TD = (
-                    partial_block_TD.detach().clone().requires_grad_()
-                    if partial_block_TD is not None
-                    else None
+                reference_inputs = tuple(
+                    value.detach().clone().requires_grad_() for value in compiled_inputs
                 )
-                reference_block_residual_TND = (
-                    block_residual_TND.detach().clone().requires_grad_()
-                )
-                reference_projection_weight_1D = (
-                    projection.weight.detach().clone().requires_grad_()
-                )
-                reference_norm_weight_D = norm.weight.detach().clone().requires_grad_()
-                assert norm.eps is not None
                 reference_output_TD = _reference(
-                    reference_partial_block_TD,
-                    reference_block_residual_TND,
-                    reference_projection_weight_1D,
-                    reference_norm_weight_D,
+                    list(reference_inputs[:num_sources]),
+                    reference_inputs[num_sources],
+                    reference_inputs[num_sources + 1],
                     norm.eps,
                 )
-                reference_inputs = (
-                    (reference_partial_block_TD,)
-                    if reference_partial_block_TD is not None
-                    else ()
-                ) + (
-                    reference_block_residual_TND,
-                    reference_projection_weight_1D,
-                    reference_norm_weight_D,
-                )
                 reference_grads = torch.autograd.grad(
-                    reference_output_TD,
-                    reference_inputs,
-                    grad_output_TD,
+                    reference_output_TD, reference_inputs, grad_output_TD
                 )
 
                 torch.testing.assert_close(output_TD, reference_output_TD)
@@ -159,50 +107,33 @@ class TestKimiK3AttentionResidualLocalCompile(unittest.TestCase):
     def test_forward_and_backward_are_batch_invariant(self):
         torch.manual_seed(42)
         projection, norm = _build_modules(128)
-        partial_block_TD = torch.randn(
-            64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
-        )
+        partial_block_TD = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
         block_residual_TND = torch.randn(
-            64, 3, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
+            64, 3, 128, device="cuda", dtype=torch.bfloat16
         )
         grad_output_TD = torch.randn_like(partial_block_TD)
+        sources_TD = [
+            source.contiguous().requires_grad_()
+            for source in (*block_residual_TND.unbind(1), partial_block_TD)
+        ]
 
         def run(
-            partial_block_TD: torch.Tensor,
-            block_residual_TND: torch.Tensor,
-            grad_output_TD: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            output_TD = self.attention_residual(
-                partial_block_TD,
-                block_residual_TND,
-                projection,
-                norm,
+            sources_TD: list[torch.Tensor], grad_output_TD: torch.Tensor
+        ) -> tuple[torch.Tensor, ...]:
+            output_TD = self.attention_residual(sources_TD, projection, norm)
+            return output_TD, *torch.autograd.grad(
+                output_TD, sources_TD, grad_output_TD
             )
-            grad_partial_TD, grad_residual_TND = torch.autograd.grad(
-                output_TD,
-                (partial_block_TD, block_residual_TND),
-                grad_output_TD,
-            )
-            return output_TD, grad_partial_TD, grad_residual_TND
 
-        full_outputs = run(
-            partial_block_TD,
-            block_residual_TND,
-            grad_output_TD,
-        )
-        split_outputs = [[], [], []]
-        for inputs in zip(
-            partial_block_TD.detach().chunk(2),
-            block_residual_TND.detach().chunk(2),
-            grad_output_TD.chunk(2),
-            strict=True,
-        ):
-            partial_part_TD, residual_part_TND, grad_part_TD = inputs
-            partial_part_TD.requires_grad_()
-            residual_part_TND.requires_grad_()
+        full_outputs = run(sources_TD, grad_output_TD)
+        split_outputs = [[] for _ in full_outputs]
+        for part in range(2):
+            sources_part_TD = [
+                source.detach().chunk(2)[part].requires_grad_() for source in sources_TD
+            ]
             for outputs, output in zip(
                 split_outputs,
-                run(partial_part_TD, residual_part_TND, grad_part_TD),
+                run(sources_part_TD, grad_output_TD.chunk(2)[part]),
                 strict=True,
             ):
                 outputs.append(output)

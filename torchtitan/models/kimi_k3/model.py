@@ -203,23 +203,20 @@ class AttentionResidual(Function[torch.Tensor]):
     def __init__(self, config: Config) -> None:
         pass
 
-    # N grows across attention-residual blocks, so keep one shape-polymorphic graph.
-    @local_compile("attention_residual", batch_invariant=True, dynamic=True)
+    # A list compiles one graph per source count, more than dynamo's default limit of 8.
+    @local_compile(
+        "attention_residual", batch_invariant=True, dynamic=True, recompile_limit=32
+    )
     def __call__(
         self,
-        partial_block_TD: torch.Tensor | None,
-        block_residual_TND: torch.Tensor,
+        sources_TD: list[torch.Tensor],
         projection: Linear,
         norm: RMSNorm,
     ) -> torch.Tensor:
         """Apply Kimi's block-level attention residual in FP32."""
         assert norm.eps is not None
 
-        values_TND = (
-            block_residual_TND
-            if partial_block_TD is None
-            else torch.cat((block_residual_TND, partial_block_TD.unsqueeze(1)), dim=1)
-        )
+        values_TND = torch.stack(sources_TD, dim=1)
         values_float = values_TND.float()
         variance = values_float.pow(2).mean(dim=-1, keepdim=True)
         keys_TND = values_float * torch.rsqrt(variance + norm.eps)
@@ -300,17 +297,15 @@ class KimiK3TransformerBlock(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        block_residual_TND: torch.Tensor,
+        blocks_TD: list[torch.Tensor],
         attention_metadata: AttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         if self.first_layer_in_block:
-            block_residual_TND = torch.cat(
-                (block_residual_TND, x_TD.unsqueeze(1)), dim=1
-            )
+            blocks_TD = [*blocks_TD, x_TD]
             partial_block_TD = None
         else:
             partial_block_TD = x_TD
@@ -320,8 +315,11 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.attention_res_norm is not None
             h_TD = self.attention_residual(
-                partial_block_TD,
-                block_residual_TND,
+                (
+                    blocks_TD
+                    if partial_block_TD is None
+                    else [*blocks_TD, partial_block_TD]
+                ),
                 self.attention_res_proj,
                 self.attention_res_norm,
             )
@@ -336,8 +334,7 @@ class KimiK3TransformerBlock(Module):
         prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
 
         h_TD = self.attention_residual(
-            prefix_sum_TD,
-            block_residual_TND,
+            [*blocks_TD, prefix_sum_TD],
             self.ffn_res_proj,
             self.ffn_res_norm,
         )
@@ -356,7 +353,8 @@ class KimiK3TransformerBlock(Module):
         out_TD = remat.region(
             torch.add, self.remat_region_name("ffn_residual"), recompute=False
         )(prefix_sum_TD, h_TD)
-        return out_TD, block_residual_TND
+        # torch_remat's region checkpoint returns one hop of tensors, so the blocks come back flat.
+        return out_TD, *blocks_TD
 
 
 class KimiK3Model(MultimodalModel):
@@ -606,7 +604,7 @@ class KimiK3Model(MultimodalModel):
     def forward(  # pyrefly: ignore[bad-param-name-override, bad-override]
         self,
         tokens: torch.Tensor,
-        block_residual_TND: torch.Tensor | None = None,
+        blocks_TD: list[torch.Tensor] | None = None,
         *,
         pixel_values: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
@@ -618,7 +616,7 @@ class KimiK3Model(MultimodalModel):
         padding_mask: torch.Tensor | None = None,
         vision_bank_indices_T: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
 
@@ -649,16 +647,16 @@ class KimiK3Model(MultimodalModel):
                 ),
             )
 
-        if block_residual_TND is None:
-            block_residual_TND = h_TD.unsqueeze(1)[:, :0]
+        if blocks_TD is None:
+            blocks_TD = []
         with spmd.no_typecheck():
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
         for layer in self.layers.values():
-            h_TD, block_residual_TND = layer(
+            h_TD, *blocks_TD = layer(
                 h_TD,
-                block_residual_TND,
+                blocks_TD,
                 (
                     attention_metadata[
                         cast(KimiK3TransformerBlock, layer).attention_metadata_key
@@ -672,10 +670,9 @@ class KimiK3Model(MultimodalModel):
             )
 
         if self.output_res_proj is None:
-            return h_TD, block_residual_TND
+            return h_TD, blocks_TD
         h_TD = self.attention_residual(
-            h_TD,
-            block_residual_TND,
+            [*blocks_TD, h_TD],
             self.output_res_proj,
             self.output_res_norm,
         )
