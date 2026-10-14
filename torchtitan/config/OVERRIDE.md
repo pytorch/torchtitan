@@ -411,7 +411,7 @@ checkpoint FQNs. By default an override checkpoints whatever real parameters it
 defines. Keep format-specific layout conversion in a model-level
 `BaseStateDictAdapter` (for example, `Llama3StateDictAdapter` converts native
 `w13.weight` into Hugging Face `gate_proj.weight` and `up_proj.weight`). This
-keeps native DCP checkpoints and per-step RL weight synchronization in the
+keeps native DCP checkpoints and per-step RL model state dict pushes in the
 model's physical layout without hook-produced copies.
 
 ## Parallelism
@@ -497,7 +497,7 @@ RoPE is an ordinary component override.
 | `torchtitan/config/__init__.py` | Re-exports the override API. |
 | `torchtitan/models/base/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field and applies recipe-provided overrides before builds. |
-| `torchtitan/rl/controller.py` | Holds the RL `override` field and applies it to the trainer and generator models before spawning actors. |
+| `torchtitan/rl/controller/controller.py` | Holds the RL `override` field and applies it to the trainer and generator models before spawning actors. |
 | `torchtitan_recipes/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
 | `tests/unit_tests/cpu/config/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
 
