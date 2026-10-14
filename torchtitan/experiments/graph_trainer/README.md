@@ -168,6 +168,25 @@ Current limitations:
   graph-trainer numerics and integration suites. Composability with additional
   overlap or sharding modes should be validated with loss comparison before use.
 
+### DeepEP Dispatch Overlap
+
+With the DeepEP token dispatcher, the compact training dispatch waits on the
+host for the receive counts before the received tokens exist, and eager code
+queues nothing in between. `DeepEPTokenDispatcher.Config.split_dispatch_launch_wait`
+issues that dispatch as a `deepep.launch_dispatch` node followed by a
+`deepep.wait_dispatch` node, and
+
+```python
+config.compile.deepep_dispatch_overlap = True
+```
+
+moves forward work that does not depend on the wait, in the common MoE layout
+the shared experts, between the two nodes, so the GPU runs it while the dispatch
+is in flight. `graph_trainer_deepseek_v3_debugmodel_deepep` in the test recipes
+shows the setup. The pass is forward-only and is independent of `ep_overlap`:
+DeepEP has one communication buffer, so the second in-flight exchange that
+`ep_overlap` chunking needs is not available.
+
 ### Experimental AutoParallel Sharding
 
 GraphTrainer can use AutoParallel to solve SPMD placement for supported models,

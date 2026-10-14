@@ -393,6 +393,7 @@ def annotate_moe_ep_regions() -> None:
     from torchtitan.models.common.moe import MoE
     from torchtitan.models.common.token_dispatcher import (
         AllToAllTokenDispatcher,
+        DeepEPTokenDispatcher,
         LocalTokenDispatcher,
     )
 
@@ -407,6 +408,12 @@ def annotate_moe_ep_regions() -> None:
     )
     AllToAllTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
         AllToAllTokenDispatcher.combine
+    )
+    DeepEPTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
+        DeepEPTokenDispatcher.dispatch
+    )
+    DeepEPTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
+        DeepEPTokenDispatcher.combine
     )
     AllToAllTokenDispatcher._token_count_exchange = annotate_fn(
         {_EP_TOKEN_COUNT_EXCHANGE: "dispatch"}
