@@ -17,7 +17,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.activation_checkpoint import FullAC, RegionAC, SelectiveAC
+from torchtitan.distributed.activation_remat import (
+    ActivationRematConfig,
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import SwiGLU
@@ -127,19 +131,22 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         # activations. These policies save dispatch and combine instead.
         self._check_deepep_activation_checkpointing(
             (
-                SelectiveAC.Config(),
-                RegionAC.Config(save_regions=["*ep_communication"]),
+                DefaultActivationRematConfig(),
+                ActivationRematConfig(save_regions=["*ep_communication"]),
             ),
             num_replays=0,
         )
 
     @with_comms
     def test_region_ac_replay_is_exact(self):
-        # FullAC and RegionAC without ep_communication saved replay dispatch and
+        # The full policy and policies without ep_communication saved replay dispatch and
         # combine. DeepEP then uses a deterministic buffer, which receives rows in
         # the forward's order, so the gradients match the run without AC bitwise.
         self._check_deepep_activation_checkpointing(
-            (FullAC.Config(), RegionAC.Config(save_regions=[])),
+            (
+                FullActivationRematConfig(),
+                ActivationRematConfig(save_regions=[]),
+            ),
             num_replays=1,
         )
 
@@ -160,9 +167,9 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
             dense_sp_enabled=False,
         )
         num_experts = 4 * self.world_size
-        for ac_config in ac_configs:
+        for activation_remat in ac_configs:
             with (
-                self.subTest(ac=type(ac_config).__qualname__),
+                self.subTest(ac=type(activation_remat).__qualname__),
                 torch.autograd.set_multithreading_enabled(False),
                 set_current_spmd_mesh(mesh),
             ):
@@ -174,7 +181,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     self.device_type, torch.bfloat16
                 )
                 ac_model.load_state_dict(baseline.state_dict())
-                ac_config.build().apply(ac_model)
+                activation_remat.apply(ac_model)
                 # As in training, the buffer is created after AC is applied. Both
                 # models share it, so the baseline also runs deterministic when
                 # the AC model replays.
