@@ -79,7 +79,10 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
 
     config = ft.FaultTolerantTrainer.Config(
         model=build_model_config(
-            "debugmodel", seq_len=2048, parallelism=ParallelismConfig()
+            "debugmodel",
+            seq_len=2048,
+            attn_backend="flex",
+            parallelism=ParallelismConfig(),
         ),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
@@ -144,7 +147,7 @@ def test_ft_rejects_validation_cuda_graphs():
     parallelism = ParallelismConfig()
     config = ft.FaultTolerantTrainer.Config(
         model=build_muse_glimmer_config(
-            "debugmodel", seq_len=2048, parallelism=parallelism
+            "debugmodel", seq_len=2048, attn_backend="flex", parallelism=parallelism
         ),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
@@ -162,7 +165,7 @@ def test_ft_accepts_eager_validation():
     parallelism = ParallelismConfig(pipeline_parallel_degree=2)
     config = ft.FaultTolerantTrainer.Config(
         model=build_muse_glimmer_config(
-            "debugmodel", seq_len=2048, parallelism=parallelism
+            "debugmodel", seq_len=2048, attn_backend="flex", parallelism=parallelism
         ),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
@@ -176,7 +179,10 @@ def test_ft_accepts_eager_validation():
 def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None:
     config = ft.FaultTolerantTrainer.Config(
         model=build_model_config(
-            "debugmodel", seq_len=2048, parallelism=ParallelismConfig()
+            "debugmodel",
+            seq_len=2048,
+            attn_backend="flex",
+            parallelism=ParallelismConfig(),
         ),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
