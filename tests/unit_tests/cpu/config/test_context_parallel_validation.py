@@ -199,7 +199,7 @@ class TestGptOssUlysses(unittest.TestCase):
                 training=None,
                 parallelism=None,
                 local_compile_regions=[],
-                ac_config=None,
+                activation_remat=None,
                 dump_folder="",
             )
 

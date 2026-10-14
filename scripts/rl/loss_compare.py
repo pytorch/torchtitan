@@ -147,7 +147,7 @@ def run_training(
 def rl_loss_compare_config():
     """Build the deterministic RL configuration used by this script."""
     from torchtitan.config import ConfigLoader
-    from torchtitan.rl.controller import Controller
+    from torchtitan.rl.controller.controller import Controller
 
     config = ConfigLoader._load_config(
         os.environ["TORCHTITAN_RL_LOSS_MODULE"],

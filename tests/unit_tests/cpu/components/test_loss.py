@@ -62,6 +62,43 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(logprobs, expected_logprobs)
         torch.testing.assert_close(entropy, expected_entropy)
 
+    def test_compute_logprobs_entropy_with_masked_logits(self):
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                logits = torch.tensor(
+                    [[0.0, 1.0, -torch.inf], [0.0, -torch.inf, -torch.inf]],
+                    dtype=dtype,
+                    requires_grad=True,
+                )
+                labels = torch.tensor([0, IGNORE_INDEX])
+                logprobs, entropy = compute_logprobs(
+                    logits, labels, vocab_parallel_group=None, return_entropy=True
+                )
+                expected_entropy = torch.distributions.Categorical(
+                    logits=logits.detach().double()
+                ).entropy()
+
+                torch.testing.assert_close(
+                    entropy.double(), expected_entropy, rtol=1e-6, atol=1e-7
+                )
+                torch.testing.assert_close(
+                    logprobs, -F.cross_entropy(logits.float(), labels, reduction="none")
+                )
+                self.assertFalse(entropy.requires_grad)
+
+    def test_compute_logprobs_entropy_preserves_invalid_distributions(self):
+        logits = torch.tensor(
+            [[-torch.inf, -torch.inf], [torch.inf, 0.0], [torch.nan, 0.0]]
+        )
+        _, entropy = compute_logprobs(
+            logits,
+            torch.zeros(3, dtype=torch.long),
+            vocab_parallel_group=None,
+            return_entropy=True,
+        )
+
+        self.assertTrue(torch.isnan(entropy).all())
+
     def test_roll_mtp_sequence_respects_packed_document_boundaries(self):
         tokens = torch.tensor([10, 11, 12, 20, 21, 22, 23, 24])
         positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4])
