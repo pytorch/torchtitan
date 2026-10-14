@@ -264,6 +264,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         device_module.set_device(self.device)
         config = self.config
         set_batch_invariance(config.debug.batch_invariant)
+        dist_utils.configure_nccl_for_ulysses(
+            self.model_config,
+            device_type=self.device.type,
+            comm_backend=config.comm.backend,
+        )
         with sl.log_trace_span("torch_distributed_init"):
             topology = dist_utils.init_distributed(
                 config.comm,

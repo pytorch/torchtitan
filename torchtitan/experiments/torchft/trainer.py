@@ -80,6 +80,11 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             global_ranks = list(range(first_rank, last_rank + 1))
 
         config = self.config
+        dist_utils.configure_nccl_for_ulysses(
+            self.model_config,
+            device_type=self.device.type,
+            comm_backend=config.comm.backend,
+        )
         topology = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
