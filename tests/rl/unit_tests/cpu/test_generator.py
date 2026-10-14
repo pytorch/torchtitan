@@ -55,6 +55,7 @@ from torchtitan.rl.generator.generator import (
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.registry import register_to_vllm
+from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
@@ -62,7 +63,6 @@ from torchtitan.rl.generator.vllm.worker import (
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import LeastLoadedRoutingStrategy
-from torchtitan.rl.session_kv_holder import VLLMSessionKVHolder
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
@@ -139,7 +139,7 @@ def _generator():
     per-request helpers (`_build_sampling_params`) read."""
     generator = VLLMGenerator.__new__(VLLMGenerator)
     generator._engine = _FakeEngine()
-    generator._session_kv = None
+    generator._session_kv_holder = None
     generator._rank = 0
     generator.policy_version = 7
     generator.config = SimpleNamespace(
