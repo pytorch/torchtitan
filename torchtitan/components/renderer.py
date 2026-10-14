@@ -29,7 +29,7 @@ class RendererConfig(Configurable.Config):
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
         raise NotImplementedError
 
-    def to_renderers_config(self) -> PrimeRendererConfig:
+    def to_renderers(self) -> PrimeRendererConfig:
         """Return the config Verifiers can serialize and rebuild in its workers."""
         raise ValueError(
             f"{type(self).__name__} cannot be used with Verifiers: use "
