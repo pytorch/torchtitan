@@ -23,6 +23,7 @@ from torchtitan.rl.distributed.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.rl.distributed.routing.types import RoutingCandidate, RoutingContext
+from torchtitan.tools.utils import device_type
 
 
 @dataclass(kw_only=True, slots=True)
@@ -97,6 +98,11 @@ class InterGeneratorRouter(Actor, Configurable):
         idle, so a weight sync may land mid-rollout and successive turns can run
         under different policy versions. A turn whose session is pinned to a
         draining generator waits for it instead of moving to another one."""
+
+        sequential_initial_pull: bool = field(
+            default_factory=lambda: device_type == "xpu"
+        )
+        """Run the first pull one generator at a time (needed on XPU: oneCCL#225)."""
 
     def __init__(
         self,
@@ -241,11 +247,14 @@ class InterGeneratorRouter(Actor, Configurable):
 
         await asyncio.gather(*(wait(generator) for generator in self._generators))
 
-    async def _pull_model_state_dict(self, *, policy_version: int) -> None:
+    async def _pull_model_state_dict(
+        self, *, policy_version: int, sequential: bool = False
+    ) -> None:
         """Pull the given policy version's state dict into every generator.
 
         Args:
             policy_version: Trainer policy version whose state dict to pull.
+            sequential: Pull one generator at a time instead of all at once.
         """
 
         async def _pull_one(h: _GeneratorHandle) -> None:
@@ -275,7 +284,11 @@ class InterGeneratorRouter(Actor, Configurable):
         # TODO(perf): stagger the per-generator fetches when num_generators is large so they don't
         #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
         #   big models / many generators, not at small scale.
-        await asyncio.gather(*[_pull_one(h) for h in self._generators])
+        if sequential:
+            for h in self._generators:
+                await _pull_one(h)
+        else:
+            await asyncio.gather(*[_pull_one(h) for h in self._generators])
 
     @concurrent_endpoint
     async def generate(
@@ -333,11 +346,20 @@ class InterGeneratorRouter(Actor, Configurable):
         await self._fanout("release_groups", group_ids)
 
     @concurrent_endpoint
-    async def pull_model_state_dict(self, policy_version: int) -> None:
-        """Pull the given policy version's state dict into every generator."""
+    async def pull_model_state_dict(
+        self, policy_version: int, *, initial: bool = False
+    ) -> None:
+        """Pull the given policy version's state dict into every generator.
+
+        ``initial`` marks the first pull after setup, which honors
+        ``Config.sequential_initial_pull``.
+        """
         # Wrapper the logic in a private method so we can test it independently
         # without the need to spawn the Monarch actor mesh.
-        await self._pull_model_state_dict(policy_version=policy_version)
+        await self._pull_model_state_dict(
+            policy_version=policy_version,
+            sequential=initial and self._config.sequential_initial_pull,
+        )
 
     @concurrent_endpoint
     async def close_generators(self) -> list[Any | BaseException]:

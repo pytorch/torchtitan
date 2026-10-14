@@ -227,6 +227,26 @@ def _check_gpus_per_host(
             )
 
 
+def spawn_storage_volume_mesh_fn(
+    host_mesh: HostMesh, trainer_world_size: int, gpus_per_node: int
+) -> Callable[[], ProcMesh]:
+    """Return a function that spawns the TorchStore storage-volume proc mesh as a
+    twin of the trainer mesh: same hosts, same per-host devices, same rank layout
+    (see ``Controller.Config.storage_volumes_in_own_procs``).
+
+    Relies on the trainer taking the first ``trainer_world_size / len(host_mesh)``
+    devices of each of its hosts, as ``spawn_proc_mesh`` does (the trainer is
+    allocated first on its host mesh); a fresh provisioner starts at the same
+    device.
+    """
+    return lambda: _spawn_proc_mesh(
+        host_mesh,
+        trainer_world_size,
+        PerHostProvisioner(total_gpus=gpus_per_node),
+        bootstrap=_preimport_torch,
+    )
+
+
 def spawn_proc_mesh(
     trainer_world_size: int,
     per_generator_world_size: int,
@@ -347,6 +367,9 @@ async def main():
         await rl_trainer.setup_async(
             trainer_mesh=trainer_mesh,
             generator_meshes=generator_meshes,
+            spawn_storage_volume_mesh=spawn_storage_volume_mesh_fn(
+                this_host(), trainer_world_size, trainer_world_size
+            ),
         )
         await rl_trainer.run()
     except (KeyboardInterrupt, asyncio.CancelledError):
