@@ -21,12 +21,20 @@ class RendererConfig(Configurable.Config):
     """Base config of a renderer; `build` returns a `renderers.Renderer` on TorchTitan's tokenizer.
 
     Subclasses: `RenderersConfigAdapter` for a renderer from the `renderers` library, and
-    in-tree renderers such as `MuseGlimmerRendererConfig`.
+    in-tree renderers such as `MuseGlimmerRendererConfig`. A renderer usable with
+    Verifiers exports a library config through `to_renderers_config`.
     """
 
     # pyrefly: ignore[bad-override]
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
         raise NotImplementedError
+
+    def to_renderers_config(self) -> PrimeRendererConfig:
+        """Return the config Verifiers can serialize and rebuild in its workers."""
+        raise ValueError(
+            f"{type(self).__name__} cannot be used with Verifiers: use "
+            "from_renderers(...) or provide a renderers config for this renderer."
+        )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -48,15 +56,11 @@ class RenderersConfigAdapter(RendererConfig):
             add_generation_prompt=True,
         )
 
-    A renderer the library does not ship, such as an in-tree one, is selected with
-    `renderers.CustomRendererConfig(import_path="my_pkg.module.MyRenderer", **options)`.
-    ``MyRenderer.config_class`` names its `renderers.BaseRendererConfig` subclass, which
-    validates ``options``, and the renderer is built as ``MyRenderer(tokenizer, config)``:
-    here with a `RendererTokenizerWrapper`, in Verifiers environment-server workers with a
-    tokenizer the library loads from the checkpoint path. Workers import the class by its
-    path, so it must be importable there. The class implements the library's `Renderer`
-    protocol in full: the library's client calls ``parse_response(token_ids,
-    prompt_ids=..., tools=...)``.
+    In-tree renderers use `CustomRendererConfig(import_path=..., **options)`.
+    Workers import the renderer and build it with the checkpoint tokenizer. It must
+    provide a `BaseRendererConfig` `config_class` and implement the `Renderer`
+    protocol, including `parse_response(..., prompt_ids=...)`. TorchTitan-native
+    configs can export this config via `to_renderers_config`.
     """
 
     renderers_config: PrimeRendererConfig
@@ -66,6 +70,9 @@ class RenderersConfigAdapter(RendererConfig):
 
     def to_dict(self) -> dict[str, Any]:
         return {"renderers_config": self.renderers_config.model_dump(mode="json")}
+
+    def to_renderers_config(self) -> PrimeRendererConfig:
+        return self.renderers_config
 
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
         if self.renderers_config.name == "auto":

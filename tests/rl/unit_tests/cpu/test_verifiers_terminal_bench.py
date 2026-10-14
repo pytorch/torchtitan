@@ -20,8 +20,11 @@ pytest.importorskip("verifiers")
 
 import verifiers.v1 as vf
 
+from renderers import CustomRendererConfig
+
 from torchtitan.config import ConfigLoader
 from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.models.muse_glimmer.renderer import MuseGlimmerRendererConfig
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.examples.verifiers import env_server
 from torchtitan.rl.examples.verifiers.terminal_bench import taskset
@@ -273,6 +276,37 @@ def _num_experts(model: object) -> int | None:
         if moe is not None:
             return moe.num_experts
     return None
+
+
+def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> None:
+    config = _terminal_bench_config("rl_grpo_muse_glimmer_30b_terminal_bench")
+
+    assert config.hf_assets_path == "./assets/hf/Muse-Glimmer-30B"
+    assert isinstance(config.renderer, MuseGlimmerRendererConfig)
+    worker_config = config.renderer.to_renderers_config()
+    assert isinstance(worker_config, CustomRendererConfig)
+    assert worker_config.import_path == (
+        "torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
+    )
+    assert worker_config.model_extra["reasoning_strength"] == "low"
+
+    assert config.trainer.training.max_context_length == 16384
+    assert config.generator.model.max_context_length == 16384
+    assert config.rollouter.generation_server.max_rollout_tokens == 16384
+    assert config.generator.sampling.max_tokens == 4096
+    assert config.rollouter.verifiers_env_server.environment.agent.max_turns == 8
+    assert config.generator.cuda_graph.mode == "NONE"
+    assert isinstance(config.trainer.activation_checkpoint, FullAC.Config)
+    assert _num_kv_heads(config.generator.model) == 2
+    assert config.trainer.parallelism.tensor_parallel_degree == 2
+    assert config.generator.parallelism.tensor_parallel_degree == 2
+    assert config.trainer.parallelism.data_parallel_shard_degree == 4
+    assert config.num_generators == 4
+    assert (
+        config.rollouter.training_dataloader.dataset.verifiers_taskset.dataset
+        == TRAIN_DATASET
+    )
+    assert config.rollouter.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
 
 
 @pytest.mark.parametrize(

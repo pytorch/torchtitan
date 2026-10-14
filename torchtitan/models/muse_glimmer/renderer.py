@@ -30,11 +30,12 @@ fails first.
 
 Implements the ``renderers.Renderer`` Protocol. Muse Glimmer is not in the library yet, so
 ``MuseGlimmerRendererConfig`` is a TorchTitan ``RendererConfig`` whose ``build`` constructs
-this class directly.
+this class directly. For Verifiers, the config exports a
+``renderers.CustomRendererConfig`` that names this class; workers receive the library
+config and build the same renderer through ``MuseGlimmerLibraryConfig``.
 
 TODO: upstream this to PrimeIntellect-ai/renderers (renderer -> renderers/muse_glimmer.py,
-atem.py -> a tool parser in renderers/parsers.py), then delete both files and select it
-through ``from_renderers`` like the other renderers.
+atem.py -> a tool parser in renderers/parsers.py), then delete both files.
 """
 
 from __future__ import annotations
@@ -43,9 +44,10 @@ import datetime
 import json
 import re
 from dataclasses import dataclass, replace
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
-from renderers import Renderer
+from pydantic import StrictBool
+from renderers import CustomRendererConfig, Renderer
 from renderers.base import (
     extract_message_tool_names,
     ParsedResponse,
@@ -56,7 +58,7 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
-from renderers.configs import ThinkingRetention
+from renderers.configs import BaseRendererConfig, ThinkingRetention
 
 from torchtitan.components.renderer import RendererConfig, RendererTokenizerWrapper
 
@@ -139,6 +141,44 @@ class MuseGlimmerRendererConfig(RendererConfig):
         # Snapshot the config, as `Configurable.Config.build` does, so later edits to the
         # recipe object cannot desynchronize full renders from bridging.
         return MuseGlimmerRenderer(RendererTokenizerWrapper(tokenizer), replace(self))
+
+    def to_renderers_config(self) -> CustomRendererConfig:
+        """Export this renderer's options for Verifiers environment-server workers."""
+        return CustomRendererConfig(
+            import_path=f"{MuseGlimmerRenderer.__module__}.{MuseGlimmerRenderer.__name__}",
+            **self.to_dict(),
+        )
+
+
+class MuseGlimmerLibraryConfig(BaseRendererConfig):
+    """Muse Glimmer options carried through renderers to Verifiers workers."""
+
+    name: Literal["muse_glimmer"] = "muse_glimmer"
+    reasoning_strength: str | None = None
+    knowledge_cutoff: str | None = None
+    current_date: str | None = None
+    retain_reasoning_in_history: StrictBool = True
+    answer_from_reasoning_fallback: StrictBool = False
+
+    _template_fields = frozenset(
+        {
+            "reasoning_strength",
+            "knowledge_cutoff",
+            "current_date",
+            "retain_reasoning_in_history",
+        }
+    )
+    _internal_fields = frozenset({"answer_from_reasoning_fallback"})
+
+    def to_torchtitan_config(self) -> MuseGlimmerRendererConfig:
+        return MuseGlimmerRendererConfig(
+            reasoning_strength=self.reasoning_strength,
+            knowledge_cutoff=self.knowledge_cutoff,
+            current_date=self.current_date,
+            retain_reasoning_in_history=self.retain_reasoning_in_history,
+            answer_from_reasoning_fallback=self.answer_from_reasoning_fallback,
+            thinking_retention=self.thinking_retention,
+        )
 
 
 # Muse Glimmer special tokens. The ids are checked against the tokenizer in __init__
@@ -351,10 +391,23 @@ class _Piece(NamedTuple):
 
 
 class MuseGlimmerRenderer:
-    def __init__(self, tokenizer, config: MuseGlimmerRendererConfig | None = None):
+    config_class = MuseGlimmerLibraryConfig
+
+    @property
+    def is_prefix_stable(self) -> bool:
+        # An assistant tool-call terminator can depend on the next message's role.
+        return False
+
+    def __init__(
+        self,
+        tokenizer,
+        config: MuseGlimmerRendererConfig | MuseGlimmerLibraryConfig | None = None,
+    ):
         # Match the `(tokenizer, config)` constructor used by library renderers.
         self._tok = tokenizer
-        self._config = config or MuseGlimmerRendererConfig()
+        if isinstance(config, MuseGlimmerLibraryConfig):
+            config = config.to_torchtitan_config()
+        self._config = config if config is not None else MuseGlimmerRendererConfig()
         self._bos = tokenizer.bos_token or ""
         # `thinking_retention` is the library-wide bridge knob. Muse Glimmer's published
         # chat template renders reasoning_content for every assistant turn unconditionally
@@ -715,7 +768,13 @@ class MuseGlimmerRenderer:
 
     # ------------------------------------------------------------------ parsing
 
-    def parse_response(self, token_ids, *, tools=None) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools=None,
+        prompt_ids: list[int] | None = None,
+    ) -> ParsedResponse:
         """Parse a Muse Glimmer completion into (content, reasoning_content, tool_calls).
 
         Muse Glimmer emits harmony channels `to=<recipient><|message|><body>`:
@@ -724,6 +783,9 @@ class MuseGlimmerRenderer:
           - otherwise ("user", ...)  -> final answer content
         Validated against real generations.
         """
+        # The generation prompt ends after "assistant"; the sampled tokens contain
+        # the recipient and channel body, so there is no header to recover from it.
+        del prompt_ids
         text = self._tok.decode(token_ids, skip_special_tokens=False)
 
         reasoning_parts, content_parts, tool_calls = [], [], []
