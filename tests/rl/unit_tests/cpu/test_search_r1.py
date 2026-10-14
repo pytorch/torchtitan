@@ -40,7 +40,7 @@ def test_muse_glimmer_search_recipe_uses_worker_loadable_renderer():
 
     assert isinstance(config, Controller.Config)
     assert isinstance(config.renderer, RenderersConfigAdapter)
-    renderer_config = config.renderer.to_renderers_config()
+    renderer_config = config.renderer.get_renderers_config()
     assert isinstance(renderer_config, CustomRendererConfig)
     assert renderer_config.import_path == (
         "torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"

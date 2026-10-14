@@ -143,7 +143,7 @@ def test_muse_glimmer_renderer_survives_verifiers_worker_config() -> None:
     sent = TrainClientConfig(
         base_url="http://127.0.0.1:1",
         api_key_var="",
-        renderer=config.to_renderers_config(),
+        renderer=config.get_renderers_config(),
         renderer_model_name="muse-tokenizer",
     )
     received = TrainClientConfig.model_validate_json(sent.model_dump_json())
@@ -260,7 +260,7 @@ def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> 
 
     sent = rollouter._verifiers_train_client_config
     assert sent is not None
-    assert sent.renderer == config.to_renderers_config()
+    assert sent.renderer == config.get_renderers_config()
     assert sent.renderer_model_name == "muse-checkpoint"
     asyncio.run(rollouter.close())
 

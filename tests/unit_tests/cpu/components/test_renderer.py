@@ -51,12 +51,12 @@ def test_from_renderers_returns_adapter() -> None:
     config = from_renderers(renderers_config)
     assert isinstance(config, RenderersConfigAdapter)
     assert config.renderers_config is renderers_config
-    assert config.to_renderers_config() is renderers_config
+    assert config.get_renderers_config() is renderers_config
 
 
 def test_renderer_without_worker_config_is_rejected() -> None:
     with pytest.raises(ValueError, match="cannot be used with Verifiers"):
-        RendererConfig().to_renderers_config()
+        RendererConfig().get_renderers_config()
 
 
 def test_build_renders_with_titan_tokenizer() -> None:

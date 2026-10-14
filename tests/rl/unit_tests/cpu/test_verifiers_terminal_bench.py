@@ -283,7 +283,7 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
 
     assert config.hf_assets_path == "./assets/hf/Muse-Glimmer-30B"
     assert isinstance(config.renderer, RenderersConfigAdapter)
-    worker_config = config.renderer.to_renderers_config()
+    worker_config = config.renderer.get_renderers_config()
     assert isinstance(worker_config, CustomRendererConfig)
     assert worker_config.import_path == (
         "torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
