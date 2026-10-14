@@ -7,12 +7,19 @@
 """Context-parallel transform."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+import spmd_types as spmd
 
 from torchtitan.models.base.module import Module
 
-from torchtitan.models.common.attention import InnerAttention
-from torchtitan.models.common.attention.cp_attention import CPInnerAttention
+from torchtitan.models.common.attention import Attention, InnerAttention
+from torchtitan.models.common.attention.cp_attention import CPAttention
+from torchtitan.models.common.attention.cp_mla import (
+    KVAllGatherMLAFlexAttention,
+    UlyssesMLAAttention,
+)
+from torchtitan.models.common.decoder_sharding import mla_kv_projection_sharding_config
 
 from .base import convert_config_type, ModelConfigTransform
 
@@ -34,36 +41,12 @@ class ContextParallelTransform(ModelConfigTransform):
                 raise ValueError(
                     f"{inner_attention.__qualname__} must inherit InnerAttention."
                 )
-            if not issubclass(cp_inner_attention, CPInnerAttention):
+            if not issubclass(cp_inner_attention, CPAttention):
                 raise ValueError(
-                    f"{cp_inner_attention.__qualname__} must inherit "
-                    "CPInnerAttention."
+                    f"{cp_inner_attention.__qualname__} must inherit CPAttention."
                 )
 
     def transform(self, model: Module.Config) -> Module.Config:
-        def convert(
-            traversed: InnerAttention.Config,
-            parent: object,
-            field_name: str | int,
-        ) -> None:
-            inner_attention = traversed._owner
-            assert inner_attention is not None and issubclass(
-                inner_attention, InnerAttention
-            )
-            if inner_attention not in self.inner_attention_map:
-                raise ValueError(
-                    "No CP inner attention configured for "
-                    f"{inner_attention.__qualname__}."
-                )
-            converted = convert_config_type(
-                traversed,
-                self.inner_attention_map[inner_attention],
-            )
-            assert isinstance(
-                field_name, str
-            ), "Inner-attention configs must be stored in named decoder fields."
-            setattr(parent, field_name, converted)
-
         # Restrict traversal to decoder layers so replicated vision attention
         # is not replaced with a token-sharded CP backend.
         layers = getattr(model, "layers", None)
@@ -72,9 +55,36 @@ class ContextParallelTransform(ModelConfigTransform):
 
         mtp_layers = getattr(model, "mtp_layers", None) or []
         for layer in layers + mtp_layers:
-            for _, traversed, parent, field_name in layer.traverse(
-                InnerAttention.Config
-            ):
-                assert parent is not None and field_name is not None
-                convert(traversed, parent, field_name)
+            for _, attention, _, _ in layer.traverse(Attention.Config):
+                existing = attention.inner_attention
+                inner_attention = existing._owner
+                assert inner_attention is not None and issubclass(
+                    inner_attention, InnerAttention
+                )
+                if inner_attention not in self.inner_attention_map:
+                    raise ValueError(
+                        "No CP inner attention configured for "
+                        f"{inner_attention.__qualname__}."
+                    )
+                converted = convert_config_type(
+                    existing, self.inner_attention_map[inner_attention]
+                )
+                if isinstance(
+                    converted,
+                    (KVAllGatherMLAFlexAttention.Config, UlyssesMLAAttention.Config),
+                ):
+                    # All-gather precedes the projection; Ulysses all-to-all follows it.
+                    cp = (
+                        spmd.R
+                        if isinstance(converted, KVAllGatherMLAFlexAttention.Config)
+                        else spmd.S(0)
+                    )
+                    converted = replace(
+                        converted,
+                        wkv_b=replace(
+                            converted.wkv_b,
+                            sharding_config=mla_kv_projection_sharding_config(cp=cp),
+                        ),
+                    )
+                attention.inner_attention = converted
         return model

@@ -60,7 +60,7 @@ def test_model_defaults_to_varlen(model):
         else [config]
     )
     attention_configs = [
-        attention
+        attention.inner_attention_config
         for layer in layers
         for _, attention, _, _ in layer.traverse(InnerAttention.Config)
     ]

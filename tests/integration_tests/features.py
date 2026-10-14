@@ -40,9 +40,9 @@ from torchtitan.distributed.activation_remat import (
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
-    UlyssesCPFlexInnerAttention,
-    UlyssesCPVarlenInnerAttention,
+    KVAllGatherFlexInnerAttention,
+    UlyssesFlexInnerAttention,
+    UlyssesVarlenInnerAttention,
 )
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
@@ -485,9 +485,7 @@ def llama3_debugmodel_cp4() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -504,7 +502,7 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: UlyssesCPFlexInnerAttention}
+                inner_attention_map={FlexInnerAttention: UlyssesFlexInnerAttention}
             )
         ],
     )
@@ -522,9 +520,7 @@ def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    VarlenInnerAttention: UlyssesCPVarlenInnerAttention
-                }
+                inner_attention_map={VarlenInnerAttention: UlyssesVarlenInnerAttention}
             )
         ],
     )
@@ -558,9 +554,7 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -576,9 +570,7 @@ def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -594,9 +586,7 @@ def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -695,9 +685,7 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )

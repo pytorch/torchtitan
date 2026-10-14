@@ -76,6 +76,11 @@ class InnerAttention(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         @property
+        def inner_attention_config(self) -> "InnerAttention.Config":
+            """Return the underlying computation config; composed modules override this."""
+            return self
+
+        @property
         def is_full_attention(self) -> bool:
             """Whether queries attend to their full document (possibly causally)."""
             return False

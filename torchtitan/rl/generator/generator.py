@@ -946,12 +946,14 @@ class VLLMGenerator(Configurable):
 
         # Set vLLM environment variables from config before any vLLM initialization
         attention = model_config.first_full_attention
-        assert attention is not None, "No full attention layer found in the model spec."
-        attention_backend = attention.inner_attention
-        assert isinstance(
-            attention_backend,
+        if attention is None:
+            raise ValueError("No full attention layer found in the model spec.")
+        inner_attention_config = attention.inner_attention.inner_attention_config
+        if not isinstance(
+            inner_attention_config,
             (VarlenInnerAttention.Config, FlexInnerAttention.Config),
-        ), "Only varlen and flex attention backends are allowed."
+        ):
+            raise ValueError("Only varlen and flex attention backends are supported.")
 
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         set_batch_invariance(config.debug.batch_invariant)
@@ -996,7 +998,7 @@ class VLLMGenerator(Configurable):
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(attention_backend, FlexInnerAttention.Config)
+                    if isinstance(inner_attention_config, FlexInnerAttention.Config)
                     else AttentionBackendEnum.CUSTOM
                 ),
             ),

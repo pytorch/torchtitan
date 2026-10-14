@@ -24,6 +24,7 @@ from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     InnerAttention,
 )
+from torchtitan.models.common.attention.cp_attention import CPAttention
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
@@ -323,7 +324,6 @@ class Decoder(BaseModel):
     ) -> dict[str, Any]:
         """Prepare attention metadata and shard model inputs for CP."""
         from torchtitan.distributed import context_parallel
-        from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 
         attention_metadata = input_dict.get("attention_metadata")
         load_balancer_config = parallelism.context_parallel_load_balancer
@@ -342,7 +342,7 @@ class Decoder(BaseModel):
                 if attention_metadata is not None:
                     cp_inner_attention = attention.inner_attention._owner
                     assert cp_inner_attention is not None and issubclass(
-                        cp_inner_attention, CPInnerAttention
+                        cp_inner_attention, CPAttention
                     )
                     selected_attention_metadata = attention_metadata.get(
                         cp_inner_attention
@@ -360,7 +360,7 @@ class Decoder(BaseModel):
             attention_metadata = input_dict["attention_metadata"]
             assert isinstance(attention_metadata, dict)
             for inner_attention, metadata in attention_metadata.items():
-                if not issubclass(inner_attention, CPInnerAttention):
+                if not issubclass(inner_attention, CPAttention):
                     continue
                 attention_metadata[
                     inner_attention
@@ -384,7 +384,8 @@ class Decoder(BaseModel):
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
         for layer_config in self.config.layers:
-            for _, config, _, _ in layer_config.traverse(InnerAttention.Config):
+            for _, attention, _, _ in layer_config.traverse(Attention.Config):
+                config = attention.inner_attention
                 backend = config._owner
                 assert backend is not None and issubclass(backend, InnerAttention)
                 if backend in attention_metadata:
