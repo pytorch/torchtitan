@@ -16,7 +16,7 @@ import torch.nn as nn
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     maybe_register_blockmask_pytree_node,
@@ -79,7 +79,7 @@ def build_minimal_trainer(
     model_config,
     trainer_cls: type[Trainer],
     *,
-    activation_checkpoint_mode: str = "none",
+    activation_remat: ActivationRematConfig | None = None,
     compile_enable_passes: bool = True,
     compile_passes: list[str] | None = None,
     compile_ep_overlap_enabled: bool = False,
@@ -133,11 +133,7 @@ def build_minimal_trainer(
                 ),
             ),
             model=model_config,
-            activation_checkpoint={
-                "none": None,
-                "selective": SelectiveAC.Config(),
-                "full": FullAC.Config(),
-            }[activation_checkpoint_mode],
+            activation_remat=activation_remat,
             dataloader=SimpleNamespace(max_num_documents=max_num_documents),
             debug=DebugConfig(),
             training=TrainingConfig(disable_cuda_graphs=True),

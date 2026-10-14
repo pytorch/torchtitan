@@ -677,7 +677,7 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
         # must match the original forward even if later microbatches' forwards
         # run before this one's checkpoint replay (pipeline schedules). A
         # retained torch_remat region skips the update, the count all-reduce,
-        # and the snapshot read during RegionAC recompute and reuses the
+        # and the snapshot read during recompute and reuses the
         # original snapshot.
         cumulative_counts_E = remat.region(
             self._accumulate_expert_counts,
