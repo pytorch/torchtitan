@@ -302,19 +302,23 @@ class AttnResPipelineStage(PipelineStage):
         like = grad_hidden
         if like is None:
             like = next((g for g in grad_stack_TD if g is not None), None)
-        if like is None:
+        inputs_meta = self._stage_meta.inputs
+        if like is not None:
+            grad_delta, deposits = _split_stack_grad(
+                grad_stack_TD, order, delta_blocks, like
+            )
+        elif inputs_meta is None or any(m.requires_grad for m in inputs_meta):
             raise RuntimeError(
                 f"stage {self.stage_index}: backward produced no gradient for "
                 "any input"
             )
-        grad_delta, deposits = _split_stack_grad(
-            grad_stack_TD, order, delta_blocks, like
-        )
+        else:
+            # Nothing upstream is trainable (a frozen prefix under LoRA): no gradient channel.
+            grad_delta, deposits = [None] * len(delta_blocks), {}
         for b, grad_TD in deposits.items():
             store.deposit(bwd_chunk_id, b, grad_TD)
         for j, b in enumerate(delta_blocks):
             self._collect_into(grad_delta[j], bwd_chunk_id, b)
-        inputs_meta = self._stage_meta.inputs
         if inputs_meta is None or len(inputs_meta) != 1 + len(delta_blocks):
             raise RuntimeError(
                 f"stage {self.stage_index}: the receive metadata should describe "
@@ -323,7 +327,9 @@ class AttnResPipelineStage(PipelineStage):
         self.bwd_cache[bwd_chunk_id] = (
             grad_hidden.contiguous() if grad_hidden is not None else None,
             *(
-                grad_TD.contiguous() if meta.requires_grad else None
+                grad_TD.contiguous()
+                if grad_TD is not None and meta.requires_grad
+                else None
                 for grad_TD, meta in zip(grad_delta, inputs_meta[1:], strict=True)
             ),
         )
