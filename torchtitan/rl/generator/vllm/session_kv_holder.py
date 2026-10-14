@@ -16,11 +16,12 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.request import RequestStatus
 
 from torchtitan.config import Configurable
-from torchtitan.rl.cpu_kv_offload import CPUKVOffload
+from torchtitan.rl.generator.vllm.cpu_kv_offload import CPUKVOffload
 
 
 class VLLMSessionKVHolder(Configurable):
-    """Keeps each multi-turn session's cached prefix on GPU between its turns.
+    """Keeps each multi-turn session's reusable KV between its turns: held on GPU
+    (``hold_gpu_blocks``), and with ``cpu_kv_offload`` in host RAM, where ended sessions go first.
 
     Between turns (a tool call, an env step) a session has no request in vLLM, so its blocks sit in
     vLLM's free queue, where any new request can take them; the next turn then recomputes its
@@ -35,7 +36,8 @@ class VLLMSessionKVHolder(Configurable):
     state leaves the request when decode starts.
 
     When memory runs short, it releases whole idle sessions, idle longest first:
-    - before each step, while fewer than ``floor`` blocks are free;
+    - after each step, while fewer than ``floor`` blocks are free: the next step needs room, and the
+      holder can't act inside a step;
     - after a step where nothing runs and requests wait: vLLM refused the head for lack of blocks.
 
     The floor is vLLM's watermark plus the most blocks the next step can add to running requests
@@ -50,7 +52,7 @@ class VLLMSessionKVHolder(Configurable):
     - Every mutating method runs on every rank's engine thread in the same order, so the TP ranks'
       schedulers stay identical.
 
-    With `CPUKVOffload`, a session's CPU chunks are evicted first when it ends (`release`), except
+    With ``cpu_kv_offload``, a session's CPU chunks are evicted first when it ends (`release`), except
     the chunks a live session also uses:
 
         CPU eviction queue, evicted first on the left; GRPO siblings s1, s2 share prompt chunk p
@@ -60,56 +62,45 @@ class VLLMSessionKVHolder(Configurable):
 
     Example:
 
-        holder = VLLMSessionKVHolder.Config().build(scheduler=scheduler)
+        holder = VLLMSessionKVHolder.Config(cpu_kv_offload=CPUKVOffload.Config(size_gib=96)).build()
+        engine_kwargs.update(holder.engine_kwargs())  # before the engine build
+        engine = LLMEngine.from_engine_args(EngineArgs(**engine_kwargs))
+        holder.attach(engine)
         internal_id = engine.add_request(request_id="group=3/rollout=0/turn=2", ...)
         holder.track(internal_id, session_id="group=3/rollout=0", group_id=3)
-        holder.evict_until_free()  # before each engine.step()
         engine.step()
-        holder.after_step()  # holds the prefix of requests whose prefill just finished
+        holder.after_step()  # holds new prefixes, then releases idle sessions for the next step
         holder.release(session_ids=["group=3/rollout=0"])  # the rollout ended
-
-    Args:
-        scheduler: The vLLM v1 scheduler of this rank's in-process engine.
-        hold: Hold sessions' GPU blocks. False: only track sessions, so that with CPU offload
-            ended sessions' chunks are evicted first.
-        cpu_kv_offload: The CPU KV offload attached to this engine; None without it.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        hold_gpu_blocks: bool = True
+        """Keep each session's reusable prefix on GPU between its turns. False needs
+        ``cpu_kv_offload``: no GPU blocks are held, and the next turn reloads its history from CPU
+        (an 8k-token turn on 1 H100: ~24 ms, vs ~16 ms GPU hit and ~196 ms recomputed)."""
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        scheduler: Any,
-        hold: bool = True,
-        cpu_kv_offload: CPUKVOffload | None = None,
-    ) -> None:
-        del config
-        if hold:
-            # Partial-block prefix hits or speculative decoding move the replay point away from the
-            # prompt-end block this holds.
-            if scheduler.kv_cache_manager.coordinator.enable_partial_hash_hits:
+        cpu_kv_offload: CPUKVOffload.Config | None = None
+        """vLLM's native CPU KV offload (see `CPUKVOffload`). None: off."""
+
+        def __post_init__(self):
+            if not self.hold_gpu_blocks and self.cpu_kv_offload is None:
                 raise ValueError(
-                    "session_kv_holder does not support partial-block prefix hits"
+                    "session_kv_holder with hold_gpu_blocks=False does nothing without "
+                    "cpu_kv_offload: set cpu_kv_offload, or drop session_kv_holder"
                 )
-            if scheduler.vllm_config.speculative_config is not None:
-                raise ValueError(
-                    "session_kv_holder does not support speculative decoding"
-                )
-        self._scheduler = scheduler
-        kv_cache_manager = scheduler.kv_cache_manager
-        self._coordinator = kv_cache_manager.coordinator
-        self._block_pool = kv_cache_manager.block_pool
-        self._num_kv_cache_groups = kv_cache_manager.num_kv_cache_groups
-        self.free_floor_blocks = kv_cache_manager.watermark_blocks + sum(
-            cdiv(scheduler.max_num_scheduled_tokens, group.kv_cache_spec.block_size)
-            for group in kv_cache_manager.kv_cache_config.kv_cache_groups
+
+    def __init__(self, config: Config) -> None:
+        self._hold_gpu_blocks = config.hold_gpu_blocks
+        self.cpu_kv_offload = (
+            config.cpu_kv_offload.build() if config.cpu_kv_offload is not None else None
         )
-        self._hold_enabled = hold
-        self._cpu_kv_offload = cpu_kv_offload
+        # Set by `attach`: this rank's vLLM scheduler and its KV cache manager's parts.
+        self._scheduler: Any = None
+        self._coordinator: Any = None
+        self._block_pool: Any = None
+        self._num_kv_cache_groups = 0
+        self.free_floor_blocks = 0
         # Requests in vLLM: internal request id -> (session, group, prefill seen).
         self._live: dict[str, tuple[str, int, bool]] = {}
         # Held blocks per session, idle longest first.
@@ -136,16 +127,49 @@ class VLLMSessionKVHolder(Configurable):
         self.cpu_hit_prefix_tokens = 0
         self.recomputed_prefix_tokens = 0
 
+    def engine_kwargs(self) -> dict[str, Any]:
+        """vLLM engine args the holder needs: the CPU offload connector's, if on."""
+        return (
+            {} if self.cpu_kv_offload is None else self.cpu_kv_offload.engine_kwargs()
+        )
+
+    def attach(self, engine: Any) -> None:
+        """Read this rank's vLLM scheduler once the engine is built, and attach the CPU offload."""
+        scheduler = engine.engine_core.engine_core.scheduler
+        if self._hold_gpu_blocks:
+            # Partial-block prefix hits or speculative decoding move the replay point away from the
+            # prompt-end block this holds.
+            if scheduler.kv_cache_manager.coordinator.enable_partial_hash_hits:
+                raise ValueError(
+                    "session_kv_holder does not support partial-block prefix hits"
+                )
+            if scheduler.vllm_config.speculative_config is not None:
+                raise ValueError(
+                    "session_kv_holder does not support speculative decoding"
+                )
+        self._scheduler = scheduler
+        kv_cache_manager = scheduler.kv_cache_manager
+        self._coordinator = kv_cache_manager.coordinator
+        self._block_pool = kv_cache_manager.block_pool
+        self._num_kv_cache_groups = kv_cache_manager.num_kv_cache_groups
+        self.free_floor_blocks = kv_cache_manager.watermark_blocks + sum(
+            cdiv(scheduler.max_num_scheduled_tokens, group.kv_cache_spec.block_size)
+            for group in kv_cache_manager.kv_cache_config.kv_cache_groups
+        )
+        if self.cpu_kv_offload is not None:
+            self.cpu_kv_offload.attach(engine)
+
     def track(self, internal_request_id: str, session_id: str, group_id: int) -> None:
-        """Once this request's prefill finishes, track its session (and with `hold`, its prefix)."""
+        """Once this request's prefill finishes, track its session (and hold its prefix)."""
         self._live[internal_request_id] = (session_id, group_id, False)
         self._prefill_stats[internal_request_id] = self._scheduler.requests[
             internal_request_id
         ].prefill_stats
 
     def after_step(self) -> None:
-        """Track the sessions of requests whose prefill finished (with `hold`, hold their prefix);
-        mark sessions whose request left; release sessions if vLLM could not admit anything."""
+        """After each engine step: track the sessions of requests whose prefill finished (and hold
+        their prefix), mark sessions whose request left, and release idle sessions so the next
+        step has room."""
         for internal_id, (session_id, group_id, prefill_seen) in list(
             self._live.items()
         ):
@@ -167,7 +191,7 @@ class VLLMSessionKVHolder(Configurable):
                 self._session_groups[session_id] = group_id
                 self._group_sessions.setdefault(group_id, set()).add(session_id)
                 self._session_hashes[session_id] = request.block_hashes
-                if self._hold_enabled:
+                if self._hold_gpu_blocks:
                     self._hold(request, session_id)
 
         # Nothing runs and requests wait: with an empty batch vLLM skips the watermark, so it refused
@@ -187,8 +211,9 @@ class VLLMSessionKVHolder(Configurable):
                 # GRPO siblings share prompt blocks, so one release may free none.
                 if self._block_pool.get_num_free_blocks() > free_before:
                     break
+        self._evict_until_free()
 
-    def evict_until_free(self) -> None:
+    def _evict_until_free(self) -> None:
         """Release sessions with no running request, idle longest first, until enough blocks are free.
 
         A session whose request is running is skipped: that request still references most of its
@@ -196,18 +221,22 @@ class VLLMSessionKVHolder(Configurable):
         released: its hold is all that keeps those blocks, and keeping it once memory is full stops
         every waiting request from starting.
         """
-        if not self._hold_enabled:
+        if not self._hold_gpu_blocks:
             return
-        running_ids = {request.request_id for request in self._scheduler.running}
+        running = self._scheduler.running
         # GRPO siblings decode in lockstep, so all running requests can cross a boundary together.
-        floor = self.free_floor_blocks + self._num_kv_cache_groups * len(running_ids)
+        floor = self.free_floor_blocks + self._num_kv_cache_groups * len(running)
         if self._block_pool.get_num_free_blocks() >= floor:
             return
-        running = {self._live[i][0] for i in running_ids if i in self._live}
+        running_sessions = {
+            self._live[request.request_id][0]
+            for request in running
+            if request.request_id in self._live
+        }
         for session_id in list(self._held):
             if self._block_pool.get_num_free_blocks() >= floor:
                 return
-            if session_id not in running:
+            if session_id not in running_sessions:
                 self._release(session_id)
                 self.num_evicted += 1
 
@@ -232,7 +261,7 @@ class VLLMSessionKVHolder(Configurable):
         ]
 
         # ======== CPU offload: the ended sessions' chunks are evicted first ========
-        if self._cpu_kv_offload is not None:
+        if self.cpu_kv_offload is not None:
             # Chunks a live session uses keep their place: sessions past their first prefill,
             # and requests still before it (e.g. a GRPO sibling's first turn).
             # TODO: rebuilt on every release: 0.6 ms for 250 live Qwen3.5 sessions of 16k tokens,
@@ -244,7 +273,7 @@ class VLLMSessionKVHolder(Configurable):
                 ended = session_id in released or group_id in dropped_groups
                 if not prefill_seen and not ended and request is not None:
                     live_hashes.update(request.block_hashes)
-            self._cpu_kv_offload.evict_first(
+            self.cpu_kv_offload.evict_first(
                 block_hash
                 for block_hash in ended_hashes
                 if block_hash not in live_hashes

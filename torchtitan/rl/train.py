@@ -140,7 +140,8 @@ class HostMeshes:
 
 
 def generator_launch_env(generator_config: VLLMGenerator.Config) -> dict[str, str]:
-    """Env generator procs need for CPU KV offload (``cpu_kv_offload``), on top of ``RL_ENV_DEFAULTS``:
+    """Env generator procs need for CPU KV offload (``session_kv_holder.cpu_kv_offload``), on top of
+    ``RL_ENV_DEFAULTS``:
     - ``expandable_segments:False``: vLLM refuses a KV connector under ``expandable_segments:True``;
       other allocator options are kept.
     - ``PYTHONHASHSEED=0``: TP ranks must iterate vLLM's sets in the same order.
@@ -152,7 +153,8 @@ def generator_launch_env(generator_config: VLLMGenerator.Config) -> dict[str, st
                           PYTHONHASHSEED=0
     """
     launch_env = {}
-    if generator_config.cpu_kv_offload is not None:
+    holder_config = generator_config.session_kv_holder
+    if holder_config is not None and holder_config.cpu_kv_offload is not None:
         for key in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"):
             launch_env[key] = os.environ.get(key, "").replace(
                 "expandable_segments:True", "expandable_segments:False"

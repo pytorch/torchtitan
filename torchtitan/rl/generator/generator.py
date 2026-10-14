@@ -39,7 +39,6 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
@@ -49,6 +48,7 @@ from torchtitan.rl.generator.vllm.registry import (
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
 )
+from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
@@ -56,7 +56,6 @@ from torchtitan.rl.generator.vllm.stat_logger import (
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
-from torchtitan.rl.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
@@ -81,7 +80,7 @@ def add_extra_vllm_engine_args(
         "compilation_config": "cuda_graph",
         "seed": "debug.seed",
         # vLLM builds the same connector from it, without `CPUKVOffload.attach`.
-        "kv_offloading_size": "cpu_kv_offload",
+        "kv_offloading_size": "session_kv_holder.cpu_kv_offload",
     }
     owned_keys = sorted(
         extra_vllm_engine_args.keys()
@@ -877,12 +876,8 @@ class VLLMGenerator(Configurable):
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
         session_kv_holder: VLLMSessionKVHolder.Config | None = None
-        """Keep each multi-turn session's cached prefix on GPU between its turns (see
-        `VLLMSessionKVHolder`). None: off."""
-
-        cpu_kv_offload: CPUKVOffload.Config | None = None
-        """Copy KV blocks to host RAM, so a turn whose history left the GPU reloads it instead of
-        recomputing it (see `CPUKVOffload`). None: off."""
+        """Keep each multi-turn session's KV between its turns: held on GPU, and with
+        ``cpu_kv_offload`` reloaded from CPU (see `VLLMSessionKVHolder`). None: off."""
 
         def __post_init__(self):
             if (
@@ -890,17 +885,9 @@ class VLLMGenerator(Configurable):
                 and self.reset_kv_cache_on_model_state_dict_load
             ):
                 raise ValueError(
-                    "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False: vLLM "
-                    "cannot reset the prefix cache while blocks are held"
-                )
-            if (
-                self.cpu_kv_offload is not None
-                and self.reset_kv_cache_on_model_state_dict_load
-            ):
-                raise ValueError(
-                    "cpu_kv_offload needs reset_kv_cache_on_model_state_dict_load=False (so no "
-                    "batch_invariant): vLLM cannot reset the prefix cache while a request waits "
-                    "on a CPU load"
+                    "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False (so no "
+                    "batch_invariant): vLLM cannot reset the prefix cache while blocks are held or "
+                    "a request waits on a CPU load"
                 )
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -1070,10 +1057,12 @@ class VLLMGenerator(Configurable):
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
             engine_kwargs["seed"] = config.debug.seed
-        self._cpu_kv_offload: CPUKVOffload | None = None
-        if config.cpu_kv_offload is not None:
-            self._cpu_kv_offload = config.cpu_kv_offload.build()
-            engine_kwargs.update(self._cpu_kv_offload.engine_kwargs())
+        # Every rank tracks the same sessions in its own scheduler; only the engine thread touches them.
+        self._session_kv_holder: VLLMSessionKVHolder | None = None
+        if config.session_kv_holder is not None:
+            self._session_kv_holder = config.session_kv_holder.build()
+            # CPU offload's connector, if on.
+            engine_kwargs.update(self._session_kv_holder.engine_kwargs())
         add_extra_vllm_engine_args(engine_kwargs, config.extra_vllm_engine_args)
         engine_args = EngineArgs(**engine_kwargs)
 
@@ -1108,8 +1097,16 @@ class VLLMGenerator(Configurable):
                     stat_loggers = [build_stat_logger]
 
             # Rank 0 adds up its engine's CPU KV store bytes for `get_session_kv_metrics`.
-            if self._cpu_kv_offload is not None and self._rank == 0:
-                stat_loggers = [*(stat_loggers or []), self._cpu_kv_offload.stat_logger]
+            holder = self._session_kv_holder
+            if (
+                holder is not None
+                and holder.cpu_kv_offload is not None
+                and self._rank == 0
+            ):
+                stat_loggers = [
+                    *(stat_loggers or []),
+                    holder.cpu_kv_offload.stat_logger,
+                ]
 
             # Start the thread that runs vllm engine.
             self._engine_event_loop = asyncio.new_event_loop()
@@ -1155,8 +1152,8 @@ class VLLMGenerator(Configurable):
                 f"({self._dp_rank}) != vLLM data_parallel_rank "
                 f"({vllm_parallel_config.data_parallel_rank})"
             )
-        if self._cpu_kv_offload is not None:
-            self._cpu_kv_offload.attach(self._engine)
+        if self._session_kv_holder is not None:
+            self._session_kv_holder.attach(self._engine)
 
         self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the
@@ -1189,18 +1186,8 @@ class VLLMGenerator(Configurable):
         # Engine-loop queue (rank 0): messages the endpoints put; the loop takes them off to decide.
         self._engine_loop_queue = EngineLoopQueue(self._engine_event_loop)
 
-        # Every rank tracks the same sessions in its own scheduler; only the engine thread touches
-        # them. CPU offload alone still tracks them, to evict ended sessions' CPU chunks first.
-        self._session_kv: VLLMSessionKVHolder | None = None
         # Running totals (holder, CPU offload) at the last `get_session_kv_metrics`.
         self._session_kv_totals: dict[str, int] = {}
-        if config.session_kv_holder is not None or self._cpu_kv_offload is not None:
-            holder_config = config.session_kv_holder or VLLMSessionKVHolder.Config()
-            self._session_kv = holder_config.build(
-                scheduler=self._engine.engine_core.engine_core.scheduler,
-                hold=config.session_kv_holder is not None,
-                cpu_kv_offload=self._cpu_kv_offload,
-            )
 
         # `_engine_loop` running on the engine thread's event loop, as a future any thread can await;
         # None until start_engine_loop starts it.
@@ -1417,8 +1404,8 @@ class VLLMGenerator(Configurable):
                         )
                     return
 
-                if self._session_kv is not None:
-                    self._session_kv.release(
+                if self._session_kv_holder is not None:
+                    self._session_kv_holder.release(
                         decision.released_session_ids, decision.released_group_ids
                     )
 
@@ -1472,8 +1459,8 @@ class VLLMGenerator(Configurable):
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
                             )
-                            if self._session_kv is not None:
-                                self._session_kv.track(
+                            if self._session_kv_holder is not None:
+                                self._session_kv_holder.track(
                                     internal_request_id,
                                     request.routing_session_id,
                                     request.group_id,
@@ -1492,12 +1479,10 @@ class VLLMGenerator(Configurable):
                     for _ in range(self.config.max_engine_steps_between_decisions):
                         if not self._engine.has_unfinished_requests():
                             break
-                        if self._session_kv is not None:
-                            self._session_kv.evict_until_free()
                         with torch.no_grad():
                             request_outputs = self._engine.step()
-                        if self._session_kv is not None:
-                            self._session_kv.after_step()
+                        if self._session_kv_holder is not None:
+                            self._session_kv_holder.after_step()
                         self._request_dispatcher.process_finished_requests(
                             request_outputs, self.policy_version
                         )
@@ -1661,30 +1646,30 @@ class VLLMGenerator(Configurable):
         # consistent snapshot of the pins, send releases through the queue instead.
         for group_id in group_ids:
             self._group_min_policy_versions.pop(group_id, None)
-        if self._session_kv is not None and self._rank == 0:
+        if self._session_kv_holder is not None and self._rank == 0:
             self._engine_loop_queue.put(SessionReleaseMessage(group_ids=group_ids))
 
     async def release_sessions(self, session_ids: list[str]) -> None:
         """Release the held KV of sessions whose rollout ended (rank 0; a no-op without
-        ``session_kv_holder`` or ``cpu_kv_offload``).
+        ``session_kv_holder``).
 
         Args:
             session_ids: Routing session ids with no more generation calls.
         """
-        if self._session_kv is not None and self._rank == 0:
+        if self._session_kv_holder is not None and self._rank == 0:
             self._engine_loop_queue.put(SessionReleaseMessage(session_ids=session_ids))
 
     async def get_session_kv_metrics(self) -> list[m.Metric]:
         """This rank's session-KV metrics: levels now, counts since the last call.
 
-        Empty without `session_kv_holder` and `cpu_kv_offload`.
+        Empty without `session_kv_holder`.
 
         Example:
 
             call 1: holder.num_evicted 3, num_sessions 80  ->  evicted_sessions 3, held_sessions 80
             call 2: holder.num_evicted 5, num_sessions 78  ->  evicted_sessions 2, held_sessions 78
         """
-        holder = self._session_kv
+        holder = self._session_kv_holder
         if holder is None:
             return []
         # TODO: with DP > 1 this is DP rank 0's engine only; gather every DP rank's holder.
@@ -1695,12 +1680,12 @@ class VLLMGenerator(Configurable):
             "cpu_hit_prefix_tokens": holder.cpu_hit_prefix_tokens,
             "recomputed_prefix_tokens": holder.recomputed_prefix_tokens,
         }
-        if self.config.session_kv_holder is not None:
+        if self.config.session_kv_holder.hold_gpu_blocks:
             levels["held_sessions"] = holder.num_sessions
             levels["held_blocks"] = holder.num_held_blocks
             totals["evicted_sessions"] = holder.num_evicted
             totals["stall_evicted_sessions"] = holder.num_stall_evicted
-        offload = self._cpu_kv_offload
+        offload = holder.cpu_kv_offload
         if offload is not None:
             levels["cpu_used_fraction"] = offload.used_fraction()
             totals["cpu_store_bytes"] = offload.store_bytes
@@ -1828,7 +1813,7 @@ class VLLMGenerator(Configurable):
                 logger.info("Shutting down vLLM renderer")
                 renderer.shutdown()
             self._engine = None
-            self._session_kv = None
+            self._session_kv_holder = None
 
 
 # ===================== helpers =====================

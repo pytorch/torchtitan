@@ -13,9 +13,9 @@ from typing import Any, NamedTuple
 import pytest
 import torch.distributed as dist
 
-import torchtitan.rl.cpu_kv_offload as cpu_kv_offload_module
+import torchtitan.rl.generator.vllm.cpu_kv_offload as cpu_kv_offload_module
 import vllm.distributed.parallel_state as vllm_parallel_state
-from torchtitan.rl.cpu_kv_offload import CPUKVOffload
+from torchtitan.rl.generator.vllm.cpu_kv_offload import CPUKVOffload
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
 )

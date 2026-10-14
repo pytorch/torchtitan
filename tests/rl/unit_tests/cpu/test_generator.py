@@ -38,7 +38,6 @@ from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan.rl.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.generator.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
@@ -54,7 +53,9 @@ from torchtitan.rl.generator.generator import (
     VLLMGenerator,
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.vllm.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.generator.vllm.registry import register_to_vllm
+from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
@@ -62,7 +63,6 @@ from torchtitan.rl.generator.vllm.worker import (
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import LeastLoadedRoutingStrategy
-from torchtitan.rl.session_kv_holder import VLLMSessionKVHolder
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
@@ -139,7 +139,7 @@ def _generator():
     per-request helpers (`_build_sampling_params`) read."""
     generator = VLLMGenerator.__new__(VLLMGenerator)
     generator._engine = _FakeEngine()
-    generator._session_kv = None
+    generator._session_kv_holder = None
     generator._rank = 0
     generator.policy_version = 7
     generator.config = SimpleNamespace(
@@ -154,9 +154,12 @@ def _session_kv_generator(*, hold: bool, offload: bool):
     """A bare generator with stub holder and CPU offload, as `get_session_kv_metrics` reads them."""
     generator = _generator()
     generator.config = SimpleNamespace(
-        session_kv_holder=VLLMSessionKVHolder.Config() if hold else None
+        session_kv_holder=VLLMSessionKVHolder.Config(
+            hold_gpu_blocks=hold,
+            cpu_kv_offload=CPUKVOffload.Config(size_gib=1) if offload else None,
+        )
     )
-    generator._session_kv = SimpleNamespace(
+    generator._session_kv_holder = SimpleNamespace(
         num_sessions=80,
         num_held_blocks=900,
         num_evicted=3,
@@ -164,9 +167,11 @@ def _session_kv_generator(*, hold: bool, offload: bool):
         gpu_hit_prefix_tokens=4000,
         cpu_hit_prefix_tokens=1000,
         recomputed_prefix_tokens=0,
-    )
-    generator._cpu_kv_offload = (
-        SimpleNamespace(used_fraction=lambda: 0.5, store_bytes=10) if offload else None
+        cpu_kv_offload=(
+            SimpleNamespace(used_fraction=lambda: 0.5, store_bytes=10)
+            if offload
+            else None
+        ),
     )
     generator._session_kv_totals = {}
     kv_cache_manager = SimpleNamespace(usage=0.3)
@@ -193,10 +198,10 @@ def _session_kv_metrics(generator) -> dict[str, float]:
 def test_session_kv_metrics_are_levels_now_and_counts_since_the_last_call():
     generator = _session_kv_generator(hold=True, offload=True)
     first = _session_kv_metrics(generator)
-    holder = generator._session_kv
+    holder = generator._session_kv_holder
     holder.num_sessions, holder.num_evicted = 78, 5
     holder.recomputed_prefix_tokens = 528
-    generator._cpu_kv_offload.store_bytes = 25
+    generator._session_kv_holder.cpu_kv_offload.store_bytes = 25
     second = _session_kv_metrics(generator)
 
     assert first == {
@@ -669,18 +674,6 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_weight_sync():
         )
 
 
-def test_cpu_kv_offload_rejects_kv_cache_reset_on_weight_sync():
-    with pytest.raises(
-        ValueError, match="needs reset_kv_cache_on_model_state_dict_load=False"
-    ):
-        VLLMGenerator.Config(
-            model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
-            cpu_kv_offload=CPUKVOffload.Config(size_gib=16),
-            reset_kv_cache_on_model_state_dict_load=True,
-        )
-
-
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
@@ -739,7 +732,10 @@ def test_cpu_kv_offload_names_vllms_offloading_connector(monkeypatch, tmp_path):
         monkeypatch,
         tmp_path,
         VLLMGenerator.Config(
-            model=_MODEL_CONFIG, cpu_kv_offload=CPUKVOffload.Config(size_gib=16)
+            model=_MODEL_CONFIG,
+            session_kv_holder=VLLMSessionKVHolder.Config(
+                cpu_kv_offload=CPUKVOffload.Config(size_gib=16)
+            ),
         ),
     )
     kv_transfer_config = engine_kwargs["kv_transfer_config"]
@@ -769,7 +765,10 @@ def test_cpu_kv_offload_names_vllms_offloading_connector(monkeypatch, tmp_path):
             r"use VLLMGenerator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use VLLMGenerator\.Config\.debug\.seed"),
-        ("kv_offloading_size", r"use VLLMGenerator\.Config\.cpu_kv_offload"),
+        (
+            "kv_offloading_size",
+            r"use VLLMGenerator\.Config\.session_kv_holder\.cpu_kv_offload",
+        ),
     ],
 )
 def test_extra_vllm_engine_args_rejects_torchtitan_owned_keys(key, match):
