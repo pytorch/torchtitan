@@ -20,9 +20,9 @@ from torchtitan.config import Configurable
 class RendererConfig(Configurable.Config):
     """Base config of a renderer; `build` returns a `renderers.Renderer` on TorchTitan's tokenizer.
 
-    Subclasses: `RenderersConfigAdapter` for a renderer from the `renderers` library, and
-    in-tree renderers such as `MuseGlimmerRendererConfig`. A renderer usable with
-    Verifiers exports a library config through `to_renderers_config`.
+    `RenderersConfigAdapter` adapts library configs, including in-tree renderers
+    selected with `CustomRendererConfig`. A renderer usable with Verifiers exports
+    a library config through `to_renderers_config`.
     """
 
     # pyrefly: ignore[bad-override]
@@ -59,8 +59,8 @@ class RenderersConfigAdapter(RendererConfig):
     In-tree renderers use `CustomRendererConfig(import_path=..., **options)`.
     Workers import the renderer and build it with the checkpoint tokenizer. It must
     provide a `BaseRendererConfig` `config_class` and implement the `Renderer`
-    protocol, including `parse_response(..., prompt_ids=...)`. TorchTitan-native
-    configs can export this config via `to_renderers_config`.
+    protocol, including `parse_response(..., prompt_ids=...)`. Pass the custom
+    config to `from_renderers` to use it in TorchTitan and Verifiers alike.
     """
 
     renderers_config: PrimeRendererConfig

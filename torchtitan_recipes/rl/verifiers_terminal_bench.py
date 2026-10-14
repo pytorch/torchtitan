@@ -17,7 +17,7 @@ import math
 
 import verifiers.v1 as vf
 
-from renderers import Qwen35RendererConfig
+from renderers import CustomRendererConfig, Qwen35RendererConfig
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
@@ -35,7 +35,6 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
-from torchtitan.models.muse_glimmer.renderer import MuseGlimmerRendererConfig
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
@@ -463,7 +462,12 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             max_concurrent_rollouts=async_loop.max_active_rollout_groups
             * async_loop.num_samples_per_prompt,
         ),
-        renderer=MuseGlimmerRendererConfig(reasoning_strength="low"),
+        renderer=from_renderers(
+            CustomRendererConfig(
+                import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
+                reasoning_strength="low",
+            )
+        ),
         num_generators=4,
         generator_router=InterGeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(

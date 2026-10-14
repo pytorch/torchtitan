@@ -22,9 +22,9 @@ import verifiers.v1 as vf
 
 from renderers import CustomRendererConfig
 
+from torchtitan.components.renderer import RenderersConfigAdapter
 from torchtitan.config import ConfigLoader
 from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.models.muse_glimmer.renderer import MuseGlimmerRendererConfig
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.examples.verifiers import env_server
 from torchtitan.rl.examples.verifiers.terminal_bench import taskset
@@ -282,12 +282,13 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
     config = _terminal_bench_config("rl_grpo_muse_glimmer_30b_terminal_bench")
 
     assert config.hf_assets_path == "./assets/hf/Muse-Glimmer-30B"
-    assert isinstance(config.renderer, MuseGlimmerRendererConfig)
+    assert isinstance(config.renderer, RenderersConfigAdapter)
     worker_config = config.renderer.to_renderers_config()
     assert isinstance(worker_config, CustomRendererConfig)
     assert worker_config.import_path == (
         "torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
     )
+    assert worker_config.model_extra is not None
     assert worker_config.model_extra["reasoning_strength"] == "low"
 
     assert config.trainer.training.max_context_length == 16384

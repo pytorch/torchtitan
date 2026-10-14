@@ -63,7 +63,8 @@ def test_train_client_config_carries_an_in_tree_renderer() -> None:
 
 def test_muse_glimmer_renderer_survives_verifiers_worker_config() -> None:
     """An in-tree renderer produces the same tokens before and after transport."""
-    from renderers import create_renderer
+    from renderers import create_renderer, CustomRendererConfig
+    from torchtitan.components.renderer import from_renderers
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
     from torchtitan.models.muse_glimmer.atem import render_atem_tool_call
 
@@ -128,13 +129,16 @@ def test_muse_glimmer_renderer_survives_verifiers_worker_config() -> None:
         bos_id=None,
         eos_id=None,
     )
-    config = MuseGlimmerRendererConfig(
-        reasoning_strength="low",
-        knowledge_cutoff="2025-01-01",
-        current_date="2026-10-13",
-        retain_reasoning_in_history=False,
-        answer_from_reasoning_fallback=True,
-        thinking_retention="tool_cycle",
+    config = from_renderers(
+        CustomRendererConfig(
+            import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
+            reasoning_strength="low",
+            knowledge_cutoff="2025-01-01",
+            current_date="2026-10-13",
+            retain_reasoning_in_history=False,
+            answer_from_reasoning_fallback=True,
+            thinking_retention="tool_cycle",
+        )
     )
     sent = TrainClientConfig(
         base_url="http://127.0.0.1:1",
@@ -155,6 +159,7 @@ def test_muse_glimmer_renderer_survives_verifiers_worker_config() -> None:
 
     assert isinstance(trainer_renderer, MuseGlimmerRenderer)
     assert isinstance(worker_renderer, MuseGlimmerRenderer)
+    assert isinstance(worker_renderer._config, MuseGlimmerRendererConfig)
     assert worker_renderer._config == trainer_renderer._config
     assert worker_renderer.is_prefix_stable is False
     assert worker_renderer.render_ids(
@@ -209,8 +214,9 @@ def test_muse_glimmer_renderer_survives_verifiers_worker_config() -> None:
 
 
 def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> None:
+    from renderers import CustomRendererConfig
+    from torchtitan.components.renderer import from_renderers
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
-    from torchtitan.models.muse_glimmer.renderer import MuseGlimmerRendererConfig
 
     generation_server = SimpleNamespace(
         start=AsyncMock(),
@@ -237,7 +243,12 @@ def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> 
     rollouter._generation_server = None
     rollouter._verifiers_env_client = None
     rollouter._verifiers_train_client_config = None
-    config = MuseGlimmerRendererConfig(reasoning_strength="low")
+    config = from_renderers(
+        CustomRendererConfig(
+            import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
+            reasoning_strength="low",
+        )
+    )
 
     asyncio.run(
         rollouter.setup_async(
