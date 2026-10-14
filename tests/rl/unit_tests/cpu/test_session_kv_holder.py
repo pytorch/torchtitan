@@ -14,7 +14,7 @@ import pytest
 import torch
 import vllm.distributed.parallel_state as vllm_parallel_state
 
-from torchtitan.rl.cpu_kv_offload import CPUKVOffload
+from torchtitan.rl.generator.vllm.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
@@ -120,6 +120,13 @@ def _scheduler(manager, max_num_scheduled_tokens=0, **attrs) -> SimpleNamespace:
     )
 
 
+def _engine(scheduler) -> SimpleNamespace:
+    """What `attach` reads of vLLM's in-process engine."""
+    return SimpleNamespace(
+        engine_core=SimpleNamespace(engine_core=SimpleNamespace(scheduler=scheduler))
+    )
+
+
 def _holder(
     manager,
     requests,
@@ -127,8 +134,8 @@ def _holder(
     running=(),
     waiting=(),
     skipped_waiting=(),
-    hold=True,
-    cpu_kv_offload=None,
+    config=None,
+    connector=None,
 ) -> VLLMSessionKVHolder:
     scheduler = _scheduler(
         manager,
@@ -136,10 +143,10 @@ def _holder(
         running=running,
         waiting=waiting,
         skipped_waiting=skipped_waiting,
+        connector=connector,
     )
-    holder = VLLMSessionKVHolder.Config().build(
-        scheduler=scheduler, hold=hold, cpu_kv_offload=cpu_kv_offload
-    )
+    holder = (config or VLLMSessionKVHolder.Config()).build()
+    holder.attach(_engine(scheduler))
     holder.free_floor_blocks = floor
     return holder
 
@@ -323,26 +330,25 @@ class _ConnectorConfig(NamedTuple):
     num_workers: int
 
 
-def _cpu_kv_offload(monkeypatch, manager, cpu_tier) -> CPUKVOffload:
-    """CPUKVOffload attached, at TP=1, to vLLM's real KV cache manager and CPU tier."""
+def _offload_holder(
+    monkeypatch, manager, requests, cpu_tier, hold_gpu_blocks=True
+) -> VLLMSessionKVHolder:
+    """A holder with CPU offload, attached at TP=1 to vLLM's real KV cache manager and CPU tier."""
     monkeypatch.setattr(
         vllm_parallel_state, "get_tp_group", lambda: SimpleNamespace(world_size=1)
     )
     connector_scheduler = SimpleNamespace(
         config=_ConnectorConfig(num_workers=1), manager=cpu_tier
     )
-    scheduler = _scheduler(
-        manager, connector=SimpleNamespace(connector_scheduler=connector_scheduler)
+    config = VLLMSessionKVHolder.Config(
+        hold_gpu_blocks=hold_gpu_blocks, cpu_kv_offload=CPUKVOffload.Config(size_gib=1)
     )
-    offload = CPUKVOffload.Config(size_gib=1).build()
-    offload.attach(
-        SimpleNamespace(
-            engine_core=SimpleNamespace(
-                engine_core=SimpleNamespace(scheduler=scheduler)
-            )
-        )
+    return _holder(
+        manager,
+        requests,
+        config=config,
+        connector=SimpleNamespace(connector_scheduler=connector_scheduler),
     )
-    return offload
 
 
 def _store(cpu_tier: CPUOffloadingManager, keys) -> None:
@@ -367,8 +373,7 @@ def test_release_evicts_an_ended_session_first_except_the_prefix_a_live_sibling_
     monkeypatch, manager
 ):
     requests, cpu_tier = {}, _cpu_tier()
-    offload = _cpu_kv_offload(monkeypatch, manager, cpu_tier)
-    holder = _holder(manager, requests, cpu_kv_offload=offload)
+    holder = _offload_holder(monkeypatch, manager, requests, cpu_tier)
     prompt = list(range(48))  # 3 blocks both siblings share
     s1 = _finished_turn(manager, holder, requests, "s1", prompt + list(range(100, 134)))
     s2 = _finished_turn(manager, holder, requests, "s2", prompt + list(range(200, 234)))
@@ -395,8 +400,9 @@ def test_a_sibling_before_its_first_prefill_keeps_the_shared_prefix_in_place(
     monkeypatch, manager
 ):
     requests, cpu_tier = {}, _cpu_tier()
-    offload = _cpu_kv_offload(monkeypatch, manager, cpu_tier)
-    holder = _holder(manager, requests, hold=False, cpu_kv_offload=offload)
+    holder = _offload_holder(
+        monkeypatch, manager, requests, cpu_tier, hold_gpu_blocks=False
+    )
     prompt = list(range(48))  # 3 blocks both siblings share
     s1 = _finished_turn(manager, holder, requests, "s1", prompt + list(range(100, 134)))
     # s2's first turn is in vLLM but not prefilled yet.
@@ -413,8 +419,9 @@ def test_a_sibling_before_its_first_prefill_keeps_the_shared_prefix_in_place(
 
 def test_completion_blocks_of_an_ended_session_are_evicted_first(monkeypatch, manager):
     requests, cpu_tier = {}, _cpu_tier()
-    offload = _cpu_kv_offload(monkeypatch, manager, cpu_tier)
-    holder = _holder(manager, requests, hold=False, cpu_kv_offload=offload)
+    holder = _offload_holder(
+        monkeypatch, manager, requests, cpu_tier, hold_gpu_blocks=False
+    )
     turn = _request("t1", list(range(50)))
     requests["t1"] = turn
     holder.track("t1", session_id="s", group_id=0)
@@ -437,8 +444,9 @@ def test_offload_without_hold_holds_nothing_and_evicts_a_finished_group_first(
     monkeypatch, manager
 ):
     requests, cpu_tier = {}, _cpu_tier()
-    offload = _cpu_kv_offload(monkeypatch, manager, cpu_tier)
-    holder = _holder(manager, requests, hold=False, cpu_kv_offload=offload)
+    holder = _offload_holder(
+        monkeypatch, manager, requests, cpu_tier, hold_gpu_blocks=False
+    )
     free_before = manager.block_pool.get_num_free_blocks()
     s1 = _finished_turn(manager, holder, requests, "s1", list(range(50)), group_id=5)
     s2 = _finished_turn(manager, holder, requests, "s2", list(range(500, 550)), 5)
@@ -456,8 +464,7 @@ def test_free_floor_release_keeps_the_cpu_chunks_of_a_live_session(
 ):
     """A session dropped from GPU for room is still alive: its CPU copy is what it reloads."""
     requests, cpu_tier = {}, _cpu_tier()
-    offload = _cpu_kv_offload(monkeypatch, manager, cpu_tier)
-    holder = _holder(manager, requests, cpu_kv_offload=offload)
+    holder = _offload_holder(monkeypatch, manager, requests, cpu_tier)
     old = _finished_turn(manager, holder, requests, "old", list(range(50)))
     _finished_turn(manager, holder, requests, "new", list(range(500, 550)))
     _store(cpu_tier, _offload_keys(old) + [_CHURN])
@@ -473,7 +480,8 @@ def test_free_floor_release_keeps_the_cpu_chunks_of_a_live_session(
 def test_free_floor_is_the_watermark_plus_one_prefill_chunk(manager):
     manager.watermark_blocks = 8  # vLLM's watermark=0.1 of the 80-block pool
     scheduler = _scheduler(manager, max_num_scheduled_tokens=100)
-    holder = VLLMSessionKVHolder.Config().build(scheduler=scheduler)
+    holder = VLLMSessionKVHolder.Config().build()
+    holder.attach(_engine(scheduler))
     # watermark 8 + 4 KV cache groups x cdiv(100, 16) = 7 chunk blocks
     assert holder.free_floor_blocks == 8 + 4 * 7
 
@@ -481,12 +489,17 @@ def test_free_floor_is_the_watermark_plus_one_prefill_chunk(manager):
 def test_holder_rejects_partial_block_hits_and_speculative_decoding(manager):
     manager.coordinator.enable_partial_hash_hits = True
     with pytest.raises(ValueError, match="does not support partial-block prefix hits"):
-        VLLMSessionKVHolder.Config().build(scheduler=_scheduler(manager))
+        VLLMSessionKVHolder.Config().build().attach(_engine(_scheduler(manager)))
     manager.coordinator.enable_partial_hash_hits = False
     scheduler = _scheduler(manager)
     scheduler.vllm_config.speculative_config = object()
     with pytest.raises(ValueError, match="does not support speculative decoding"):
-        VLLMSessionKVHolder.Config().build(scheduler=scheduler)
+        VLLMSessionKVHolder.Config().build().attach(_engine(scheduler))
+
+
+def test_hold_gpu_blocks_off_needs_cpu_kv_offload():
+    with pytest.raises(ValueError, match="does nothing without cpu_kv_offload"):
+        VLLMSessionKVHolder.Config(hold_gpu_blocks=False)
 
 
 @pytest.mark.parametrize("queue", ["waiting", "skipped_waiting"])

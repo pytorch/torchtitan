@@ -38,7 +38,6 @@ from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan.rl.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.generator.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
@@ -54,6 +53,7 @@ from torchtitan.rl.generator.generator import (
     VLLMGenerator,
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.vllm.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.generator.vllm.registry import register_to_vllm
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
@@ -585,18 +585,6 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_weight_sync():
         )
 
 
-def test_cpu_kv_offload_rejects_kv_cache_reset_on_weight_sync():
-    with pytest.raises(
-        ValueError, match="needs reset_kv_cache_on_model_state_dict_load=False"
-    ):
-        VLLMGenerator.Config(
-            model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
-            cpu_kv_offload=CPUKVOffload.Config(size_gib=16),
-            reset_kv_cache_on_model_state_dict_load=True,
-        )
-
-
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
@@ -655,7 +643,10 @@ def test_cpu_kv_offload_names_vllms_offloading_connector(monkeypatch, tmp_path):
         monkeypatch,
         tmp_path,
         VLLMGenerator.Config(
-            model=_MODEL_CONFIG, cpu_kv_offload=CPUKVOffload.Config(size_gib=16)
+            model=_MODEL_CONFIG,
+            session_kv_holder=VLLMSessionKVHolder.Config(
+                cpu_kv_offload=CPUKVOffload.Config(size_gib=16)
+            ),
         ),
     )
     kv_transfer_config = engine_kwargs["kv_transfer_config"]
@@ -685,7 +676,10 @@ def test_cpu_kv_offload_names_vllms_offloading_connector(monkeypatch, tmp_path):
             r"use VLLMGenerator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use VLLMGenerator\.Config\.debug\.seed"),
-        ("kv_offloading_size", r"use VLLMGenerator\.Config\.cpu_kv_offload"),
+        (
+            "kv_offloading_size",
+            r"use VLLMGenerator\.Config\.session_kv_holder\.cpu_kv_offload",
+        ),
     ],
 )
 def test_extra_vllm_engine_args_rejects_torchtitan_owned_keys(key, match):

@@ -115,8 +115,9 @@ class CPUKVOffload(Configurable):
             return
         if sys.flags.hash_randomization:
             raise ValueError(
-                "cpu_kv_offload with tensor_parallel_degree > 1 needs PYTHONHASHSEED=0 in generator "
-                "procs (train.py sets it): TP ranks iterate the same sets and must agree on the order"
+                "session_kv_holder.cpu_kv_offload with tensor_parallel_degree > 1 needs "
+                "PYTHONHASHSEED=0 in generator procs (train.py sets it): TP ranks iterate the same "
+                "sets and must agree on the order"
             )
 
         request_counter = itertools.count()
