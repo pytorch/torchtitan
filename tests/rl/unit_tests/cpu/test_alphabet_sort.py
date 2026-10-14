@@ -17,8 +17,6 @@ from renderers import Qwen3RendererConfig
 from torchtitan.components.renderer import from_renderers
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-
-from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.examples.alphabet_sort import (
     AlphabetSortDataset,
     AlphabetSortSample,
@@ -28,6 +26,8 @@ from torchtitan.rl.examples.alphabet_sort import (
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import score_sorted_list
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
+
+from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.types import RolloutTurnID
 from torchtitan_recipes.rl.alphabet_sort import _alphabet_sort_rollouter_config
 

@@ -214,7 +214,7 @@ def test_model_autoparallel_uses_fx_module_path_and_resolved_policy(
             training=_training_config(),
             parallelism=parallelism,
             compile_config=compile_config,
-            ac_config=object(),
+            activation_remat=object(),
             dump_folder="",
         )
 
