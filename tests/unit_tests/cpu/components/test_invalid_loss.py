@@ -66,6 +66,7 @@ class TestInvalidLoss(unittest.TestCase):
         optim.pp_has_last_stage = True
         optim.parameters = []
         optim.optimizers = MagicMock()
+        optim.gradient_clipper = None
         optim.lr_schedulers = MagicMock()
         optim.lr_schedulers.get_metrics.return_value = {}
         optim.ema = None

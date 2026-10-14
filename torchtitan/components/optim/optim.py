@@ -26,6 +26,30 @@ from .optimizer import OptimizersContainer
 logger = logging.getLogger(__name__)
 
 
+class GradientClipper(Configurable):
+    """Base class for optimizer-owned gradient clipping.
+
+    Implementations must define their own nested ``Config`` class.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+
+    def __call__(
+        self,
+        parameters: list[nn.Parameter],
+        max_norm: float | int,
+        *,
+        parallelism_context: ParallelismContext,
+    ) -> torch.Tensor:
+        """Clip gradients in place and return their total norm."""
+        raise NotImplementedError
+
+
 class Optim(Configurable):
     """Own the parameter update and its eager state."""
 
@@ -41,6 +65,8 @@ class Optim(Configurable):
         """Optional online EMA of model weights."""
         max_norm: float | int = 1.0
         """Maximum norm used for gradient clipping."""
+        gradient_clipper: GradientClipper.Config | None = None
+        """Optional optimizer-owned gradient clipping implementation."""
         enable_cuda_graph: bool = False
         """Capture gradient clipping and optimizer updates in one CUDA graph."""
 
@@ -51,6 +77,7 @@ class Optim(Configurable):
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
     ema: EMA | None
+    gradient_clipper: GradientClipper | None
 
     def __init__(
         self,
@@ -93,6 +120,11 @@ class Optim(Configurable):
             if config.ema is not None
             else None
         )
+        self.gradient_clipper = (
+            config.gradient_clipper.build()
+            if config.gradient_clipper is not None
+            else None
+        )
 
         self._run_update = self._update
         if enable_cuda_graph:
@@ -120,14 +152,24 @@ class Optim(Configurable):
             self.ema.step(current_step)
         return grad_norm
 
-    def _update(self, loss: torch.Tensor) -> torch.Tensor:
-        """Clip gradients, check loss and gradient norm, then update parameters."""
-        grad_norm = dist_utils.clip_grad_norm_(
+    def _clip_grad_norm(self) -> torch.Tensor:
+        """Clip gradients and return their total norm."""
+        if self.gradient_clipper is None:
+            return dist_utils.clip_grad_norm_(
+                self.parameters,
+                self.config.max_norm,
+                foreach=True,
+                pp_mesh=self.parallelism_context.get_optional_mesh("pp"),
+            )
+        return self.gradient_clipper(
             self.parameters,
             self.config.max_norm,
-            foreach=True,
-            pp_mesh=self.parallelism_context.get_optional_mesh("pp"),
+            parallelism_context=self.parallelism_context,
         )
+
+    def _update(self, loss: torch.Tensor) -> torch.Tensor:
+        """Clip gradients, check loss and gradient norm, then update parameters."""
+        grad_norm = self._clip_grad_norm()
         loss_is_finite = torch.isfinite(loss).all().to(torch.int32)
         if not self.parallelism_context.pp_enabled or self.pp_has_last_stage:
             loss_mesh = self.parallelism_context.get_optional_mesh("loss")
