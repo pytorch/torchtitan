@@ -176,7 +176,7 @@ class VerifiersRollouter(Rollouter):
         del tokenizer_config
         if self._verifiers_env_client is not None:
             return
-        verifiers_renderer_config = renderer_config.get_renderers_config()
+        verifiers_renderer_config = renderer_config.to_renderers()
 
         # Verifiers generates through an HTTP endpoint, while TorchTitan exposes
         # an in-process GenerateFn. This server bridges those interfaces.
