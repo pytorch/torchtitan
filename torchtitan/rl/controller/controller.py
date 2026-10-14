@@ -349,6 +349,16 @@ class Controller(Configurable):
                     "to control optimizer-step boundaries.",
                     stacklevel=2,
                 )
+            if (
+                self.async_loop.batcher.rdma_min_tensor_bytes is not None
+                and not self.trainer.training.preprocess_microbatch_groups_lazily
+            ):
+                warnings.warn(
+                    "async_loop.batcher.rdma_min_tensor_bytes is set without "
+                    "trainer.training.preprocess_microbatch_groups_lazily=True: trainer "
+                    "ranks read all microbatches before forward/backward, with no overlap.",
+                    stacklevel=2,
+                )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
                 max_context_length = self.trainer.training.max_context_length

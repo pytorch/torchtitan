@@ -75,12 +75,39 @@ def test_per_group_cuda_graph_config_restrictions() -> None:
     )
 
 
+def test_lazy_preprocessing_config_restrictions() -> None:
+    with pytest.raises(ValueError, match="requires training.disable_cuda_graphs=True"):
+        TrainingEngine.Config(
+            training=TrainingConfig(preprocess_microbatch_groups_lazily=True)
+        )
+    with pytest.raises(ValueError, match="does not support SDC replay"):
+        TrainingEngine.Config(
+            training=TrainingConfig(
+                preprocess_microbatch_groups_lazily=True, disable_cuda_graphs=True
+            ),
+            sdc_replayer=SDCReplayer.Config(),
+        )
+
+    TrainingEngine.Config(
+        training=TrainingConfig(
+            preprocess_microbatch_groups_lazily=True, disable_cuda_graphs=True
+        )
+    )
+
+
 def test_graph_trainer_rejects_per_group_cuda_graphs() -> None:
     config = llama3_debugmodel(attn_backend="flex")
     with pytest.raises(ValueError, match="not supported with GraphTrainer"):
         GraphTrainer.Config(
             model=config.model,
             training=TrainingConfig(cuda_graph_per_accumulation_group=True),
+        )
+    with pytest.raises(ValueError, match="lazily is not supported with GraphTrainer"):
+        GraphTrainer.Config(
+            model=config.model,
+            training=TrainingConfig(
+                preprocess_microbatch_groups_lazily=True, disable_cuda_graphs=True
+            ),
         )
 
 

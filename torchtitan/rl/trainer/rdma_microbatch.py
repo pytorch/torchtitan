@@ -110,15 +110,15 @@ class _TensorRef:
 _NUM_MICROBATCHES_READ_AHEAD = 2
 
 
-class MicrobatchStream:
+class RDMAMicrobatchPrefetcher:
     """Yields this rank's microbatches in order, reading the next ones on a background thread.
 
     Implements only what `TrainingEngine.forward_backward` uses: `len()` and one in-order pass.
 
     Example:
-        stream = MicrobatchStream([rdma_microbatch_0, ..., rdma_microbatch_3])
-        len(stream)  # 4
-        for [microbatch] in stream:
+        prefetcher = RDMAMicrobatchPrefetcher([rdma_microbatch_0, ..., rdma_microbatch_3])
+        len(prefetcher)  # 4
+        for [microbatch] in prefetcher:
             train(microbatch)
 
         read thread:  read 0 | read 1, read 2 | read 3  |
@@ -127,12 +127,18 @@ class MicrobatchStream:
 
     def __init__(self, rdma_microbatches: list[MonarchRDMAMicrobatch]) -> None:
         self._rdma_microbatches = rdma_microbatches
-        self.read_s = 0.0  # this rank's total read time, hidden behind training or not
+        # This rank's total read time, hidden or not; final once the pass ends.
+        self.read_s = 0.0
 
     def __len__(self) -> int:
         return len(self._rdma_microbatches)
 
     def __iter__(self) -> Iterator[list[TrainingMicrobatch]]:
+        def wait_for_microbatch(read: Future[TrainingMicrobatch]) -> TrainingMicrobatch:
+            # The span is the read time that training did not hide.
+            with sl.log_trace_span("wait_for_microbatch"):
+                return read.result()
+
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="microbatch_read")
         reads: deque[Future[TrainingMicrobatch]] = deque()
         try:
@@ -145,12 +151,13 @@ class MicrobatchStream:
                     )
                 )
                 if len(reads) > _NUM_MICROBATCHES_READ_AHEAD:
-                    yield [_wait_for_microbatch(reads.popleft())]
+                    yield [wait_for_microbatch(reads.popleft())]
             while reads:
-                yield [_wait_for_microbatch(reads.popleft())]
+                yield [wait_for_microbatch(reads.popleft())]
         finally:
-            # On an error, cancel queued reads: with the batcher gone, each would wait out
-            # the 60 s RDMA timeout.
+            # Runs when the pass ends or the generator is closed or collected (e.g. after a failed
+            # step): cancel the queued reads, which would each wait out the 60 s RDMA timeout with
+            # the batcher gone. The read in flight still finishes.
             pool.shutdown(cancel_futures=True)
 
     def _read(self, rdma_microbatch: MonarchRDMAMicrobatch) -> TrainingMicrobatch:
@@ -158,12 +165,6 @@ class MicrobatchStream:
         microbatch = asyncio.run(rdma_microbatch.read())
         self.read_s += time.perf_counter() - start
         return microbatch
-
-
-def _wait_for_microbatch(read: Future[TrainingMicrobatch]) -> TrainingMicrobatch:
-    # The span is the read time that training did not hide.
-    with sl.log_trace_span("wait_for_microbatch"):
-        return read.result()
 
 
 # The CUDA driver's `CU_LIMIT_STACK_SIZE` (cuda.h).
