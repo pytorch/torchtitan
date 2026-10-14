@@ -21,8 +21,8 @@ pytest.importorskip("verifiers")
 import verifiers.v1 as vf
 
 from torchtitan.config import ConfigLoader
-from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.rl.controller import Controller
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
+from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.examples.verifiers import env_server
 from torchtitan.rl.examples.verifiers.terminal_bench import taskset
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
@@ -247,7 +247,7 @@ def test_training_recipe_uses_separate_datasets() -> None:
     (optimizer,) = config.trainer.optim.optimizer.optimizers
     assert optimizer.fused
     assert config.async_loop.training_sample_builder.drop_zero_std_reward_groups
-    assert isinstance(config.trainer.activation_checkpoint, FullAC.Config)
+    assert isinstance(config.trainer.activation_remat, FullActivationRematConfig)
     assert config.trainer.checkpointer.interval == 20
     assert config.generator.cuda_graph.mode == "FULL_DECODE_ONLY"
     assert config.num_generators == 8

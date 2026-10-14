@@ -11,10 +11,14 @@ import pytest
 
 from torchtitan.config import OverrideConfig
 from torchtitan.rl import train
-from torchtitan.rl.controller import AsyncLoopConfig
-from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
-from torchtitan.rl.observability.rollout_recorder import RolloutSampleRecorder
+from torchtitan.rl.controller.controller import AsyncLoopConfig
+from torchtitan.rl.generator.generator import (
+    SamplingConfig,
+    VLLMCudaGraphConfig,
+    VLLMGenerator,
+)
+from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
+from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 
 
 class _FakeController:
