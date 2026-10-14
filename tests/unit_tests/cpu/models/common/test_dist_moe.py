@@ -1051,7 +1051,7 @@ def test_dist_moe_671b_recipe_topology(factory, dp_degree, num_microbatches) -> 
     assert config.training.dtype == "float32"
     assert config.training.mixed_precision_param == "bfloat16"
     assert config.training.mixed_precision_reduce == "bfloat16"
-    assert config.activation_checkpoint is None
+    assert config.activation_remat is None
     assert isinstance(config.loss, CrossEntropyLoss.Config)
     assert config.override.imports == [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",

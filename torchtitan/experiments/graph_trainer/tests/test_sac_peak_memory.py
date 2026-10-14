@@ -14,7 +14,10 @@ import torch.nn as nn
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_remat import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.experiments.graph_trainer.llama3 import (
     build_model_config as build_llama3_model_config,
 )
@@ -126,7 +129,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
     def test_llama3_debugmodel_peak_memory_matches_eager_selective_ac(self):
         eager_model = _build_model(DEBUGMODEL)
         eager_model.load_state_dict(copy.deepcopy(self.state_dict))
-        SelectiveAC.Config().build().apply(eager_model)
+        DefaultActivationRematConfig().apply(eager_model)
         eager_trainer = build_minimal_trainer(
             eager_model,
             build_llama3_model_config(DEBUGMODEL, parallelism=ParallelismConfig()),
@@ -140,7 +143,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
             traced_model,
             build_llama3_model_config(DEBUGMODEL, parallelism=ParallelismConfig()),
             GraphTrainer,
-            activation_checkpoint_mode="selective",
+            activation_remat=DefaultActivationRematConfig(),
             parallelism_context=self.parallelism_context,
         )
         # Both policies retain explicitly identified expensive operations while
@@ -190,7 +193,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         """Graph full recompute produces bitwise-identical loss and grads vs eager."""
         eager_model = _build_model(DEBUGMODEL)
         eager_model.load_state_dict(copy.deepcopy(self.state_dict))
-        FullAC.Config().build().apply(eager_model)
+        FullActivationRematConfig().apply(eager_model)
         eager_trainer = build_minimal_trainer(
             eager_model,
             build_llama3_model_config(DEBUGMODEL, parallelism=ParallelismConfig()),
@@ -204,7 +207,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
             traced_model,
             build_llama3_model_config(DEBUGMODEL, parallelism=ParallelismConfig()),
             GraphTrainer,
-            activation_checkpoint_mode="selective",
+            activation_remat=DefaultActivationRematConfig(),
             parallelism_context=self.parallelism_context,
         )
         traced_trainer.config.compile.memory_policy = "full"

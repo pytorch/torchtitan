@@ -15,9 +15,7 @@ from torchtitan.models.common.attention import BaseAttention
 if TYPE_CHECKING:
     from torchtitan.config import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
-    from torchtitan.distributed.activation_checkpoint import (
-        ActivationCheckpointingConfig,
-    )
+    from torchtitan.distributed.activation_remat import ActivationRematConfig
     from torchtitan.models.base.model import BaseModel
     from torchtitan.models.base.module import Module
 
@@ -33,7 +31,7 @@ def validate_model_training_config(
     parallelism: ParallelismConfig,
     training: TrainingConfig,
     debug: DebugConfig,
-    activation_checkpoint: ActivationCheckpointingConfig,
+    activation_remat: ActivationRematConfig | None,
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
