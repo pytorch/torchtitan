@@ -54,7 +54,7 @@ def _validate(config: "Llama3Model.Config", tp: int) -> None:
             disable_cuda_graphs=True,
         ),
         debug=DebugConfig(),
-        activation_checkpoint=None,
+        activation_remat=None,
         max_num_documents=None,
     )
 

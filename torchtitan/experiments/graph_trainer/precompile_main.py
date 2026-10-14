@@ -138,7 +138,7 @@ def _common_setup(config):
         training=config.training,
         parallelism=parallelism,
         compile_config=compile_config,
-        ac_config=config.activation_checkpoint,
+        activation_remat=config.activation_remat,
         dump_folder=config.dump_folder,
     )
 

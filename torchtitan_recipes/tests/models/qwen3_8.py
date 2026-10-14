@@ -29,7 +29,10 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_remat import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -94,7 +97,7 @@ def qwen38_debugmodel(
             steps=10,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -154,7 +157,7 @@ def qwen38_debugmodel_moe(
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -193,7 +196,7 @@ def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )
 
 
@@ -236,5 +239,5 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )

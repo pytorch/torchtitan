@@ -17,7 +17,7 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.trainer import Trainer
@@ -56,5 +56,5 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )
