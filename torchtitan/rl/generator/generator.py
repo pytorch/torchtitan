@@ -48,6 +48,7 @@ from torchtitan.rl.generator.vllm.registry import (
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
 )
+from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
@@ -55,7 +56,6 @@ from torchtitan.rl.generator.vllm.stat_logger import (
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
-from torchtitan.rl.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
@@ -1164,9 +1164,9 @@ class VLLMGenerator(Configurable):
         self._engine_loop_queue = EngineLoopQueue(self._engine_event_loop)
 
         # Every rank holds the same blocks in its own scheduler; only the engine thread touches them.
-        self._session_kv: VLLMSessionKVHolder | None = None
+        self._session_kv_holder: VLLMSessionKVHolder | None = None
         if config.session_kv_holder is not None:
-            self._session_kv = config.session_kv_holder.build(
+            self._session_kv_holder = config.session_kv_holder.build(
                 scheduler=self._engine.engine_core.engine_core.scheduler
             )
 
@@ -1220,12 +1220,12 @@ class VLLMGenerator(Configurable):
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
-        if self._session_kv is not None and self._rank == 0:
+        if self._session_kv_holder is not None and self._rank == 0:
             logger.info(
                 "Session KV at step %d: %d sessions held, %d evicted so far",
                 step,
-                self._session_kv.num_sessions,
-                self._session_kv.num_evicted,
+                self._session_kv_holder.num_sessions,
+                self._session_kv_holder.num_evicted,
             )
 
     async def start_engine_loop(self) -> None:
@@ -1392,8 +1392,8 @@ class VLLMGenerator(Configurable):
                         )
                     return
 
-                if self._session_kv is not None:
-                    self._session_kv.release(
+                if self._session_kv_holder is not None:
+                    self._session_kv_holder.release(
                         decision.released_session_ids, decision.released_group_ids
                     )
 
@@ -1447,8 +1447,8 @@ class VLLMGenerator(Configurable):
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
                             )
-                            if self._session_kv is not None:
-                                self._session_kv.track(
+                            if self._session_kv_holder is not None:
+                                self._session_kv_holder.track(
                                     internal_request_id,
                                     request.routing_session_id,
                                     request.group_id,
@@ -1467,12 +1467,10 @@ class VLLMGenerator(Configurable):
                     for _ in range(self.config.max_engine_steps_between_decisions):
                         if not self._engine.has_unfinished_requests():
                             break
-                        if self._session_kv is not None:
-                            self._session_kv.evict_until_free()
                         with torch.no_grad():
                             request_outputs = self._engine.step()
-                        if self._session_kv is not None:
-                            self._session_kv.after_step()
+                        if self._session_kv_holder is not None:
+                            self._session_kv_holder.after_step()
                         self._request_dispatcher.process_finished_requests(
                             request_outputs, self.policy_version
                         )
@@ -1636,7 +1634,7 @@ class VLLMGenerator(Configurable):
         # consistent snapshot of the pins, send releases through the queue instead.
         for group_id in group_ids:
             self._group_min_policy_versions.pop(group_id, None)
-        if self._session_kv is not None and self._rank == 0:
+        if self._session_kv_holder is not None and self._rank == 0:
             self._engine_loop_queue.put(SessionReleaseMessage(group_ids=group_ids))
 
     async def release_sessions(self, session_ids: list[str]) -> None:
@@ -1646,7 +1644,7 @@ class VLLMGenerator(Configurable):
         Args:
             session_ids: Routing session ids with no more generation calls.
         """
-        if self._session_kv is not None and self._rank == 0:
+        if self._session_kv_holder is not None and self._rank == 0:
             self._engine_loop_queue.put(SessionReleaseMessage(session_ids=session_ids))
 
     async def initialize_torchstore_client(self, requester_index: int) -> None:
@@ -1762,7 +1760,7 @@ class VLLMGenerator(Configurable):
                 logger.info("Shutting down vLLM renderer")
                 renderer.shutdown()
             self._engine = None
-            self._session_kv = None
+            self._session_kv_holder = None
 
 
 # ===================== helpers =====================

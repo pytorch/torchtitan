@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from torchtitan.rl.session_kv_holder import VLLMSessionKVHolder
+from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -216,7 +216,7 @@ def test_evict_until_free_releases_the_session_idle_longest_first(manager):
     _finished_turn(manager, holder, requests, "new", list(range(500, 550)))
 
     holder.free_floor_blocks = manager.block_pool.get_num_free_blocks() + 1
-    holder.evict_until_free()
+    holder.after_step()
     # Only "old" was released: releasing "new" now frees the rest.
     assert holder.num_sessions == 1 and holder.num_evicted == 1
     holder.release(session_ids=["new"])
@@ -233,7 +233,7 @@ def test_evict_until_free_skips_a_session_with_a_running_request(manager):
     holder.after_step()
 
     holder.free_floor_blocks = manager.block_pool.get_num_free_blocks() + 1
-    holder.evict_until_free()
+    holder.after_step()
     assert holder.num_sessions == 1 and holder.num_evicted == 0
 
 
@@ -246,7 +246,7 @@ def test_evict_until_free_releases_a_session_whose_next_request_is_waiting(manag
     holder.track("s/turn2", session_id="s", group_id=0)
 
     holder.free_floor_blocks = manager.block_pool.get_num_free_blocks() + 1
-    holder.evict_until_free()
+    holder.after_step()
     assert holder.num_sessions == 0 and holder.num_evicted == 1
 
 
@@ -315,19 +315,21 @@ def test_a_waiting_turn_gets_room_when_held_sessions_fill_the_pool(manager, queu
     """Nothing runs, free >= floor, and the waiting turn needs more blocks than are free.
     vLLM serves `skipped_waiting` first and leaves a refused request there."""
     requests, waiting = {}, []
-    holder = _holder(manager, requests, floor=4, **{queue: waiting})
+    holder = _holder(manager, requests, **{queue: waiting})
     for i in range(12):  # 6 held blocks each: 7 of 80 stay free
         _finished_turn(
             manager, holder, requests, f"s{i}", [1000 * i + j for j in range(50)]
         )
+    # Set after the turns: every after_step checks the floor, which would release during setup.
+    holder.free_floor_blocks = 4
+    assert holder.num_sessions == 12 and manager.block_pool.get_num_free_blocks() == 7
     # 10 attention blocks + GDN state: more than the 7 free.
     head = _request("head", list(range(50_000, 50_160)))
     requests["head"] = head
     waiting.append(head)
 
-    # The engine loop with an empty batch: the holder, then vLLM's admission check.
+    # The engine loop with an empty batch: vLLM's admission check, then the holder.
     for _ in range(20):
-        holder.evict_until_free()
         manager.new_step_starts()
         if manager.allocate_slots(
             head, head.num_tokens, full_sequence_must_fit=True, has_scheduled_reqs=False
