@@ -165,10 +165,12 @@ class _LinearFunction(torch.autograd.Function):
 
     ``Linear._linear`` uses it only when in-place WGRAD accumulation is on.
     Without a running gradient it computes the same GEMMs as ``F.linear``'s
-    autograd formula, so the gradients are bitwise identical. Later
-    contributions use ``addmm(out=weight.grad)``, which adds the GEMM's fp32
-    accumulator into the running gradient instead of first rounding the WGRAD
-    to the weight dtype.
+    autograd formula, so the gradients are bitwise identical, except that a
+    WGRAD whose ``weight.grad_dtype`` is wider than the input (e.g. FSDP's
+    fp32 reduce dtype) comes out of the GEMM in that dtype instead of being
+    rounded to the input dtype and upcast by autograd. Later contributions use
+    ``addmm(out=weight.grad)``, which adds the GEMM's fp32 accumulator into the
+    running gradient instead of first rounding the WGRAD to the weight dtype.
     """
 
     @staticmethod
@@ -203,7 +205,19 @@ class _LinearFunction(torch.autograd.Function):
         if ctx.needs_input_grad[1]:
             grad = running_grad(weight)
             if grad is None:
-                grad_weight = grad_MN.t().mm(input_MK).view(weight.shape)
+                # Produce the WGRAD in the parameter's grad_dtype (e.g. FSDP's
+                # fp32 reduce dtype on a microbatch with gradient sync
+                # disabled) from the GEMM's fp32 accumulator, rather than
+                # rounding it to the input dtype for autograd to upcast.
+                # grad_dtype None (FSDP deferring the upcast) accepts any.
+                # out_dtype only when it differs from the inputs': CPU has no
+                # mm(out_dtype=) kernel, even when it matches them.
+                grad_dtype = weight.grad_dtype
+                if grad_dtype is None or grad_dtype == input_MK.dtype:
+                    grad_weight = grad_MN.t().mm(input_MK)
+                else:
+                    grad_weight = torch.mm(grad_MN.t(), input_MK, out_dtype=grad_dtype)
+                grad_weight = grad_weight.view(weight.shape)
             else:
                 # A later microbatch or chunk: add into the running gradient in
                 # the GEMM epilogue. Then hand the same buffer back and clear
