@@ -28,7 +28,7 @@ from torch.distributed.tensor.placement_types import Shard
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.autoparallel_api import AutoParallelGraph
 from torchtitan.experiments.graph_trainer.compile import apply_compile
@@ -98,7 +98,7 @@ def parallelize_autoparallel_deepseekv3(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: GraphTrainerCompileConfig,
-    ac_config: ActivationCheckpointingConfig,
+    activation_remat: ActivationRematConfig | None,
     dump_folder: str,
 ):
     """Apply AutoParallelGraph SPMD sharding to DeepSeek V3.
