@@ -16,7 +16,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import _LinearFunction, Linear
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
@@ -82,6 +82,33 @@ def test_adds_bf16_wgrad_into_fp32_running_grad(num_linears, monkeypatch):
     assert actual.dtype == torch.float32
     exact = exact.view(actual.shape)
     assert _relative_error(actual, exact) <= _relative_error(reference, exact)
+
+
+@pytest.mark.parametrize("num_linears", [1, 2])
+def test_first_wgrad_is_produced_in_grad_dtype(num_linears, monkeypatch):
+    # Without a running gradient, the WGRAD comes out of the GEMM in the fp32
+    # grad_dtype rather than being rounded to bf16 for autograd to upcast.
+    x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16)
+    grad_output = torch.randn(
+        64, num_linears * 512, device="cuda", dtype=torch.bfloat16
+    )
+    module = _build(inplace_wgrad_accum=True, num_linears=num_linears).bfloat16()
+    module.weight.grad_dtype = torch.float32
+    returned_dtypes = []
+    original_backward = _LinearFunction.backward
+
+    def recording_backward(ctx, *grads):
+        result = original_backward(ctx, *grads)
+        returned_dtypes.append(result[1].dtype)
+        return result
+
+    monkeypatch.setattr(_LinearFunction, "backward", staticmethod(recording_backward))
+    output = module(x)
+    output.backward(grad_output.view(output.shape))
+
+    assert returned_dtypes == [torch.float32]
+    expected = torch.mm(grad_output.t(), x, out_dtype=torch.float32)
+    assert torch.equal(module.weight.grad, expected.view(module.weight.shape))
 
 
 def _run_fsdp_microbatches(rank: int, world_size: int, port: int) -> None:
