@@ -427,13 +427,15 @@ class _DispatchGather(torch.autograd.Function):
     """``x_TD[token_indices]`` whose backward is ``_sum_routes_per_token``."""
 
     @staticmethod
-    def forward(ctx, x_TD, token_indices_experts_sorted_N, row_of_route_N, top_k):
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, x_TD, token_indices_experts_sorted_N, row_of_route_N, top_k
+    ):
         ctx.save_for_backward(row_of_route_N)
         ctx.num_tokens, ctx.top_k = x_TD.shape[0], top_k
         return x_TD[token_indices_experts_sorted_N]
 
     @staticmethod
-    def backward(ctx, grad_routed_ND):
+    def backward(ctx, grad_routed_ND):  # pyrefly: ignore[bad-override]
         (row_of_route_N,) = ctx.saved_tensors
         grad_x_TD = _sum_routes_per_token(
             grad_routed_ND=grad_routed_ND.contiguous(),
@@ -448,7 +450,7 @@ class _CombineGatherSum(torch.autograd.Function):
     """``_gather_weighted_sum`` with a gather-based backward."""
 
     @staticmethod
-    def forward(
+    def forward(  # pyrefly: ignore[bad-override]
         ctx,
         routed_output_ND,
         topk_scores_TK,
@@ -474,7 +476,7 @@ class _CombineGatherSum(torch.autograd.Function):
         )
 
     @staticmethod
-    def backward(ctx, grad_out_TD):
+    def backward(ctx, grad_out_TD):  # pyrefly: ignore[bad-override]
         (
             routed_output_ND,
             topk_scores_TK,
