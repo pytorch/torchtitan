@@ -21,6 +21,10 @@ python3 -m torchtitan.rl.train \
     --module my_rl_configs --config rl_grpo_qwen3_0_6b_varlen
 
 Set ``hf_assets_path`` in ``my_rl_configs.py`` to the model checkpoint path.
+
+On several hosts, run it as the client of a Monarch batch job (e.g.
+``monarch.job.SlurmJob`` or ``PBSJob``) with ``TORCHTITAN_MONARCH_JOB`` set to the
+dumped job; the trainer then takes the first hosts and the generators the rest.
 """
 
 # Apply process env defaults (e.g. the CUDA allocator config) before anything
@@ -31,6 +35,7 @@ apply_env_defaults()
 
 import asyncio
 import logging
+import math
 import os
 import sys
 from collections.abc import Callable
@@ -43,6 +48,7 @@ from monarch.actor import (
     shutdown_context,
     this_host,
 )
+from monarch.job import job_load
 
 from torchtitan.config import ConfigLoader
 from torchtitan.config.parallelism import ParallelismConfig
@@ -50,9 +56,13 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.tools.utils import device_module
 
 
 logger = logging.getLogger(__name__)
+
+# Path to a pickled Monarch job (``JobTrait.dump``) with one ``hosts`` mesh.
+MONARCH_JOB_ENV = "TORCHTITAN_MONARCH_JOB"
 
 
 def _preimport_torch() -> None:
@@ -227,6 +237,51 @@ def _check_gpus_per_host(
             )
 
 
+def plan_host_meshes(
+    hosts: HostMesh,
+    *,
+    trainer_world_size: int,
+    per_generator_world_size: int,
+    num_generators: int,
+    gpus_per_node: int,
+) -> HostMeshes:
+    """Split a job's hosts into the trainer's and one mesh per generator node.
+
+    One host is shared by every role. Otherwise the trainer takes the first
+    ``ceil(trainer_world_size / gpus_per_node)`` hosts and the generators the next
+    ones; generators on one node share its mesh, so they get disjoint GPUs.
+    """
+    if len(hosts) == 1:
+        return HostMeshes(
+            trainer=hosts,
+            generators=[hosts] * num_generators,
+            gpus_per_node=gpus_per_node,
+        )
+    if per_generator_world_size > gpus_per_node:
+        raise ValueError(
+            f"a generator needs {per_generator_world_size} GPUs; a node has {gpus_per_node}"
+        )
+    generators_per_node = gpus_per_node // per_generator_world_size
+    trainer_nodes = math.ceil(trainer_world_size / gpus_per_node)
+    generator_nodes = math.ceil(num_generators / generators_per_node)
+    if trainer_nodes + generator_nodes > len(hosts):
+        raise ValueError(
+            f"{trainer_nodes} trainer + {generator_nodes} generator nodes needed, "
+            f"the job has {len(hosts)}"
+        )
+    node_meshes = [
+        hosts.slice(hosts=slice(i, i + 1))
+        for i in range(trainer_nodes, trainer_nodes + generator_nodes)
+    ]
+    return HostMeshes(
+        trainer=hosts.slice(hosts=slice(0, trainer_nodes)),
+        generators=[
+            node_meshes[i // generators_per_node] for i in range(num_generators)
+        ],
+        gpus_per_node=gpus_per_node,
+    )
+
+
 def spawn_proc_mesh(
     trainer_world_size: int,
     per_generator_world_size: int,
@@ -320,6 +375,42 @@ def spawn_proc_mesh(
     return trainer_mesh, generator_meshes
 
 
+def _job_host_meshes(config: Controller.Config) -> HostMeshes | None:
+    """Host meshes of the Monarch job named by ``TORCHTITAN_MONARCH_JOB``, if any.
+
+    Must run before the controller is built: loading the job sets the transport
+    that procs on other hosts use to reach this one.
+    """
+    job_path = os.environ.get(MONARCH_JOB_ENV)
+    if not job_path:
+        return None
+    trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
+    per_generator_world_size = _compute_generator_world_size(
+        config.generator.parallelism
+    )
+    host_meshes = plan_host_meshes(
+        job_load(job_path).state(cached_path=None).hosts,
+        trainer_world_size=trainer_world_size,
+        per_generator_world_size=per_generator_world_size,
+        num_generators=config.num_generators,
+        gpus_per_node=device_module.device_count(),
+    )
+    if host_meshes.generators[0] is not host_meshes.trainer:  # not one shared host
+        p = config.trainer.parallelism
+        logger.info(
+            f"Mesh split: {len(host_meshes.trainer)} trainer node(s) "
+            f"({trainer_world_size} GPUs, "
+            f"dp_replicate={p.data_parallel_replicate_degree}, "
+            f"dp_shard={p.data_parallel_shard_degree}, "
+            f"tp={p.tensor_parallel_degree}), "
+            f"{len({id(m) for m in host_meshes.generators})} generator node(s) "
+            f"({config.num_generators * per_generator_world_size} GPUs, "
+            f"{config.num_generators} generator(s) of "
+            f"{per_generator_world_size} GPU(s))"
+        )
+    return host_meshes
+
+
 async def main():
     init_logger()
     config = ConfigLoader().load()
@@ -331,6 +422,7 @@ async def main():
         enable=config.trainer.debug.enable_structured_logging,
     )
     sl.log_trace_instant("structured_logger_started")
+    host_meshes = _job_host_meshes(config)
 
     rl_trainer: Controller = config.build()
     try:
@@ -341,7 +433,7 @@ async def main():
         trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
             per_generator_world_size,
-            host_meshes=None,
+            host_meshes=host_meshes,
             num_generators=config.num_generators,
         )
         await rl_trainer.setup_async(
