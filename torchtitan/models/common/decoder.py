@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,7 +23,6 @@ from torchtitan.models.common.attention import (
     AttentionMetadata,
     AttentionMetadataMap,
     InnerAttention,
-    LinearAttention,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -31,8 +31,11 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.observability.logging import warn_once
 
 __all__ = ["Decoder", "TransformerBlock"]
+
+logger = logging.getLogger(__name__)
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
@@ -90,14 +93,13 @@ class Decoder(BaseModel):
         enable_weight_tying: bool = False
 
         @property
-        def first_non_linear_attention(self) -> Attention.Config | None:
-            """First attention config excluding linear attention, else None."""
+        def first_full_attention(self) -> Attention.Config | None:
+            """First full-attention config, including causal attention, else None."""
             return next(
                 (
                     layer.attention
                     for layer in self.layers
-                    if isinstance(layer.attention, Attention.Config)
-                    and not isinstance(layer.attention, LinearAttention.Config)
+                    if layer.attention.inner_attention.is_full_attention
                 ),
                 None,
             )
@@ -162,7 +164,7 @@ class Decoder(BaseModel):
         from torchtitan.distributed.spmd_types import spmd_mesh_size, spmd_sparse_mesh
 
         tp = spmd_mesh_size("tp")
-        attention = config.first_non_linear_attention
+        attention = config.first_full_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -326,36 +328,32 @@ class Decoder(BaseModel):
 
         attention_metadata = input_dict.get("attention_metadata")
         load_balancer_config = parallelism.context_parallel_load_balancer
-        selected_attention_metadata = None
-        if load_balancer_config is not None and attention_metadata is not None:
-            # All layers share one token permutation. Prefer full-attention metadata,
-            # falling back to the first non-linear attention's metadata.
-            attention = next(
-                (
-                    layer.attention
-                    for layer in self.config.layers
-                    if isinstance(layer.attention, Attention.Config)
-                    and layer.attention.inner_attention.is_full_attention
-                ),
-                self.config.first_non_linear_attention,
-            )
-            if attention is not None:
-                cp_inner_attention = attention.inner_attention._owner
-                assert cp_inner_attention is not None and issubclass(
-                    cp_inner_attention, CPInnerAttention
+        load_balancer = None
+        if load_balancer_config is not None:
+            # All PP stages retain the full model config and share one permutation.
+            attention = self.config.first_full_attention
+            if attention is None:
+                warn_once(
+                    logger,
+                    "Ignoring context_parallel_load_balancer because the model "
+                    "has no full attention. Using contiguous CP sharding.",
                 )
-                selected_attention_metadata = attention_metadata.get(cp_inner_attention)
-        load_balancer = (
-            # TODO: `attention_metadata` alone cannot determine the load-balancing strategy.
-            load_balancer_config.build(
-                seq_len=context_parallel.get_cp_input_seq_len(
-                    input_dict, input_shardings=input_shardings
-                ),
-                attention_metadata=selected_attention_metadata,
-            )
-            if load_balancer_config is not None
-            else None
-        )
+            else:
+                selected_attention_metadata = None
+                if attention_metadata is not None:
+                    cp_inner_attention = attention.inner_attention._owner
+                    assert cp_inner_attention is not None and issubclass(
+                        cp_inner_attention, CPInnerAttention
+                    )
+                    selected_attention_metadata = attention_metadata.get(
+                        cp_inner_attention
+                    )
+                load_balancer = load_balancer_config.build(
+                    seq_len=context_parallel.get_cp_input_seq_len(
+                        input_dict, input_shardings=input_shardings
+                    ),
+                    attention_metadata=selected_attention_metadata,
+                )
         permutation = (
             load_balancer.generate_permutation() if load_balancer is not None else None
         )

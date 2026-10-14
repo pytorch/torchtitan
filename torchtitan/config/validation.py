@@ -64,7 +64,7 @@ def validate_model_training_config(
             )
 
         tp = parallelism.tensor_parallel_degree
-        attention = model.first_non_linear_attention
+        attention = model.first_full_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -156,6 +156,7 @@ def validate_context_parallel(
         CPInnerAttention,
         UlyssesCPInnerAttention,
     )
+    from torchtitan.models.common.decoder import Decoder
 
     cp = parallelism.context_parallel_degree
 
@@ -200,6 +201,8 @@ def validate_context_parallel(
         if isinstance(attention, LinearAttention.Config):
             continue
         if load_balancer_config is None:
+            continue
+        if isinstance(model, Decoder.Config) and model.first_full_attention is None:
             continue
         if issubclass(cp_inner_attention, UlyssesCPInnerAttention):
             raise ValueError(

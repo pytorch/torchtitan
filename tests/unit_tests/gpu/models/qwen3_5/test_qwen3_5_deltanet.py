@@ -339,7 +339,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             for layer in model.layers.values()
             if layer.full_attn
         )
-        full_attention_config = model.config.first_non_linear_attention.inner_attention
+        full_attention_config = model.config.first_full_attention.inner_attention
 
         with mock.patch.object(
             type(full_attention_config),

@@ -18,6 +18,7 @@ from torchtitan.models.common.attention import (
     Attention,
     InnerAttention,
     LinearAttention,
+    SlidingWindowFlexInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.gdn import GDN
@@ -90,14 +91,36 @@ def test_hybrid_layers_have_one_attention_config(model):
             )
         assert not hasattr(layer, "delta_net")
         assert not hasattr(layer, "delta_attention")
-    assert isinstance(config.first_non_linear_attention, Attention.Config)
+    assert isinstance(config.first_full_attention, Attention.Config)
     config.layers = [
         layer
         for layer in config.layers
         if isinstance(layer.attention, LinearAttention.Config)
     ]
     assert config.layers
-    assert config.first_non_linear_attention is None
+    assert config.first_full_attention is None
+
+
+@pytest.mark.parametrize("backend", ["flex", "varlen"])
+def test_first_full_attention_skips_sliding_window(backend):
+    from torchtitan.models.llama3 import build_model_config
+
+    config = build_model_config(
+        "debugmodel", attn_backend=backend, parallelism=ParallelismConfig()
+    )
+    first_attention = config.layers[0].attention
+    first_attention.inner_attention = (
+        SlidingWindowFlexInnerAttention.Config(window_size=128)
+        if backend == "flex"
+        else VarlenInnerAttention.Config(window_size=(128, 0))
+    )
+    assert config.first_full_attention is config.layers[1].attention
+
+    config.layers = config.layers[:1]
+    assert config.first_full_attention is None
+
+    config.layers = []
+    assert config.first_full_attention is None
 
 
 class _ReplaceRootConverter(ModelConfigConverter):

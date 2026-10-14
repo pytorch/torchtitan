@@ -12,8 +12,11 @@ from unittest import mock
 
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
-from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import FlexInnerAttention, LinearAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    InnerAttention,
+    LinearAttention,
+)
 
 
 class TestDecoderConfigCpValidation(unittest.TestCase):
@@ -130,9 +133,9 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
             config.__post_init__()
 
     def test_rejects_an_unrecognized_kernel_cp(self):
-        class LocalOnlyAttention(Module):
+        class LocalOnlyAttention(InnerAttention):
             @dataclass(kw_only=True, slots=True)
-            class Config(Module.Config):
+            class Config(InnerAttention.Config):
                 pass
 
         config = self._config(cp=2)
@@ -182,6 +185,27 @@ class TestUlyssesConfigValidation(unittest.TestCase):
 
         config = self._config(load_balancer=HeadTailCPLoadBalancer.Config())
         with self.assertRaisesRegex(ValueError, "must be None"):
+            config.__post_init__()
+
+    def test_sliding_only_ignores_load_balancer_but_validates_heads(self):
+        from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
+        from torchtitan.models.common.attention.cp_attention import (
+            UlyssesCPSlidingWindowFlexInnerAttention,
+        )
+        from torchtitan.models.common.decoder import Decoder
+
+        config = self._config(load_balancer=HeadTailCPLoadBalancer.Config())
+        model = config.model
+        assert isinstance(model, Decoder.Config)
+        for layer in model.layers:
+            layer.attention.inner_attention = (
+                UlyssesCPSlidingWindowFlexInnerAttention.Config(window_size=128)
+            )
+        self.assertIsNone(model.first_full_attention)
+        config.__post_init__()
+
+        model.layers[0].attention.n_heads = 3
+        with self.assertRaisesRegex(ValueError, r"n_heads \(3\)"):
             config.__post_init__()
 
     def test_rejects_unknown_load_balancer(self):
