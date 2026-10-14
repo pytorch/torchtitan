@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Opt-in RDMA fast path for trainer microbatches (`AsyncLoopConfig.rdma_fast_path_threshold`): the
+"""Opt-in RDMA fast path for trainer microbatches (`Batcher.Config.rdma_min_tensor_bytes`): the
 process that registers them keeps the large tensors, and each trainer rank reads its own column.
 """
 
@@ -26,11 +26,11 @@ logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class RDMAMicrobatch:
+class MonarchRDMAMicrobatch:
     """A `TrainingMicrobatch` whose large tensors stay in its owner, the process that registered it.
 
     Example:
-        rdma_microbatch = RDMAMicrobatch.register(microbatch, min_bytes=1024)  # owner
+        rdma_microbatch = MonarchRDMAMicrobatch.register(microbatch, min_bytes=1024)  # owner
         microbatch = await rdma_microbatch.read()  # trainer rank: one RDMA action reads every buffer
         await rdma_microbatch.drop()               # owner, after every rank has read it
     """
@@ -42,7 +42,7 @@ class RDMAMicrobatch:
     @classmethod
     def register(
         cls, microbatch: TrainingMicrobatch, *, min_bytes: int
-    ) -> RDMAMicrobatch:
+    ) -> MonarchRDMAMicrobatch:
         fields = {
             field.name: getattr(microbatch, field.name)
             for field in dataclasses.fields(microbatch)

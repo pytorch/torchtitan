@@ -9,10 +9,13 @@
 `TrainingMicrobatch`es;
 """
 
+import asyncio
 import heapq
 import logging
 import math
+from collections import deque
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -26,6 +29,9 @@ from torchtitan.rl.components.training_sample_builder import (
     TrainingSampleGroup,
 )
 from torchtitan.rl.observability import metrics as m
+
+if TYPE_CHECKING:
+    from torchtitan.rl.distributed.rdma_microbatch import MonarchRDMAMicrobatch
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +74,8 @@ class TrainerStepBatch:
         # global_routing_token_counts = per-depth non-padding token counts
     """
 
-    microbatches: list[list[TrainingMicrobatch]]  # [num_microbatches][dp_degree]
+    # [num_microbatches][dp_degree]; MonarchRDMAMicrobatches when `rdma_min_tensor_bytes` is set
+    microbatches: list[list[TrainingMicrobatch]] | list[list["MonarchRDMAMicrobatch"]]
     global_loss_token_counts: torch.Tensor
     global_routing_token_counts: torch.Tensor
     metrics: list[m.Metric]
@@ -182,12 +189,30 @@ class Batcher(Configurable):
         When unset, the trainer uses the microbatch token capacity as the
         CUDA-graph-safe metadata bound without imposing a tighter packing cap.
         """
+        rdma_min_tensor_bytes: int | None = None
+        """Microbatches go to the trainer in Monarch RPC messages. With a value, their tensors of at
+        least that many bytes go as Monarch RDMA buffers instead, and each trainer rank reads only its
+        own microbatches:
+            None (default): no RDMA; every tensor in the message.
+            e.g. 1024: tensors of 1 KiB or more stay in the batcher's process; token counts (8 B) and
+                empty tensors stay in the message.
+        Monarch uses ibverbs where the host has it, else TCP. A host that lists ibverbs devices it can't
+        use fails instead of falling back; MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process,
+        weight sync included."""
 
         def __post_init__(self) -> None:
             if self.num_mtp_layers < 0:
                 raise ValueError("num_mtp_layers must be non-negative")
             if self.max_num_documents is not None and self.max_num_documents <= 0:
                 raise ValueError("max_num_documents must be positive")
+            if (
+                self.rdma_min_tensor_bytes is not None
+                and self.rdma_min_tensor_bytes < 1
+            ):
+                raise ValueError(
+                    "rdma_min_tensor_bytes must be None or >= 1 (RDMABuffer rejects empty tensors), "
+                    f"got {self.rdma_min_tensor_bytes}"
+                )
 
     def __init__(
         self,
@@ -220,6 +245,10 @@ class Batcher(Configurable):
         self._dp_degree = dp_degree
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
         self._num_consecutive_zero_output_groups = 0
+        self._rdma_min_tensor_bytes = config.rdma_min_tensor_bytes
+        # Batches trainer ranks may still read, oldest first. Each buffer keeps its tensor's
+        # storage alive until drop().
+        self._batches_being_read: deque[list[list[MonarchRDMAMicrobatch]]] = deque()
 
     def _record_untrainable_groups(self, *, group_is_trainable: bool) -> None:
         """Fail when consecutive groups cannot contribute one training sample.
@@ -316,7 +345,40 @@ class Batcher(Configurable):
         )
         if num_trainable_groups < self._num_prompts_per_train_step:
             return None, group_is_trainable  # accumulate until one full batch is ready
-        return self._pack_one_training_batch(), group_is_trainable
+        batch = self._pack_one_training_batch()
+        if self._rdma_min_tensor_bytes is None:
+            return batch, group_is_trainable
+        # Import lazily to avoid a circular import: rdma_microbatch imports TrainingMicrobatch.
+        from torchtitan.rl.distributed.rdma_microbatch import MonarchRDMAMicrobatch
+
+        # Trainer ranks read these tensors from this process.
+        rdma_microbatches = [
+            [
+                MonarchRDMAMicrobatch.register(
+                    microbatch, min_bytes=self._rdma_min_tensor_bytes
+                )
+                for microbatch in row
+            ]
+            for row in batch.microbatches
+        ]
+        self._batches_being_read.append(rdma_microbatches)
+        return replace(batch, microbatches=rdma_microbatches), group_is_trainable
+
+    async def maybe_release_oldest_batch(self) -> None:
+        """Free the oldest batch's RDMA buffers; a no-op when `rdma_min_tensor_bytes` is None.
+
+        Call once per trained batch, in training order, after `forward_backward` returns or raises.
+        """
+        if self._rdma_min_tensor_bytes is None:
+            return
+        rdma_microbatches = self._batches_being_read.popleft()
+        await asyncio.gather(
+            *(
+                rdma_microbatch.drop()
+                for row in rdma_microbatches
+                for rdma_microbatch in row
+            )
+        )
 
     def _pack_one_training_batch(self) -> TrainerStepBatch:
         """Pack the oldest accumulated groups (up to `num_prompts_per_train_step` trainable groups) into one batch."""
