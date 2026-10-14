@@ -573,7 +573,7 @@ def test_batch_invariant_requires_kv_cache_reset():
         )
 
 
-def test_session_kv_holder_rejects_kv_cache_reset_on_weight_sync():
+def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load():
     with pytest.raises(
         ValueError, match="needs reset_kv_cache_on_model_state_dict_load=False"
     ):
