@@ -1,0 +1,551 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-14",
+  "status": {
+    "bitwise_parity": "pass",
+    "memory_nonincrease": "pass",
+    "faster_than_original": true,
+    "absolute_roofline_attained": false
+  },
+  "recipe": "graph_trainer_deepseek_v3_671b_dist_moe_mxfp8",
+  "layer_index": 3,
+  "shape": {
+    "num_tokens": 4096,
+    "model_dim": 7168,
+    "intermediate_dim": 2048,
+    "num_experts": 256,
+    "num_local_experts": 4,
+    "top_k": 8,
+    "num_expert_groups": 8,
+    "num_limited_groups": 4
+  },
+  "precision": "Production MXFP8 shared/routed GEMMs; BF16 router operands, FP32 scores, hi_mid_lo backward",
+  "scope": "One MoE after unsharding; fake EP; synthetic loss; no optimizer or PP schedule",
+  "auxiliary_loss": {
+    "enabled": true,
+    "coefficient": 0.001,
+    "global_token_denominator": 62914560
+  },
+  "production_parallelism": {
+    "data_parallel_replicate_degree": 1,
+    "data_parallel_shard_degree": 64,
+    "fsdp_reshard_after_forward": "default",
+    "fsdp_defer_gradient_reduction": true,
+    "fsdp_symm_mem_scope": null,
+    "tensor_parallel_degree": 1,
+    "enable_sequence_parallel": true,
+    "pipeline_parallel_degree": 4,
+    "pipeline_parallel_module_fqns_per_model_part": null,
+    "pipeline_parallel_first_stage_less_layers": 1,
+    "pipeline_parallel_last_stage_less_layers": 1,
+    "pipeline_parallel_layers_per_stage": 4,
+    "pipeline_parallel_schedule": "Interleaved1F1B",
+    "pipeline_parallel_schedule_csv": "",
+    "num_pp_microbatches": 240,
+    "pipeline_parallel_max_outstanding_sends": null,
+    "pp_max_unsharded_active_stages": null,
+    "pp_num_unshard_lookahead_factor": "auto",
+    "context_parallel_degree": 1,
+    "context_parallel_load_balancer": null,
+    "expert_parallel_degree": 64,
+    "save_parallelism_folder": null
+  },
+  "execution": {
+    "physical_gpu": 0,
+    "logical_fake_pg_ranks": 64,
+    "simulate_uniform_ranks": true,
+    "pipeline_schedule_executed": false,
+    "optimizer_executed": false
+  },
+  "environment": {
+    "hardware": "NVIDIA GB300",
+    "compute_capability": "10.3",
+    "num_sms": 152,
+    "torch": "2.16.0a0+git5e675f6",
+    "triton": "3.9.0",
+    "torchao": "0.19.0.dev20261014+cu130",
+    "dist_moe": "0.1.0",
+    "dist_moe_commit": "6f0c3d4216aa9d2ef2eec2fa4215fa42b73af314",
+    "repository_base_commit": "d68dc9e8666eb1c4815a65186a70c622fd25a474",
+    "python": "/tmp/torchtitan_auto_fuser_20261014_env/bin/python",
+    "deterministic": true,
+    "seed": 42,
+    "fill_uninitialized_memory": false
+  },
+  "fusion_counts": {
+    "selection": 1,
+    "weights_forward": 1,
+    "router_backward": 1,
+    "counts": 1,
+    "aux_forward": 1,
+    "swiglu_forward": 1,
+    "swiglu_backward": 1
+  },
+  "unchanged_boundary_call_targets": {
+    "aten.mm.dtype": 4,
+    "dist_moe.prepare_mxfp8_weight.default": 2,
+    "dist_moe.block_scaled_forward.default": 1,
+    "aten._scaled_mm_v2.default": 6,
+    "dist_moe.block_scaled_backward.default": 1,
+    "aten.mm.default": 1
+  },
+  "graphs": {
+    "baseline": {
+      "nodes": 224,
+      "computational_boundary_calls": [
+        "torch.ops.aten.mm.dtype",
+        "torch.ops.dist_moe.block_scaled_forward.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.dist_moe.block_scaled_backward.default",
+        "torch.ops.aten.mm.default",
+        "torch.ops.aten.mm.dtype",
+        "torch.ops.aten.mm.dtype",
+        "torch.ops.aten.mm.dtype"
+      ],
+      "source_sha256": "501356b6797b659dbe3b35c70028031ed78ff451879d441637543880b1441624"
+    },
+    "fused": {
+      "nodes": 155,
+      "computational_boundary_calls": [
+        "torch.ops.aten.mm.dtype",
+        "torch.ops.dist_moe.block_scaled_forward.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.aten._scaled_mm_v2.default",
+        "torch.ops.dist_moe.block_scaled_backward.default",
+        "torch.ops.aten.mm.default",
+        "torch.ops.aten.mm.dtype",
+        "torch.ops.aten.mm.dtype",
+        "torch.ops.aten.mm.dtype"
+      ],
+      "source_sha256": "6b4c64937f6a36edc5b1b69728ab99b7cb14acdf34c1801bdaa16a7aaf31a709"
+    }
+  },
+  "timing": {
+    "unit": "microseconds",
+    "method": "CUDA events around joint forward/backward CUDA-graph replay",
+    "warmup_steps": 10,
+    "steps_per_sample": 50,
+    "baseline_samples": [
+      6137.120361328125,
+      6155.162353515625,
+      6185.4071044921875,
+      6166.6107177734375,
+      6206.7205810546875
+    ],
+    "fused_samples": [
+      5875.0042724609375,
+      5904.793701171875,
+      5965.318603515625,
+      5929.8272705078125,
+      5921.4532470703125
+    ],
+    "baseline_median": 6166.6107177734375,
+    "fused_median": 5921.4532470703125,
+    "speedup": 1.0414015716200105,
+    "latency_reduction_percent": 3.975562621401263
+  },
+  "memory_bytes": {
+    "baseline": {
+      "allocated_before_capture": 7069720064,
+      "reserved_before_capture": 7472152576,
+      "peak_allocated": 7962782208,
+      "peak_reserved": 8585740288,
+      "allocated_after_capture": 7631233024,
+      "reserved_after_capture": 8585740288
+    },
+    "fused": {
+      "allocated_before_capture": 7069720064,
+      "reserved_before_capture": 7472152576,
+      "peak_allocated": 7962782208,
+      "peak_reserved": 8564768768,
+      "allocated_after_capture": 7631233024,
+      "reserved_after_capture": 8564768768
+    },
+    "delta": {
+      "allocated_before_capture": 0,
+      "reserved_before_capture": 0,
+      "peak_allocated": 0,
+      "peak_reserved": -20971520,
+      "allocated_after_capture": 0,
+      "reserved_after_capture": -20971520
+    }
+  },
+  "validation": {
+    "tensors_per_seed": 11,
+    "eager_parity": {
+      "output": true,
+      "loss": true,
+      "input_gradient": true,
+      "routed_experts.w13.weight": true,
+      "routed_experts.w2.weight": true,
+      "router.gate.weight": true,
+      "shared_experts.w13.weight": true,
+      "shared_experts.w2.weight": true
+    },
+    "buffer_parity": {
+      "expert_bias_E": true,
+      "router.tokens_per_expert_E": true,
+      "router.aux_loss.instance_acc": true
+    },
+    "compared_tensor_metadata": [
+      "shape",
+      "stride",
+      "dtype"
+    ],
+    "compared_tensor_value": "SHA256 of contiguous uint8 view, exact bytes; same seed direct eager comparison also uses torch.equal on uint8 views",
+    "gradient_norm": "torch.linalg.vector_norm(torch.stack([torch.linalg.vector_norm(g.float()) for g in parameter_gradients]))",
+    "signature_hash_encoding": "UTF-8 JSON, sort_keys=True, separators=(comma,colon), no trailing newline",
+    "identical_baseline_and_fused_steps": [
+      {
+        "seed": 42,
+        "loss": 22.06275177001953,
+        "parameter_grad_norm": 54966.50390625,
+        "input_grad_norm": 46.708740234375,
+        "signature_sha256": "40820f1b807ab0ff08092f061bd4d1cda4aa534a26084ad964fe815766c9a374"
+      },
+      {
+        "seed": 43,
+        "loss": 7.165668487548828,
+        "parameter_grad_norm": 36360.859375,
+        "input_grad_norm": 46.519859313964844,
+        "signature_sha256": "7a5a2961544e2d1278577a7b4228da73c4a597ce075ef020b443486b50964b3b"
+      },
+      {
+        "seed": 44,
+        "loss": -43.0933837890625,
+        "parameter_grad_norm": 36705.33984375,
+        "input_grad_norm": 46.52080154418945,
+        "signature_sha256": "ed4492c3a67d9775b13b3201b0399e63bea691186e3817f6a39322f881bbd430"
+      },
+      {
+        "seed": 45,
+        "loss": 3.853950023651123,
+        "parameter_grad_norm": 34903.83984375,
+        "input_grad_norm": 46.51877975463867,
+        "signature_sha256": "f12aab0f0741ab5a571ea3414834b2a734bc759e11e7050ea93ad44805a71861"
+      },
+      {
+        "seed": 46,
+        "loss": 2.159585952758789,
+        "parameter_grad_norm": 36133.203125,
+        "input_grad_norm": 46.46761703491211,
+        "signature_sha256": "399c7e25eb2f8a1fc8ca5259dd55f243165b8a4323a6c6e38d43b4de02d4f1cc"
+      },
+      {
+        "seed": 47,
+        "loss": -16.77115249633789,
+        "parameter_grad_norm": 35828.09765625,
+        "input_grad_norm": 46.516578674316406,
+        "signature_sha256": "1d1211db48907df32c943909d30c67a63ab1415ea9e21be43cfa1b70340da98c"
+      },
+      {
+        "seed": 48,
+        "loss": 16.187543869018555,
+        "parameter_grad_norm": 36533.5625,
+        "input_grad_norm": 46.48988723754883,
+        "signature_sha256": "90ea2dde859b98c716fbb702387c999862db783c36100071fc5251c202801419"
+      },
+      {
+        "seed": 49,
+        "loss": -7.647853851318359,
+        "parameter_grad_norm": 36404.80078125,
+        "input_grad_norm": 46.469112396240234,
+        "signature_sha256": "254264a155ef3d3f4bb7186d092da297cde9eba8a9552d80808dfc87d1adc977"
+      },
+      {
+        "seed": 50,
+        "loss": -6.796721458435059,
+        "parameter_grad_norm": 37252.49609375,
+        "input_grad_norm": 46.531314849853516,
+        "signature_sha256": "f33b47d923ea9b1cc8523b4cd349145398e04864f8dcc737a2b59ccbf2573d19"
+      },
+      {
+        "seed": 51,
+        "loss": 23.695695877075195,
+        "parameter_grad_norm": 35469.1328125,
+        "input_grad_norm": 46.490379333496094,
+        "signature_sha256": "212d861a6d8466f2741362e9e28a8c28667d087cc930f3f74243fa7982cce8b8"
+      }
+    ]
+  },
+  "checks": {
+    "cpu_tests_passed": 10,
+    "cpu_subtests_passed": 9,
+    "cpu_cuda_visible_devices": "",
+    "gpu_tests_passed": 20,
+    "gpu_test_device": "GB300 physical GPU 3",
+    "precommit_all_files": "pass",
+    "precommit_implementation_and_tests": "pass",
+    "git_diff_check": "pass",
+    "remote_ci_executed": false,
+    "gpu_test_in_ci": ".github/workflows/integration_test_b200.yaml",
+    "logs": [
+      "validation_cpu_no_cuda.log",
+      "validation_gpu_final.log",
+      "validation_precommit_all_final.log"
+    ]
+  },
+  "profile": {
+    "baseline": {
+      "num_replays": 10,
+      "events_per_replay": {
+        "gpu_memset": 5.0,
+        "kernel": 183.0
+      },
+      "summed_gpu_event_us_per_replay": 6159.6198,
+      "gpu_event_union_us_per_replay": 6140.420141601562,
+      "groups": {
+        "other_kernels_and_transfers": {
+          "duration_us_per_replay": 1137.7936999999997,
+          "events_per_replay": 147.0
+        },
+        "recognized_dist_moe_runtime": {
+          "duration_us_per_replay": 609.0987000000003,
+          "events_per_replay": 14.0
+        },
+        "routed_gemm_dispatch_combine": {
+          "duration_us_per_replay": 3987.8125000000014,
+          "events_per_replay": 16.0
+        },
+        "shared_router_gemm": {
+          "duration_us_per_replay": 424.9149000000003,
+          "events_per_replay": 11.0
+        }
+      },
+      "recognized_fixed_boundary_sum_us_per_replay": 5021.8261,
+      "recognized_fixed_boundary_share_of_gpu_event_time": 0.8152818295700653,
+      "recognized_fixed_boundary_union_us_per_replay": 5014.088671875,
+      "classification": {
+        "routed_gemm_dispatch_combine": "kernel name contains grouped_gemm_",
+        "shared_router_gemm": "kernel name begins nvjet_",
+        "recognized_dist_moe_runtime": "kernel name begins _cute_quantize_ or _triton_",
+        "limitations": "Conservative name-based attribution. Other kernels include additional DistMoE internals. Summed durations are not end-to-end latency; interval unions account for measured overlap only."
+      }
+    },
+    "fused": {
+      "num_replays": 10,
+      "events_per_replay": {
+        "gpu_memset": 2.0,
+        "kernel": 96.0
+      },
+      "summed_gpu_event_us_per_replay": 5844.6712,
+      "gpu_event_union_us_per_replay": 5828.527124023438,
+      "groups": {
+        "fusion_kernels": {
+          "duration_us_per_replay": 64.2522,
+          "events_per_replay": 8.0
+        },
+        "other_kernels_and_transfers": {
+          "duration_us_per_replay": 706.6002000000001,
+          "events_per_replay": 49.0
+        },
+        "recognized_dist_moe_runtime": {
+          "duration_us_per_replay": 617.1512000000001,
+          "events_per_replay": 14.0
+        },
+        "routed_gemm_dispatch_combine": {
+          "duration_us_per_replay": 4030.511,
+          "events_per_replay": 16.0
+        },
+        "shared_router_gemm": {
+          "duration_us_per_replay": 426.1565999999998,
+          "events_per_replay": 11.0
+        }
+      },
+      "recognized_fixed_boundary_sum_us_per_replay": 5073.8188,
+      "recognized_fixed_boundary_share_of_gpu_event_time": 0.8681102197844766,
+      "recognized_fixed_boundary_union_us_per_replay": 5064.5355224609375,
+      "classification": {
+        "routed_gemm_dispatch_combine": "kernel name contains grouped_gemm_",
+        "shared_router_gemm": "kernel name begins nvjet_",
+        "recognized_dist_moe_runtime": "kernel name begins _cute_quantize_ or _triton_",
+        "limitations": "Conservative name-based attribution. Other kernels include additional DistMoE internals. Summed durations are not end-to-end latency; interval unions account for measured overlap only."
+      }
+    }
+  },
+  "streaming_bandwidth_probe": {
+    "baseline": {
+      "l2_copy": {
+        "operation": "torch.add(source, 0.0, out=destination)",
+        "payload_bytes": 4194304,
+        "read_write_bytes": 8388608,
+        "median_us": 1.7049280405044556,
+        "measured_tb_per_s": 4.920212349559323
+      },
+      "hbm_copy": {
+        "operation": "torch.add(source, 0.0, out=destination)",
+        "payload_bytes": 536870912,
+        "read_write_bytes": 1073741824,
+        "median_us": 151.85635375976562,
+        "measured_tb_per_s": 7.070773118249914
+      }
+    },
+    "fused": {
+      "l2_copy": {
+        "operation": "torch.add(source, 0.0, out=destination)",
+        "payload_bytes": 4194304,
+        "read_write_bytes": 8388608,
+        "median_us": 1.8982720375061035,
+        "measured_tb_per_s": 4.419075788010194
+      },
+      "hbm_copy": {
+        "operation": "torch.add(source, 0.0, out=destination)",
+        "payload_bytes": 536870912,
+        "read_write_bytes": 1073741824,
+        "median_us": 151.8701171875,
+        "measured_tb_per_s": 7.070132320200624
+      }
+    },
+    "limitation": "Measured SM streaming and small cache-resident comparisons; not universal hardware rooflines."
+  },
+  "ncu_final": {
+    "nsight_compute": "2025.3.1.0",
+    "cache_control": "none",
+    "clock_control": "none",
+    "warmup_calls": 10,
+    "kernels": [
+      {
+        "name": "_select_experts_fused_kernel",
+        "block": "(128, 1, 1)",
+        "grid": "(1024, 1, 1)",
+        "dram_throughput_percent": 0.0,
+        "duration_us": 10.11,
+        "sm_throughput_percent": 43.42,
+        "local_spill_requests": 0.0,
+        "l2_hit_percent": 89.74,
+        "registers_per_thread": 60.0,
+        "waves_per_sm": 0.84,
+        "theoretical_occupancy_percent": 50.0,
+        "achieved_occupancy_percent": 31.33
+      },
+      {
+        "name": "_router_weights_forward_kernel",
+        "block": "(128, 1, 1)",
+        "grid": "(256, 1, 1)",
+        "dram_throughput_percent": 0.0,
+        "duration_us": 3.84,
+        "sm_throughput_percent": 1.68,
+        "local_spill_requests": 0.0,
+        "l2_hit_percent": 71.49,
+        "registers_per_thread": 23.0,
+        "waves_per_sm": 0.11,
+        "theoretical_occupancy_percent": 100.0,
+        "achieved_occupancy_percent": 10.14
+      },
+      {
+        "name": "_partial_counts_kernel",
+        "block": "(128, 1, 1)",
+        "grid": "(64, 1, 1)",
+        "dram_throughput_percent": 0.0,
+        "duration_us": 3.42,
+        "sm_throughput_percent": 0.39,
+        "local_spill_requests": 0.0,
+        "l2_hit_percent": 81.45,
+        "registers_per_thread": 19.0,
+        "waves_per_sm": 0.03,
+        "theoretical_occupancy_percent": 100.0,
+        "achieved_occupancy_percent": 6.21
+      },
+      {
+        "name": "_sum_counts_kernel",
+        "block": "(128, 1, 1)",
+        "grid": "(8, 1, 1)",
+        "dram_throughput_percent": 0.0,
+        "duration_us": 3.2,
+        "sm_throughput_percent": 0.08,
+        "local_spill_requests": 0.0,
+        "l2_hit_percent": 55.72,
+        "registers_per_thread": 26.0,
+        "waves_per_sm": 0.0,
+        "theoretical_occupancy_percent": 100.0,
+        "achieved_occupancy_percent": 4.25
+      },
+      {
+        "name": "_router_aux_forward_kernel",
+        "block": "(32, 1, 1)",
+        "grid": "(2048, 1, 1)",
+        "dram_throughput_percent": 0.0,
+        "duration_us": 5.28,
+        "sm_throughput_percent": 11.8,
+        "local_spill_requests": 0.0,
+        "l2_hit_percent": 92.7,
+        "registers_per_thread": 64.0,
+        "waves_per_sm": 0.42,
+        "theoretical_occupancy_percent": 50.0,
+        "achieved_occupancy_percent": 18.49
+      },
+      {
+        "name": "_router_backward_kernel",
+        "block": "(256, 1, 1)",
+        "grid": "(512, 1, 1)",
+        "dram_throughput_percent": 0.0,
+        "duration_us": 10.02,
+        "sm_throughput_percent": 32.83,
+        "local_spill_requests": 0.0,
+        "l2_hit_percent": 94.0,
+        "registers_per_thread": 64.0,
+        "waves_per_sm": 0.84,
+        "theoretical_occupancy_percent": 50.0,
+        "achieved_occupancy_percent": 36.1
+      },
+      {
+        "name": "_swiglu_mxfp8_kernel",
+        "block": "(128, 1, 1)",
+        "grid": "(128, 16, 1)",
+        "dram_throughput_percent": 1.78,
+        "duration_us": 14.37,
+        "sm_throughput_percent": 57.22,
+        "local_spill_requests": 0.0,
+        "l2_hit_percent": 89.49,
+        "registers_per_thread": 63.0,
+        "waves_per_sm": 1.68,
+        "theoretical_occupancy_percent": 50.0,
+        "achieved_occupancy_percent": 40.54
+      },
+      {
+        "name": "_swiglu_mxfp8_kernel",
+        "block": "(128, 1, 1)",
+        "grid": "(128, 32, 1)",
+        "dram_throughput_percent": 28.25,
+        "duration_us": 22.4,
+        "sm_throughput_percent": 68.36,
+        "local_spill_requests": 0.0,
+        "l2_hit_percent": 71.36,
+        "registers_per_thread": 58.0,
+        "waves_per_sm": 3.37,
+        "theoretical_occupancy_percent": 50.0,
+        "achieved_occupancy_percent": 44.63
+      }
+    ],
+    "limitation": "Profiler replay durations are not the CUDA-graph timing result. Counters characterize the warmed isolated final region calls, without forced cache flushing or fixed clocks."
+  },
+  "source_sha256": {
+    "benchmark_moe.py": "a157bfd2a9adc863a174f58ebb02085ff769b27c3bdc2710334e4e398d2cd878",
+    "moe_fusion.py": "d07eaca6163bd647d97b34413da925c5dafe48515443d55f8002d77969d6713b",
+    "kernels/router_selection.py": "13d5d83d4586d03a6ed8bae2904eea2874f491d6177d4bbd7ec47af6492acbb8",
+    "kernels/router_weights.py": "fe9bd311e4b3501376e083c0464b31540715d82c43840b4aede6c041f7a1f090",
+    "kernels/shared_expert.py": "683819e67e67f29396be5035a49f2709eba078e9cae4e488d91affc24f62fba8",
+    "kernels/router_aux.py": "c3f39f3a3446dbd6b3019867684856e95d9f382675f2bac7b61375981806a420",
+    "kernels/router_counts.py": "4edbd8c8d6f8fc8d498b98766159d4f0926df6708a6f73344d8382d0370e1d03",
+    "kernels/router_backward.py": "f1915a5b6d83026635e6c062149b7c9d636ee3db457cf5773a89d8ad5a19524d"
+  },
+  "artifacts": {
+    "baseline_result": "/tmp/torchtitan_auto_fuser_20261014/baseline_parameter_norm/result.json",
+    "fused_result": "/tmp/torchtitan_auto_fuser_20261014/fused_selected/result.json",
+    "baseline_result_sha256": "9235edb7f058756194357df90ade8a8071ef80df4af32f03211ebd853a9ff221",
+    "fused_result_sha256": "9bea6d47684b52d9763a57665d5efdecc42d06785da45aa6f554c9fb733f5145",
+    "directory": "/tmp/torchtitan_auto_fuser_20261014",
+    "ncu_report": "/tmp/torchtitan_auto_fuser_20261014/roofline_final.ncu-rep",
+    "ncu_csv": "/tmp/torchtitan_auto_fuser_20261014/roofline_final.csv",
+    "ncu_summary": "/tmp/torchtitan_auto_fuser_20261014/roofline_final_summary.json"
+  }
+}
