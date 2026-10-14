@@ -33,7 +33,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     rowwise_sharding_config,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
@@ -717,7 +717,7 @@ def test_mxfp8_converter_replaces_a_root_linear_config(monkeypatch):
 
     ``convert`` writes into ``parent`` for nested configs, so the root case is
     the one branch that has to return the replacement. Not covered by the FQN
-    test below, which passes a FeedForward and so always has a parent.
+    test below, which passes a DenseFeedForward and so always has a parent.
     """
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter.Config().build()
@@ -758,7 +758,7 @@ def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
         linears_saving_inputs_for_backward_in_mxfp8=["w2"],
     ).build()
     converted = converter.convert(
-        FeedForward.Config(
+        DenseFeedForward.Config(
             w13=Linear.Config(in_features=128, out_features=128, num_linears=2),
             w2=Linear.Config(in_features=128, out_features=128),
         )
@@ -775,7 +775,7 @@ def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):
     converter = MXFP8LinearConverter.Config(
         linears_saving_inputs_for_backward_in_mxfp8=["missing"],
     ).build()
-    model_config = FeedForward.Config(
+    model_config = DenseFeedForward.Config(
         w13=Linear.Config(in_features=128, out_features=128, num_linears=2),
         w2=Linear.Config(in_features=128, out_features=128),
     )

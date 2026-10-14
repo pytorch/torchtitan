@@ -28,7 +28,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import get_moe
+from torchtitan.models.common.moe import MoE
 
 
 logger = logging.getLogger(__name__)
@@ -609,8 +609,8 @@ def apply_simple_fsdp(
         for transformer_block in model.modules():
             if not isinstance(transformer_block, TransformerBlock):
                 continue
-            moe = get_moe(transformer_block)
-            if moe is None:
+            moe = transformer_block.feed_forward
+            if not isinstance(moe, MoE):
                 continue
             routed_experts = moe.routed_experts
             experts_shard_dim = 0

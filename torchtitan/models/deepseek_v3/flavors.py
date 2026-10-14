@@ -54,7 +54,7 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_sharding_config,
     token_embedding_sharding_config,
 )
-from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.moe.sharding import (
     router_gate_sharding_config,
     router_sharding_config,
@@ -299,8 +299,8 @@ def build_mla_moe_layers(
 ) -> list[TransformerBlock.Config]:
     """Build the sharded per-layer ``DeepSeekV3TransformerBlock`` configs.
 
-    Layers with layer_id < n_dense_layers get a dense FeedForward and no MoE.
-    Layers with layer_id >= n_dense_layers get a MoE and no FeedForward.
+    Layers with layer_id < n_dense_layers get a DenseFeedForward.
+    Layers with layer_id >= n_dense_layers get an MoE.
 
     Router and expert inits are constructed per-layer so depth-scaled
     initializers are correct for each layer's position. The router factory lets
@@ -331,7 +331,7 @@ def build_mla_moe_layers(
             enable_sp=enable_sp,
         )
 
-        ffn_cfg: FeedForward.Config | MoE.Config
+        ffn_cfg: FeedForward.Config
         if layer_id < n_dense_layers:
             ffn_cfg = make_ffn_config(
                 dim=dim,

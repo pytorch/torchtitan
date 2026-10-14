@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3 import (
@@ -47,8 +47,12 @@ def test_feed_forward_registration_matches_config_paths(model_name, flavor):
         model = config.build()
 
     for layer_config, layer in zip(config.layers, model.layers.values(), strict=True):
+        assert isinstance(layer_config.feed_forward, FeedForward.Config)
+        assert isinstance(layer.feed_forward, FeedForward)
         expected_type = (
-            MoE if isinstance(layer_config.feed_forward, MoE.Config) else FeedForward
+            MoE
+            if isinstance(layer_config.feed_forward, MoE.Config)
+            else DenseFeedForward
         )
         assert isinstance(layer.feed_forward, expected_type)
         assert not hasattr(layer, "moe")
@@ -56,10 +60,35 @@ def test_feed_forward_registration_matches_config_paths(model_name, flavor):
 
     # Checkpoint conversion and FQN-based transforms consume these paths.
     modules = dict(model.named_modules())
-    for config_type in (FeedForward.Config, MoE.Config, GroupedLinear.Config):
+    for config_type in (
+        FeedForward.Config,
+        DenseFeedForward.Config,
+        MoE.Config,
+        GroupedLinear.Config,
+    ):
         for fqn, child_config, parent, attr in config.traverse(config_type):
             assert fqn in modules
             assert getattr(parent, attr) is child_config
+
+
+def test_first_feed_forward_skips_moe():
+    config = build_deepseek_v3_model_config(
+        "debugmodel", seq_len=128, parallelism=ParallelismConfig()
+    )
+    dense_layer = next(
+        layer
+        for layer in config.layers
+        if isinstance(layer.feed_forward, DenseFeedForward.Config)
+    )
+    moe_layer = next(
+        layer for layer in config.layers if isinstance(layer.feed_forward, MoE.Config)
+    )
+
+    config.layers = [moe_layer, dense_layer]
+    assert config.first_feed_forward is dense_layer.feed_forward
+
+    config.layers = [moe_layer]
+    assert config.first_feed_forward is None
 
 
 def test_moe_traversal_preserves_config_replacement_field():

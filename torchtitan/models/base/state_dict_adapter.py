@@ -324,11 +324,13 @@ class StateDictAdapter(BaseStateDictAdapter):
         """
         from torchtitan.models.common.attention import QKVLinear
         from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
-        from torchtitan.models.common.feed_forward import FeedForward
+        from torchtitan.models.common.feed_forward import DenseFeedForward
         from torchtitan.models.common.moe import RoutedExperts
 
         result = dict(state_dict)
-        for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
+        for fqn, _config, _parent, _ in self.model_config.traverse(
+            DenseFeedForward.Config
+        ):
             prefix = f"{fqn}." if fqn else ""
             for name in ("weight", "bias"):
                 self._split_stacked_linear(
@@ -384,11 +386,13 @@ class StateDictAdapter(BaseStateDictAdapter):
         """
         from torchtitan.models.common.attention import QKVLinear
         from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
-        from torchtitan.models.common.feed_forward import FeedForward
+        from torchtitan.models.common.feed_forward import DenseFeedForward
         from torchtitan.models.common.moe import RoutedExperts
 
         result = dict(state_dict)
-        for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
+        for fqn, _config, _parent, _ in self.model_config.traverse(
+            DenseFeedForward.Config
+        ):
             prefix = f"{fqn}." if fqn else ""
             for name in ("weight", "bias"):
                 self._stack_logical_linears(

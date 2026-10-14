@@ -31,7 +31,7 @@ from torchtitan.experiments.graph_trainer.configs import (
     validate_ep_overlap_config,
 )
 from torchtitan.models.common.decoder import TransformerBlock
-from torchtitan.models.common.moe import get_moe, MoE
+from torchtitan.models.common.moe import MoE
 
 
 logger = logging.getLogger(__name__)
@@ -423,7 +423,7 @@ def maybe_apply_ep_overlap_eager_chunking(
             if (
                 module_fqn == TRANSFORMER_BLOCK_FQN
                 and isinstance(module, TransformerBlock)
-                and get_moe(module) is None
+                and not isinstance(module.feed_forward, MoE)
             ):
                 continue
             if root_kind == "moe" and not isinstance(module, MoE):

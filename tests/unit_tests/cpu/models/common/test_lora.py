@@ -20,7 +20,7 @@ from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import make_ffn_config
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
@@ -150,7 +150,7 @@ def test_lora_forward():
 def test_lora_targets_fused_feed_forward_projection():
     """The physical w13 projection uses one LoRA adapter."""
     init = {"weight": torch.nn.init.ones_}
-    config = FeedForward.Config(
+    config = DenseFeedForward.Config(
         w13=Linear.Config(
             in_features=4, out_features=8, num_linears=2, param_init=init
         ),
@@ -384,7 +384,7 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
         alpha=4,
         target_modules=["w13"],
     ).transform(config)
-    assert isinstance(config, FeedForward.Config)
+    assert isinstance(config, DenseFeedForward.Config)
 
     feed_forward = config.build()
     assert feed_forward.w13._sharding_config is not None
