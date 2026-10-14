@@ -125,9 +125,10 @@ class KDAKernel(Module):
             lower_bound=self.lower_bound,
             impl="fused",
         )
+        autotune = not torch.are_deterministic_algorithms_enabled()
         return (
-            l2norm(q_1THK),
-            l2norm(k_1THK),
+            l2norm(q_1THK, autotune=autotune),
+            l2norm(k_1THK, autotune=autotune),
             gate_1THK,
             raw_beta_1TH.float().sigmoid(),
         )
