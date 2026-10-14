@@ -920,6 +920,73 @@ class TestChunkedLossWrapper(unittest.TestCase):
             model_chunked.output.weight.grad, model_ref.output.weight.grad
         )
 
+    def test_frozen_features_accumulate_head_gradients(self):
+        """Head-only training matches cross entropy across chunks and microbatches."""
+        torch.manual_seed(42)
+        for num_chunks in (1, 2, 4):
+            with self.subTest(num_chunks=num_chunks):
+                head = nn.Linear(5, 17)
+                reference_head = nn.Linear(5, 17)
+                reference_head.load_state_dict(head.state_dict())
+                chunked_loss = ChunkedLossWrapper(
+                    ChunkedLossWrapper.Config(num_chunks=num_chunks)
+                )
+                chunked_loss.set_lm_head(head)
+                for _ in range(2):
+                    hidden = torch.randn(8, 5)
+                    labels = torch.randint(0, 17, (8,))
+                    labels[1] = IGNORE_INDEX
+                    token_count = (labels != IGNORE_INDEX).sum()
+                    reference_loss = (
+                        F.cross_entropy(reference_head(hidden), labels, reduction="sum")
+                        / token_count
+                    )
+
+                    loss, _ = chunked_loss(hidden, labels, token_count)
+                    loss.backward()
+                    reference_loss.backward()
+
+                    torch.testing.assert_close(loss, reference_loss)
+                    self.assertIsNone(hidden.grad)
+                    for actual, expected in zip(
+                        head.parameters(), reference_head.parameters(), strict=True
+                    ):
+                        torch.testing.assert_close(actual.grad, expected.grad)
+
+    def test_no_grad_leaves_head_and_features_unchanged(self):
+        """Validation does not backpropagate even with trainable input tensors."""
+        for requires_grad in (False, True):
+            with self.subTest(requires_grad=requires_grad):
+                head = nn.Linear(5, 17)
+                chunked_loss = ChunkedLossWrapper(
+                    ChunkedLossWrapper.Config(num_chunks=2)
+                )
+                chunked_loss.set_lm_head(head)
+                hidden = torch.randn(8, 5, requires_grad=requires_grad)
+                labels = torch.randint(0, 17, (8,))
+
+                with torch.no_grad():
+                    loss, _ = chunked_loss(hidden, labels)
+
+                self.assertFalse(loss.requires_grad)
+                self.assertIsNone(hidden.grad)
+                for parameter in head.parameters():
+                    self.assertIsNone(parameter.grad)
+
+    def test_fully_frozen_model_returns_detached_loss(self):
+        """Frozen features and head keep the forward-only loss contract."""
+        head = nn.Linear(5, 17).requires_grad_(False)
+        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
+        chunked_loss.set_lm_head(head)
+        hidden = torch.randn(8, 5)
+        labels = torch.randint(0, 17, (8,))
+
+        loss, _ = chunked_loss(hidden, labels)
+
+        self.assertFalse(loss.requires_grad)
+        for parameter in head.parameters():
+            self.assertIsNone(parameter.grad)
+
     def test_weighted_multi_output_matches_full_objective(self):
         torch.manual_seed(42)
         T, D, V, num_chunks = 24, 5, 17, 3
