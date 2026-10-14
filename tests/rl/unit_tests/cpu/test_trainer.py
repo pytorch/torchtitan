@@ -23,7 +23,10 @@ from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.components.batcher import TrainingMicrobatch
 from torchtitan.rl.components.checkpointer import MirroredState
 from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
-from torchtitan.rl.distributed.rdma_microbatch import MicrobatchStream, RDMAMicrobatch
+from torchtitan.rl.distributed.rdma_microbatch import (
+    MicrobatchStream,
+    MonarchRDMAMicrobatch,
+)
 from torchtitan.rl.trainer import Trainer
 from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
@@ -380,9 +383,9 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             advantages=torch.tensor([1.0]),
         )
 
-        # This rank's column; with the RDMA fast path the trainer reads it.
+        # This rank's column; with `rdma_min_tensor_bytes` the trainer reads it.
         microbatch = (
-            MagicMock(spec=RDMAMicrobatch, read=AsyncMock(return_value=batch))
+            MagicMock(spec=MonarchRDMAMicrobatch, read=AsyncMock(return_value=batch))
             if rdma
             else batch
         )

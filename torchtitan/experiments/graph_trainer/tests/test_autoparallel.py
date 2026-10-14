@@ -121,13 +121,13 @@ def test_autoparallel_graph_pass_selection_uses_regular_memory_policy():
         compile=GraphTrainerCompileConfig(
             enable_autoparallel=True,
             enable_async_tensor_parallel=False,
-            disable_passes=["cuda_graph_pass"],
         ),
         model=SimpleNamespace(layers=[object()]),
         parallelism=SimpleNamespace(
             fsdp_reshard_after_forward="always",
             pipeline_parallel_degree=1,
         ),
+        training=TrainingConfig(disable_cuda_graphs=True),
     )
 
     graph_passes = passes.construct_default_graph_passes(traced_result, config)

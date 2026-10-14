@@ -29,7 +29,10 @@ from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.rl.components.batcher import TrainingMicrobatch
 from torchtitan.rl.components.checkpointer import CONTROLLER_STATE_KEY, MirroredState
-from torchtitan.rl.distributed.rdma_microbatch import MicrobatchStream, RDMAMicrobatch
+from torchtitan.rl.distributed.rdma_microbatch import (
+    MicrobatchStream,
+    MonarchRDMAMicrobatch,
+)
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
@@ -240,7 +243,7 @@ class Trainer(Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        microbatches: list[TrainingMicrobatch] | list[RDMAMicrobatch],
+        microbatches: list[TrainingMicrobatch] | list[MonarchRDMAMicrobatch],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
@@ -248,8 +251,8 @@ class Trainer(Configurable):
 
         Args:
             microbatches: This rank's microbatches, `[num_microbatches]`: one column of the
-                batcher's `[num_microbatches][dp_degree]` grid; `RDMAMicrobatch`es with the RDMA
-                fast path, read a few ahead of training.
+                batcher's `[num_microbatches][dp_degree]` grid; `MonarchRDMAMicrobatch`es when
+                `rdma_min_tensor_bytes` is set, read a few ahead of training.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -275,11 +278,13 @@ class Trainer(Configurable):
             len(microbatches)
             * self.config.training.num_tokens_per_microbatch_per_dp_rank
         )
-        uses_rdma = bool(microbatches) and isinstance(microbatches[0], RDMAMicrobatch)
+        uses_rdma = bool(microbatches) and isinstance(
+            microbatches[0], MonarchRDMAMicrobatch
+        )
         microbatch_groups = [[microbatch] for microbatch in microbatches]
         if uses_rdma:
             # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
-            # and broadcast it, to cut the batcher's reads by cp * tp. Needs a per-replica group.
+            # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             microbatch_groups = MicrobatchStream(microbatches)
         result = engine.forward_backward(
             microbatch_groups=microbatch_groups,

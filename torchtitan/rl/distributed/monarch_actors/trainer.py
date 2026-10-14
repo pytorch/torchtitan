@@ -15,7 +15,7 @@ from monarch.actor import Actor, concurrent_endpoint
 
 from torchtitan.rl.components.batcher import TrainingMicrobatch
 
-from torchtitan.rl.distributed.rdma_microbatch import RDMAMicrobatch
+from torchtitan.rl.distributed.rdma_microbatch import MonarchRDMAMicrobatch
 from torchtitan.rl.trainer import OptimizerStepOutput, Trainer
 
 
@@ -47,7 +47,7 @@ class _TrainerActorEndpoints:
     @concurrent_endpoint
     async def forward_backward(
         self,
-        microbatches: list[TrainingMicrobatch] | list[RDMAMicrobatch],
+        microbatches: list[TrainingMicrobatch] | list[MonarchRDMAMicrobatch],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
