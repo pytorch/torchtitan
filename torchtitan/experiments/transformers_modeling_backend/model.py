@@ -27,20 +27,24 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
     create_attention_mask,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.models.utils import quadratic_attention_flops_per_token
-from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import Module, ModuleDict
+from torchtitan.models.common.flops import quadratic_attention_flops_per_token
 
 from .parallelize import parallelize_hf_transformers
 from .pipeline import pipeline_hf_transformers
 
 
 logger = logging.getLogger(__name__)
+
+# HF's own _init_weights, captured before _patch_hf_llama_like replaces it, so the
+# patched version can delegate modules whose init it does not reimplement.
+_hf_init_weights = PreTrainedModel._init_weights
 
 
 class HFFlexKernel(Module):
@@ -584,11 +588,11 @@ class HFTransformerModel(BaseModel):
                             parameter_weights[id(param)] = Fraction(0)
 
             for layer in model.layers.values():
-                moe_config = getattr(layer, "_native_moe_config", None)
-                if moe_config is None:
+                moe_params = getattr(layer, "_native_moe_params", None)
+                if moe_params is None:
                     continue
                 active_expert_ratio = Fraction(
-                    moe_config.router.top_k, moe_config.num_experts
+                    moe_params["top_k"], moe_params["num_experts"]
                 )
                 if getattr(layer, "_layer_level_moe", False):
                     moe_block = layer
@@ -845,9 +849,9 @@ class HFTransformerModel(BaseModel):
                     layer._layer_level_moe = True
 
         if config.is_moe:
-            from .moe_replacement import prepare_native_moe_configs
+            from .moe_replacement import probe_native_moe_params
 
-            prepare_native_moe_configs(self, config)
+            probe_native_moe_params(self, config)
 
     def set_cp_mesh(self, mesh):
         self.cp_mesh = mesh
@@ -1081,6 +1085,13 @@ class HFTransformerModel(BaseModel):
                     module.weight.data.fill_(1.0)
                 if hasattr(module, "bias") and module.bias is not None:
                     module.bias.data.zero_()
+
+            elif "RotaryEmbedding" in module.__class__.__name__:
+                # HF rotary modules compute their inv_freq buffers in __init__, which
+                # meta init + to_empty() leaves uninitialized. HF's _init_weights
+                # recomputes them for every rope_type, so delegate instead of
+                # reimplementing its rope dispatch.
+                _hf_init_weights(self, module)
 
         decoder_layer_cls.__init__ = _decoder_layer_init_patched
         PreTrainedModel._init_weights = _init_weights_patched
@@ -1414,21 +1425,6 @@ class HFTransformerModel(BaseModel):
                 logger.info("Skipping nn.Identity module during weight initialization.")
 
         self.model.apply(selective_init)
-
-        # HF rotary embeddings compute their `inv_freq` buffer in __init__, not in
-        # `_init_weights`. With meta-device init + `to_empty()`, that buffer is
-        # left uninitialized (zeros), which silently disables RoPE (no positional
-        # information -> near-random outputs). Recompute it from each rotary
-        # module's `rope_init_fn` so positions work after materialization.
-        for module in self.model.modules():
-            rope_init_fn = getattr(module, "rope_init_fn", None)
-            if rope_init_fn is not None and hasattr(module, "inv_freq"):
-                device = module.inv_freq.device
-                inv_freq, attention_scaling = rope_init_fn(module.config, device)
-                module.inv_freq.copy_(
-                    inv_freq.to(device=device, dtype=module.inv_freq.dtype)
-                )
-                module.attention_scaling = attention_scaling
 
         # TODO(3outeille): For pipeline parallel, only tie weights if both input and output embeddings are on the same device
         # Maybe better way of handling this?

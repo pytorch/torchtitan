@@ -63,7 +63,7 @@ jobs:
         conda activate "${CONDA_ENV}"
 
         # The ARC H100 runner mounts the shared HF cache (/mnt/hf_cache) read-only.
-        # The c4_test loader (torchtitan/hf_datasets/text_datasets.py) calls
+        # The c4_test loader (torchtitan/components/data/text_datasets.py) calls
         # datasets.load_dataset non-streaming, which os.makedirs the HF datasets
         # cache root before loading -- that write fails on the read-only mount and
         # crashes dataloader build for every debug-model flavor. Point the HF cache

@@ -69,6 +69,7 @@ class Optim(Configurable):
             for model_part in model_parts
             for parameter in model_part.parameters()
         ]
+        self._is_first_step_call = True
         enable_cuda_graph = (
             config.enable_cuda_graph
             and cuda_graphs_supported()
@@ -106,6 +107,13 @@ class Optim(Configurable):
 
     def step(self, loss: torch.Tensor, *, current_step: int) -> torch.Tensor:
         """Validate loss and gradients, update parameters, then advance eager state."""
+        if self._is_first_step_call:
+            # Finish GPU work before freeing cached memory for NCCL buffers.
+            # https://github.com/pytorch/torchtitan/issues/5019
+            if torch.cuda.is_initialized():
+                torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            self._is_first_step_call = False
         grad_norm = self._run_update(loss)
         self.lr_schedulers.step()
         if self.ema is not None:
@@ -119,7 +127,6 @@ class Optim(Configurable):
             self.config.max_norm,
             foreach=True,
             pp_mesh=self.parallelism_context.get_optional_mesh("pp"),
-            ep_enabled=self.parallelism_context.ep_enabled,
         )
         loss_is_finite = torch.isfinite(loss).all().to(torch.int32)
         if not self.parallelism_context.pp_enabled or self.pp_has_last_stage:

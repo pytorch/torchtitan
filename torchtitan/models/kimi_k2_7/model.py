@@ -19,7 +19,7 @@ from torch import nn
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -95,15 +95,6 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
                 modules_excluded_from_active_params=(kimi_model.vision_encoder,),
             )
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_kimi_k2_5_sharding_config
-
-            set_kimi_k2_5_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
     def __init__(self, config: Config):
         tp = spmd_mesh_size("tp")
         if (
@@ -127,9 +118,8 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         local_compile_regions: list[str],
-        ac_config: ActivationCheckpointingConfig | None,
+        activation_remat: ActivationRematConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> KimiK25Model:
         if parallelism_context.cp_enabled:
             raise NotImplementedError(
@@ -142,9 +132,8 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             training=training,
             parallelism=parallelism,
             local_compile_regions=local_compile_regions,
-            ac_config=ac_config,
+            activation_remat=activation_remat,
             dump_folder=dump_folder,
-            skip_dp=skip_dp,
         )
 
     def preprocess_inputs(

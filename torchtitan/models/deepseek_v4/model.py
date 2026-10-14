@@ -15,20 +15,20 @@ from torch import nn
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.base.module import ModuleList
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.flops import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
     roll_mtp_sequence,
 )
-from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
-from torchtitan.protocols.module import ModuleList
 
 from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
@@ -93,7 +93,13 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         """
         residual = x
         x, post, comb = self.hc_attn_pre(x)
-        x = self.attention(self.attention_norm(x), attention_metadata, positions)
+        x = self.attention(
+            self.attention_norm(x),
+            attention_metadata,
+            positions,
+            aux_loss_denominator=aux_loss_denominator,
+            padding_mask=padding_mask,
+        )
         # hc_post reads the attention output (wo_b projection) with bare ops.
         remat.recompute_needs_tensor(x)
         x = self.hc_post(x, residual, post, comb)
@@ -132,9 +138,11 @@ class DeepSeekV4Model(Decoder):
     def _register_optimizer_hooks(
         cls, optimizers, model_parts, parallelism_context
     ) -> None:
+        from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
         from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+        register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
     def _apply_fsdp(
         self,
@@ -235,15 +243,6 @@ class DeepSeekV4Model(Decoder):
             )
 
             return nparams, 6 * active_nparams + attention_op_flops
-
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_deepseek_v4_sharding_config
-
-            set_deepseek_v4_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
 
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size

@@ -8,11 +8,14 @@ from dataclasses import dataclass, field, fields
 from typing import Literal
 
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
-from torchtitan.protocols.model import BaseModel
+from torchtitan.experiments.graph_trainer.common_utils import (
+    disable_inplace_wgrad_accum,
+)
+from torchtitan.models.base.model import BaseModel
 from torchtitan.trainer import Trainer
 
 EpOverlapChunkDim = Literal["batch", "seq"]
@@ -196,7 +199,7 @@ class GraphTrainerCompileConfig:
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
     studies. A pass is skipped if its name exactly matches any entry.
-    Example: ``["custom_codegen_pass", "cuda_graph_pass"]``."""
+    Example: ``["custom_codegen_pass"]``."""
 
     memory_policy: Literal[
         "none",
@@ -215,7 +218,7 @@ class GraphTrainerCompileConfig:
             full_recompute_save_ops. With no selectors, this mirrors eager's
             the former eager full-AC implementation.
         eager: SAC alternating mm ops between save/recompute, matching the
-            eager AC policy in torchtitan.distributed.activation_checkpoint.
+            former eager SAC policy.
         min_cut: choose saved activations with the min-cut partitioner.
         sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
@@ -336,8 +339,8 @@ def to_graph_trainer_config(
     """Convert a base Trainer.Config to a GraphTrainer.Config.
 
     Copies all fields from the base config and converts its model config to the
-    GraphTrainer model config class, without local compile regions because
-    GraphTrainer traces the whole step. The ``compile`` field keeps the
+    GraphTrainer model config class, without local compile regions or in-place
+    WGRAD accumulation because GraphTrainer traces the whole step. The ``compile`` field keeps the
     GraphTrainer.Config default; callers should explicitly set it.
     """
     from .trainer import GraphTrainer
@@ -351,14 +354,15 @@ def to_graph_trainer_config(
     )
     # GraphTrainer compiles the whole step (config.compile), so it drops the model's local compile regions.
     graph_model.local_compile_regions = []
+    disable_inplace_wgrad_accum(graph_model)
     d["model"] = graph_model
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any
     # enabled AC policy with the default selective one so callers don't need
     # per-config fixups.
-    ac = d.get("activation_checkpoint")
+    ac = d.get("activation_remat")
     if ac is not None:
-        d["activation_checkpoint"] = SelectiveAC.Config()
+        d["activation_remat"] = DefaultActivationRematConfig()
 
     # graph_trainer's tracer requires explicit autograd outputs for lm_head
     # params instead of relying on .grad side effects from chunk_loss.backward().

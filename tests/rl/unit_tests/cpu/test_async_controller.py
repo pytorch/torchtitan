@@ -10,27 +10,35 @@ the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+import numpy as np
 import pytest
 import torch
-
-from torchtitan.rl.components.batcher import Batcher
-from torchtitan.rl.components.work_buffer import (
-    RolloutGroupWork,
-    RolloutGroupWorkBuffer,
-)
-from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.observability.controller import (
+from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     MetricsTimer,
 )
+from torchtitan.rl.controller.work_buffer import (
+    RolloutGroupWork,
+    RolloutGroupWorkBuffer,
+)
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
-from torchtitan.rl.types import RolloutTurnID, TrainingSample, TrainingSampleGroup
+from torchtitan.rl.rollout.types import RolloutTurnID
+
+from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.training_sample_builder import (
+    TrainingSample,
+    TrainingSampleGroup,
+)
 
 
 def test_controller_config_maybe_log(tmp_path, caplog) -> None:
-    from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
+    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
 
     config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
     assert config.generator.max_num_batched_tokens == 128
@@ -38,7 +46,7 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     config.trainer.debug.print_config = True
     config.trainer.debug.save_config_file = "config.json"
 
-    with caplog.at_level(logging.INFO, logger="torchtitan.rl.controller"):
+    with caplog.at_level(logging.INFO, logger="torchtitan.rl.controller.controller"):
         config.maybe_log()
 
     assert "Running with configs:" in caplog.text
@@ -52,10 +60,10 @@ def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
         min_policy_version=0,
         max_policy_version=0,
         rollout_id=RolloutTurnID(group_id=group_id, rollout_id=rollout_id, turn_id=0),
-        token_ids=[1, 2, 3],
-        loss_mask=[False, True, True],
-        logprobs=[0.0, 0.1, 0.2],
-        advantage=[0.0, 1.0, 1.0],
+        token_ids=np.array([1, 2, 3]),
+        loss_mask=np.array([False, True, True]),
+        logprobs=np.array([0.0, 0.1, 0.2], dtype=np.float32),
+        advantage=np.array([0.0, 1.0, 1.0], dtype=np.float32),
     )
 
 
@@ -84,10 +92,12 @@ def _variable_length_group(
                     rollout_id=rollout_id,
                     turn_id=0,
                 ),
-                token_ids=list(range(token_length)),
-                loss_mask=[False] + [True] * (token_length - 1),
-                logprobs=[0.0] * token_length,
-                advantage=[0.0] + [1.0] * (token_length - 1),
+                token_ids=np.arange(token_length),
+                loss_mask=np.array([False] + [True] * (token_length - 1)),
+                logprobs=np.zeros(token_length, dtype=np.float32),
+                advantage=np.array(
+                    [0.0] + [1.0] * (token_length - 1), dtype=np.float32
+                ),
             )
         )
     return TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])
@@ -147,6 +157,7 @@ def test_batcher_packs_groups_in_id_order_regardless_of_arrival() -> None:
 
     assert batch is not None
     assert batch.min_policy_versions == [3, 7]
+    assert batch.group_ids == [3, 7]
 
 
 def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
@@ -165,6 +176,7 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert group_is_trainable
     assert batch.global_loss_token_counts[0] > 0
     assert batch.global_routing_token_counts.shape == (1,)
+    assert batch.group_ids == [0, 1]
 
 
 def test_batcher_prepares_per_depth_mtp_token_counts() -> None:
@@ -494,10 +506,10 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
         temperature=1.0,
     )
     sample = _training_sample(group_id=0, rollout_id=0)
-    sample.token_ids = list(range(6))
-    sample.loss_mask = [False] * 6
-    sample.logprobs = [0.0] * 6
-    sample.advantage = [0.0] * 6
+    sample.token_ids = np.arange(6)
+    sample.loss_mask = np.zeros(6, dtype=bool)
+    sample.logprobs = np.zeros(6, dtype=np.float32)
+    sample.advantage = np.zeros(6, dtype=np.float32)
 
     pending, group_is_trainable = batcher.add_training_samples(
         training_sample_group=TrainingSampleGroup(
@@ -513,6 +525,7 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
         training_sample_group=_trainable_group(1, num_samples=1)
     )
     assert batch is not None
+    assert batch.group_ids == [0, 1]
     dropped_metric = next(
         metric
         for metric in batch.metrics
@@ -768,3 +781,71 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
         assert taker.result().group_id == 6
 
     asyncio.run(run())
+
+
+async def _block_forever(*args, **kwargs) -> None:
+    await asyncio.Event().wait()
+
+
+def _run_with_generator_watcher(watcher) -> None:
+    """Run Controller.run with every stage but the engine-loop watcher stubbed to block."""
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(
+            num_training_steps=1,
+            max_active_rollout_groups=1,
+            window_size=None,
+            target_offpolicy_steps=0,
+            windowed_fifo_batches=None,
+            max_offpolicy_steps=None,
+            num_prompts_per_train_step=1,
+            group_buffer=SimpleNamespace(
+                build=lambda **kwargs: SimpleNamespace(close=AsyncMock())
+            ),
+            training_sample_builder=SimpleNamespace(build=lambda: None),
+            batcher=SimpleNamespace(build=lambda **kwargs: None),
+        ),
+        trainer=SimpleNamespace(
+            training=SimpleNamespace(
+                num_tokens_per_microbatch_per_dp_rank=8, max_context_length=8
+            )
+        ),
+    )
+    controller.start_step = 0
+    controller.trainer = None
+    controller.trainer_dp_degree = 1
+    controller.tokenizer = SimpleNamespace(eos_id=0)
+    controller._sampling = SimpleNamespace(temperature=1.0)
+    controller.generator_router = SimpleNamespace(
+        wait_engine_loop=SimpleNamespace(call_one=watcher)
+    )
+    with (
+        patch.multiple(
+            Controller,
+            _validate_and_log=AsyncMock(return_value={}),
+            _make_generate_fn=lambda self, metrics_prefix: None,
+            _data_input_loop=_block_forever,
+            _rollout_loop=_block_forever,
+            _batcher_loop=_block_forever,
+            _trainer_loop=_block_forever,
+        ),
+    ):
+        asyncio.run(asyncio.wait_for(controller.run(), timeout=10))
+
+
+def test_run_fails_when_an_engine_loop_crashes() -> None:
+    async def crashed() -> None:
+        raise RuntimeError("engine loop crashed")
+
+    with pytest.raises(RuntimeError, match="engine loop crashed"):
+        _run_with_generator_watcher(crashed)
+
+
+def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
+    async def exited() -> None:
+        return None
+
+    with pytest.raises(
+        RuntimeError, match="generator_wait_engine_loop exited unexpectedly"
+    ):
+        _run_with_generator_watcher(exited)

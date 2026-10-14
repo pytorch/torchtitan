@@ -19,7 +19,6 @@ from torchtitan.models.common.linear import (
     GroupedLinear,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
@@ -38,7 +37,6 @@ _QUANTIZABLE_LINEAR_CLASSES = (
     Linear,
     ColumnParallelLinear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
     InvariantRowParallelLinear,
 )
 
@@ -203,6 +201,7 @@ class MXFP8LinearConverter(QuantizationConverter):
                 input_activation_format_for_backward=(
                     "mxfp8" if fqn in mxfp8_fqns else "bf16"
                 ),
+                inplace_wgrad_accum=config.inplace_wgrad_accum,
             )
             if parent is None:
                 model_config = new_config

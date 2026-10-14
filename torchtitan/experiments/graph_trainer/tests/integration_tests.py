@@ -32,7 +32,6 @@ _FLEX_CP_INDUCTOR_DISABLED = True
 
 def llama3_fsdp_tp_cp():
     config = llama3_recipes.graph_trainer_llama3_debugmodel()
-    config.compile.disable_passes = ["cuda_graph_pass"]
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -96,7 +95,6 @@ def deepseek_v3_fused_mla_swiglu_fsdp_tp_ep():
     config.training.disable_cuda_graphs = True
     config.compile.disable_passes = [
         "joint_transformer_block_bucketing_reordering_pass",
-        "cuda_graph_pass",
     ]
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
@@ -104,6 +102,15 @@ def deepseek_v3_fused_mla_swiglu_fsdp_tp_ep():
     ]
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    return config
+
+
+def deepseek_v3_hsdp_edp_shard_ep():
+    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel()
+    config.training.disable_cuda_graphs = True
+    config.parallelism.data_parallel_replicate_degree = 2
+    config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 2
     return config
 
@@ -227,8 +234,7 @@ def _round_robin_routing(config):
 
 def deepseek_v3_hybrid_ep_paged_stash():
     config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel_hybridep()
-    # GraphTrainer applies its own CUDA graph pass when the trainer-level CUDA
-    # graph wrapper is off.
+    # Paged stash may release and reallocate buffers after an overflow.
     config.training.disable_cuda_graphs = True
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -251,7 +257,7 @@ def deepseek_v3_graph_pp_hybrid_ep_paged_stash():
 
 def qwen3_fsdp_tp_cp():
     config = qwen3_recipes.graph_trainer_qwen3_debugmodel()
-    config.compile.disable_passes = ["cuda_graph_pass"]
+    config.training.disable_cuda_graphs = True
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -291,7 +297,7 @@ def llama3_fsdp_tp_async_tp():
 
 
 def llama3_autoparallel_fsdp_tp():
-    config = llama3_recipes.graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss()
+    config = llama3_recipes.graph_trainer_llama3_debugmodel_varlen_cross_entropy_loss()
     config.compile.enable_autoparallel = True
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -431,6 +437,12 @@ def _build_deepseek_v3_tests() -> list[IntegrationTestDefinition]:
 
     return [
         # === GraphRuntime tests ===
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_hsdp_edp_shard_ep],
+            test_descr="aot_fx_trace deepseek_v3 HSDP+edp_shard+EP",
+            test_name="aot_fx_trace_deepseek_v3_hsdp_edp_shard_ep",
+            ngpu=8,
+        ),
         # Note: standard DSv3 MoE load-balancing introduces CUDA-to-CPU
         # transfers incompatible with CUDA graph capture, so this fused test
         # explicitly disables CUDA graphs in both the trainer and graph passes.
@@ -619,15 +631,8 @@ def _build_async_tp_tests() -> list[IntegrationTestDefinition]:
 def _build_autoparallel_tests() -> list[IntegrationTestDefinition]:
     """AutoParallel integration tests for default runners."""
     return [
-        # Uses the SDPA backend: AutoParallel's dynamo export
-        # (_dynamo_graph_capture_for_export) pytree-flattens the default
-        # FlexInnerAttention BlockMask to plain (Fake)Tensors, so flex_attention then
-        # fails with "'FakeTensor' object has no attribute 'BLOCK_SIZE'". SDPA is
-        # maskless (is_causal) and carries no BlockMask, and its input_fn
-        # (tokens, positions) binds correctly now that Decoder.forward lists
-        # positions before attention_metadata.
-        # TODO: re-test on FlexInnerAttention once BlockMask survives AutoParallel
-        # graph capture.
+        # TODO: Before re-enabling, wire Varlen metadata through AutoParallel
+        # input_fn and its input sharding constraints.
         # TODO: Disabled due to upstream AutoParallel/PyTorch API skew. PyTorch
         # #186754 (2026-06-24) removed propagate_single_input_strategy in favor
         # of propagate_single_input_single_dim_strategy, but AutoParallel's

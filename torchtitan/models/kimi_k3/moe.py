@@ -83,6 +83,7 @@ class KimiLatentMoE(MoE):
             weights_TK,
             expert_ids_TK,
             num_tokens_per_expert_E,
+            padding_mask_T=routed_padding_mask_T,
         )
         # routed_norm reads the routed experts' combined output with bare ops.
         remat.recompute_needs_tensor(routed_TD)
