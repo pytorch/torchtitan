@@ -7,6 +7,7 @@
 # @lint-ignore-every CITRINE
 
 import unittest
+from typing import Literal
 from unittest import mock
 
 import pytest
@@ -572,7 +573,7 @@ class TestDistMuonCpuOffload(DTensorTestBase):
         return "cpu:gloo,cuda:nccl"
 
     @with_comms
-    def test_ns_on_accelerator_matches_gpu_resident_run(self):
+    def test_accelerator_ns_device_matches_gpu_resident_run(self):
         mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
         )
@@ -594,7 +595,7 @@ class TestDistMuonCpuOffload(DTensorTestBase):
             4, 16, generator=torch.Generator().manual_seed(self.rank)
         ).to(self.device_type)
 
-        def run(*, offload: bool, ns_on_accelerator: bool):
+        def run(*, offload: bool, ns_device: Literal["accelerator"] | None):
             torch.manual_seed(0)
             model = _TwoLayerModel()
             policy = CPUOffloadPolicy() if offload else OffloadPolicy()
@@ -609,7 +610,7 @@ class TestDistMuonCpuOffload(DTensorTestBase):
                 weight_decay=0.2,
                 momentum=0.8,
                 ns_steps=2,
-                ns_on_accelerator=ns_on_accelerator,
+                ns_device=ns_device,
             )
             ns_devices: list[torch.device] = []
             original = dist_muon_module._compute_muon_direction
@@ -627,9 +628,9 @@ class TestDistMuonCpuOffload(DTensorTestBase):
                     optimizer.zero_grad()
             return params, optimizer, ns_devices
 
-        gpu_params, _, gpu_ns_devices = run(offload=False, ns_on_accelerator=False)
+        gpu_params, _, gpu_ns_devices = run(offload=False, ns_device=None)
         host_params, host_optimizer, host_ns_devices = run(
-            offload=True, ns_on_accelerator=True
+            offload=True, ns_device="accelerator"
         )
 
         rank_device = torch.device(self.device_type, self.rank)

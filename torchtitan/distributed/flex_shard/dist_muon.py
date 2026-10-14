@@ -13,7 +13,7 @@ import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, cast, NoReturn, overload
+from typing import Any, cast, Literal, NoReturn, overload
 
 import torch
 from torch import Tensor
@@ -159,10 +159,11 @@ class DistMuon(Optimizer):
     time, but bitwise equality across the two kernel schedules is not part of
     the contract.
 
-    ``ns_on_accelerator`` selects where Newton-Schulz runs. ``False`` keeps the
-    storage device, where each parameter's local shard lives (the host under
-    FSDP2 CPU offload). ``True`` copies each compute view to the current
-    accelerator, runs Newton-Schulz there and copies the result back.
+    ``ns_device`` selects where Newton-Schulz runs. ``None`` keeps the storage
+    device, where each parameter's local shard lives (the host under FSDP2 CPU
+    offload). ``"accelerator"`` copies each compute view to the current
+    accelerator, of any type, runs Newton-Schulz there and copies the result
+    back.
     Momentum, parameters, gradients and redistribution buffers stay where they
     are, so this only changes anything when the parameters live on the host.
     """
@@ -187,9 +188,9 @@ class DistMuon(Optimizer):
         eps: float = 1e-7,
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
-        ns_on_accelerator: bool = False,
+        ns_device: Literal["accelerator"] | None = None,
     ) -> None:
-        self._ns_device = self._resolve_ns_device(ns_on_accelerator)
+        self._ns_device = self._resolve_ns_device(ns_device)
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -212,13 +213,17 @@ class DistMuon(Optimizer):
         )
 
     @staticmethod
-    def _resolve_ns_device(ns_on_accelerator: bool) -> torch.device | None:
+    def _resolve_ns_device(ns_device: str | None) -> torch.device | None:
         """Return the Newton-Schulz device, or ``None`` to keep the storage device."""
-        if not ns_on_accelerator:
+        if ns_device is None:
             return None
-        accelerator = torch.accelerator.current_accelerator()
+        if ns_device != "accelerator":
+            raise ValueError(
+                f"ns_device must be 'accelerator' or None, got {ns_device!r}"
+            )
+        accelerator = torch.accelerator.current_accelerator(check_available=True)
         if accelerator is None:
-            raise ValueError("ns_on_accelerator=True requires an accelerator")
+            raise ValueError("ns_device='accelerator' requires an accelerator")
         return torch.device(accelerator.type, torch.accelerator.current_device_index())
 
     @overload

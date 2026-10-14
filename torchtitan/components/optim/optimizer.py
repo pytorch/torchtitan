@@ -200,10 +200,10 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         adjust_lr_fn: Literal[
             "original", "match_rms_adamw", "spectral_unclamped"
         ] | None = None
-        ns_on_accelerator: bool = False
-        """Where Newton-Schulz runs. ``False`` keeps the storage device, where each
+        ns_device: Literal["accelerator"] | None = None
+        """Where Newton-Schulz runs. ``None`` keeps the storage device, where each
         parameter's local shard lives (the host under FSDP2 CPU offload).
-        ``True`` copies each matrix to the current accelerator, runs
+        ``"accelerator"`` copies each matrix to the current accelerator, runs
         Newton-Schulz there and copies the result back. Momentum, parameters,
         gradients and the exchange between ranks stay where they are, so this only
         changes anything when the parameters live on the host."""
@@ -226,7 +226,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             eps=config.eps,
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
-            ns_on_accelerator=config.ns_on_accelerator,
+            ns_device=config.ns_device,
         )
 
 
