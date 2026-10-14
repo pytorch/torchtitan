@@ -220,10 +220,13 @@ def _gather_weighted_sum(
 ) -> torch.Tensor:
     """Combine expert outputs per token as a score-weighted sum of its top_k rows.
 
-    Compiled, it gathers each token's rows through the inverse of ``expert_sort_N``
-    and accumulates in float32 in one kernel. Eager keeps
-    ``LocalTokenDispatcher._score_and_scatter_add``: unrolled over K, the gather-sum
-    is about 3K eager kernels.
+        compiled:  gather each token's top_k rows, sum in float32, round once
+        eager:     ``LocalTokenDispatcher._score_and_scatter_add``: rounds each product and
+                   each partial sum to the input dtype (a gather-sum is ~3K eager kernels)
+
+    Error vs a float64 sum, random bf16 rows at Qwen3.5-35B-A3B shapes: rel L2 1.7e-3
+    compiled, 4.0e-3 eager. Both are deterministic: no atomics, and each token sums its
+    rows in a fixed order.
 
     Example:
         expert_sort_N = [1, 3, 0, 2] puts routes (t, k) = (0, 1), (1, 1), (0, 0), (1, 0)
@@ -732,6 +735,9 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD = spmd.reinterpret_mesh(
                 routed_output_RD, spmd.current_mesh()
             )
+        # TODO: these rows are back in `_local_reorder`'s order, as at EP=1, so
+        # `_gather_weighted_sum` could replace the scatter-add (EP=1, 4096 tokens, H100:
+        # 717 -> 77 us). Needs the dispatch's sort in the metadata and an EP>1 test.
         return self._score_and_scatter_add(
             routed_output_RD,
             topk_scores_experts_sorted_N,
