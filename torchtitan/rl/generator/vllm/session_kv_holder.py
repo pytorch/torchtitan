@@ -21,7 +21,8 @@ from torchtitan.rl.generator.vllm.cpu_kv_offload import CPUKVOffload
 
 class VLLMSessionKVHolder(Configurable):
     """Keeps each multi-turn session's reusable KV between its turns: held on GPU
-    (``hold_gpu_blocks``), and with ``cpu_kv_offload`` in host RAM, where ended sessions go first.
+    (`hold_gpu_blocks`), and with `cpu_kv_offload` in host RAM, where ended sessions are evicted
+    first.
 
     Between turns (a tool call, an env step) a session has no request in vLLM, so its blocks sit in
     vLLM's free queue, where any new request can take them; the next turn then recomputes its
@@ -77,8 +78,8 @@ class VLLMSessionKVHolder(Configurable):
     class Config(Configurable.Config):
         hold_gpu_blocks: bool = True
         """Keep each session's reusable prefix on GPU between its turns. False needs
-        ``cpu_kv_offload``: no GPU blocks are held, and the next turn reloads its history from CPU
-        (an 8k-token turn on 1 H100: ~24 ms, vs ~16 ms GPU hit and ~196 ms recomputed)."""
+        `cpu_kv_offload`: no GPU blocks are held, and a turn whose history left the GPU reloads it
+        from CPU (8k-token turn, 1 H100: ~24 ms, vs ~16 ms GPU hit and ~196 ms recomputed)."""
 
         cpu_kv_offload: CPUKVOffload.Config | None = None
         """vLLM's native CPU KV offload (see `CPUKVOffload`). None: off."""
@@ -149,13 +150,17 @@ class VLLMSessionKVHolder(Configurable):
             self.cpu_kv_offload.attach(engine)
 
     def track(self, internal_request_id: str, session_id: str, group_id: int) -> None:
-        """Once this request's prefill finishes, track its session (and hold its prefix)."""
+        """Once this request's prefill finishes, track its session (and, with `hold_gpu_blocks`, hold
+        its prefix)."""
         self._live[internal_request_id] = (session_id, group_id, False)
 
     def after_step(self) -> None:
-        """After each engine step: track the sessions of requests whose prefill finished (and hold
-        their prefix), mark sessions whose request left, and release idle sessions so the next
-        step has room."""
+        """After each engine step:
+        - track the sessions of requests whose prefill finished, and hold their prefix
+          (`hold_gpu_blocks`);
+        - mark sessions whose request left as idle;
+        - release idle sessions so the next step has room.
+        """
         for internal_id, (session_id, group_id, prefill_seen) in list(
             self._live.items()
         ):
