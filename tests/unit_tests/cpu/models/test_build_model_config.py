@@ -84,8 +84,10 @@ def test_build_model_config_returns_the_converted_root(model):
     _ReplaceRootConverter.returned.clear()
 
     config = module.build_model_config(
-        flavor, converters=[_ReplaceRootConverter.Config()]
-    , parallelism=ParallelismConfig())
+        flavor,
+        parallelism=ParallelismConfig(),
+        converters=[_ReplaceRootConverter.Config()],
+    )
 
     assert _ReplaceRootConverter.returned
     assert config is _ReplaceRootConverter.returned[-1]

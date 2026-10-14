@@ -474,7 +474,7 @@ class TestNativeMoeActivationRemat(unittest.TestCase):
         """
         import copy
 
-        from torchtitan.distributed.activation_checkpoint import SelectiveAC
+        from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
         from torchtitan.experiments.transformers_modeling_backend.module_conversion import (
             convert_hf_to_module,
         )
@@ -491,7 +491,7 @@ class TestNativeMoeActivationRemat(unittest.TestCase):
         convert_hf_to_module(model)
         model.cuda()
         ref_model = copy.deepcopy(model)
-        SelectiveAC.Config().build().apply(model.model)
+        DefaultActivationRematConfig().apply(model.model)
 
         input_ids = torch.randint(0, config.vocab_size, (1, 32), device="cuda")
         losses = []

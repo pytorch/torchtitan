@@ -2278,7 +2278,7 @@ class TestTraceContextParallel(FSDPTest):
                 config.parallelism.data_parallel_shard_degree = dp_shard_degree
                 config.parallelism.context_parallel_degree = context_parallel_degree
                 config.parallelism.tensor_parallel_degree = 1
-                config.activation_checkpoint = None
+                config.activation_remat = None
                 config.compile.enable_passes = False
                 config.debug.enable_structured_logging = False
                 config.model.layers = config.model.layers[:1]

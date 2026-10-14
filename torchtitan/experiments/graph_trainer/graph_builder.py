@@ -75,7 +75,11 @@ ReduceGradPlacement = Literal["last_microbatch", "schedule", "every_microbatch"]
 class GraphExecutionPlan:
     """Resolved FSDP placement, gradient accumulation, and action variants.
 
-    ``unshard`` and ``reduce_grad`` are ``None`` without FSDP. With FSDP:
+    ``reduce_grad`` is ``None`` without FSDP.
+    In case of PP and no FSDP parameters preparation (e.g. cast, quantization) are
+    also extracted into unshard to do it only once.
+
+    With FSDP:
 
     - SPMD without gradient accumulation keeps both boundaries in its single
       joint graph.
