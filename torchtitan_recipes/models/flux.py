@@ -17,17 +17,13 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import MXFP8LinearConverter
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.flux import build_model_config
-from torchtitan.models.flux.configs import FluxEncoderConfig
-from torchtitan.models.flux.flux_datasets import (
-    DATASETS,
-    FluxCollator,
-    FluxSampleProcessor,
-)
+from torchtitan.models.flux.data import DATASETS, FluxCollator, FluxSampleProcessor
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
-from torchtitan.models.flux.trainer import FluxTrainer
+from torchtitan.models.flux.trainer import FluxEncoderConfig, FluxTrainer
 from torchtitan.models.flux.utils import (
     IMAGE_LATENT_SIZE_RATIO,
     PATCH_HEIGHT,
@@ -54,6 +50,7 @@ def _flux_seq_len(img_size: int, max_t5_encoding_len: int) -> int:
 
 def _flux_recipe(flavor: str, *, max_t5_encoding_len: int) -> FluxTrainer.Config:
     img_size = 256
+    parallelism = ParallelismConfig()
     return FluxTrainer.Config(
         loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
@@ -65,7 +62,8 @@ def _flux_recipe(flavor: str, *, max_t5_encoding_len: int) -> FluxTrainer.Config
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
-        model=build_model_config(flavor),
+        model=build_model_config(flavor, parallelism=parallelism),
+        parallelism=parallelism,
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=1e-4)]
@@ -88,7 +86,7 @@ def _flux_recipe(flavor: str, *, max_t5_encoding_len: int) -> FluxTrainer.Config
             collator=FluxCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
         checkpointer=None,
         validator=None,
     )
@@ -118,6 +116,7 @@ def _enable_mxfp8(config: FluxTrainer.Config, *, flavor: str) -> FluxTrainer.Con
                 ],
             ),
         ],
+        parallelism=config.parallelism,
     )
     return config
 

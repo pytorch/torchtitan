@@ -13,6 +13,12 @@ from torchtitan.components.data import (
     GrainDataLoader,
     SingleDatasetConfig,
 )
+from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.mm_datasets import (
+    MM_DATASETS,
+    VisionProcessor,
+)
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -23,10 +29,10 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS, VisionProcessor
-from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.distributed.activation_remat import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -34,6 +40,8 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.qwen3_8 import build_model_config, QWEN3_8_SPECIAL_TOKENS
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
+
+from torchtitan_recipes.data import c4_document_capacity
 
 
 def _multimodal_collator_config(
@@ -52,7 +60,10 @@ def _multimodal_collator_config(
 def qwen38_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -63,6 +74,7 @@ def qwen38_debugmodel(
         tokenizer=MultiModalTokenizer.Config(**QWEN3_8_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
+        parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
@@ -85,7 +97,7 @@ def qwen38_debugmodel(
             steps=10,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -94,7 +106,10 @@ def qwen38_debugmodel_varlen_attn(
 ) -> Trainer.Config:
     config = qwen38_debugmodel(seq_len=seq_len)
     config.model = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        parallelism=config.parallelism,
     )
     config.training.disable_cuda_graphs = True
     return config
@@ -103,7 +118,16 @@ def qwen38_debugmodel_varlen_attn(
 def qwen38_debugmodel_moe(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel_moe", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        pipeline_parallel_degree=2,
+        num_pp_microbatches=2,
+        expert_parallel_degree=4,
+        tensor_parallel_degree=2,
+    )
+    model_config = build_model_config(
+        "debugmodel_moe", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -131,20 +155,20 @@ def qwen38_debugmodel_moe(
             steps=10,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=2,
-            pipeline_parallel_degree=2,
-            num_pp_microbatches=2,
-            expert_parallel_degree=4,
-            tensor_parallel_degree=2,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
 def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("27B", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=-1,
+        tensor_parallel_degree=4,
+    )
+    model_config = build_model_config(
+        "27B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -170,18 +194,23 @@ def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=4,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )
 
 
 def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
     """Qwen3.8-2.4T-A95B text-only MoE training config."""
-    model_config = build_model_config("2.4T-A95B", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=-1,
+        tensor_parallel_degree=4,
+        expert_parallel_degree=64,
+    )
+    model_config = build_model_config(
+        "2.4T-A95B", seq_len=seq_len, parallelism=parallelism
+    )
+    num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -191,6 +220,9 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.8-2.4T-A95B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -200,16 +232,12 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=4,
-            expert_parallel_degree=64,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )

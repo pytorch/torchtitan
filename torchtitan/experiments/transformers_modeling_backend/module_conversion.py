@@ -20,8 +20,9 @@ from typing import cast
 
 import torch.nn as nn
 
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.embedding import Embedding
-from torchtitan.protocols.module import Module
 
 logger = logging.getLogger(__name__)
 

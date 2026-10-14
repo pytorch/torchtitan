@@ -23,14 +23,12 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
 )
+from torchtitan.experiments.graph_trainer.cuda_graph import construct_cuda_graph_passes
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
 )
-from torchtitan.experiments.graph_trainer.passes import (
-    apply_graph_passes,
-    construct_default_graph_passes,
-)
+from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 from torchtitan.observability.profiler import _EXPORT_SUPPORTS_ANNOTATIONS, Profiler
 
 
@@ -90,8 +88,8 @@ class TestKernelAnnotationsE2E(TestCase):
         self.assertIn("norm", fqns_in_graph)
         self.assertIn("ffn", fqns_in_graph)
 
-        # Apply passes (annotation + CUDA graph).
-        passes = construct_default_graph_passes(traced)
+        # Apply the opt-in passes explicitly.
+        passes = construct_cuda_graph_passes(traced)
         traced.gm = apply_graph_passes(traced.gm, traced.example_inputs, passes)
 
         # Run: warmup + capture + replay.

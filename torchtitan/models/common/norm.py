@@ -13,8 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torchtitan.distributed.local_compile import local_compile
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.activation import UnaryActivationFn
-from torchtitan.protocols.module import Module
 
 
 class GatedRMSNorm(Module):

@@ -148,7 +148,7 @@ def main():
         parallelism_context=parallelism_context,
         training=cfg.training,
         parallelism=cfg.parallelism,
-        ac_config=None,
+        activation_remat=None,
         dump_folder="/tmp/flex_cp_spike",
     )
     cp_model.eval()
