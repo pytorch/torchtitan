@@ -170,10 +170,8 @@ class TorchTitanLinearAttentionMetadataBuilder(
             # Under FULL, num_actual_tokens is the padded capacity, while the last
             # query offset is the real token count. The appended interval is null.
             self.query_start_loc[m.num_reqs + 1 :].fill_(m.num_actual_tokens)
-            torch.gt(
-                m.compute_num_computed_tokens()[: m.num_reqs],
-                0,
-                out=self.has_initial_state[: m.num_reqs],
+            self.has_initial_state[: m.num_reqs].copy_(
+                m.compute_num_computed_tokens()[: m.num_reqs] > 0
             )
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
                 split_decodes_and_prefills(m, decode_threshold=1)
