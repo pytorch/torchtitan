@@ -180,6 +180,15 @@ class VarlenInnerAttention(InnerAttention):
                           is_causal=False.
               - (W, 0): Sliding window causal - attend to at most W previous tokens.
         """
+        sdpa_backends: list[SDPBackend] = field(
+            default_factory=lambda: [
+                SDPBackend.CUDNN_ATTENTION,
+                SDPBackend.FLASH_ATTENTION,
+            ]
+        )
+        """ Backend priority order for varlen_attn, applied via
+            ``sdpa_kernel(..., set_priority=True)``.
+        """
 
         def build_attention_metadata(
             self,
@@ -197,14 +206,10 @@ class VarlenInnerAttention(InnerAttention):
                 max_context_length=max_context_length,
             )
 
-    # varlen_attn prefers cuDNN over Flash when no sdpa_kernel priority is set.
-    # cuDNN's varlen backward allocates ~num_docs * max_seqlen * H * K * 8 bytes
-    # (e.g. 31 GiB for 64 docs with max_seqlen 8k), so pin Flash explicitly.
-    sdpa_backends: list[SDPBackend] = [SDPBackend.FLASH_ATTENTION]
-
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.window_size = config.window_size
+        self.sdpa_backends = config.sdpa_backends
 
         from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
