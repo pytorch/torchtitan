@@ -74,7 +74,7 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
 
         apply_local_compile([])
         eager = self._run(router, x)
-        apply_local_compile(["router", "moe_aux_loss"])
+        apply_local_compile(["moe_router_topk", "moe_aux_loss"])
         compiled = self._run(router, x)
         # Default dtype-aware tolerances: ids, maps and counts must match exactly, and the
         # compiled kernels may round bf16 grads one ulp differently.
