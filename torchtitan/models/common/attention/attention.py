@@ -14,7 +14,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
+from typing import Any, ClassVar, Literal, NamedTuple, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -297,6 +297,42 @@ class FlexInnerAttention(InnerAttention):
     class Config(InnerAttention.Config):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
+        mask_type: Literal["block_causal", "causal"] = "block_causal"
+        """
+        Causal mask for the flex path. ``"block_causal"`` (default) is causal
+        within each packed document: it reads ``positions``, which reset to 0 at
+        each document start. ``"causal"`` is plain causal over the whole
+        sequence and does not read ``positions``. The two are equivalent when
+        each sequence holds one document; ``"causal"`` is only correct in that
+        case.
+        """
+
+        def _causal_mask_mods(
+            self, positions: torch.Tensor
+        ) -> list[_mask_mod_signature]:
+            """Return the causal mask_mods that ``mask_type`` selects.
+
+            Args:
+                positions: Per-token position tensor with shape ``[T]``, reset
+                    to 0 at each packed-document start.
+
+            Returns:
+                The mask_mods to compose with ``and_masks``.
+
+            Raises:
+                ValueError: If ``mask_type`` is not a known value.
+            """
+            if self.mask_type == "causal":
+                return [get_causal_mask_mod()]
+            if self.mask_type == "block_causal":
+                return [
+                    get_causal_mask_mod(),
+                    get_efficient_causal_mask_mod_for_packed_document(positions),
+                ]
+            raise ValueError(
+                f"mask_type={self.mask_type!r} is not known. "
+                "Use 'block_causal' or 'causal'."
+            )
 
         def build_attention_metadata(
             self,
@@ -306,14 +342,11 @@ class FlexInnerAttention(InnerAttention):
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
         ) -> FlexAttentionMetadata:
-            """Build the standard document-causal FlexAttention BlockMask."""
+            """Build the causal FlexAttention BlockMask selected by ``mask_type``."""
             del padding_mask, max_num_documents, max_context_length
             seq_len = positions.shape[0]
             return create_attention_mask(
-                and_masks(
-                    get_causal_mask_mod(),
-                    get_efficient_causal_mask_mod_for_packed_document(positions),
-                ),
+                and_masks(*self._causal_mask_mods(positions)),
                 1,
                 None,
                 seq_len,
@@ -479,13 +512,12 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
         ) -> FlexAttentionMetadata:
-            """Build the document-causal sliding-window FlexAttention BlockMask."""
+            """Build the sliding-window BlockMask selected by ``mask_type``."""
             del padding_mask, max_num_documents, max_context_length
             seq_len = positions.shape[0]
             return create_attention_mask(
                 and_masks(
-                    get_causal_mask_mod(),
-                    get_efficient_causal_mask_mod_for_packed_document(positions),
+                    *self._causal_mask_mods(positions),
                     get_sliding_window_mask_mod(self.window_size),
                 ),
                 1,
