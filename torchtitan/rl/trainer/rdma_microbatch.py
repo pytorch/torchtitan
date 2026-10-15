@@ -36,7 +36,9 @@ class MonarchRDMAMicrobatch:
     """A `TrainingMicrobatch` whose large tensors stay in its owner, the process that registered it.
 
     Example:
-        rdma_microbatch = MonarchRDMAMicrobatch.register(microbatch, min_bytes=1024)  # owner
+        rdma_microbatch = MonarchRDMAMicrobatch.register(  # owner
+            microbatch, min_bytes=1024, batch_index=0, dp_rank=1, microbatch_index=2
+        )
         microbatch = await rdma_microbatch.read()  # trainer rank: one RDMA action reads every buffer
         await rdma_microbatch.drop()               # owner, after every rank has read it
     """
@@ -45,9 +47,24 @@ class MonarchRDMAMicrobatch:
     """The microbatch's fields: tensors of at least `min_bytes` (also inside `model_kwargs`) as
     `_TensorRef`s, the rest by value. Tensors inside a container that pytree can't flatten also go by value."""
 
+    batch_index: int
+    """How many batches the owner registered before this one."""
+
+    dp_rank: int
+    """The trainer DP rank that should read it."""
+
+    microbatch_index: int
+    """Its position in that rank's column."""
+
     @classmethod
     def register(
-        cls, microbatch: TrainingMicrobatch, *, min_bytes: int
+        cls,
+        microbatch: TrainingMicrobatch,
+        *,
+        min_bytes: int,
+        batch_index: int,
+        dp_rank: int,
+        microbatch_index: int,
     ) -> MonarchRDMAMicrobatch:
         fields = {
             field.name: getattr(microbatch, field.name)
@@ -60,7 +77,10 @@ class MonarchRDMAMicrobatch:
                 ),
                 _TensorRef.register,
                 fields,
-            )
+            ),
+            batch_index=batch_index,
+            dp_rank=dp_rank,
+            microbatch_index=microbatch_index,
         )
 
     async def read(self) -> TrainingMicrobatch:

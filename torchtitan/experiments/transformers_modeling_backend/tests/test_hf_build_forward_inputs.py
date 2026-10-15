@@ -52,6 +52,8 @@ def _run(
                 batch,
                 parallelism_context=pd,
                 parallelism=ParallelismConfig(),
+                # The training engine passes it to every model; this one has no aux loss.
+                global_routing_token_counts=torch.tensor([1]),
             ),
             B,
             S,
