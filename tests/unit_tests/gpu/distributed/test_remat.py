@@ -1156,8 +1156,8 @@ class TestRematRegions(unittest.TestCase):
         self.assertIsNotNone(x_TD.grad)
 
     def test_quantile_router_statistics_are_recorded_once_with_topk_region(self):
-        # A compiled region inside this eager checkpoint would update the histogram again
-        # on recompute (12 -> 24); the quantile router stays out of moe_router_topk.
+        # The recompute replays the compiled region; a histogram update inside it would
+        # run again (12 -> 24), so the router updates the histogram in eager.
         apply_local_compile(["moe_router_topk"])
         try:
             self.test_quantile_router_statistics_are_recorded_once()
