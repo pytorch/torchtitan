@@ -122,11 +122,8 @@ _CU_LIMIT_STACK_SIZE = 0
 
 
 def create_cuda_context_to_silence_monarch_log() -> None:
-    """Make a CUDA context current on GPU 0, so Monarch stops logging one line per registered buffer.
-
-    Monarch checks each registered pointer with a CUDA driver call, and prints
-    `[RdmaXcel] No CUDA context ...` each time in a process without a context.
-    """
+    """Make a CUDA context current on GPU 0, so Monarch stops printing `[RdmaXcel] No CUDA context ...`
+    for every registered buffer (its CUDA driver check on each pointer needs a context)."""
     # TODO: this costs ~256 MiB on GPU 0 (H100). Remove it when Monarch prints this line once, not per
     # buffer (https://github.com/meta-pytorch/monarch/issues/5049; per buffer in torchmonarch 0.7.0).
     if not torch.cuda.is_available() or torch.version.cuda is None:

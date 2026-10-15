@@ -274,8 +274,7 @@ class Trainer(Configurable):
         read_start = time.perf_counter()
         if uses_rdma:
             # A wrong column, or a batch read twice or out of order, fails here instead of training.
-            # Both counters start at 0 in their own process, and every registered batch is trained,
-            # in order.
+            # Both counters start at 0 in their own process, and every registered batch trains in order.
             for microbatch_index, microbatch in enumerate(microbatches):
                 identity = (
                     microbatch.batch_index,
