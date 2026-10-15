@@ -11,14 +11,14 @@ production and SFT recipes.
 ## Quick start
 
 ```bash
-NGPU=4 MODULE=torchtitan_recipes.models.muse_spark CONFIG=muse_spark_debugmodel ./run_train.sh
+NGPU=4 MODULE=torchtitan_recipes.tests.models.muse_spark CONFIG=muse_spark_debugmodel ./run_train.sh
 ```
 
 For a 10-step debug run mixing local CC12M test images with synthetic audio
 and video datasets at equal Grain weights:
 
 ```bash
-NGPU=8 MODULE=torchtitan_recipes.models.muse_spark CONFIG=muse_spark_debugmodel_mm ./run_train.sh
+NGPU=8 MODULE=torchtitan_recipes.tests.models.muse_spark CONFIG=muse_spark_debugmodel_mm ./run_train.sh
 ```
 
 The recipe packs mixed examples into 512-token microbatches and uses

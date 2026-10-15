@@ -11,7 +11,7 @@ import os
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast, Literal, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 
@@ -28,14 +28,6 @@ if TYPE_CHECKING:
 
 
 _HF_LOAD_THREAD_COUNT = 8
-
-
-@dataclass(frozen=True)
-class _MappingSpec:
-    checkpoint_key: str
-    native_keys: tuple[str, ...]
-    transform: Literal["identity", "transpose", "packed_w13", "rope"] = "identity"
-    num_heads: int | None = None
 
 
 @dataclass(frozen=True)
@@ -155,8 +147,8 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
             for key in self._native_metadata
             if re.search(r"\.lora_[ab]\.weight$", key)
         }
-        self._mapping_specs = self._build_mapping_specs()
-        self._validate_mapping_specs()
+        self.from_hf_map = self._build_from_hf_map()
+        self._validate_mapping()
         self._native_keys_by_pipeline_component = (
             self._build_native_keys_by_pipeline_component()
         )
@@ -234,202 +226,134 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
             for key, value in state_dict.items()
         }
 
-    def _build_mapping_specs(self) -> list[_MappingSpec]:
-        from torchtitan.models.muse_spark.model import (
-            MuseSparkAttention,
-            MuseSparkRMSNorm,
-        )
-
+    def _build_from_hf_map(self) -> dict[str, str]:
         config = cast(Any, self.model_config)
-        specs = [
-            _MappingSpec(
-                "model.language_model.embed_tokens.weight",
-                ("tok_embeddings.embedding.weight",),
-            )
-        ]
+        mapping = {
+            "model.language_model.embed_tokens.weight": (
+                "tok_embeddings.embedding.weight"
+            ),
+        }
         for layer_id, layer in enumerate(config.layers):
             checkpoint = f"model.language_model.layers.{layer_id}"
             native = f"layers.{layer_id}"
-            attention = cast(MuseSparkAttention.Config, layer.attention)
-            post_attention_norm = cast(
-                MuseSparkRMSNorm.Config,
-                layer.post_attention_norm,
+            mapping.update(
+                {
+                    f"{checkpoint}.self_attn.q_proj.weight": (
+                        f"{native}.attention.qkv_linear.wq.weight"
+                    ),
+                    f"{checkpoint}.self_attn.k_proj.weight": (
+                        f"{native}.attention.qkv_linear.wk.weight"
+                    ),
+                    f"{checkpoint}.self_attn.v_proj.weight": (
+                        f"{native}.attention.qkv_linear.wv.weight"
+                    ),
+                    f"{checkpoint}.self_attn.o_proj.weight": (
+                        f"{native}.attention.wo.weight"
+                    ),
+                    f"{checkpoint}.input_layernorm.weight": (
+                        f"{native}.attention_norm.weight"
+                    ),
+                    f"{checkpoint}.post_attention_residual_gate.gate": (
+                        f"{native}.attention_residual.gate"
+                    ),
+                    f"{checkpoint}.pre_feedforward_layernorm.weight": (
+                        f"{native}.ffn_norm.weight"
+                    ),
+                    f"{checkpoint}.post_feedforward_layernorm.weight": (
+                        f"{native}.post_ffn_norm.weight"
+                    ),
+                    f"{checkpoint}.post_feedforward_residual_gate.gate": (
+                        f"{native}.ffn_residual.gate"
+                    ),
+                }
             )
-            specs.extend(
-                [
-                    _MappingSpec(
-                        f"{checkpoint}.self_attn.q_proj.weight",
-                        (f"{native}.attention.qkv_linear.wq.weight",),
-                        "rope",
-                        attention.n_heads,
-                    ),
-                    _MappingSpec(
-                        f"{checkpoint}.self_attn.k_proj.weight",
-                        (f"{native}.attention.qkv_linear.wk.weight",),
-                        "rope",
-                        attention.n_kv_heads,
-                    ),
-                    _MappingSpec(
-                        f"{checkpoint}.self_attn.v_proj.weight",
-                        (f"{native}.attention.qkv_linear.wv.weight",),
-                    ),
-                    _MappingSpec(
-                        f"{checkpoint}.self_attn.o_proj.weight",
-                        (f"{native}.attention.wo.weight",),
-                    ),
-                    _MappingSpec(
-                        f"{checkpoint}.input_layernorm.weight",
-                        (f"{native}.attention_norm.weight",),
-                    ),
-                    _MappingSpec(
-                        f"{checkpoint}.post_attention_residual_gate.gate",
-                        (f"{native}.attention_residual.gate",),
-                    ),
-                    _MappingSpec(
-                        f"{checkpoint}.pre_feedforward_layernorm.weight",
-                        (f"{native}.ffn_norm.weight",),
-                    ),
-                    _MappingSpec(
-                        f"{checkpoint}.post_feedforward_layernorm.weight",
-                        (f"{native}.post_ffn_norm.weight",),
-                    ),
-                    _MappingSpec(
-                        f"{checkpoint}.post_feedforward_residual_gate.gate",
-                        (f"{native}.ffn_residual.gate",),
-                    ),
-                ]
-            )
-            if attention.output_gate is not None:
-                specs.append(
-                    _MappingSpec(
-                        f"{checkpoint}.self_attn.gate_proj.weight",
-                        (f"{native}.attention.output_gate.weight",),
-                    )
-                )
-            if post_attention_norm.elementwise_affine:
-                specs.append(
-                    _MappingSpec(
-                        f"{checkpoint}.post_attention_layernorm.weight",
-                        (f"{native}.post_attention_norm.weight",),
-                    )
-                )
+            if layer.attention.output_gate is not None:
+                mapping[
+                    f"{checkpoint}.self_attn.gate_proj.weight"
+                ] = f"{native}.attention.output_gate.weight"
+            if layer.post_attention_norm.elementwise_affine:
+                mapping[
+                    f"{checkpoint}.post_attention_layernorm.weight"
+                ] = f"{native}.post_attention_norm.weight"
 
             if isinstance(layer.feed_forward, DenseFeedForward.Config):
-                specs.extend(
-                    [
-                        _MappingSpec(
-                            f"{checkpoint}.mlp.gate_proj.weight",
-                            (f"{native}.feed_forward.w1.weight",),
+                mapping.update(
+                    {
+                        f"{checkpoint}.mlp.gate_proj.weight": (
+                            f"{native}.feed_forward.w1.weight"
                         ),
-                        _MappingSpec(
-                            f"{checkpoint}.mlp.up_proj.weight",
-                            (f"{native}.feed_forward.w3.weight",),
+                        f"{checkpoint}.mlp.up_proj.weight": (
+                            f"{native}.feed_forward.w3.weight"
                         ),
-                        _MappingSpec(
-                            f"{checkpoint}.mlp.down_proj.weight",
-                            (f"{native}.feed_forward.w2.weight",),
+                        f"{checkpoint}.mlp.down_proj.weight": (
+                            f"{native}.feed_forward.w2.weight"
                         ),
-                    ]
+                    }
                 )
                 continue
 
             moe = f"{native}.feed_forward"
             experts = f"{moe}.routed_experts"
-            specs.extend(
-                [
-                    _MappingSpec(
-                        f"{checkpoint}.mlp.gate.weight",
-                        (f"{moe}.router.gate.weight",),
+            mapping.update(
+                {
+                    f"{checkpoint}.mlp.gate.weight": f"{moe}.router.gate.weight",
+                    f"{checkpoint}.mlp.gate.e_score_correction_bias": (
+                        f"{moe}.expert_bias_E"
                     ),
-                    _MappingSpec(
-                        f"{checkpoint}.mlp.gate.e_score_correction_bias",
-                        (f"{moe}.expert_bias_E",),
+                    f"{checkpoint}.mlp.pre_expert_proj.weight": f"{moe}.pooler.weight",
+                    f"{checkpoint}.mlp.pre_expert_norm.weight": (
+                        f"{moe}.pre_expert_norm.weight"
                     ),
-                    _MappingSpec(
-                        f"{checkpoint}.mlp.pre_expert_proj.weight",
-                        (f"{moe}.pooler.weight",),
+                    f"{checkpoint}.mlp.experts.gate_up_proj": f"{experts}.w13.weight",
+                    f"{checkpoint}.mlp.experts.down_proj": f"{experts}.w2.weight",
+                    f"{checkpoint}.mlp.experts.post_expert_norm.weight": (
+                        f"{experts}.output_postprocess.weight"
                     ),
-                    _MappingSpec(
-                        f"{checkpoint}.mlp.pre_expert_norm.weight",
-                        (f"{moe}.pre_expert_norm.weight",),
+                    f"{checkpoint}.mlp.post_expert_proj.weight": (
+                        f"{moe}.unpooler.weight"
                     ),
-                    _MappingSpec(
-                        f"{checkpoint}.mlp.experts.gate_up_proj",
-                        (f"{experts}.w1_EFD", f"{experts}.w3_EFD"),
-                        "packed_w13",
-                    ),
-                    _MappingSpec(
-                        f"{checkpoint}.mlp.experts.down_proj",
-                        (f"{experts}.w2.weight",),
-                    ),
-                    _MappingSpec(
-                        f"{checkpoint}.mlp.experts.post_expert_norm.weight",
-                        (f"{experts}.output_postprocess.weight",),
-                    ),
-                    _MappingSpec(
-                        f"{checkpoint}.mlp.post_expert_proj.weight",
-                        (f"{moe}.unpooler.weight",),
-                    ),
-                ]
+                }
             )
 
-        specs.extend(
-            [
-                _MappingSpec("model.language_model.norm.weight", ("norm.weight",)),
-                _MappingSpec("lm_head.weight", ("lm_head.weight",)),
-            ]
+        mapping.update(
+            {
+                "model.language_model.norm.weight": "norm.weight",
+                "lm_head.weight": "lm_head.weight",
+            }
         )
-        specs.extend(self._build_vision_mapping_specs(config))
-        specs.extend(self._build_audio_mapping_specs(config))
-        return specs
+        mapping.update(self._build_vision_from_hf_map(config))
+        mapping.update(self._build_audio_from_hf_map(config))
+        return mapping
 
     @staticmethod
-    def _build_vision_mapping_specs(
-        config: MuseSparkModel.Config,
-    ) -> list[_MappingSpec]:
+    def _build_vision_from_hf_map(config: MuseSparkModel.Config) -> dict[str, str]:
         vision_encoder = config.vision_encoder
         if vision_encoder is None:
-            return []
+            return {}
 
         checkpoint = "model.vision_tower"
         native = "vision_encoder"
-        specs = [
-            _MappingSpec(
-                f"{checkpoint}.patch_embedder.position_embedding_table.weight",
-                (f"{native}.positional_embedding_vlm",),
+        mapping = {
+            f"{checkpoint}.patch_embedder.position_embedding_table.weight": (
+                f"{native}.positional_embedding_vlm"
             ),
-            _MappingSpec(
-                f"{checkpoint}.patch_embedder.patch_embedding.weight",
-                (f"{native}.conv1_linear.weight",),
+            f"{checkpoint}.patch_embedder.patch_embedding.weight": (
+                f"{native}.conv1_linear.weight"
             ),
-        ]
+        }
         for norm in ("ln_pre", "ln_post"):
             for parameter in ("weight", "bias"):
-                specs.append(
-                    _MappingSpec(
-                        f"{checkpoint}.{norm}.{parameter}",
-                        (f"{native}.{norm}.{parameter}",),
-                    )
-                )
+                mapping[
+                    f"{checkpoint}.{norm}.{parameter}"
+                ] = f"{native}.{norm}.{parameter}"
 
         for layer_id in range(vision_encoder.num_layers):
             checkpoint_layer = f"{checkpoint}.layers.{layer_id}"
             native_layer = f"{native}.layers.{layer_id}"
-            for checkpoint_name, native_name, transform, num_heads in (
-                ("q_proj", "wq", "rope", vision_encoder.num_heads),
-                ("k_proj", "wk", "rope", vision_encoder.num_heads),
-                ("v_proj", "wv", "identity", None),
-            ):
-                for parameter in ("weight", "bias"):
-                    specs.append(
-                        _MappingSpec(
-                            f"{checkpoint_layer}.attn.{checkpoint_name}.{parameter}",
-                            (f"{native_layer}.attn.{native_name}.{parameter}",),
-                            transform,
-                            num_heads,
-                        )
-                    )
             for checkpoint_name, native_name in (
+                ("attn.q_proj", "attn.wq"),
+                ("attn.k_proj", "attn.wk"),
+                ("attn.v_proj", "attn.wv"),
                 ("attn.proj", "attn.proj"),
                 ("norm1", "norm1"),
                 ("norm2", "norm2"),
@@ -437,55 +361,36 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                 ("mlp.fc2", "mlp.linear_fc2"),
             ):
                 for parameter in ("weight", "bias"):
-                    specs.append(
-                        _MappingSpec(
-                            f"{checkpoint_layer}.{checkpoint_name}.{parameter}",
-                            (f"{native_layer}.{native_name}.{parameter}",),
-                        )
-                    )
+                    mapping[
+                        f"{checkpoint_layer}.{checkpoint_name}.{parameter}"
+                    ] = f"{native_layer}.{native_name}.{parameter}"
 
         for checkpoint_name, native_name in (("fc1", "c_fc"), ("fc2", "c_proj")):
-            specs.append(
-                _MappingSpec(
-                    f"model.vision_adapter.{checkpoint_name}.weight",
-                    (f"vision_adapter.{native_name}.weight",),
-                )
-            )
-        specs.append(
-            _MappingSpec(
-                "model.vision_projection.weight",
-                ("vision_projection.weight",),
-            )
-        )
-        return specs
+            mapping[
+                f"model.vision_adapter.{checkpoint_name}.weight"
+            ] = f"vision_adapter.{native_name}.weight"
+        mapping["model.vision_projection.weight"] = "vision_projection.weight"
+        return mapping
 
     @staticmethod
-    def _build_audio_mapping_specs(
-        config: MuseSparkModel.Config,
-    ) -> list[_MappingSpec]:
+    def _build_audio_from_hf_map(config: MuseSparkModel.Config) -> dict[str, str]:
         audio_encoder = config.audio_encoder
         if audio_encoder is None:
-            return []
+            return {}
 
         checkpoint = "model.audio_tower"
         native = "audio_encoder"
-        specs = []
+        mapping = {}
         for stage_id in range(len(audio_encoder.layers)):
             checkpoint_stage = f"{checkpoint}.layers.{stage_id}"
             native_stage = f"{native}.layers.{stage_id}"
             for parameter in ("weight", "bias"):
-                specs.append(
-                    _MappingSpec(
-                        f"{checkpoint_stage}.patch_embedder.proj.{parameter}",
-                        (f"{native_stage}.patchifier.linear.{parameter}",),
-                    )
-                )
-            specs.append(
-                _MappingSpec(
-                    f"{checkpoint_stage}.patch_embedder.norm.weight",
-                    (f"{native_stage}.patchifier.norm.weight",),
-                )
-            )
+                mapping[
+                    f"{checkpoint_stage}.patch_embedder.proj.{parameter}"
+                ] = f"{native_stage}.patchifier.linear.{parameter}"
+            mapping[
+                f"{checkpoint_stage}.patch_embedder.norm.weight"
+            ] = f"{native_stage}.patchifier.norm.weight"
             for block_id, block_name in ((0, "block1"), (1, "block2")):
                 checkpoint_block = f"{checkpoint_stage}.conv_blocks.{block_id}"
                 for checkpoint_name, native_name, parameters in (
@@ -495,14 +400,9 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                     ("mlp.fc2", "linear2", ("weight", "bias")),
                 ):
                     for parameter in parameters:
-                        specs.append(
-                            _MappingSpec(
-                                f"{checkpoint_block}.{checkpoint_name}.{parameter}",
-                                (
-                                    f"{native_stage}.{block_name}.{native_name}.{parameter}",
-                                ),
-                            )
-                        )
+                        mapping[
+                            f"{checkpoint_block}.{checkpoint_name}.{parameter}"
+                        ] = f"{native_stage}.{block_name}.{native_name}.{parameter}"
 
         for checkpoint_name, native_name, parameters in (
             ("norm", "norm", ("weight",)),
@@ -510,22 +410,41 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
             ("post_proj_norm", "dual_norm", ("weight",)),
         ):
             for parameter in parameters:
-                specs.append(
-                    _MappingSpec(
-                        f"{checkpoint}.{checkpoint_name}.{parameter}",
-                        (f"{native}.{native_name}.{parameter}",),
-                    )
-                )
-        return specs
+                mapping[
+                    f"{checkpoint}.{checkpoint_name}.{parameter}"
+                ] = f"{native}.{native_name}.{parameter}"
+        return mapping
 
-    def _validate_mapping_specs(self) -> None:
-        checkpoint_keys: set[str] = set()
+    @staticmethod
+    def _mapped_native_keys(native_key: str) -> tuple[str, ...]:
+        if native_key.endswith(".routed_experts.w13.weight"):
+            prefix = native_key.removesuffix("w13.weight")
+            return (f"{prefix}w1_EFD", f"{prefix}w3_EFD")
+        return (native_key,)
+
+    def _rope_num_heads(self, native_key: str) -> int | None:
+        config = cast("MuseSparkModel.Config", self.model_config)
+        if native_key.endswith(
+            ("attention.qkv_linear.wq.weight", "attention.qkv_linear.wk.weight")
+        ):
+            layer_id = int(native_key.split(".")[1])
+            attention = config.layers[layer_id].attention
+            return (
+                attention.n_heads
+                if native_key.endswith("wq.weight")
+                else attention.n_kv_heads
+            )
+        if re.fullmatch(
+            r"vision_encoder\.layers\.\d+\.attn\.w[qk]\.(weight|bias)", native_key
+        ):
+            assert config.vision_encoder is not None
+            return config.vision_encoder.num_heads
+        return None
+
+    def _validate_mapping(self) -> None:
         native_keys: set[str] = set()
-        for spec in self._mapping_specs:
-            if spec.checkpoint_key in checkpoint_keys:
-                raise ValueError(f"duplicate checkpoint mapping: {spec.checkpoint_key}")
-            checkpoint_keys.add(spec.checkpoint_key)
-            for native_key in spec.native_keys:
+        for mapped_key in self.from_hf_map.values():
+            for native_key in self._mapped_native_keys(mapped_key):
                 if native_key in native_keys:
                     raise ValueError(f"duplicate native mapping: {native_key}")
                 if native_key not in self._native_metadata:
@@ -533,7 +452,6 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                         f"mapping references unknown native state: {native_key}"
                     )
                 native_keys.add(native_key)
-
         unmapped = set(self._native_metadata) - native_keys - self._lora_native_keys
         if unmapped:
             raise ValueError("unmapped native state: " + ", ".join(sorted(unmapped)))
@@ -546,8 +464,8 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
 
     def _build_native_keys_by_pipeline_component(self) -> dict[str, set[str]]:
         result: dict[str, set[str]] = {}
-        for spec in self._mapping_specs:
-            for key in spec.native_keys:
+        for native_key in self.from_hf_map.values():
+            for key in self._mapped_native_keys(native_key):
                 component = self._pipeline_component_for_native_key(key)
                 result.setdefault(component, set()).add(key)
         return result
@@ -556,17 +474,9 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
         self,
     ) -> dict[str, set[str]]:
         result: dict[str, set[str]] = {}
-        for spec in self._mapping_specs:
-            components = {
-                self._pipeline_component_for_native_key(key) for key in spec.native_keys
-            }
-            if len(components) != 1:
-                raise ValueError(
-                    "checkpoint mapping crosses pipeline components: "
-                    f"{spec.checkpoint_key}"
-                )
-            component = next(iter(components))
-            result.setdefault(component, set()).add(spec.checkpoint_key)
+        for checkpoint_key, native_key in self.from_hf_map.items():
+            component = self._pipeline_component_for_native_key(native_key)
+            result.setdefault(component, set()).add(checkpoint_key)
         return result
 
     @staticmethod
@@ -598,27 +508,17 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
 
     def _build_checkpoint_metadata(self) -> dict[str, _TensorMetadata]:
         metadata = {}
-        for spec in self._mapping_specs:
-            native = [self._native_metadata[key] for key in spec.native_keys]
-            if spec.transform in {"identity", "rope"}:
+        for checkpoint_key, native_key in self.from_hf_map.items():
+            native_keys = self._mapped_native_keys(native_key)
+            native = [self._native_metadata[key] for key in native_keys]
+            if len(native_keys) == 1:
                 checkpoint = native[0]
-                if spec.transform == "rope" and (
-                    spec.num_heads is None
-                    or checkpoint.shape[0] % (2 * spec.num_heads) != 0
-                ):
+                num_heads = self._rope_num_heads(native_key)
+                if num_heads is not None and checkpoint.shape[0] % (2 * num_heads) != 0:
                     raise ValueError(
                         "RoPE mapping requires an even head dimension: "
-                        f"{spec.checkpoint_key}"
+                        f"{checkpoint_key}"
                     )
-            elif spec.transform == "transpose":
-                if len(native[0].shape) != 2:
-                    raise ValueError(
-                        f"transpose mapping requires a matrix: {spec.checkpoint_key}"
-                    )
-                checkpoint = _TensorMetadata(
-                    (native[0].shape[1], native[0].shape[0]),
-                    native[0].dtype,
-                )
             else:
                 w1, w3 = native
                 if (
@@ -630,13 +530,13 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                 ):
                     raise ValueError(
                         "packed_w13 mapping requires compatible rank-3 weights: "
-                        f"{spec.checkpoint_key}"
+                        f"{checkpoint_key}"
                     )
                 checkpoint = _TensorMetadata(
                     (w1.shape[0], w1.shape[1] + w3.shape[1], w1.shape[2]),
                     w1.dtype,
                 )
-            metadata[spec.checkpoint_key] = checkpoint
+            metadata[checkpoint_key] = checkpoint
 
         return metadata
 
@@ -721,8 +621,8 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
     ) -> dict[str, Any]:
         del to_quantized_layout
         self._validate_checkpoint_index()
-        fused_w13: dict[tuple[str, ...], Any] = {
-            (f"{fqn}.w1_EFD", f"{fqn}.w3_EFD"): state_dict[f"{fqn}.w13.weight"]
+        fused_w13 = {
+            f"{fqn}.w13.weight": state_dict[f"{fqn}.w13.weight"]
             for fqn in self._routed_expert_fqns()
             if f"{fqn}.w13.weight" in state_dict
         }
@@ -740,11 +640,13 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
 
         result: dict[str, Any] = {}
         sharded_rope: dict[tuple[Any, ...], list[tuple[str, DTensor]]] = {}
-        for spec in self._mapping_specs:
-            if not set(spec.native_keys) <= provided_native:
+        to_hf_map = {value: key for key, value in self.from_hf_map.items()}
+        for mapped_key, checkpoint_key in to_hf_map.items():
+            native_keys = self._mapped_native_keys(mapped_key)
+            if not set(native_keys) <= provided_native:
                 continue
             tensors = []
-            for native_key in spec.native_keys:
+            for native_key in native_keys:
                 # pop, so each replicated Q/K copy is freed once it is permuted.
                 tensor = state_dict.pop(native_key)
                 if not isinstance(tensor, torch.Tensor):
@@ -753,36 +655,30 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                     native_key, tensor, self._native_metadata[native_key]
                 )
                 tensors.append(tensor)
-            if (
-                spec.transform == "packed_w13"
-                and len({tensor.dtype for tensor in tensors}) != 1
-            ):
+            if len(native_keys) == 2 and len({tensor.dtype for tensor in tensors}) != 1:
                 raise ValueError(
                     "packed_w13 native weights must use the same dtype: "
-                    f"{spec.native_keys}"
+                    f"{native_keys}"
                 )
-            w13 = fused_w13.get(spec.native_keys)
-            if spec.transform == "rope" and _is_row_sharded(tensors[0]):
-                assert spec.num_heads is not None
+            w13 = fused_w13.get(mapped_key)
+            num_heads = self._rope_num_heads(mapped_key)
+            if num_heads is not None and _is_row_sharded(tensors[0]):
                 tensor = cast(DTensor, tensors[0])
-                key = _rope_group_key(tensor, spec.num_heads)
-                sharded_rope.setdefault(key, []).append((spec.checkpoint_key, tensor))
+                key = _rope_group_key(tensor, num_heads)
+                sharded_rope.setdefault(key, []).append((checkpoint_key, tensor))
                 continue
-            if spec.transform == "identity":
-                checkpoint_tensor = tensors[0]
-            elif spec.transform == "transpose":
-                checkpoint_tensor = tensors[0].transpose(0, 1).contiguous()
-            elif spec.transform == "rope":
-                assert spec.num_heads is not None
-                checkpoint_tensor = _permute_rope_rows(tensors[0], spec.num_heads)
+            if num_heads is not None:
+                checkpoint_tensor = _permute_rope_rows(tensors[0], num_heads)
             elif w13 is not None and not _is_feature_sharded(w13):
                 # Gate and up rows are adjacent in the fused (E, 2, F, D) weight,
                 # so flattening it gives the checkpoint's (E, 2F, D) layout
                 # without a copy.
                 checkpoint_tensor = w13.flatten(1, 2)
-            else:
+            elif len(native_keys) == 2:
                 checkpoint_tensor = torch.cat(tensors, dim=1)
-            result[spec.checkpoint_key] = checkpoint_tensor
+            else:
+                checkpoint_tensor = tensors[0]
+            result[checkpoint_key] = checkpoint_tensor
         for key, entries in sharded_rope.items():
             permuted = _permute_rope_tensors(
                 [tensor for _, tensor in entries], key[-1], _permute_rope_rows
@@ -816,41 +712,35 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
         sharded_rope: dict[tuple[Any, ...], list[tuple[str, DTensor]]] = {}
         # Mapping order, not set order: every rank must gather the RoPE groups
         # in the same order.
-        for spec in self._mapping_specs:
-            if spec.checkpoint_key not in mapped:
+        for checkpoint_key, native_key in self.from_hf_map.items():
+            if checkpoint_key not in mapped:
                 continue
-            tensor = hf_state_dict[spec.checkpoint_key]
+            tensor = hf_state_dict[checkpoint_key]
             if not isinstance(tensor, torch.Tensor):
-                raise ValueError(
-                    f"checkpoint state must be a tensor: {spec.checkpoint_key}"
-                )
+                raise ValueError(f"checkpoint state must be a tensor: {checkpoint_key}")
             self._validate_tensor(
-                spec.checkpoint_key,
+                checkpoint_key,
                 tensor,
-                self._checkpoint_metadata[spec.checkpoint_key],
+                self._checkpoint_metadata[checkpoint_key],
             )
-            if spec.transform == "identity":
-                result[spec.native_keys[0]] = tensor
-            elif spec.transform == "transpose":
-                result[spec.native_keys[0]] = tensor.transpose(0, 1)
-            elif spec.transform == "rope" and _is_row_sharded(tensor):
-                assert spec.num_heads is not None
+            num_heads = self._rope_num_heads(native_key)
+            if num_heads is not None and _is_row_sharded(tensor):
                 tensor = cast(DTensor, tensor)
-                key = _rope_group_key(tensor, spec.num_heads)
-                entry = (spec.native_keys[0], tensor)
+                key = _rope_group_key(tensor, num_heads)
+                entry = (native_key, tensor)
                 sharded_rope.setdefault(key, []).append(entry)
-            elif spec.transform == "rope":
-                assert spec.num_heads is not None
+            elif num_heads is not None:
                 # to_hf returns RoPE weights as copies, so reorder in place
                 # rather than hold a second copy of every replicated Q and K.
                 with torch.no_grad():
-                    tensor.copy_(_unpermute_rope_rows(tensor, spec.num_heads))
-                result[spec.native_keys[0]] = tensor
-            else:
+                    tensor.copy_(_unpermute_rope_rows(tensor, num_heads))
+                result[native_key] = tensor
+            elif native_key.endswith(".routed_experts.w13.weight"):
                 # Restore w13 directly; after a load into to_hf's view of w13,
                 # this is a view of the parameter itself.
-                w13_key = spec.native_keys[0].removesuffix("w1_EFD") + "w13.weight"
-                result[w13_key] = tensor.unflatten(1, (2, -1))
+                result[native_key] = tensor.unflatten(1, (2, -1))
+            else:
+                result[native_key] = tensor
         for key, entries in sharded_rope.items():
             unpermuted = _permute_rope_tensors(
                 [tensor for _, tensor in entries], key[-1], _unpermute_rope_rows

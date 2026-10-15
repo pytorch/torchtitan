@@ -70,14 +70,12 @@ class MuseSparkTokenizer(MultiModalTokenizer):
         audio_start_token: str
         audio_end_token: str
 
-    # pyrefly: ignore[bad-override]
     TOKEN_FIELDS: ClassVar[tuple[str, ...]] = (
         *MultiModalTokenizer.TOKEN_FIELDS,
         "audio",
         "audio_start",
         "audio_end",
     )
-    # pyrefly: ignore[bad-override]
     LOSS_MASK_TOKEN_FIELDS: ClassVar[tuple[str, ...]] = (
         *MultiModalTokenizer.LOSS_MASK_TOKEN_FIELDS,
         "audio",
