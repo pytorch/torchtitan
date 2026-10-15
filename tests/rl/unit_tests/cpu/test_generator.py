@@ -787,26 +787,36 @@ def test_cuda_graph_full_mode_no_compile():
 
 
 def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
-    # FULL_DECODE_ONLY only graphs decode, so capture up to max_num_seqs (plus
-    # max_num_seqs itself when not a power of 2).
+    # FULL_DECODE_ONLY only graphs decode, so capture up to max_num_seqs itself.
     cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
         max_num_seqs=500,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
     )
-    assert cfg.cudagraph_capture_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 500]
+    assert cfg.cudagraph_capture_sizes == [
+        *[1, 2, 4],
+        *range(8, 256, 8),  # +8
+        *range(256, 500, 16),  # +16
+        500,  # max_num_seqs
+    ]
 
 
 def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
     # FULL also graphs prefill, so sizes extend to the chunked-prefill chunk
-    # (max_num_batched_tokens, 2048) on top of max_num_seqs.
+    # (max_num_batched_tokens) on a coarser ladder past 1024.
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
         max_num_seqs=500,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        max_num_batched_tokens=16384,
     )
-    assert cfg.cudagraph_capture_sizes[-1] == 2048
-    assert 500 in cfg.cudagraph_capture_sizes  # decode batch captured exactly
+    assert cfg.cudagraph_capture_sizes == [
+        *[1, 2, 4],
+        *range(8, 256, 8),  # +8
+        *range(256, 1025, 16),  # +16
+        *range(1536, 4097, 512),  # +512
+        *range(6144, 16385, 2048),  # +2048
+    ]
 
 
 def test_cuda_graph_rejects_nonpositive_max_num_seqs():
