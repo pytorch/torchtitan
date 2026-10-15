@@ -523,7 +523,7 @@ class MetricsProcessor(Configurable):
                 Defined as global_loss_sum / global_valid_tokens
             global_max_loss: Maximum local loss across all ranks
                 Defined as max(local_loss_sum / local_valid_tokens)
-            grad_norm: Gradient norm after clipping
+            grad_norm: Pre-clip global L2 norm of the gradients
             extra_metrics: Optional additional metrics to log
 
         """

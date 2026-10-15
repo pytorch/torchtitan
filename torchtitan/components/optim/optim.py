@@ -46,7 +46,24 @@ class GradientClipper(Configurable):
         *,
         parallelism_context: ParallelismContext,
     ) -> torch.Tensor:
-        """Clip gradients in place and return their total norm."""
+        """Clip gradients in place and return their pre-clip global L2 norm.
+
+        The implementation must be semantically equivalent to:
+
+        .. code-block:: python
+
+            dist_utils.clip_grad_norm_(
+                parameters,
+                max_norm,
+                foreach=True,
+                pp_mesh=parallelism_context.get_optional_mesh("pp"),
+            )
+
+        The returned value must be a local zero-dimensional tensor containing
+        the pre-clip global L2 norm, with an equivalent value on every rank.
+        It must retain that value rather than being reused as the clip
+        coefficient or scratch storage, and must preserve non-finite values.
+        """
         raise NotImplementedError
 
 
@@ -153,19 +170,25 @@ class Optim(Configurable):
         return grad_norm
 
     def _clip_grad_norm(self) -> torch.Tensor:
-        """Clip gradients and return their total norm."""
+        """Clip gradients and return their pre-clip global L2 norm."""
         if self.gradient_clipper is None:
-            return dist_utils.clip_grad_norm_(
+            grad_norm = dist_utils.clip_grad_norm_(
                 self.parameters,
                 self.config.max_norm,
                 foreach=True,
                 pp_mesh=self.parallelism_context.get_optional_mesh("pp"),
             )
-        return self.gradient_clipper(
-            self.parameters,
-            self.config.max_norm,
-            parallelism_context=self.parallelism_context,
-        )
+        else:
+            grad_norm = self.gradient_clipper(
+                self.parameters,
+                self.config.max_norm,
+                parallelism_context=self.parallelism_context,
+            )
+        if not isinstance(grad_norm, torch.Tensor):
+            raise TypeError("Gradient clipping must return a torch.Tensor.")
+        if grad_norm.ndim != 0:
+            raise ValueError("Gradient clipping must return a zero-dimensional tensor.")
+        return grad_norm
 
     def _update(self, loss: torch.Tensor) -> torch.Tensor:
         """Clip gradients, check loss and gradient norm, then update parameters."""

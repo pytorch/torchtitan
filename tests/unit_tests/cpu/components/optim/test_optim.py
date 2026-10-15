@@ -201,6 +201,28 @@ def test_optim_update_uses_configured_grad_clip() -> None:
     optim.optimizers.step.assert_called_once_with()
 
 
+@pytest.mark.parametrize(
+    ("grad_norm", "expected_error", "match"),
+    [
+        (2.0, TypeError, "torch.Tensor"),
+        (torch.tensor([2.0]), ValueError, "zero-dimensional"),
+    ],
+)
+def test_optim_rejects_invalid_grad_norm(
+    grad_norm: object,
+    expected_error: type[Exception],
+    match: str,
+) -> None:
+    optim = object.__new__(Optim)
+    optim.config = SimpleNamespace(max_norm=1.0)
+    optim.parallelism_context = MagicMock()
+    optim.parameters = [torch.nn.Parameter(torch.tensor(1.0))]
+    optim.gradient_clipper = MagicMock(return_value=grad_norm)
+
+    with pytest.raises(expected_error, match=match):
+        optim._clip_grad_norm()
+
+
 @pytest.mark.parametrize("cuda_initialized", [False, True])
 def test_optim_step_keeps_eager_state_outside_update(cuda_initialized: bool) -> None:
     events = []
