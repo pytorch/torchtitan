@@ -1018,10 +1018,16 @@ def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(
         isinstance(projection, NVFP4Linear.Config) for projection in linears.values()
     )
     if recipe == "deepseek_v3_16b_nvfp4_ffn_mxfp8_attn":
+        dense_ffn_prefixes = tuple(
+            f"layers.{i}.feed_forward."
+            for i, layer in enumerate(config.model.layers)
+            if isinstance(layer.feed_forward, DenseFeedForward.Config)
+        )
+        assert dense_ffn_prefixes
         assert all(
             type(projection) is type(baseline_linears[fqn])
             for fqn, projection in linears.items()
-            if ".feed_forward." in fqn
+            if fqn.startswith(dense_ffn_prefixes)
         )
 
     assert all(
