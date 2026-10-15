@@ -192,8 +192,7 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self._ep_mesh: DeviceMesh | None = None
-        self._ep_mesh_parent: DeviceMesh | None = None
+        self._ep_mesh_cache: tuple[DeviceMesh, DeviceMesh] | None = None
 
     @property
     def ep_mesh(self) -> DeviceMesh | None:
@@ -201,13 +200,14 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
         mesh = spmd_sparse_mesh()
         if mesh is None:
             return None
-        # mesh["ep"] builds a new DeviceMesh on every call, about 0.4 ms of CPU each.
-        if self._ep_mesh_parent is not mesh:
+        cache = self._ep_mesh_cache
+        # DeviceMesh.__getitem__ builds a new submesh on every call.
+        if cache is None or cache[0] is not mesh:
             with spmd.no_typecheck():
                 # weirdly, accessing ep PG hits DeviceMesh internals that expects type annotations
-                self._ep_mesh = mesh["ep"]
-            self._ep_mesh_parent = mesh
-        return self._ep_mesh
+                cache = (mesh, mesh["ep"])
+            self._ep_mesh_cache = cache
+        return cache[1]
 
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""

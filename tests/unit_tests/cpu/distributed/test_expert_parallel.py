@@ -32,13 +32,14 @@ class TestTokenDispatcherModule(unittest.TestCase):
         self.assertIsInstance(dispatcher, torch.nn.Module)
         self.assertEqual(list(dispatcher.state_dict()), [])
 
-    def test_ep_mesh_is_sliced_once_per_sparse_mesh(self):
+    def test_ep_mesh_is_cached_per_sparse_mesh(self):
         dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=8)
         self.addCleanup(dist.destroy_process_group)
         self.addCleanup(
             set_spmd_meshes, dense_mesh=None, sparse_mesh=None, dense_sp_enabled=False
         )
         dispatcher = AllToAllTokenDispatcher.Config(num_experts=8, top_k=1).build()
+        self.assertIsNone(dispatcher.ep_mesh)
 
         first_mesh = init_device_mesh("cpu", (2, 4), mesh_dim_names=("dp", "ep"))
         set_spmd_meshes(
