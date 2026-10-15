@@ -74,6 +74,10 @@ class _GeneratorActorEndpoints:
         await super().release_groups(group_ids)
 
     @concurrent_endpoint
+    async def release_sessions(self, session_ids: list[str]) -> None:
+        await super().release_sessions(session_ids)
+
+    @concurrent_endpoint
     async def load_model_state_dict(self, version: int) -> None:
         await super().load_model_state_dict(version)
 
