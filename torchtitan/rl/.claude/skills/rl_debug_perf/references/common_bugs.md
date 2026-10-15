@@ -69,3 +69,17 @@ Read 10 completions end to end.
 ## Slow decode
 
 Inter-token latency in the hundreds of ms can mean the generator runs eager instead of replaying CUDA graphs (one MoE generator: 234 ms per engine step eager, 22 ms with graphs, at 8 sequences). Check the generator log for CUDA graph capture. For generator kernel speed against native vLLM, use the `inference_perf_hillclimb` skill.
+
+## A MoE generator at EP>1 runs without CUDA graphs
+
+- **Symptom:** capture fails with `Cannot copy between CPU and CUDA tensors during CUDA graph capture`, or the recipe sets `cuda_graph` to `NONE`. Decode is then CPU-bound.
+- **Who:** MoE generators with EP>1. MoE requires EP >= TP (`models/common/decoder.py:199-205`), so every MoE generator with TP>1 is EP>1. EP=1 (one-GPU generators) uses the local dispatcher and captures fine: nothing to do.
+- **Cause:** the standard all-to-all dispatcher copies the split sizes to the host (`_sync_token_count_exchange`, `models/common/token_dispatcher.py:283`).
+- **Fix, Blackwell (SM100+):** Dist-MoE on the generator, as in `rl_grpo_moe_debug_dist_moe_tp2_ep4` (`torchtitan_recipes/tests/rl/alphabet_sort.py`). It needs the optional `dist_moe` package.
+  ```python
+  config.generator.dist_moe_runtime = DistMoeRuntime.Config(scratch_capacity_factor=4.0, inference=True)
+  config.generator.cuda_graph.mode = "FULL"
+  config.generator = apply_transforms(config.generator, [DistMoeTransform()])
+  ```
+  For Dist-MoE on the trainer too, also set `trainer.dist_moe_runtime` and `trainer.activation_remat = ActivationRematConfig(save_regions=[])`: full activation checkpointing replays Dist-MoE's forward and corrupts its planner.
+- **Fix, other GPUs:** a dispatcher without the host read: DeepEP (`rl_grpo_qwen3_moe_debug_deepep` in the same file), or HybridEP with `non_blocking_capacity_factor`.

@@ -132,7 +132,7 @@ Confirmation steps and fixes: [references/common_bugs.md](references/common_bugs
 - **Samples or groups vanish:** `batcher/num_samples_dropped_oversized/sum` and `training_sample_builder/num_groups_dropped_untrainable/sum`.
 - **The logprob gap moves:** the trainer and generator compute different math (attention kernel, MoE routing, lm head dtype).
 - **The attention kernel isn't the one you think:** `varlen_attn` can pick cuDNN over FA3/FA4. Log `torch.nn.attention.varlen` at INFO.
-- **Slow decode:** ITL in the hundreds of ms can mean no CUDA graph replay. For kernel speed, use `inference_perf_hillclimb`.
+- **Slow decode:** ITL in the hundreds of ms can mean no CUDA graph replay. A MoE generator at EP>1 (any MoE generator with TP>1, since EP >= TP) can't capture graphs on the standard all-to-all dispatcher; use Dist-MoE. EP=1 needs nothing. For kernel speed, use `inference_perf_hillclimb`.
 
 ## 6. Measure learning correctly
 
