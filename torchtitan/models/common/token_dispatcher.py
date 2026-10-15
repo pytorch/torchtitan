@@ -268,9 +268,9 @@ def _argsort_expert_ids(expert_ids_N: torch.Tensor, num_experts: int) -> torch.T
     return torch.argsort(expert_ids_N, stable=True)
 
 
-# The one-hot is (N, E); above this many elements the cumsum costs more than a radix
-# sort (Qwen3.5-35B-A3B, E=256, GB300: faster up to 2048 tokens x top-8, slower at 4096).
-_MAX_COUNTING_SORT_ONE_HOT_ELEMENTS = 16384 * 256
+# Up to this many flat routes, comparing every pair of routes (one fused kernel) is
+# faster than a radix sort (Qwen3.5-35B-A3B, E=256, GB300: 256 tokens x top-8).
+_MAX_PAIRWISE_RANK_ROUTES = 2048
 
 
 @local_compile("moe_dispatch", batch_invariant=False)
@@ -327,41 +327,36 @@ def _sort_routes(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Return the stable expert sort of the flat routes and, compiled, each route's row.
 
-    compiled, N * E <= 16384 * 256:  one-hot cumsum, fused with the caller's gathers
-    compiled, larger:                argsort(stable=True), same order, then its inverse
-    eager:                           argsort(stable=True); row None (the cumsum is
-                                     ~30x slower in eager, and eager combine scatters)
+    compiled, N <= 2048:  pairwise rank (below), one kernel with the sort
+    compiled, larger:     argsort(stable=True), same order, then its inverse
+    eager:                argsort(stable=True); row None (eager combine scatters)
+
+    Pairwise rank: give each route a unique key that orders routes by expert, then by
+    route index (key = expert_id * N + route). A route's row in the stable sort is the
+    number of routes with a smaller key.
+
+    Example (N = 4):
+        expert ids    [2, 0, 0, 1]
+        keys          [8, 1, 2, 7]   expert_id * 4 + route
+        row of route  [3, 0, 1, 2]   number of smaller keys
+        sort          [1, 2, 3, 0]   route at each row
     """
     expert_ids_N = topk_expert_ids_TK.reshape(-1)
+    num_routes = expert_ids_N.numel()
+    routes_N = torch.arange(num_routes, device=expert_ids_N.device)
     compiling = torch.compiler.is_compiling()
-    if compiling and expert_ids_N.numel() * num_experts <= (
-        _MAX_COUNTING_SORT_ONE_HOT_ELEMENTS
-    ):
-        # A route's row: routes of lower experts + earlier routes of its own expert.
-        one_hot_NE = (
-            expert_ids_N[:, None]
-            == torch.arange(num_experts, device=expert_ids_N.device)
-        ).to(torch.int32)
-        rank_NE = torch.cumsum(one_hot_NE, dim=0)
-        counts_E = one_hot_NE.sum(dim=0)
-        offsets_E = torch.cumsum(counts_E, dim=0) - counts_E
-        row_of_route_N = (
-            offsets_E[expert_ids_N]
-            + rank_NE.gather(1, expert_ids_N[:, None]).squeeze(1)
-            - 1
-        ).long()
+    if compiling and num_routes <= _MAX_PAIRWISE_RANK_ROUTES:
+        key_N = expert_ids_N * num_routes + routes_N
+        # (N, N) compare; row i counts the keys smaller than key i. Fuses to one kernel.
+        row_of_route_N = (key_N[None, :] < key_N[:, None]).sum(dim=1)
         expert_sort_N = torch.empty_like(row_of_route_N)
-        expert_sort_N[row_of_route_N] = torch.arange(
-            expert_ids_N.numel(), device=expert_ids_N.device
-        )
+        expert_sort_N[row_of_route_N] = routes_N
         return expert_sort_N, row_of_route_N
     expert_sort_N = _argsort_expert_ids(expert_ids_N, num_experts)
     row_of_route_N = None
     if compiling:
         row_of_route_N = torch.empty_like(expert_sort_N)
-        row_of_route_N[expert_sort_N] = torch.arange(
-            expert_ids_N.numel(), device=expert_ids_N.device
-        )
+        row_of_route_N[expert_sort_N] = routes_N
     return expert_sort_N, row_of_route_N
 
 
