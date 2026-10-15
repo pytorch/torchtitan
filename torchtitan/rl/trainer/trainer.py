@@ -169,6 +169,8 @@ class Trainer(Configurable):
         else:
             self.dp_size = 1
             self.dp_rank = 0
+        # Batches read over RDMA so far; the next batch's `batch_index` must equal it.
+        self._num_rdma_batches_read = 0
 
     @property
     def policy_version(self) -> int:
@@ -283,6 +285,22 @@ class Trainer(Configurable):
         )
         microbatch_groups = [[microbatch] for microbatch in microbatches]
         if uses_rdma:
+            # A wrong column, or a batch read twice or out of order, fails here instead of training.
+            # Both counters start at 0 in their own process, and every registered batch is trained,
+            # in order.
+            for microbatch_index, microbatch in enumerate(microbatches):
+                identity = (
+                    microbatch.batch_index,
+                    microbatch.dp_rank,
+                    microbatch.microbatch_index,
+                )
+                expected = (self._num_rdma_batches_read, self.dp_rank, microbatch_index)
+                if identity != expected:
+                    raise ValueError(
+                        "RDMA microbatch (batch_index, dp_rank, microbatch_index) is "
+                        f"{identity}, expected {expected}."
+                    )
+            self._num_rdma_batches_read += 1
             # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)

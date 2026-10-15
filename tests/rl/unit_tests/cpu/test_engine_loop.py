@@ -39,6 +39,7 @@ from torchtitan.rl.generator.generator import (
     ModelStateDictLoadMessage,
     RequestDispatcher,
     SamplingConfig,
+    SessionReleaseMessage,
     VLLMGenerator,
 )
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
@@ -77,6 +78,7 @@ def _bare_generator(
     generator.policy_version = 0
     generator._group_min_policy_versions = {}
     generator._prefetched_model_state_dict = {}
+    generator._session_kv_holder = None
     # Engine-thread tests bind the queue once the engine thread's event loop exists.
     if event_loop is not None:
         generator._engine_loop_queue = EngineLoopQueue(event_loop)
@@ -293,6 +295,21 @@ def test_load_takes_precedence_over_queued_requests(runner) -> None:
     assert decision.action is LoopAction.STEP
     assert decision.requests_per_dp_rank == [[request]]
     assert pending_engine_requests == []
+
+
+@pytest.mark.parametrize("load", [False, True])
+def test_session_releases_ride_the_load_or_step_decision(runner, load) -> None:
+    generator = _bare_generator(event_loop=runner.get_loop())
+    messages = [
+        SessionReleaseMessage(session_ids=["s0"]),
+        _request(),
+        SessionReleaseMessage(group_ids=[3]),
+    ]
+    decision = _decide(runner, generator, [], *messages, *([_load(5)] if load else []))
+    assert decision.action is (
+        LoopAction.LOAD_MODEL_STATE_DICT if load else LoopAction.STEP
+    )
+    assert (decision.released_session_ids, decision.released_group_ids) == (["s0"], [3])
 
 
 def test_loads_taken_off_the_queue_together_coalesce_at_the_highest_version(
@@ -881,6 +898,8 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
         failing_load = asyncio.create_task(generator.load_model_state_dict(3))
         assert await asyncio.to_thread(reading.wait, _TIMEOUT_S)
 
+        # A session release (no reply) queued ahead of the calls must not stop them from failing.
+        generator._engine_loop_queue.put(SessionReleaseMessage(session_ids=["s"]))
         queued = [
             _generate(generator, "r0"),
             asyncio.create_task(generator.load_model_state_dict(4)),
