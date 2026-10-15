@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import cast, Protocol
@@ -347,9 +348,8 @@ class TokenChoiceTopKRouter(Module):
           default); with it off, a compiled region would round its fp32 weight grad to bf16.
         - counts, aux loss: they update buffers. Compiled, ``remat.is_recomputing()`` is
           always False, so a recompute pass would count them twice.
-        Don't enable the region (``local_compile_regions``) for a router whose
-        ``_select_experts`` updates state, such as ``QuantileBalancedTopKRouter``'s
-        histogram: a recompute pass would update it twice.
+        A router whose ``_select_experts`` updates state must run this method eagerly, as
+        ``QuantileBalancedTopKRouter`` does.
 
         Returns:
             scores_TE: Router scores ``(T, E)`` in FP32.
@@ -419,6 +419,13 @@ class RoundRobinTokenChoiceTopKRouter(TokenChoiceTopKRouter):
 
 class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
     """Top-k router that uses a biased Top-(k+1) cutoff during training."""
+
+    # Eager even with moe_router_topk enabled: ``_select_experts`` updates the histogram,
+    # and compiled, ``remat.is_recomputing()`` is always False, so a recompute would update
+    # it twice. ``inspect.unwrap`` strips the local_compile wrapper.
+    _score_and_select_experts = inspect.unwrap(
+        TokenChoiceTopKRouter._score_and_select_experts
+    )
 
     @dataclass(kw_only=True, slots=True)
     class Config(TokenChoiceTopKRouter.Config):
