@@ -13,7 +13,7 @@
   - **GEMM side, 21 us:** w13 +4.9, w2 +7.5, 2 grouped-GEMM setup kernels +4.1, launch gaps ~4.
   - **Glue, 17 us:** dispatch 16.2 vs 5.6 us (8 kernels vs 1, plus a cast); SwiGLU 2.0 us as its own kernel (FlashInfer fuses it into its first GEMM); the rest is launch gaps (our 14 kernels without PDL vs FlashInfer's 5 with it). The combine is the exception: ours is faster (2.8 vs 6.3 us).
   - These walls come from a process that also ran the profiler, which adds ~0.3 us per kernel to later CUDA-graph replays (see Known behaviors), so part of the launch-gap share is the profiler.
-- 10 asks, each with numbers at real shapes and a repro in `repros/`. 8 are pure torch; ask 2 needs out-of-tree CUTLASS builds and ask 7 needs cutlass-dsl 4.8.
+- 11 asks, each with numbers at real shapes and a repro in `repros/`. 8 are pure torch; ask 2 needs out-of-tree CUTLASS builds and ask 7 needs cutlass-dsl 4.8.
   - Decode: small-group grouped-GEMM tiles (48 us/layer), a ragged MoE GEMM path without per-group descriptors (~10), dispatch codegen (~7-10).
   - Prefill: bounds masks under dynamic shapes (~20 us/layer at 4096-token chunks), and dynamic kernels tuned at their first size (up to ~110 us/layer when that size is small).
 - One GB300, torch 2.16.0.dev20261009 (git 146a5a2f73); every repro run on 2026-10-15.
@@ -41,6 +41,7 @@ B. Inductor
 8   autotuning         dynamic kernel keeps the config tuned at its first (small) size  1.8x on SwiGLU; up to ~110 us at T=4096
 9   codegen            bounds masks under symbolic T slow a per-token gather-sum 1.7x   ~20 us at T=4096
 10  codegen            dispatch: scan -> scatter -> gather = 5 kernels; looped scan      ~7-10 us at T=34; ~1.2-1.7%
+11  fusion             router: per-row softmax, top-k, gather, normalize = 3 kernels      ~7 us at T=34; ~1.2%
 ```
 
 Repros: `./run_all.sh gpu` (pure torch) and `./run_all.sh ext` (asks 2 and 8, see `run_all.sh`). Raw outputs: `logs/`.
@@ -260,6 +261,25 @@ TORCHINDUCTOR_MULTI_KERNEL=1, with or without multi_kernel_hints: no change
 **Workaround:** rank the routes without a scan. Each route's row is the number of routes with a smaller `(expert, route)` key: one `(N, N)` compare-and-count, which Inductor fuses with the sort's `index_put` into one kernel. Dispatch at T=34: 5 kernels (9.1 us) -> 3 (5.1 us). It is O(N^2), so TorchTitan uses it up to 2048 routes (256 tokens) and a radix sort above. The ask stands for scans in general.
 
 **Repro:** `repros/ask10_dispatch_codegen.py`.
+
+
+### 11. The router's per-row work becomes 3 kernels
+
+**Ask:** fuse a chain of row reductions over one token's scores into one persistent kernel, even when a later step reduces over a different length (the k=8 picks after the E=256 argmaxes) or reads a `cat` of earlier reductions.
+
+**Impact:** ~7 us per MoE layer at T=34 (~1.2%): the graph takes 14.2 us for 7.5 us of kernels.
+
+```text
+router after the gate GEMM, compiled in the generator's order, CUDA graph   (logs/ask11)
+gather/scatter (TorchTitan today)   T=34: graph 14.2 us, 3 kernels 4.6 + 0.8 + 2.1
+row ops (masked sums, OR of masks)  T=34: graph 19.5 us, 3 kernels 4.8 + 5.6 + 1.3
+```
+
+**Why:** the softmax and the 8 argmax rounds fuse into one persistent kernel, which writes the ids (`cat`). The pick gather and the map scatter start a second kernel; the zeros for the map is a third. Written as row ops, the second kernel recomputes the softmax, and the normalization over the 8 picks (a different reduction length) splits off a third.
+
+**Workaround:** none in TorchTitan; a hand-written routing kernel would replace the region.
+
+**Repro:** `repros/ask11_router_row_gather.py`.
 
 ---
 
