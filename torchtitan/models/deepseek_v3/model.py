@@ -13,10 +13,10 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
-    BaseAttention,
+    Attention,
     FlexAttentionMetadata,
+    InnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
@@ -33,7 +33,7 @@ from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 
-class Attention(BaseAttention):
+class DeepSeekMLAAttention(Attention):
     """
     Multi-head latent attention (MLA) module.
 
@@ -41,8 +41,7 @@ class Attention(BaseAttention):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
-        n_heads: int
+    class Config(Attention.Config):
         dim: int
         wq: Linear.Config | None = None
         wq_a: Linear.Config | None = None
@@ -58,7 +57,7 @@ class Attention(BaseAttention):
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
         rope: RoPE.Config
-        inner_attention: Module.Config = field(
+        inner_attention: InnerAttention.Config = field(
             default_factory=VarlenInnerAttention.Config
         )
         mscale: float = 1.0

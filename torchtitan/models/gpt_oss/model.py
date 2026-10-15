@@ -18,10 +18,10 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
-    BaseAttention,
+    Attention,
     FlexAttentionMetadata,
+    InnerAttention,
     QKVLinear,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
@@ -47,20 +47,20 @@ def apply_attention_sink_rescale(
     return out * sink_scale.to(out.dtype)
 
 
-class Attention(BaseAttention):
+class GptOssAttention(Attention):
     """
     Multi-head attention (MLA) module with sink attention.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
+    class Config(Attention.Config):
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
         dim: int
         qkv_linear: QKVLinear.Config
         wo: Linear.Config  # output projection
-        inner_attention: Module.Config = dataclasses.field(
+        inner_attention: InnerAttention.Config = dataclasses.field(
             default_factory=VarlenInnerAttention.Config
         )
         sliding_window_size: int | None = None
@@ -148,7 +148,7 @@ class GptOssTransformerBlock(TransformerBlock):
 
     def __init__(self, config: Config):
         super().__init__()
-        assert isinstance(config.attention, Attention.Config)
+        assert isinstance(config.attention, GptOssAttention.Config)
         self.attention = config.attention.build()
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -255,8 +255,8 @@ class GptOssModel(Decoder):
         dump_folder: str,
     ) -> GptOssModel:
         if parallelism_context.cp_enabled and any(
-            isinstance(backend, UlyssesCPInnerAttention.Config)
-            for backend in self.config.base_attention_backends
+            isinstance(layer.attention.inner_attention, UlyssesCPInnerAttention.Config)
+            for layer in self.config.layers
         ):
             raise NotImplementedError(
                 "GPT-OSS does not support Ulysses CP because its per-head "

@@ -58,7 +58,7 @@ from torchtitan.models.common.moe_sharding import (
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
-from .model import Attention, GptOssModel, GptOssTransformerBlock
+from .model import GptOssAttention, GptOssModel, GptOssTransformerBlock
 from .moe import GptOssGroupedLinear
 from .sharding import attention_sharding_config, routed_expert_linear_sharding_config
 
@@ -99,8 +99,8 @@ def _make_gptoss_attn_config(
     sliding_window_size: int | None = None,
     rope: RoPE.Config,
     enable_sp: bool,
-) -> Attention.Config:
-    """Build a fully-specified, sharded GPT-OSS Attention.Config for a layer.
+) -> GptOssAttention.Config:
+    """Build a fully-specified, sharded GptOssAttention.Config for a layer.
 
     All linear sub-configs have their in_features/out_features set.
     All linear params use depth-scaled init (including wq/wkv/wo).
@@ -145,7 +145,7 @@ def _make_gptoss_attn_config(
         ),
     )
 
-    return Attention.Config(
+    return GptOssAttention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,

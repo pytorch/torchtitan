@@ -34,7 +34,6 @@ from .attention import (
 
 __all__ = [
     "CPInnerAttention",
-    "canonicalize_cp_inner_attention",
     "KVAllGatherCPFlexInnerAttention",
     "KVAllGatherCPSlidingWindowFlexInnerAttention",
     "UlyssesCPInnerAttention",
@@ -344,16 +343,3 @@ class UlyssesCPVarlenInnerAttention(
     @dataclass(kw_only=True, slots=True)
     class Config(UlyssesCPInnerAttention.Config, VarlenInnerAttention.Config):
         pass
-
-
-def canonicalize_cp_inner_attention(
-    cp_inner_attention: type[InnerAttention],
-) -> type[InnerAttention]:
-    """Return the full inner attention used to select load-balancer metadata.
-
-    A single token permutation is shared across layers, so models containing
-    both full and sliding-window attention balance using the full-attention mask.
-    """
-    if cp_inner_attention is KVAllGatherCPSlidingWindowFlexInnerAttention:
-        return KVAllGatherCPFlexInnerAttention
-    return cp_inner_attention

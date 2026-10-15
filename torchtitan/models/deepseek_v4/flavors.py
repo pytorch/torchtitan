@@ -57,8 +57,8 @@ from torchtitan.models.common.moe_sharding import (
 from torchtitan.models.common.param_init import depth_scaled_std
 
 from .attention import (
-    Attention,
     CompressedSparseAttention,
+    DeepSeekV4Attention,
     HeavilyCompressedAttention,
     SlidingWindowAttention,
 )
@@ -233,7 +233,7 @@ def _make_v4_attn_config(
     n_layers: int,
     rope: RoPE.Config,
     enable_sp: bool,
-) -> Attention.Config:
+) -> DeepSeekV4Attention.Config:
     hd = head_dim
     per_group_in = (n_heads * hd) // n_groups
     per_group_out = n_groups * o_lora_rank
@@ -304,7 +304,7 @@ def _make_v4_attn_config(
     )
     replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
-    return Attention.Config(
+    return DeepSeekV4Attention.Config(
         dim=dim,
         n_heads=n_heads,
         head_dim=head_dim,
