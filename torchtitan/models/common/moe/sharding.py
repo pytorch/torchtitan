@@ -136,7 +136,7 @@ def shared_experts_output_placement(*, enable_sp: bool) -> SpmdType:
 
 
 def shared_experts_sharding_config(*, enable_sp: bool) -> ShardingConfig:
-    """Shared FeedForward boundary inside an MoE."""
+    """Shared DenseFeedForward boundary inside an MoE."""
     return ShardingConfig(
         in_src_shardings={"x": residual_activation_placement(enable_sp=enable_sp)},
         out_src_shardings=shared_experts_output_placement(enable_sp=enable_sp),

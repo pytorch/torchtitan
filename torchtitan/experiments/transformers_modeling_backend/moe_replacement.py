@@ -41,7 +41,7 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.moe_sharding import shared_experts_sharding_config
+from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.deepseek_v3.flavors import make_deepseek_v3_router_config
 
 

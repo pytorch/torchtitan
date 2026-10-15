@@ -21,7 +21,7 @@ from torchtitan.models.common.dist_moe import (
 )
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from .base import ModelConfigTransform
 
 

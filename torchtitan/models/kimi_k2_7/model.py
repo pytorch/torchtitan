@@ -26,12 +26,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_local_context,
     spmd_mesh_size,
 )
-from torchtitan.models.common.attention import (
-    AttentionMetadataMap,
-    FlexInnerAttention,
-    VarlenInnerAttention,
-)
-from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.attention import AttentionMetadataMap
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -144,6 +139,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap, and return the batch."""
@@ -151,16 +147,12 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
-            inner = getattr(self.config.first_base_attention, "inner_attention", None)
-            if isinstance(
-                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
-            ):
-                input_dict["attention_metadata"] = self._get_attention_metadata(
-                    positions=positions,
-                    padding_mask=padding_mask,
-                    max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
-                )
+            input_dict["attention_metadata"] = self._get_attention_metadata(
+                positions=positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
 
         input_shardings = {
             **decoder_input_sharding(),
@@ -179,7 +171,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
-        input_dict["aux_loss_denominators"] = None
+        input_dict["aux_loss_denominators"] = global_routing_token_counts
         return inputs, labels, input_dict
 
     def _prepare_multimodal_embeds(
@@ -314,9 +306,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             x = layer(
                 x,

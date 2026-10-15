@@ -193,7 +193,9 @@ class TestConfigFingerprint(unittest.TestCase):
         cfg_a = _StubCompileConfig(memory_policy="full")
         cfg_b = _StubCompileConfig(
             memory_policy="full",
-            full_recompute_save_ops=("layers.*.moe.router.gate :: aten.mm.dtype"),
+            full_recompute_save_ops=(
+                "layers.*.feed_forward.router.gate :: aten.mm.dtype"
+            ),
         )
 
         fp_a = compute_config_fingerprint(_make_stub_model(), cfg_a, dims)
@@ -246,7 +248,7 @@ class TestConfigFingerprint(unittest.TestCase):
             ep_overlap=EpOverlapConfig(
                 enabled=True,
                 chunk_dim="seq",
-                module_fqn="layers.*.moe",
+                module_fqn="layers.*.feed_forward",
             ),
         )
         fp_graph_batch = compute_config_fingerprint(
