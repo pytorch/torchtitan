@@ -1174,9 +1174,8 @@ class Controller(Configurable):
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
-                    # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over
-                    # TCP). Send the MonarchRDMAMicrobatches to the trainer during the previous
-                    # optim_step, so each rank reads microbatch 0 then.
+                    # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over TCP).
+                    # Send the MonarchRDMAMicrobatches during the previous optim_step to read microbatch 0 then.
                     try:
                         fwd_bwd_metrics = self._get_rank_0_value(
                             await self.trainer.forward_backward.call(
