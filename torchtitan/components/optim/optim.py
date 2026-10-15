@@ -46,23 +46,12 @@ class GradientClipper(Configurable):
         *,
         parallelism_context: ParallelismContext,
     ) -> torch.Tensor:
-        """Clip gradients in place and return their pre-clip global L2 norm.
+        """Clip gradients with semantics matching ``dist_utils.clip_grad_norm_``.
 
-        The implementation must be semantically equivalent to:
-
-        .. code-block:: python
-
-            dist_utils.clip_grad_norm_(
-                parameters,
-                max_norm,
-                foreach=True,
-                pp_mesh=parallelism_context.get_optional_mesh("pp"),
-            )
-
-        The returned value must be a local zero-dimensional tensor containing
-        the pre-clip global L2 norm, with an equivalent value on every rank.
-        It must retain that value rather than being reused as the clip
-        coefficient or scratch storage, and must preserve non-finite values.
+        Use ``foreach=True`` and the PP mesh from ``parallelism_context``.
+        Return the pre-clip global L2 norm as a local zero-dimensional tensor
+        with an equivalent value on every rank. Preserve non-finite values and
+        do not reuse the returned norm as the clip coefficient or scratch.
         """
         raise NotImplementedError
 
