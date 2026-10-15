@@ -280,7 +280,9 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             for index in range(2)
         ]
 
-        prepared_groups = engine._preprocess_microbatch_groups([microbatches])
+        prepared_groups = engine._preprocess_microbatch_groups(
+            [microbatches], global_routing_token_counts=torch.tensor([2])
+        )
         engine._pp_forward_backward_microbatch_group = MagicMock(
             return_value=torch.tensor(3.0)
         )
@@ -346,7 +348,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         )
 
         [(arg_mbs, kwarg_mbs, target_mbs)] = engine._preprocess_microbatch_groups(
-            [[microbatch]]
+            [[microbatch]], global_routing_token_counts=torch.tensor([2, 1])
         )
 
         assert len(arg_mbs) == 1 and len(arg_mbs[0]) == 1

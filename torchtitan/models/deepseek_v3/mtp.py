@@ -258,6 +258,7 @@ class MTPDecoder(Decoder):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
@@ -325,7 +326,7 @@ class MTPDecoder(Decoder):
 
         main_tokens = input_dict.pop("input")
         main_labels = input_dict.pop("labels")
-        input_dict["aux_loss_denominators"] = None
+        input_dict["aux_loss_denominators"] = global_routing_token_counts
         if self.mtp_layers is None:
             return main_tokens, main_labels, input_dict
 
