@@ -88,6 +88,17 @@ class TestLocalTokenDispatcherInference(unittest.TestCase):
         self.assertTrue(torch.equal(counting_outputs[3], argsort_outputs[3]))
 
 
+    def test_narrow_key_argsort_matches_int64_argsort(self):
+        torch.manual_seed(0)
+        for num_experts in (5, 300, 40000):  # uint8, int16 and int64 keys
+            ids_N = torch.randint(0, num_experts, (4096,))
+            self.assertTrue(
+                torch.equal(
+                    token_dispatcher._argsort_expert_ids(ids_N, num_experts),
+                    torch.argsort(ids_N, stable=True),
+                )
+            )
+
 def _compiled_regions():
     """Run the dispatcher's regions under torch.compile (eager backend)."""
     names = (
