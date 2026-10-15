@@ -353,16 +353,33 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
     return rejected_requests
 
 
-def _engine_request(request_id: str, *, min_policy_version: int):
+def _engine_request(request_id: str, *, min_policy_version: int, group_id: int = 3):
     request = EngineRequest(
         request_id=request_id,
         prompt_token_ids=[1, 2],
         sampling=SamplingConfig(),
-        group_id=3,
+        group_id=group_id,
         routing_session_id="group=3/rollout=0",
+        arrival_time=1.5,
     )
     request.min_policy_version = min_policy_version
     return request
+
+
+def test_admission_passes_group_id_as_priority_and_arrival_time(monkeypatch):
+    # Priority is the group id (3), not the pinned version (6); every validation id shares -1.
+    generator = _generator()
+    engine = cast(_FakeEngine, generator._engine)
+    requests = [
+        _engine_request("train", min_policy_version=6, group_id=3),
+        _engine_request("val_1", min_policy_version=6, group_id=-1),
+        _engine_request("val_5", min_policy_version=6, group_id=-5),
+    ]
+
+    _admit_through_engine_loop(monkeypatch, generator, requests)
+
+    assert [kwargs["priority"] for _, kwargs in engine.add_requests] == [3, -1, -1]
+    assert [kwargs["arrival_time"] for _, kwargs in engine.add_requests] == [1.5] * 3
 
 
 def test_admission_salts_prompt_with_min_policy_version(monkeypatch):
@@ -634,7 +651,7 @@ def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
         ),
     )
     assert engine_kwargs["watermark"] == 0.03
-    assert engine_kwargs["scheduling_policy"] == "fcfs"
+    assert engine_kwargs["scheduling_policy"] == "priority"
 
 
 @pytest.mark.parametrize(
