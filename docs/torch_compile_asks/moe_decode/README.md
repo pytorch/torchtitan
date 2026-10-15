@@ -13,7 +13,7 @@
   - **GEMM side, 21 us:** w13 +4.9, w2 +7.5, 2 grouped-GEMM setup kernels +4.1, launch gaps ~4.
   - **Glue, 17 us:** dispatch 16.2 vs 5.6 us (8 kernels vs 1, plus a cast); SwiGLU 2.0 us as its own kernel (FlashInfer fuses it into its first GEMM); the rest is launch gaps (our 14 kernels without PDL vs FlashInfer's 5 with it). The combine is the exception: ours is faster (2.8 vs 6.3 us).
   - These walls come from a process that also ran the profiler, which adds ~0.3 us per kernel to later CUDA-graph replays (see Known behaviors), so part of the launch-gap share is the profiler.
-- 11 asks, each with numbers at real shapes and a repro in `repros/`. 8 are pure torch; ask 2 needs out-of-tree CUTLASS builds and ask 7 needs cutlass-dsl 4.8.
+- 12 asks, each with numbers at real shapes and a repro in `repros/`. 8 are pure torch; ask 2 needs out-of-tree CUTLASS builds and ask 7 needs cutlass-dsl 4.8.
   - Decode: small-group grouped-GEMM tiles (48 us/layer), a ragged MoE GEMM path without per-group descriptors (~10), dispatch codegen (~7-10).
   - Prefill: bounds masks under dynamic shapes (~20 us/layer at 4096-token chunks), and dynamic kernels tuned at their first size (up to ~110 us/layer when that size is small).
 - One GB300, torch 2.16.0.dev20261009 (git 146a5a2f73); every repro run on 2026-10-15.
@@ -42,6 +42,7 @@ B. Inductor
 9   codegen            bounds masks under symbolic T slow a per-token gather-sum 1.7x   ~20 us at T=4096
 10  codegen            dispatch: scan -> scatter -> gather = 5 kernels; looped scan      ~7-10 us at T=34; ~1.2-1.7%
 11  fusion             router: per-row softmax, top-k, gather, normalize = 3 kernels      ~7 us at T=34; ~1.2%
+12  codegen            split reduction chosen at the size hint, never at runtime         ~3-5 us at T=34; ~0.6-0.9%
 ```
 
 Repros: `./run_all.sh gpu` (pure torch) and `./run_all.sh ext` (asks 2 and 8, see `run_all.sh`). Raw outputs: `logs/`.
@@ -280,6 +281,26 @@ row ops (masked sums, OR of masks)  T=34: graph 19.5 us, 3 kernels 4.8 + 5.6 + 1
 **Workaround:** none in TorchTitan; a hand-written routing kernel would replace the region.
 
 **Repro:** `repros/ask11_router_row_gather.py`.
+
+
+### 12. A split reduction is chosen from the size hint, never at runtime
+
+**Ask:** decide split vs single-kernel reductions per call (as multi-kernel does for persistent vs looped), or let a region pass a runtime threshold.
+
+**Impact:** ~3-5 us per MoE layer at T=34 (~0.6-0.9%): tokens per expert costs 2 kernels and a launch gap where 1 kernel takes 1.2 us.
+
+```text
+tokens per expert = (T, E) bool map .sum(dim=0), compiled dynamic in the generator's order, kernel sums   (logs/ask12)
+                 T=34          T=256        T=4096        T=16384
+default          4.5 (2 krn)   4.4 (2)      4.9 (2)       5.7 (2)
+no split         1.2 (1)       1.6 (1)      6.1 (1)       19.9 (1)
+```
+
+**Why:** with a large size hint the column sum is split into a partial-sum kernel and a final kernel. The choice is baked into the dynamic kernel, so decode sizes pay for 2 launches. Turning splits off per region fixes decode and makes prefill 3.5x slower.
+
+**Workaround:** none clean. Per-region `split_reductions=False` trades prefill for decode; computing the counts inside the consuming kernel removes the reduction.
+
+**Repro:** `repros/ask12_split_reduction_size_hint.py`.
 
 ---
 

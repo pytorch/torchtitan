@@ -20,7 +20,7 @@ run() {
 
 if [ "$MODE" = gpu ] || [ "$MODE" = all ]; then
     for f in ask01_grouped_mm_small_groups ask03_gather_and_swiglu ask06_triton_template_small_m \
-             ask08_dynamic_autotune_first_size ask09_dynamic_bounds_mask ask10_dispatch_codegen ask11_router_row_gather \
+             ask08_dynamic_autotune_first_size ask09_dynamic_bounds_mask ask10_dispatch_codegen ask11_router_row_gather ask12_split_reduction_size_hint \
              kb_profiler_slows_graph_replay; do
         rm -f "../logs/$f.txt"
         run "$f" python "$f.py"
