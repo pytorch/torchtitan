@@ -71,31 +71,25 @@ class CPUKVOffload(Configurable):
                 kv_role="kv_both",
                 kv_connector_extra_config={
                     "cpu_bytes_to_use": int(self.config.size_gib * (1 << 30)),
-                    # vLLM's default stores prompt blocks only, but the next turn's prompt also
-                    # holds this turn's completion.
+                    # Store completions too: vLLM's default stores prompt blocks only.
                     "offload_prompt_only": False,
                 },
             )
         }
 
     def attach(self, engine: Any) -> None:
-        """Keep vLLM's CPU LRU for `evict_first`, and make the offload work with TP > 1 or DP > 1
-        under external_launcher.
+        """Keep vLLM's CPU LRU for `evict_first`, and make the offload work with TP > 1 or DP > 1.
 
-        vLLM's offload marks a CPU load or store done once every worker of its scheduler has finished
-        it, and only its multiprocess executor merges the workers' finished transfers. Here each rank
-        runs its own scheduler with one worker, so:
-
+        vLLM marks a CPU transfer done once every worker of its scheduler finished it, and only its
+        multiprocess executor merges their results. Here each rank runs a one-worker scheduler:
         1. Each scheduler waits for its own TP group only (vLLM's world size also counts DP).
-        2. With TP > 1, each engine step all-gathers the TP ranks' finished transfers before the
-           scheduler reads them, and merges them as the multiprocess executor does:
+        2. With TP > 1, every engine step all-gathers and merges the TP ranks' finished transfers:
 
                step s    rank 0: load 7 done   rank 1: -            both schedulers: 1 of 2
                step s+1  rank 0: -             rank 1: load 7 done  both schedulers: done
 
-        3. The TP ranks' schedulers must stay identical. Request ids get a counter suffix instead of
-           vLLM's random one, generator procs run with PYTHONHASHSEED=0 (vLLM iterates sets), and
-           each step's gather compares a scheduler fingerprint across ranks.
+        3. The TP ranks' schedulers stay identical: counter request-id suffixes instead of vLLM's
+           random ones, PYTHONHASHSEED=0 (vLLM iterates sets), and a fingerprint check per gather.
         """
         # Imported here: runs without CPU offload never load vLLM's offload code.
         from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -179,11 +173,8 @@ class CPUKVOffload(Configurable):
         scheduler.update_from_output = update_from_merged_output
 
     def evict_first(self, block_hashes: Iterable[bytes]) -> None:
-        """Move these blocks' CPU chunks to the front of vLLM's LRU, so they are evicted first.
-
-        One chunk per block and KV cache group. Chunks vLLM never stored, or is still storing or
-        loading, are skipped.
-        """
+        """Make these blocks' CPU chunks (one per KV cache group) the first evicted in vLLM's LRU.
+        Skips chunks vLLM never stored, or is still storing or loading."""
         from vllm.v1.kv_offload.base import make_offload_key
 
         # TODO: a chunk whose store finishes after the release (the last turn's final blocks,

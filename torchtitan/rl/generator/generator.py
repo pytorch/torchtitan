@@ -1061,7 +1061,6 @@ class VLLMGenerator(Configurable):
         self._session_kv_holder: VLLMSessionKVHolder | None = None
         if config.session_kv_holder is not None:
             self._session_kv_holder = config.session_kv_holder.build()
-            # CPU offload's connector, if on.
             engine_kwargs.update(self._session_kv_holder.engine_kwargs())
         add_extra_vllm_engine_args(engine_kwargs, config.extra_vllm_engine_args)
         engine_args = EngineArgs(**engine_kwargs)
