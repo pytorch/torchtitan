@@ -1661,8 +1661,6 @@ class VLLMGenerator(Configurable):
     async def get_session_kv_metrics(self) -> list[m.Metric]:
         """This rank's session-KV metrics: levels now, counts since the last call.
 
-        Empty without `session_kv_holder`.
-
         Example:
 
             call 1: holder.num_evicted 3, num_sessions 80  ->  evicted_sessions 3, held_sessions 80

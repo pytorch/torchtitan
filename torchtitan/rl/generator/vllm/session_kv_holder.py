@@ -121,7 +121,7 @@ class VLLMSessionKVHolder(Configurable):
         self.num_held_blocks = 0
         self.num_evicted = 0
         self.num_stall_evicted = 0
-        # A session's later turns: prompt tokens its earlier turns computed, by where they came from.
+        # Prompt tokens a session's earlier turns computed, by where its later turns got them.
         self.gpu_hit_prefix_tokens = 0
         self.cpu_hit_prefix_tokens = 0
         self.recomputed_prefix_tokens = 0
