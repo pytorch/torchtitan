@@ -30,6 +30,8 @@ import os
 from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.models.common.attention.gdn import GDN
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
@@ -64,11 +66,11 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     """
     if not cfg.layers:
         raise ValueError(f"Model config {type(cfg).__qualname__} has no layers")
-    attn = cfg.first_base_attention
+    attn = cfg.first_full_attention
     if attn is None:
         raise ValueError(
-            f"Model config {type(cfg).__qualname__} has no full-attention layer. "
-            "vLLM's engine requires full-attention metadata before the model is built."
+            f"Model config {type(cfg).__qualname__} has no full attention layer. "
+            "vLLM needs attention head counts and dimensions before building the model."
         )
     ffn = cfg.first_feed_forward
     moe = cfg.first_moe
@@ -164,11 +166,10 @@ def register_to_vllm(
             with Dist-MoE routed experts; ``None`` otherwise.
     """
     has_gdn = any(
-        getattr(layer, "delta_net", None) is not None for layer in model_config.layers
+        isinstance(layer.attention, GDN.Config) for layer in model_config.layers
     )
     has_kda = any(
-        getattr(layer, "delta_attention", None) is not None
-        for layer in model_config.layers
+        isinstance(layer.attention, KDA.Config) for layer in model_config.layers
     )
     if has_gdn or has_kda:
         # Attention Gym's paged linear-attention kernels require channels to

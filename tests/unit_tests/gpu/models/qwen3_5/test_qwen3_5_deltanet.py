@@ -25,7 +25,7 @@ from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
 from torchtitan.models.common.attention.cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
 )
-from torchtitan.models.common.attention.gdn import InnerGDN
+from torchtitan.models.common.attention.gdn import GDN, InnerGDN
 
 # Tensor shape suffixes: B batch, L seq len, H heads, K key head dim,
 # V value head dim.
@@ -140,7 +140,7 @@ class ReferenceGatedDeltaKernel(nn.Module):
     """Drop-in replacement for GDNKernel backed by the reference math.
 
     Mirrors GDNKernel.forward's interface, including the grouped-query
-    Q/K head expansion, so tests can swap it onto a built GatedDeltaNet and
+    Q/K head expansion, so tests can swap it onto a built GDN and
     exercise the full varlen plumbing (flattening, conv resets, host-offset
     contract) on CPU.
     """
@@ -335,15 +335,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         positions = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32)
         full_attention_mask = mock.sentinel.full_attention_mask
         full_attention_backend = next(
-            layer.attention_metadata_key
+            type(layer.attention.inner_attention)
             for layer in model.layers.values()
             if layer.full_attn
         )
-        full_attention_config = next(
-            layer.attention.inner_attention
-            for layer in model.config.layers
-            if layer.attention is not None
-        )
+        full_attention_config = model.config.first_full_attention.inner_attention
 
         with mock.patch.object(
             type(full_attention_config),
@@ -373,11 +369,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
     ):
         try:
             from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, SiLU
-            from torchtitan.models.common.attention.gdn import (
-                GatedDeltaNet,
-                GDNKernel,
-                InnerGDN,
-            )
+            from torchtitan.models.common.attention.gdn import GDN, GDNKernel, InnerGDN
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
                 f"Qwen3.5 optional dependency unavailable: {exc.name}"
@@ -402,7 +394,8 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 bias=False,
             )
 
-        model = GatedDeltaNet.Config(
+        model = GDN.Config(
+            n_heads=num_value_heads,
             key_head_dim=key_head_dim,
             value_head_dim=value_head_dim,
             conv_kernel_size=conv_kernel_size,
@@ -415,7 +408,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             conv_q=conv(key_dim),
             conv_k=conv(key_dim),
             conv_v=conv(value_dim),
-            inner_gated_delta_net=InnerGDN.Config(
+            inner_attention=InnerGDN.Config(
                 conv_kernel_size=conv_kernel_size,
                 kernel=GDNKernel.Config(),
             ),
@@ -431,7 +424,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ),
         ).build()
         if not use_fused:
-            model.inner_gated_delta_net.kernel = ReferenceGatedDeltaKernel()
+            model.inner_attention.kernel = ReferenceGatedDeltaKernel()
 
         model = model.to(device=device, dtype=dtype)
         with torch.no_grad():
@@ -496,7 +489,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             a_TH.float() + model.dt_bias
         )
         update_gate_TH = torch.sigmoid(b_TH)
-        output_THV = model.inner_gated_delta_net.kernel(
+        output_THV = model.inner_attention.kernel(
             query_THK,
             key_THK,
             value_THV,
@@ -598,7 +591,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         ).build()
         masks = flex_model._get_attention_metadata(positions)
         flex_backend = next(
-            layer.attention_metadata_key
+            type(layer.attention.inner_attention)
             for layer in flex_model.layers.values()
             if layer.full_attn
         )
@@ -615,12 +608,13 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         # Each block picks the entry matching its layer type.
         metadata_keys = {
-            layer.attention_metadata_key for layer in flex_model.layers.values()
+            type(layer.attention.inner_attention)
+            for layer in flex_model.layers.values()
         }
         self.assertEqual(metadata_keys, {flex_backend, InnerGDN})
         for layer in flex_model.layers.values():
             self.assertEqual(
-                layer.attention_metadata_key,
+                type(layer.attention.inner_attention),
                 flex_backend if layer.full_attn else InnerGDN,
             )
 
@@ -629,7 +623,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         ).build()
         varlen_masks = varlen_model._get_attention_metadata(positions)
         varlen_backend = next(
-            layer.attention_metadata_key
+            type(layer.attention.inner_attention)
             for layer in varlen_model.layers.values()
             if layer.full_attn
         )
@@ -651,7 +645,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         deltanet_only_config.layers = [
             layer
             for layer in deltanet_only_config.layers
-            if layer.delta_net is not None
+            if isinstance(layer.attention, GDN.Config)
         ]
         deltanet_only_model = deltanet_only_config.build()
         deltanet_only_masks = deltanet_only_model._get_attention_metadata(positions)

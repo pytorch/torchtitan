@@ -18,7 +18,7 @@ from torch.nn.attention.flex_attention import AuxRequest
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.deepseek_v3.model import Attention
+from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
 
 # Shape suffixes:
 # T = packed tokens, H = attention heads, D = projection rows per head,
@@ -108,7 +108,7 @@ def _scale_mla_heads(
 
 @torch.no_grad()
 def _clip_mla_weights(
-    attention: Attention,
+    attention: DeepSeekMLAAttention,
     scales_H: torch.Tensor,
     *,
     alpha: float,
@@ -148,7 +148,7 @@ def qk_clip(
         module
         for model_part in model_parts
         for module in model_part.modules()
-        if isinstance(module, Attention)
+        if isinstance(module, DeepSeekMLAAttention)
         and isinstance(module.inner_attention, QKClipFlexInnerAttention)
     ]
     if not attention_layers:

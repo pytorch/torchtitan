@@ -34,7 +34,7 @@ from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 if TYPE_CHECKING:
-    from .attention import Attention
+    from .attention import DeepSeekV4Attention
     from .mtp import MTPBlock
 
 
@@ -43,7 +43,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        attention: "Attention.Config"  # pyrefly: ignore [bad-override]
+        attention: "DeepSeekV4Attention.Config"  # pyrefly: ignore [bad-override]
         hc_attn_pre: HcPre.Config
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
@@ -133,6 +133,8 @@ class DeepSeekV4Model(Decoder):
     state_dict_adapter_cls = DeepSeekV4StateDictAdapter
 
     """DeepSeek V4 decoder model with HC branches and sparse attention."""
+
+    mtp_layers: "ModuleList[MTPBlock]"
 
     @classmethod
     def _register_optimizer_hooks(
@@ -309,9 +311,7 @@ class DeepSeekV4Model(Decoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             h = layer(
                 h,
@@ -366,9 +366,7 @@ class DeepSeekV4Model(Decoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, mtp_block).attention.attention_metadata_key
-                )
+                else attention_metadata.get(type(mtp_block.attention.inner_attention))
             )
             with spmd.no_typecheck():
                 aux_loss_denominator = (

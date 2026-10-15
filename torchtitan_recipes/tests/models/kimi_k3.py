@@ -38,6 +38,7 @@ from torchtitan.distributed.flex_shard import (
     Owned,
 )
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -148,11 +149,11 @@ def _dist_muon_optimizer(
     adamw_lr: float,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
-    attention = cast(KimiMLAAttention.Config, model_config.first_base_attention)
+    attention = cast(KimiMLAAttention.Config, model_config.first_full_attention)
     delta_attention = next(
-        layer.delta_attention
+        layer.attention
         for layer in model_config.layers
-        if layer.delta_attention is not None
+        if isinstance(layer.attention, KDA.Config)
     )
     # FSDP flattens dp_shard and cp into one storage axis under CP.
     owned = ComputeLayout(
@@ -217,7 +218,7 @@ def _dist_muon_optimizer(
         layer = model_config.layers[layer_id]
         prefix = f"layers.{layer_id}"
         shardings = {}
-        if layer.attention is not None:
+        if isinstance(layer.attention, KimiMLAAttention.Config):
             shardings.update(
                 {
                     f"{prefix}.attention.{projection}.weight": compute_sharding
@@ -227,7 +228,7 @@ def _dist_muon_optimizer(
         else:
             shardings.update(
                 {
-                    f"{prefix}.delta_attention.{projection}.weight": compute_sharding
+                    f"{prefix}.attention.{projection}.weight": compute_sharding
                     for projection, compute_sharding in (
                         delta_attention_shardings.items()
                     )
@@ -303,8 +304,8 @@ def _dist_muon_optimizer(
     # single-row [1, D], so Newton-Schulz would only rescale them.
     muon_pattern = (
         r"(?:"
-        rf"attention\.(?:{'|'.join(attention_shardings)})\.weight|"
-        rf"delta_attention\.(?:{'|'.join(delta_attention_shardings)})\.weight|"
+        rf"attention\.(?:{'|'.join(attention_shardings)}|"
+        rf"{'|'.join(delta_attention_shardings)})\.weight|"
         r"routed_experts\.w(?:13|2)\.weight|"
         r"feed_forward\.w(?:13|2)\.weight|"
         r"moe\.router\.gate\.weight|"
