@@ -16,7 +16,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 
-from torchtitan.models.common.linear import _LinearFunction, Linear
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear.linear import _LinearFunction
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
