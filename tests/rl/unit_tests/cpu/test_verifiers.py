@@ -31,7 +31,7 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     verifiers_rollout_logs,
     VerifiersRollouter,
 )
-from torchtitan.rl.generator import SamplingConfig
+from torchtitan.rl.generator.generator import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Completion, RolloutStatus
 from verifiers.v1.errors import model_error, OverlongPromptError

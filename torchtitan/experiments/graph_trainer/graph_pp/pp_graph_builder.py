@@ -589,6 +589,7 @@ def _compile_stage_graphs(
     stage: GraphPipelineStage,
     *,
     compile_config: GraphTrainerCompileConfig,
+    use_cuda_graph: bool,
 ) -> None:
     """Compile the GraphTrainer graphs attached to ``stage`` once."""
 
@@ -616,6 +617,7 @@ def _compile_stage_graphs(
                 gm,
                 compile_config=compile_config,
                 graph_name=f"stage_{stage.stage_index}_{name}",
+                use_cuda_graph=use_cuda_graph,
             )
         )
     graphs.modules = _StageGraphModules(
@@ -1054,17 +1056,25 @@ def _build_stage_graphs(
         num_state_buffer_values,
     )
     if compile_graphs:
-        _compile_stage_graphs(stage, compile_config=compile_config)
+        _compile_stage_graphs(
+            stage,
+            compile_config=compile_config,
+            use_cuda_graph=not config.training.disable_cuda_graphs,
+        )
 
 
 def _build_graph_pp_overlap_graphs(
     schedule: _PipelineScheduleRuntime,
     *,
     compile_config: GraphTrainerCompileConfig,
+    use_cuda_graph: bool,
 ) -> dict[tuple[int, int], OverlapStageGraphs]:
     return stage_builder._build_graph_pp_overlap_graphs(
         schedule,
         compile_config=compile_config,
-        compile_graph_module=_compile_graph_pp_module,
+        compile_graph_module=functools.partial(
+            _compile_graph_pp_module,
+            use_cuda_graph=use_cuda_graph,
+        ),
         execute_graph_module=_execute_graph_module,
     )

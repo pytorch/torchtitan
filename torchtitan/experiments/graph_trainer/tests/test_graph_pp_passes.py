@@ -2319,6 +2319,53 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         actual = (compute_outputs[0], *reduced_grads)
         _assert_tensor_sequence_equal(self, actual, expected)
 
+    def test_forward_split_extracts_local_parameter_preparation(self) -> None:
+        gm = _make_forward_graph_with_quantized_unshard()
+        graph = gm.graph
+        param = graph.find_nodes(op="placeholder")[0]
+        (all_gather,) = graph.find_nodes(
+            op="call_function",
+            target=torch.ops._c10d_functional.all_gather_into_tensor.default,
+        )
+        (wait,) = graph.find_nodes(
+            op="call_function", target=torch.ops._c10d_functional.wait_tensor.default
+        )
+        with graph.inserting_before(all_gather):
+            cast = graph.call_function(
+                torch.ops.aten._to_copy.default,
+                args=(param,),
+                kwargs={"dtype": torch.bfloat16},
+            )
+        cast.meta.update(all_gather.meta)
+        wait.replace_all_uses_with(cast)
+        graph.erase_node(wait)
+        graph.erase_node(all_gather)
+        graph.lint()
+        gm.recompile()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        split = extract_fsdp_unshard_graph(
+            gm,
+            num_params=1,
+            input_names=("sharded_param", "x"),
+            flat_input_indices=(0, 1),
+        )
+        self.assertIsNotNone(split.unshard_module)
+        for target in (
+            torch.ops.aten._to_copy.default,
+            _quantize_weight_for_graph_test,
+        ):
+            self.assertIn(target, _call_targets(split.unshard_module))
+            self.assertNotIn(target, _call_targets(split.compute_module))
+
+        weight = torch.arange(4, dtype=torch.float32) / 7
+        prepared = split.unshard_module(weight)
+        for microbatch in range(240):
+            x = torch.full((4,), microbatch, dtype=torch.bfloat16)
+            expected = gm(weight, x)
+            actual = split.compute_module(*prepared, x)
+            _assert_tensor_sequence_equal(self, actual, expected)
+
     def test_forward_split_keeps_quantization_in_unshard_chain(self) -> None:
         gm = _make_forward_graph_with_quantized_unshard()
         deduplicate_fsdp_unshard_chains_pass(gm)

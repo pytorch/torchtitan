@@ -10,10 +10,10 @@ import random
 
 import numpy as np
 import torch
-
-from torchtitan.rl.components.batcher import Batcher
-from torchtitan.rl.components.training_sample_builder import TrainingSample
 from torchtitan.rl.rollout.types import RolloutTurnID
+
+from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.training_sample_builder import TrainingSample
 
 
 def _make_samples(lengths: list[int]) -> list[TrainingSample]:

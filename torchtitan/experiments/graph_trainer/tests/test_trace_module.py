@@ -180,7 +180,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
-        from torchtitan.training_engine import TrainingEngine
 
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
@@ -189,6 +188,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             sdc_replayer=None,
             training=SimpleNamespace(
+                disable_cuda_graphs=False,
                 num_tokens_per_microbatch_per_dp_rank=1,
                 num_tokens_per_train_step=2,
             ),
@@ -213,12 +213,21 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 "make_spmd_graph_runtime",
                 return_value=graph_runtime,
             ) as make_runtime,
-            patch.object(TrainingEngine, "_initialize_forward_backward") as base_init,
+            patch(
+                "torchtitan.experiments.graph_trainer.trainer.cuda_graphs_supported",
+                return_value=True,
+            ),
+            patch(
+                "torchtitan.experiments.graph_trainer.trainer."
+                "wrap_fwd_bwd_with_cuda_graph",
+                return_value=MagicMock(),
+            ) as wrap_cuda_graph,
         ):
             engine._initialize_forward_backward()
 
         self.assertIs(engine.pp_schedule, graph_runtime)
-        base_init.assert_not_called()
+        wrap_cuda_graph.assert_called_once()
+        self.assertIs(engine._run_forward_backward, wrap_cuda_graph.return_value)
         make_runtime.assert_called_once_with(
             engine.model_parts[0],
             gradient_accumulation_steps=2,
@@ -2246,7 +2255,7 @@ class TestTraceContextParallel(FSDPTest):
         import torch.distributed as dist
 
         from torchtitan_recipes.tests.graph_trainer.llama3 import (
-            graph_trainer_llama3_debugmodel_sdpa,
+            graph_trainer_llama3_debugmodel_varlen,
         )
 
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
@@ -2260,7 +2269,7 @@ class TestTraceContextParallel(FSDPTest):
         trainer = None
         try:
             with tempfile.TemporaryDirectory() as dump_folder:
-                config = graph_trainer_llama3_debugmodel_sdpa()
+                config = graph_trainer_llama3_debugmodel_varlen()
                 config.dump_folder = dump_folder
                 config.training.max_context_length = 128
                 config.training.num_tokens_per_microbatch_per_dp_rank = 2 * 128
@@ -2269,7 +2278,7 @@ class TestTraceContextParallel(FSDPTest):
                 config.parallelism.data_parallel_shard_degree = dp_shard_degree
                 config.parallelism.context_parallel_degree = context_parallel_degree
                 config.parallelism.tensor_parallel_degree = 1
-                config.activation_checkpoint = None
+                config.activation_remat = None
                 config.compile.enable_passes = False
                 config.debug.enable_structured_logging = False
                 config.model.layers = config.model.layers[:1]
@@ -2289,7 +2298,7 @@ class TestTraceContextParallel(FSDPTest):
                     device=trainer.engine.device,
                 )
                 # The dataloader always supplies per-document positions, which
-                # drive RoPE (SDPA itself is maskless and uses is_causal).
+                # drive RoPE and define the Varlen document boundaries.
                 positions = (
                     torch.arange(
                         num_tokens,
@@ -2317,25 +2326,29 @@ class TestTraceContextParallel(FSDPTest):
                 code_lines = trainer.engine._traced_step.gm.graph.python_code(
                     "self"
                 ).src.splitlines()
-                sdpa_line = next(
+                attention_line = next(
                     (
                         idx
                         for idx, line in enumerate(code_lines)
-                        if "scaled_dot_product" in line
+                        if "flash_attention" in line or "flash_attn" in line
                     ),
                     None,
                 )
                 self.assertIsNotNone(
-                    sdpa_line,
-                    "Expected SDPA in generated code:\n" + "\n".join(code_lines),
+                    attention_line,
+                    "Expected Varlen attention in generated code:\n"
+                    + "\n".join(code_lines),
                 )
-                assert sdpa_line is not None
-                all_gather_pg_names_before_sdpa = []
+                assert attention_line is not None
+                all_gather_pg_names_before_attention = []
                 for node in trainer.engine._traced_step.gm.graph.nodes:
-                    if "scaled_dot_product" in str(node.target):
+                    if any(
+                        name in str(node.target)
+                        for name in ("flash_attention", "flash_attn")
+                    ):
                         break
                     if "all_gather_into_tensor" in str(node.target):
-                        all_gather_pg_names_before_sdpa.append(node.args[2])
+                        all_gather_pg_names_before_attention.append(node.args[2])
 
                 cp_pg_name = (
                     trainer.engine.parallelism_context.get_mesh("cp")
@@ -2354,8 +2367,8 @@ class TestTraceContextParallel(FSDPTest):
                 trainer = None
                 return {
                     "code": code,
-                    "all_gather_pg_names_before_sdpa": (
-                        all_gather_pg_names_before_sdpa
+                    "all_gather_pg_names_before_attention": (
+                        all_gather_pg_names_before_attention
                     ),
                     "cp_pg_name": cp_pg_name,
                     "fsdp_pg_name": fsdp_pg_name,
@@ -2368,26 +2381,20 @@ class TestTraceContextParallel(FSDPTest):
             else:
                 os.environ["LOCAL_RANK"] = old_local_rank
 
-    # Pinned to the SDPA backend: this validates CP all_gather-before-SDPA
-    # codegen, which requires the scaled_dot_product op. The default
-    # FlexInnerAttention backend has no SDPA op and flex + CP is unsupported anyway
-    # (torch's _create_cp_block_mask requires seq_len divisible by 2 *
-    # BLOCK_SIZE, here 128 < 256; see the aot_fx_trace_llama3_fsdp_tp_cp
-    # integration flavor). SDPA has native CP support and emits the SDPA op.
-    def test_llama3_cp_only_codegen_all_gather_before_sdpa(self):
+    def test_llama3_cp_only_codegen_all_gather_before_attention(self):
         cp_trace = self._trace_llama3_step_code(
             dp_shard_degree=1,
             context_parallel_degree=2,
         )
-        # Verify AG along CP PG exists before SDPA
+        # Verify AG along CP PG exists before attention
         self.assertIn(
             cp_trace["cp_pg_name"],
-            cp_trace["all_gather_pg_names_before_sdpa"],
-            "Expected CP all_gather on the CP mesh before SDPA. "
+            cp_trace["all_gather_pg_names_before_attention"],
+            "Expected CP all_gather on the CP mesh before attention. "
             f"CP pg={cp_trace['cp_pg_name']}, "
             f"FSDP pg={cp_trace['fsdp_pg_name']}, "
-            "pre-SDPA all_gather pgs="
-            f"{cp_trace['all_gather_pg_names_before_sdpa']}.\n"
+            "pre-attention all_gather pgs="
+            f"{cp_trace['all_gather_pg_names_before_attention']}.\n"
             f"Generated code:\n{cp_trace['code']}",
         )
 
