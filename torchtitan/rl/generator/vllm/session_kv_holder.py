@@ -107,8 +107,9 @@ class VLLMSessionKVHolder(Configurable):
         # Sessions past their first prefill, until `release`.
         self._session_groups: dict[str, int] = {}
         self._group_sessions: dict[int, set[str]] = {}
-        # With offload: each session's latest request's block hashes, which cover its earlier turns
-        # (vLLM appends decode blocks). If a turn re-renders history, old chunks keep their place.
+        # With offload: each session's latest request's block hashes. Its prompt holds the earlier
+        # turns, and vLLM appends decode blocks to this list. If a turn re-renders the history,
+        # chunks only an earlier turn had are not evicted first.
         self._session_hashes: dict[str, list[bytes]] = {}
         # Plain ints, so other threads (e.g. a logging endpoint) can read them safely.
         self.num_sessions = 0
@@ -153,8 +154,7 @@ class VLLMSessionKVHolder(Configurable):
 
     def after_step(self) -> None:
         """After each engine step:
-        - track the sessions of requests whose prefill finished, and hold their prefix
-          (`hold_gpu_blocks`);
+        - track sessions whose request finished prefill, and hold their prefix (`hold_gpu_blocks`);
         - mark sessions whose request left as idle;
         - release idle sessions so the next step has room.
         """

@@ -75,15 +75,16 @@ class CPUKVOffload(Configurable):
         """Keep vLLM's CPU LRU for `evict_first`, and make the offload work with TP > 1 or DP > 1.
 
         vLLM marks a CPU transfer done once every worker of its scheduler finished it, and only its
-        multiprocess executor merges their results. Here each rank runs a one-worker scheduler:
+        multiprocess executor merges their results. Under external_launcher, each rank runs its own
+        scheduler with one worker:
         1. Each scheduler waits for its own TP group only (vLLM's world size also counts DP).
         2. With TP > 1, every engine step all-gathers and merges the TP ranks' finished transfers:
 
                step s    rank 0: load 7 done   rank 1: -            both schedulers: 1 of 2
                step s+1  rank 0: -             rank 1: load 7 done  both schedulers: done
 
-        3. The TP ranks' schedulers stay identical: counter request-id suffixes instead of vLLM's
-           random ones, PYTHONHASHSEED=0 (vLLM iterates sets), and a fingerprint check per gather.
+        3. The TP ranks' schedulers must stay identical: request ids get a counter suffix, not vLLM's
+           random one, and PYTHONHASHSEED=0 (vLLM iterates sets). Each gather raises if they differ.
         """
         # Imported here: runs without CPU offload never load vLLM's offload code.
         from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator

@@ -876,8 +876,7 @@ class VLLMGenerator(Configurable):
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
         session_kv_holder: VLLMSessionKVHolder.Config | None = None
-        """Keep each multi-turn session's KV between its turns: held on GPU, and with
-        ``cpu_kv_offload`` reloaded from CPU (see `VLLMSessionKVHolder`). None: off."""
+        """Keep each multi-turn session's KV between turns (see `VLLMSessionKVHolder`). None: off."""
 
         def __post_init__(self):
             if (
@@ -1057,7 +1056,7 @@ class VLLMGenerator(Configurable):
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
             engine_kwargs["seed"] = config.debug.seed
-        # Every rank tracks the same sessions in its own scheduler; only the engine thread touches them.
+        # Each rank tracks the same sessions in its scheduler; only the engine thread touches them.
         self._session_kv_holder: VLLMSessionKVHolder | None = None
         if config.session_kv_holder is not None:
             self._session_kv_holder = config.session_kv_holder.build()
