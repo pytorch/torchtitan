@@ -36,17 +36,16 @@ from vllm.config import AttentionConfig
 from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import apply_overrides, ConfigLoader
 from torchtitan.distributed.batch_invariant import set_batch_invariance
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.rl.generator.vllm.engine import add_extra_vllm_engine_args, VLLMEngine
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
+    vllm_attention_backend,
 )
 from torchtitan.tools import filesystem
 from torchtitan.tools.utils import has_cuda_capability
@@ -129,15 +128,6 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    attention = model_config.first_full_attention
-    if attention is None:
-        raise ValueError("No full attention layer found in the model spec.")
-    inner_attention_config = attention.inner_attention
-    if not isinstance(
-        inner_attention_config, (VarlenInnerAttention.Config, FlexInnerAttention.Config)
-    ):
-        raise ValueError("Only varlen and flex attention backends are supported.")
-
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     set_batch_invariance(gen_config.debug.batch_invariant)
     enable_ep = gen_config.parallelism.expert_parallel_degree > 1
@@ -168,11 +158,7 @@ def generate() -> None:
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=engine_config.cuda_graph.mode == "NONE",
         attention_config=AttentionConfig(
-            backend=(
-                AttentionBackendEnum.FLEX_ATTENTION
-                if isinstance(inner_attention_config, FlexInnerAttention.Config)
-                else AttentionBackendEnum.CUSTOM
-            ),
+            backend=vllm_attention_backend(model_config),
         ),
         disable_log_stats=False,
     )

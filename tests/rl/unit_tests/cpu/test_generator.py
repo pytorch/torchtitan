@@ -582,6 +582,7 @@ def test_decode_metrics_absent_for_single_generated_token():
 _PARALLELISM = InferenceParallelismConfig()
 # The fields of a model config that VLLMEngine reads when it builds EngineArgs.
 _MODEL_CONFIG = SimpleNamespace(
+    layers=[],
     first_full_attention=SimpleNamespace(inner_attention=VarlenInnerAttention.Config()),
     max_context_length=1024,
 )
