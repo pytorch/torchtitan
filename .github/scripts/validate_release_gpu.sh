@@ -22,7 +22,7 @@ for var in "${required_env_vars[@]}"; do
 done
 
 case "${VALIDATION_SUITE}" in
-  core|h100|b200|torchft|transformers-modeling-backend) ;;
+  core|graph-trainer|graph-trainer-h100|h100|b200|torchft|transformers-modeling-backend) ;;
   *)
     echo "Unknown validation suite: ${VALIDATION_SUITE}" >&2
     exit 1
@@ -93,6 +93,7 @@ VALIDATION_ROOT="${RUNNER_TEMP}/validate-release-gpu"
 mkdir -p \
   "${ARTIFACTS}" \
   "${VALIDATION_ROOT}/scripts" \
+  "${VALIDATION_ROOT}/torchtitan/experiments/graph_trainer" \
   "${VALIDATION_ROOT}/torchtitan/models/flux/inference"
 
 # Copy test support files without copying TorchTitan Python packages. Training
@@ -104,6 +105,9 @@ cp "${REPO_ROOT}/pyproject.toml" "${VALIDATION_ROOT}/pyproject.toml"
 cp \
   "${REPO_ROOT}/torchtitan/models/flux/inference/prompts.txt" \
   "${VALIDATION_ROOT}/torchtitan/models/flux/inference/prompts.txt"
+cp \
+  "${REPO_ROOT}/torchtitan/experiments/graph_trainer/run_train_precompile.sh" \
+  "${VALIDATION_ROOT}/torchtitan/experiments/graph_trainer/run_train_precompile.sh"
 
 cd "${VALIDATION_ROOT}"
 unset PYTHONPATH
@@ -138,6 +142,15 @@ print(f"torchao={torchao.__version__}")
 print(f"triton={triton.__version__}")
 print(f"num_cuda_devices={torch.cuda.device_count()}")
 PY
+
+TORCHTITAN_PACKAGE_ROOT="$(python - <<'PY'
+from pathlib import Path
+
+import torchtitan
+
+print(Path(torchtitan.__file__).parent)
+PY
+)"
 
 run_core_tests() {
   CUDA_VISIBLE_DEVICES=0 python -m pytest tests/unit_tests/gpu \
@@ -193,6 +206,29 @@ run_transformers_modeling_backend_tests() {
   python -m torchtitan.experiments.transformers_modeling_backend.tests.integration_tests \
     "${ARTIFACTS}/transformers_modeling_backend" \
     --ngpu 8
+}
+
+run_graph_trainer_tests() {
+  local tests_root="${TORCHTITAN_PACKAGE_ROOT}/experiments/graph_trainer/tests"
+
+  python -m torchtitan.experiments.graph_trainer.tests.integration_tests \
+    --test_suite graph_trainer_default \
+    --gpu_arch_type cuda \
+    "${ARTIFACTS}/graph_trainer" \
+    --ngpu 8
+  python -m pytest "${tests_root}/test_numerics.py::TestSimpleFSDP" -v
+  python -m pytest "${tests_root}/test_numerics.py::TestGraphTrainerNumerics" \
+    -v -k dense
+  python -m pytest "${tests_root}/test_passes.py" -v
+  python -m pytest "${tests_root}/test_profiler.py" -v
+  python -m pytest "${tests_root}/test_trace_module.py" -v
+  python -m pytest "${tests_root}/test_precompile.py" -v
+  python -m torchtitan.experiments.graph_trainer.tests.run_precompile_tests \
+    "${ARTIFACTS}/graph_trainer_precompile" \
+    --ngpu 8 \
+    --test_name aot_fx_trace_llama3_precompile_fsdp_tp
+  python -m pytest "${tests_root}/test_bitwise_deterministic.py" -v
+  python -m pytest "${tests_root}/test_sac_peak_memory.py" -v
 }
 
 install_hybrid_ep() {
@@ -253,14 +289,29 @@ run_h100_tests() {
   return "${status}"
 }
 
+run_graph_trainer_h100_tests() {
+  local tests_root="${TORCHTITAN_PACKAGE_ROOT}/experiments/graph_trainer/tests"
+
+  install_hybrid_ep
+  python -m torchtitan.experiments.graph_trainer.tests.integration_tests \
+    --test_suite graph_trainer_h100 \
+    --gpu_arch_type cuda \
+    "${ARTIFACTS}/graph_trainer_h100" \
+    --ngpu 8
+  python -m pytest "${tests_root}/test_numerics.py::TestGraphTrainerNumerics" \
+    -v -k moe
+  python -m torchtitan.experiments.graph_trainer.tests.run_precompile_tests \
+    "${ARTIFACTS}/graph_trainer_h100_precompile" \
+    --ngpu 8 \
+    --test_name aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep
+  python -m pytest "${tests_root}/test_bitwise_deterministic.py" -v
+}
+
 run_b200_tests() {
-  # The shared MXFP8 test file also contains GraphTrainer SimpleFSDP cases.
   NCCL_NVLS_ENABLE=0 python -m pytest \
     tests/unit_tests/cpu/models/common/test_dist_moe.py \
     tests/unit_tests/gpu/models/common/test_dist_moe.py \
     tests/unit_tests/gpu/quantization/test_mxfp8_fsdp.py \
-    --deselect 'tests/unit_tests/gpu/quantization/test_mxfp8_fsdp.py::test_mxfp8_fsdp_tensor_lifecycle[simple-fsdp]' \
-    --deselect tests/unit_tests/gpu/quantization/test_mxfp8_fsdp.py::test_simple_fsdp_disable_active_parametrization \
     -v
 
   CUDA_HOME=/usr/local/cuda TORCH_SHOW_CPP_STACKTRACES=1 \
@@ -285,6 +336,8 @@ set +e
   set -e
   case "${VALIDATION_SUITE}" in
     core) run_core_tests ;;
+    graph-trainer) run_graph_trainer_tests ;;
+    graph-trainer-h100) run_graph_trainer_h100_tests ;;
     h100) run_h100_tests ;;
     b200) run_b200_tests ;;
     torchft) run_torchft_tests ;;
