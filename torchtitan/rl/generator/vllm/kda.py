@@ -21,8 +21,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import LinearAttentionMetadata
+from torchtitan.models.common.attention import InnerAttention, LinearAttentionMetadata
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import chunk_kernel_options
 from torchtitan.models.common.attn_gym import (
@@ -71,7 +70,7 @@ def _replay_state_shapes(
     )
 
 
-class VLLMInnerKDA(Module, MambaBase):
+class VLLMInnerKDA(InnerAttention, MambaBase):
     """vLLM replacement for ``InnerKDA`` using paged recurrent state.
 
     vLLM owns allocation, routing, prefix copies, and the ``[slot, H, V, K]`` recurrent
@@ -80,7 +79,7 @@ class VLLMInnerKDA(Module, MambaBase):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         num_heads: int
         head_dim: int
         conv_kernel_size: int = 4

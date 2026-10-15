@@ -35,6 +35,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_b
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
+from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.observability.logging import warn_once
 from torchtitan.tools.utils import get_cuda_flash_attention_impl
@@ -297,7 +298,7 @@ class _VLLMAttention(Attention, Module):
     """vLLM attention that participates in the TorchTitan Module protocol."""
 
 
-class VLLMAttentionWrapper(Module):
+class VLLMAttentionWrapper(InnerAttention):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
@@ -320,7 +321,7 @@ class VLLMAttentionWrapper(Module):
     )
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         hidden_size: int
         num_heads: int
         num_kv_heads: int
@@ -329,6 +330,10 @@ class VLLMAttentionWrapper(Module):
         scale: float | None = None
         sliding_window_size: int | None = None
         """Causal sliding-window size (``None`` => full attention)."""
+
+        @property
+        def is_full_attention(self) -> bool:
+            return self.sliding_window_size is None
 
     def __init__(self, config: Config) -> None:
         super().__init__()

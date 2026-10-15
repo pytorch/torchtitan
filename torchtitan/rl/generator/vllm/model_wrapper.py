@@ -97,9 +97,9 @@ def _replace_vllm_layer_configs(model_config):
 
         elif isinstance(attention_cfg, GDN.Config):
             delta_net_cfg = attention_cfg
-            from torchtitan.rl.generator.vllm.gdn import VLLMInnerGatedDeltaNet
+            from torchtitan.rl.generator.vllm.gdn import VLLMInnerGDN
 
-            vllm_inner_gdn_cfg = VLLMInnerGatedDeltaNet.Config(
+            vllm_inner_gdn_cfg = VLLMInnerGDN.Config(
                 layer_idx=layer_idx,
                 num_k_heads=(
                     delta_net_cfg.in_proj_q.out_features // delta_net_cfg.key_head_dim
