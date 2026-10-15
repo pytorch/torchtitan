@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for `MonarchRDMAMicrobatch`, with Monarch's RDMA classes faked."""
+"""Unit tests for `MonarchRDMAMicrobatch`: with Monarch's RDMA classes faked, and one over real Monarch (TCP)."""
 
 import asyncio
 import dataclasses
@@ -12,6 +12,7 @@ import dataclasses
 import numpy as np
 import pytest
 import torch
+from monarch.actor import Actor, current_rank, endpoint, this_host
 from torch.utils import _pytree as pytree
 from torchtitan.rl.rollout.types import RolloutTurnID
 
@@ -82,7 +83,9 @@ def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
     microbatch = _microbatch(num_tokens=512)
 
     min_bytes = 1024
-    registered = MonarchRDMAMicrobatch.register(microbatch, min_bytes=min_bytes)
+    registered = MonarchRDMAMicrobatch.register(
+        microbatch, min_bytes=min_bytes, batch_index=0, dp_rank=0, microbatch_index=0
+    )
     read_microbatch = asyncio.run(registered.read())
 
     names = [field.name for field in dataclasses.fields(microbatch)]
@@ -115,17 +118,23 @@ def _build_batcher(rdma_min_tensor_bytes: int | None) -> Batcher:
     )
 
 
-def _training_sample_group(group_id: int) -> TrainingSampleGroup:
-    sample = TrainingSample(
-        min_policy_version=0,
-        max_policy_version=0,
-        rollout_id=RolloutTurnID(group_id=group_id, rollout_id=0, turn_id=0),
-        token_ids=np.arange(9),
-        loss_mask=np.array([False] + [True] * 8),
-        logprobs=np.zeros(9, dtype=np.float32),
-        advantage=np.ones(9, dtype=np.float32),
-    )
-    return TrainingSampleGroup(group_id=group_id, training_samples=[sample], metrics=[])
+def _training_sample_group(group_id: int, num_samples: int = 1) -> TrainingSampleGroup:
+    samples = [
+        TrainingSample(
+            min_policy_version=0,
+            max_policy_version=0,
+            rollout_id=RolloutTurnID(
+                group_id=group_id, rollout_id=rollout_id, turn_id=0
+            ),
+            # Distinct token ids per group and sample, so a swapped column shows.
+            token_ids=np.arange(9) + 1000 * group_id + 100 * rollout_id,
+            loss_mask=np.array([False] + [True] * 8),
+            logprobs=np.zeros(9, dtype=np.float32),
+            advantage=np.ones(9, dtype=np.float32),
+        )
+        for rollout_id in range(num_samples)
+    ]
+    return TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])
 
 
 def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> None:
@@ -167,3 +176,67 @@ def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> No
     ]
     assert buffers[0] and all(buffer.dropped for buffer in buffers[0])
     assert buffers[1] and not any(buffer.dropped for buffer in buffers[1])
+    assert [batch.microbatches[0][0].batch_index for batch in batches] == [0, 1]
+
+
+class _TrainerRank(Actor):
+    """Reads its DP column of a batch, as a trainer rank does."""
+
+    @endpoint
+    async def read_column(
+        self, rdma_microbatches: list[list[MonarchRDMAMicrobatch]]
+    ) -> list[TrainingMicrobatch]:
+        dp_rank = current_rank().rank
+        return [await row[dp_rank].read() for row in rdma_microbatches]
+
+
+def test_four_ranks_read_their_columns_exactly_across_released_batches(
+    monkeypatch,
+) -> None:
+    # Real Monarch RDMA over TCP (works on any CI host; the rank processes inherit the env var).
+    monkeypatch.setenv("MONARCH_RDMA_DISABLE_IBVERBS", "1")
+    batcher_kwargs = dict(
+        num_tokens_per_microbatch_per_dp_rank=64,
+        max_context_length=16,
+        num_prompts_per_train_step=1,
+        dp_degree=4,
+        pad_id=0,
+        temperature=1.0,
+    )
+    rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(**batcher_kwargs)
+    by_value_batcher = Batcher.Config().build(**batcher_kwargs)
+
+    async def run() -> None:
+        mesh = this_host().spawn_procs(per_host={"procs": 4})
+        try:
+            ranks = mesh.spawn("rank", _TrainerRank)
+            for batch_index in range(3):
+                group = _training_sample_group(batch_index, num_samples=8)
+                batch, _ = rdma_batcher.add_training_samples(
+                    training_sample_group=group
+                )
+                expected, _ = by_value_batcher.add_training_samples(
+                    training_sample_group=group
+                )
+                # All 4 ranks read at once, while the previous batch is still registered.
+                columns = list(
+                    (await ranks.read_column.call(batch.microbatches)).values()
+                )
+                for dp_rank, column in enumerate(columns):
+                    torch.testing.assert_close(
+                        [dataclasses.asdict(microbatch) for microbatch in column],
+                        [
+                            dataclasses.asdict(row[dp_rank])
+                            for row in expected.microbatches
+                        ],
+                        rtol=0,
+                        atol=0,
+                    )
+                if batch_index > 0:
+                    # Free the previous batch; the next one registers fresh buffers.
+                    await rdma_batcher.maybe_release_oldest_batch()
+            await rdma_batcher.maybe_release_oldest_batch()
+        finally:
+            await mesh.stop()
+
+    asyncio.run(run())

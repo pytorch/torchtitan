@@ -360,6 +360,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         trainer.engine = engine
         trainer.config = Trainer.Config(model=MagicMock())
         trainer.dp_rank = 1
+        trainer._num_rdma_batches_read = 0
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
                 key: float(value.item())
@@ -385,15 +386,22 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         # This rank (dp_rank 1) reads only its own column.
         if rdma:
             other_rank = MagicMock(spec=MonarchRDMAMicrobatch)
-            own = MagicMock(
-                spec=MonarchRDMAMicrobatch, read=AsyncMock(return_value=batch)
-            )
+            own = [
+                MagicMock(
+                    spec=MonarchRDMAMicrobatch,
+                    read=AsyncMock(return_value=batch),
+                    batch_index=0,
+                    dp_rank=1,
+                    microbatch_index=microbatch_index,
+                )
+                for microbatch_index in range(2)
+            ]
         else:
-            other_rank, own = MagicMock(spec=TrainingMicrobatch), batch
+            other_rank, own = MagicMock(spec=TrainingMicrobatch), [batch, batch]
 
         result = await Trainer.forward_backward(
             trainer,
-            [[other_rank, own], [other_rank, own]],
+            [[other_rank, own[0]], [other_rank, own[1]]],
             torch.tensor([3]),
             torch.tensor([2]),
         )
@@ -406,12 +414,42 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         assert trainer._step_num_tokens_per_dp_rank == 2
         if rdma:
             other_rank.read.assert_not_called()
+            assert trainer._num_rdma_batches_read == 1
             # The read time is reported only when there was a read.
             assert result.pop("timing/trainer/read_microbatches/max") >= 0
         assert trainer._reduce_forward_backward_metrics.call_count == (3 if rdma else 2)
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("batch_index", "dp_rank", "microbatch_index"),
+    [(1, 1, 0), (0, 0, 0), (0, 1, 1)],
+    ids=["another_batch", "another_rank", "out_of_order"],
+)
+def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
+    batch_index: int, dp_rank: int, microbatch_index: int
+) -> None:
+    trainer = object.__new__(Trainer)
+    trainer.engine = SimpleNamespace(num_completed_steps=0)
+    trainer.config = Trainer.Config(model=MagicMock())
+    trainer.dp_rank = 1
+    trainer._num_rdma_batches_read = 0
+    wrong = MagicMock(
+        spec=MonarchRDMAMicrobatch,
+        batch_index=batch_index,
+        dp_rank=dp_rank,
+        microbatch_index=microbatch_index,
+    )
+
+    with pytest.raises(ValueError, match=r"expected \(0, 1, 0\)"):
+        asyncio.run(
+            Trainer.forward_backward(
+                trainer, [[MagicMock(), wrong]], torch.tensor([1]), torch.tensor([1])
+            )
+        )
+    wrong.read.assert_not_called()
 
 
 def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:

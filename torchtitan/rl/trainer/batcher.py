@@ -249,6 +249,7 @@ class Batcher(Configurable):
         # Batches trainer ranks may still read, oldest first. Each buffer keeps its tensor's
         # storage alive until drop().
         self._batches_being_read: deque[list[list[MonarchRDMAMicrobatch]]] = deque()
+        self._num_batches_registered = 0
 
     def _record_untrainable_groups(self, *, group_is_trainable: bool) -> None:
         """Fail when consecutive groups cannot contribute one training sample.
@@ -355,12 +356,17 @@ class Batcher(Configurable):
         rdma_microbatches = [
             [
                 MonarchRDMAMicrobatch.register(
-                    microbatch, min_bytes=self._rdma_min_tensor_bytes
+                    microbatch,
+                    min_bytes=self._rdma_min_tensor_bytes,
+                    batch_index=self._num_batches_registered,
+                    dp_rank=dp_rank,
+                    microbatch_index=microbatch_index,
                 )
-                for microbatch in row
+                for dp_rank, microbatch in enumerate(row)
             ]
-            for row in batch.microbatches
+            for microbatch_index, row in enumerate(batch.microbatches)
         ]
+        self._num_batches_registered += 1
         self._batches_being_read.append(rdma_microbatches)
         return replace(batch, microbatches=rdma_microbatches), group_is_trainable
 
