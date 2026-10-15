@@ -79,6 +79,8 @@ def add_extra_vllm_engine_args(
         "max_num_batched_tokens": "max_num_batched_tokens",
         "compilation_config": "cuda_graph",
         "seed": "debug.seed",
+        # vLLM builds the same connector from it, without `CPUKVOffload.attach`.
+        "kv_offloading_size": "session_kv_holder.cpu_kv_offload",
     }
     owned_keys = sorted(
         extra_vllm_engine_args.keys()
@@ -874,8 +876,7 @@ class VLLMGenerator(Configurable):
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
         session_kv_holder: VLLMSessionKVHolder.Config | None = None
-        """Keep each multi-turn session's cached prefix on GPU between its turns (see
-        `VLLMSessionKVHolder`). None: off."""
+        """Keep each multi-turn session's KV between turns (see `VLLMSessionKVHolder`). None: off."""
 
         def __post_init__(self):
             if (
@@ -883,8 +884,9 @@ class VLLMGenerator(Configurable):
                 and self.reset_kv_cache_on_model_state_dict_load
             ):
                 raise ValueError(
-                    "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False: vLLM "
-                    "cannot reset the prefix cache while blocks are held"
+                    "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False (so no "
+                    "batch_invariant): vLLM cannot reset the prefix cache while blocks are held or "
+                    "a request waits on a CPU load"
                 )
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -1054,6 +1056,11 @@ class VLLMGenerator(Configurable):
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
             engine_kwargs["seed"] = config.debug.seed
+        # Each rank tracks the same sessions in its scheduler; only the engine thread touches them.
+        self._session_kv_holder: VLLMSessionKVHolder | None = None
+        if config.session_kv_holder is not None:
+            self._session_kv_holder = config.session_kv_holder.build()
+            engine_kwargs.update(self._session_kv_holder.engine_kwargs())
         add_extra_vllm_engine_args(engine_kwargs, config.extra_vllm_engine_args)
         engine_args = EngineArgs(**engine_kwargs)
 
@@ -1131,6 +1138,8 @@ class VLLMGenerator(Configurable):
                 f"({self._dp_rank}) != vLLM data_parallel_rank "
                 f"({vllm_parallel_config.data_parallel_rank})"
             )
+        if self._session_kv_holder is not None:
+            self._session_kv_holder.attach(self._engine)
 
         self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the
@@ -1162,13 +1171,6 @@ class VLLMGenerator(Configurable):
 
         # Engine-loop queue (rank 0): messages the endpoints put; the loop takes them off to decide.
         self._engine_loop_queue = EngineLoopQueue(self._engine_event_loop)
-
-        # Every rank holds the same blocks in its own scheduler; only the engine thread touches them.
-        self._session_kv_holder: VLLMSessionKVHolder | None = None
-        if config.session_kv_holder is not None:
-            self._session_kv_holder = config.session_kv_holder.build(
-                scheduler=self._engine.engine_core.engine_core.scheduler
-            )
 
         # `_engine_loop` running on the engine thread's event loop, as a future any thread can await;
         # None until start_engine_loop starts it.
@@ -1220,7 +1222,11 @@ class VLLMGenerator(Configurable):
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
-        if self._session_kv_holder is not None and self._rank == 0:
+        if (
+            self._session_kv_holder is not None
+            and self.config.session_kv_holder.hold_gpu_blocks
+            and self._rank == 0
+        ):
             logger.info(
                 "Session KV at step %d: %d sessions held, %d evicted so far",
                 step,
@@ -1441,7 +1447,7 @@ class VLLMGenerator(Configurable):
                             # prompts); the high-level entry stays resilient to vLLM internals vs
                             # vllm.inputs.tokens_input.
                             [engine_input] = self._engine.renderer.render_cmpl([prompt])
-                            # vLLM appends a random suffix to the id; the scheduler knows only that one.
+                            # vLLM appends a suffix to the id; the scheduler knows only that one.
                             internal_request_id = self._engine.add_request(
                                 request_id=request.request_id,
                                 prompt=engine_input,
