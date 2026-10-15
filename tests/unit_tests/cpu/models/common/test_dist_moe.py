@@ -240,6 +240,7 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
+            preprocess_microbatch_groups_lazily=False,
         ),
         parallelism=SimpleNamespace(
             fsdp_defer_gradient_reduction=False,

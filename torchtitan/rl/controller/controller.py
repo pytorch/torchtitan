@@ -356,6 +356,16 @@ class Controller(Configurable):
                     "to control optimizer-step boundaries.",
                     stacklevel=2,
                 )
+            if (
+                self.async_loop.batcher.rdma_min_tensor_bytes is not None
+                and not self.trainer.training.preprocess_microbatch_groups_lazily
+            ):
+                warnings.warn(
+                    "async_loop.batcher.rdma_min_tensor_bytes is set without "
+                    "trainer.training.preprocess_microbatch_groups_lazily=True: trainer "
+                    "ranks read all microbatches before forward/backward, with no overlap.",
+                    stacklevel=2,
+                )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
                 max_context_length = self.trainer.training.max_context_length
@@ -1178,6 +1188,8 @@ class Controller(Configurable):
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
+                    # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over TCP).
+                    # Sending the MonarchRDMAMicrobatches during the previous optim_step would hide it.
                     try:
                         fwd_bwd_metrics = self._get_rank_0_value(
                             await self.trainer.forward_backward.call(

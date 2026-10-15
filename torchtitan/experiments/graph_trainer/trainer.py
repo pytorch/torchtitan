@@ -373,6 +373,11 @@ class GraphTrainer(Trainer):
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."
                 )
+            if self.training.preprocess_microbatch_groups_lazily:
+                raise ValueError(
+                    "training.preprocess_microbatch_groups_lazily is not supported "
+                    "with GraphTrainer."
+                )
             # to_graph_trainer_config and the flavor builders turn these off;
             # this catches a transform applied afterwards that builds them with
             # the eager default.

@@ -4,10 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for `MonarchRDMAMicrobatch`: with Monarch's RDMA classes faked, and one over real Monarch (TCP)."""
+"""Unit tests for `MonarchRDMAMicrobatch` and `RDMAMicrobatchPrefetcher`, with Monarch's RDMA
+classes faked except in one test over real Monarch (TCP)."""
 
 import asyncio
+import contextvars
 import dataclasses
+import threading
+import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -18,7 +23,12 @@ from torchtitan.rl.rollout.types import RolloutTurnID
 
 from torchtitan.rl.trainer import rdma_microbatch
 from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
-from torchtitan.rl.trainer.rdma_microbatch import _TensorRef, MonarchRDMAMicrobatch
+from torchtitan.rl.trainer.rdma_microbatch import (
+    _NUM_MICROBATCHES_READ_AHEAD,
+    _TensorRef,
+    MonarchRDMAMicrobatch,
+    RDMAMicrobatchPrefetcher,
+)
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
     TrainingSampleGroup,
@@ -177,6 +187,73 @@ def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> No
     assert buffers[0] and all(buffer.dropped for buffer in buffers[0])
     assert buffers[1] and not any(buffer.dropped for buffer in buffers[1])
     assert [batch.microbatches[0][0].batch_index for batch in batches] == [0, 1]
+
+
+def _fake_rdma_microbatch(index: int, started: list[int]) -> SimpleNamespace:
+    """Stands in for a `MonarchRDMAMicrobatch`: `read()` records its index."""
+
+    async def read() -> int:
+        started.append(index)
+        return index
+
+    return SimpleNamespace(read=read)
+
+
+def test_prefetcher_yields_in_order_and_reads_two_ahead() -> None:
+    started: list[int] = []
+    prefetcher = RDMAMicrobatchPrefetcher(
+        [_fake_rdma_microbatch(index, started) for index in range(6)]
+    )
+
+    assert len(prefetcher) == 6
+    for [index] in prefetcher:
+        # Wait for the expected read, then 20 ms more, so a read too far ahead shows.
+        expected = min(index + _NUM_MICROBATCHES_READ_AHEAD, 5)
+        deadline = time.monotonic() + 5
+        while max(started) < expected and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.02)
+        assert max(started) == expected
+    assert started == list(range(6))
+
+
+def test_prefetcher_read_thread_sees_caller_context() -> None:
+    step = contextvars.ContextVar("step")
+    step.set(7)
+
+    async def read() -> int:
+        return step.get()
+
+    prefetcher = RDMAMicrobatchPrefetcher([SimpleNamespace(read=read)])
+
+    assert list(prefetcher) == [[7]]
+
+
+def test_prefetcher_skips_queued_reads_when_training_stops() -> None:
+    started: list[int] = []
+    read_1_started, read_1_done = threading.Event(), threading.Event()
+
+    async def read_1() -> int:
+        read_1_started.set()
+        await asyncio.sleep(0.2)
+        read_1_done.set()
+        return 1
+
+    prefetcher = RDMAMicrobatchPrefetcher(
+        [
+            _fake_rdma_microbatch(0, started),
+            SimpleNamespace(read=read_1),
+            _fake_rdma_microbatch(2, started),
+        ]
+    )
+    iterator = iter(prefetcher)
+
+    assert next(iterator) == [0]
+    assert read_1_started.wait(timeout=5)
+    # Read 1 is running and read 2 is queued: closing waits for read 1 and cancels read 2.
+    iterator.close()
+
+    assert read_1_done.is_set() and 2 not in started
 
 
 class _TrainerRank(Actor):

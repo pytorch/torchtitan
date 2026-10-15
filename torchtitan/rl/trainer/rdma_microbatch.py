@@ -11,15 +11,21 @@ that registers them keeps the large tensors, and each trainer rank reads its own
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import ctypes
 import dataclasses
 import logging
+import time
+from collections import deque
+from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import torch
 from monarch.rdma import RDMAAction, RDMABuffer
 from torch.utils import _pytree as pytree
 
+from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 
 logger = logging.getLogger(__name__)
@@ -81,6 +87,8 @@ class MonarchRDMAMicrobatch:
         action = RDMAAction()
 
         def queue_read(tensor_ref: _TensorRef) -> torch.Tensor:
+            # TODO: allocate pinned tensors here. With max_num_documents also set, that removed the
+            # ~4 ms per microbatch in `TrainingEngine._forward_backward_body`'s TODO; pinned alone did not.
             tensor = torch.empty(tensor_ref.shape, dtype=tensor_ref.dtype)
             action.read_remote(tensor.view(-1).view(torch.uint8), tensor_ref.buffer)
             return tensor
@@ -115,6 +123,67 @@ class _TensorRef:
             shape=tensor.shape,
             dtype=tensor.dtype,
         )
+
+
+# Reads queued behind the one the engine waits on. A rank holds at most 4 microbatches on
+# the host: these 2, the one waited on, and the previous one, still in the engine's loop.
+_NUM_MICROBATCHES_READ_AHEAD = 2
+
+
+class RDMAMicrobatchPrefetcher:
+    """Yields this rank's microbatches in order, reading the next ones on a background thread.
+
+    Implements only what `TrainingEngine.forward_backward` uses: `len()` and one in-order pass.
+
+    Example:
+        prefetcher = RDMAMicrobatchPrefetcher([rdma_microbatch_0, ..., rdma_microbatch_3])
+        len(prefetcher)  # 4
+        for [microbatch] in prefetcher:
+            train(microbatch)
+
+        read thread:  read 0 | read 1, read 2 | read 3  |
+        main thread:  wait   | train 0        | train 1 | train 2 | train 3
+    """
+
+    def __init__(self, rdma_microbatches: list[MonarchRDMAMicrobatch]) -> None:
+        self._rdma_microbatches = rdma_microbatches
+        # This rank's total read time, hidden or not; final once the pass ends.
+        self.read_s = 0.0
+
+    def __len__(self) -> int:
+        return len(self._rdma_microbatches)
+
+    def __iter__(self) -> Iterator[list[TrainingMicrobatch]]:
+        def wait_for_microbatch(read: Future[TrainingMicrobatch]) -> TrainingMicrobatch:
+            # The span is the read time that training did not hide.
+            with sl.log_trace_span("wait_for_microbatch"):
+                return read.result()
+
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="microbatch_read")
+        reads: deque[Future[TrainingMicrobatch]] = deque()
+        try:
+            for rdma_microbatch in self._rdma_microbatches:
+                # Copy the actor's context: in a bare thread Monarch would start a second client.
+                # Create the coroutine there too, so a cancelled read doesn't leave one unawaited.
+                reads.append(
+                    pool.submit(
+                        contextvars.copy_context().run, self._read, rdma_microbatch
+                    )
+                )
+                if len(reads) > _NUM_MICROBATCHES_READ_AHEAD:
+                    yield [wait_for_microbatch(reads.popleft())]
+            while reads:
+                yield [wait_for_microbatch(reads.popleft())]
+        finally:
+            # The pass ended, or the generator was closed or collected (e.g. a failed step). Cancel the queued
+            # reads: with the batcher gone, each would wait out the 60 s RDMA timeout. The running read finishes.
+            pool.shutdown(cancel_futures=True)
+
+    def _read(self, rdma_microbatch: MonarchRDMAMicrobatch) -> TrainingMicrobatch:
+        start = time.perf_counter()
+        microbatch = asyncio.run(rdma_microbatch.read())
+        self.read_s += time.perf_counter() - start
+        return microbatch
 
 
 # The CUDA driver's `CU_LIMIT_STACK_SIZE` (cuda.h).

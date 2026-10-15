@@ -8,7 +8,7 @@ import asyncio
 import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -23,7 +23,10 @@ from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.controller_state import MirroredState
-from torchtitan.rl.trainer.rdma_microbatch import MonarchRDMAMicrobatch
+from torchtitan.rl.trainer.rdma_microbatch import (
+    MonarchRDMAMicrobatch,
+    RDMAMicrobatchPrefetcher,
+)
 from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
@@ -254,7 +257,9 @@ def test_forward_backward_uses_global_token_count() -> None:
         garbage_collector=SimpleNamespace(run=MagicMock()),
         optim=SimpleNamespace(zero_grad=MagicMock()),
         config=SimpleNamespace(
-            training=SimpleNamespace(disable_cuda_graphs=True),
+            training=SimpleNamespace(
+                disable_cuda_graphs=True, preprocess_microbatch_groups_lazily=False
+            ),
             parallelism=SimpleNamespace(
                 fsdp_defer_gradient_reduction=False,
                 fsdp_reshard_after_forward="default",
@@ -409,11 +414,17 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         )
 
         engine.forward_backward.assert_called_once_with(
-            microbatch_groups=[[batch], [batch]],
+            microbatch_groups=ANY,
             global_loss_token_counts=torch.tensor([3]),
             global_routing_token_counts=torch.tensor([2]),
         )
-        assert trainer._step_num_tokens_per_dp_rank == 2
+        # MonarchRDMAMicrobatches are read through the prefetcher; by value, the column is passed as is.
+        groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
+        assert isinstance(groups, RDMAMicrobatchPrefetcher) == rdma
+        assert list(groups) == [[batch], [batch]]
+        assert trainer._step_num_tokens_per_dp_rank == (
+            2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
+        )
         if rdma:
             other_rank.read.assert_not_called()
             assert trainer._num_rdma_batches_read == 1
