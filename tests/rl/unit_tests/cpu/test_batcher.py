@@ -47,7 +47,7 @@ def _make_samples(lengths: list[int]) -> list[TrainingSample]:
 
 
 def test_padding_workload_matches_existing_full_length_segments() -> None:
-    batcher = Batcher.Config(max_num_documents=20).build(
+    batcher = Batcher.Config(max_num_documents=20, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=60,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -71,7 +71,7 @@ def test_padding_workload_matches_existing_full_length_segments() -> None:
 
 
 def test_lpt_uses_padding_workload_for_full_length_documents() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=48,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -96,7 +96,7 @@ def test_lpt_uses_padding_workload_for_full_length_documents() -> None:
 
 
 def test_lpt_does_not_leave_a_full_length_document_in_an_expensive_bin() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=20,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -116,7 +116,7 @@ def test_lpt_does_not_leave_a_full_length_document_in_an_expensive_bin() -> None
 
 
 def test_lpt_rebalances_ffd_bins_with_document_limit() -> None:
-    batcher = Batcher.Config(max_num_documents=3).build(
+    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -147,7 +147,7 @@ def test_lpt_rebalances_ffd_bins_with_document_limit() -> None:
 
 
 def test_lpt_falls_back_when_ffd_fits_but_lpt_cannot() -> None:
-    batcher = Batcher.Config(max_num_documents=3).build(
+    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=6,
         max_context_length=3,
         num_prompts_per_train_step=1,
@@ -172,7 +172,7 @@ def test_lpt_falls_back_when_ffd_fits_but_lpt_cannot() -> None:
 
 
 def test_three_pp_microbatches_balance_rank_costs_within_step() -> None:
-    batcher = Batcher.Config(max_num_documents=1).build(
+    batcher = Batcher.Config(max_num_documents=1, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -207,6 +207,7 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
         batcher = Batcher.Config(
             max_num_documents=max_num_documents,
             per_sample_pad_multiple=pad_multiple,
+            rdma_min_tensor_bytes=None,
         ).build(
             num_tokens_per_microbatch_per_dp_rank=num_rows * seq_len,
             max_context_length=seq_len,
@@ -253,7 +254,9 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
     samples[0].logprobs = np.array([0, -1, -2, -np.inf, -4, -5], dtype=np.float64)
     samples[0].advantage = np.arange(6, dtype=np.float32)
     samples[0].loss_mask[1] = False
-    batcher = Batcher.Config(per_sample_pad_multiple=pad_multiple).build(
+    batcher = Batcher.Config(
+        per_sample_pad_multiple=pad_multiple, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=24,
         max_context_length=24,
         num_prompts_per_train_step=1,
@@ -291,7 +294,7 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
 
 
 def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -307,7 +310,7 @@ def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
 
 
 def test_microbatch_moves_loss_kwargs_with_the_model_inputs() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -384,7 +387,9 @@ def _image_sample(
 
 
 def test_microbatch_encodes_each_distinct_image_once(image_paths) -> None:
-    batcher = Batcher.Config(build_mrope_positions=True).build(
+    batcher = Batcher.Config(
+        build_mrope_positions=True, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=64,
         max_context_length=32,
         num_prompts_per_train_step=1,
@@ -457,7 +462,9 @@ def test_microbatch_encodes_each_distinct_image_once(image_paths) -> None:
 def _image_batcher(
     num_tokens: int = 16, *, build_mrope_positions: bool = True
 ) -> Batcher:
-    return Batcher.Config(build_mrope_positions=build_mrope_positions).build(
+    return Batcher.Config(
+        build_mrope_positions=build_mrope_positions, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=num_tokens,
         max_context_length=num_tokens,
         num_prompts_per_train_step=1,
@@ -521,7 +528,7 @@ def test_placeholder_count_must_match_the_grid(image_paths) -> None:
 
 def test_packing_keeps_samples_of_an_image_together(image_paths) -> None:
     # Two groups of three samples, one image per group: each group fits one microbatch.
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=64,
         max_context_length=64,
         num_prompts_per_train_step=1,
@@ -549,7 +556,7 @@ def test_packing_keeps_samples_of_an_image_together(image_paths) -> None:
 
 def test_token_budget_need_not_be_a_multiple_of_the_context() -> None:
     """A 2.5-context budget packs whole samples; padding positions wrap at the context."""
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=25,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -577,7 +584,7 @@ def test_token_budget_need_not_be_a_multiple_of_the_context() -> None:
 
 def test_token_budget_must_fit_a_full_context_sample() -> None:
     with pytest.raises(ValueError, match="must be at least max_context_length"):
-        Batcher.Config().build(
+        Batcher.Config(rdma_min_tensor_bytes=None).build(
             num_tokens_per_microbatch_per_dp_rank=9,
             max_context_length=10,
             num_prompts_per_train_step=1,
