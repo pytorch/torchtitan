@@ -87,13 +87,13 @@ class OffsetRMSNorm(Module):
         self.weight = nn.Parameter(torch.empty(config.dim))
 
     @local_compile("offset_rmsnorm", batch_invariant=False, recompile_limit=16)
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Upcast to float32 for numerical stability in pow/rsqrt
-        input_dtype = x.dtype
-        x = x.float()
-        variance = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        return ((1.0 + self.weight.float()) * x).to(input_dtype)
+        input_dtype = input.dtype
+        input = input.float()
+        variance = input.pow(2).mean(-1, keepdim=True)
+        input = input * torch.rsqrt(variance + self.eps)
+        return ((1.0 + self.weight.float()) * input).to(input_dtype)
 
 
 class Qwen35Attention(Attention):
