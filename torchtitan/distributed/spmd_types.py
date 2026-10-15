@@ -400,7 +400,7 @@ def spmd_redistribute_per_axis(
     src: spmd.SpmdType,
     dst: spmd.SpmdType,
     *,
-    async_op: bool = False,
+    async_op: bool,
 ) -> torch.Tensor:
     """Redistribute a local tensor along axes whose SPMD type changes.
 
@@ -408,7 +408,8 @@ def spmd_redistribute_per_axis(
     for each axis where src and dst differ. Each call is a single collective
     (all-reduce, reduce-scatter, or all-gather) on that axis's process group.
 
-    With ``async_op=True`` the forward collectives return without waiting; the
+    ``async_op`` is required so callers choose explicitly. With
+    ``async_op=True`` the forward collectives return without waiting; the
     first op that consumes the result waits on it (a stream wait), so the
     collective can overlap with compute issued in between. Backward
     collectives still wait.

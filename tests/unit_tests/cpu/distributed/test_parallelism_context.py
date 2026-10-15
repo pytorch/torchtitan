@@ -478,6 +478,7 @@ class TestSpmdLayout(DTensorTestBase):
                 mesh,
                 src,
                 dst,
+                async_op=False,
             )
 
         self.assertEqual(comm_mode.get_total_counts(), 1)
@@ -495,7 +496,7 @@ class TestSpmdLayout(DTensorTestBase):
         src = dense_sequence_parallel_placement()
         dst = dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
 
-        waited = spmd_redistribute_per_axis(x, mesh, src, dst)
+        waited = spmd_redistribute_per_axis(x, mesh, src, dst, async_op=False)
         deferred = spmd_redistribute_per_axis(x, mesh, src, dst, async_op=True)
 
         self.assertNotIsInstance(waited, funcol.AsyncCollectiveTensor)
@@ -522,7 +523,7 @@ class TestSpmdLayout(DTensorTestBase):
 
         comm_mode = CommDebugMode()
         with comm_mode:
-            result = spmd_redistribute_per_axis(x, mesh, src, dst)
+            result = spmd_redistribute_per_axis(x, mesh, src, dst, async_op=False)
 
         # convert(R, S(0)) is a local chunk, not a collective.
         self.assertEqual(comm_mode.get_total_counts(), 0)

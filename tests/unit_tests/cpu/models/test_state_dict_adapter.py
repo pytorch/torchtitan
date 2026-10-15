@@ -254,7 +254,7 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         )
 
         hf_state_dict = adapter.to_hf(
-            {"layers.1.moe.routed_experts.w13.weight": grouped_expert_weight}
+            {"layers.1.feed_forward.routed_experts.w13.weight": grouped_expert_weight}
         )
 
         expected_keys = {
@@ -285,7 +285,7 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         local_weight = torch.arange(8 * 2 * 2 * 3, dtype=torch.float32).reshape(
             8, 2, 2, 3
         )
-        key = "mtp_layers.0.moe.routed_experts.w13.weight"
+        key = "mtp_layers.0.feed_forward.routed_experts.w13.weight"
         for placement in (Shard(0), Shard(2)):
             with self.subTest(placement=placement):
                 weight = DTensor.from_local(
@@ -376,8 +376,8 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                 model.init_states()
                 mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("ep",))
                 for key, value in model.state_dict().items():
-                    if ".moe.routed_experts.w13." in key or key.endswith(
-                        ".moe.routed_experts.w2.weight"
+                    if ".feed_forward.routed_experts.w13." in key or key.endswith(
+                        ".feed_forward.routed_experts.w2.weight"
                     ):
                         module_path, name = key.rsplit(".", 1)
                         weight = DTensor.from_local(
@@ -412,18 +412,18 @@ class GptOssStateDictAdapterTest(unittest.TestCase):
         # Keep the real four-layer model structure while making expert tensors
         # small enough for a CPU unit test.
         for layer_config in config.layers:
-            assert layer_config.moe is not None
-            layer_config.moe.routed_experts.w13.out_features = 16
-            layer_config.moe.routed_experts.w2.in_features = 16
+            assert layer_config.feed_forward is not None
+            layer_config.feed_forward.routed_experts.w13.out_features = 16
+            layer_config.feed_forward.routed_experts.w2.in_features = 16
             # The debug flavor uses the batch-wise aux loss without expert
             # bias; enable the bias to cover its HF round trip.
-            layer_config.moe.load_balance_coeff = 1e-3
+            layer_config.feed_forward.load_balance_coeff = 1e-3
 
         model = config.build()
         model.init_states()
         state_dict = model.state_dict()
         expert_bias_keys = {
-            key for key in state_dict if key.endswith(".moe.expert_bias_E")
+            key for key in state_dict if key.endswith(".feed_forward.expert_bias_E")
         }
         self.assertEqual(len(expert_bias_keys), len(config.layers))
         for key in expert_bias_keys:

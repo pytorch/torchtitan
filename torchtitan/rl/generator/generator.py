@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
@@ -48,6 +49,7 @@ from torchtitan.rl.generator.vllm.registry import (
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
 )
+from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
@@ -872,7 +874,19 @@ class VLLMGenerator(Configurable):
         vllm_stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
+        session_kv_holder: VLLMSessionKVHolder.Config | None = None
+        """Keep each multi-turn session's cached prefix on GPU between its turns (see
+        `VLLMSessionKVHolder`). None: off."""
+
         def __post_init__(self):
+            if (
+                self.session_kv_holder is not None
+                and self.reset_kv_cache_on_model_state_dict_load
+            ):
+                raise ValueError(
+                    "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False: vLLM "
+                    "cannot reset the prefix cache while blocks are held"
+                )
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
             # data_parallel_degree * tensor_parallel_degree (or 1 to disable EP).
@@ -945,7 +959,9 @@ class VLLMGenerator(Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        attention_backend = model_config.first_base_attention_backend
+        attention = model_config.first_full_attention
+        assert attention is not None, "No full attention layer found in the model spec."
+        attention_backend = attention.inner_attention
         assert isinstance(
             attention_backend,
             (VarlenInnerAttention.Config, FlexInnerAttention.Config),
@@ -1014,9 +1030,10 @@ class VLLMGenerator(Configurable):
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
-        # Continuous batching requires FCFS scheduling: admission order must equal the
-        # broadcast order on every rank
-        engine_kwargs["scheduling_policy"] = "fcfs"
+        # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
+        # (-1 for all validation), so older groups have higher priority (see its docstring).
+        # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.
+        engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.
         # - 0 (vLLM default since v0.29): only the replay boundary (the last block
@@ -1150,6 +1167,13 @@ class VLLMGenerator(Configurable):
         # Engine-loop queue (rank 0): messages the endpoints put; the loop takes them off to decide.
         self._engine_loop_queue = EngineLoopQueue(self._engine_event_loop)
 
+        # Every rank holds the same blocks in its own scheduler; only the engine thread touches them.
+        self._session_kv_holder: VLLMSessionKVHolder | None = None
+        if config.session_kv_holder is not None:
+            self._session_kv_holder = config.session_kv_holder.build(
+                scheduler=self._engine.engine_core.engine_core.scheduler
+            )
+
         # `_engine_loop` running on the engine thread's event loop, as a future any thread can await;
         # None until start_engine_loop starts it.
         self._engine_loop_future: concurrent.futures.Future[None] | None = None
@@ -1200,6 +1224,13 @@ class VLLMGenerator(Configurable):
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
+        if self._session_kv_holder is not None and self._rank == 0:
+            logger.info(
+                "Session KV at step %d: %d sessions held, %d evicted so far",
+                step,
+                self._session_kv_holder.num_sessions,
+                self._session_kv_holder.num_evicted,
+            )
 
     async def start_engine_loop(self) -> None:
         """Start the background engine loop on every rank (one-time, idempotent)."""
@@ -1256,7 +1287,8 @@ class VLLMGenerator(Configurable):
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
             group_id: Rollout group id. Requests of one group share a prefix cache
-                salt; `release_groups` drops it.
+                salt; `release_groups` drops it. Also sets the vLLM priority; see
+                `EngineRequest.group_id`.
             routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
@@ -1292,6 +1324,7 @@ class VLLMGenerator(Configurable):
                     sampling=sampling,
                     group_id=group_id,
                     routing_session_id=routing_session_id,
+                    arrival_time=time.time(),
                 ),
                 metrics_prefix=metrics_prefix,
                 reply=reply,
@@ -1365,6 +1398,11 @@ class VLLMGenerator(Configurable):
                         )
                     return
 
+                if self._session_kv_holder is not None:
+                    self._session_kv_holder.release(
+                        decision.released_session_ids, decision.released_group_ids
+                    )
+
                 if decision.action is LoopAction.LOAD_MODEL_STATE_DICT:
                     await self._load_model_state_dict(decision.load_version)
                     # One load serves every load this decision coalesced (only rank 0 holds any).
@@ -1384,7 +1422,7 @@ class VLLMGenerator(Configurable):
                         )
                     # Admit only this rank's DP replica slice. TP ranks in the same
                     # replica compute the same _dp_rank, so they add the identical
-                    # set in the same FCFS order.
+                    # set in the same order.
                     local_requests = decision.requests_per_dp_rank[
                         self._request_dispatcher._dp_rank
                     ]
@@ -1409,11 +1447,20 @@ class VLLMGenerator(Configurable):
                             # prompts); the high-level entry stays resilient to vLLM internals vs
                             # vllm.inputs.tokens_input.
                             [engine_input] = self._engine.renderer.render_cmpl([prompt])
-                            self._engine.add_request(
+                            # vLLM appends a random suffix to the id; the scheduler knows only that one.
+                            internal_request_id = self._engine.add_request(
                                 request_id=request.request_id,
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
+                                arrival_time=request.arrival_time,
+                                priority=max(request.group_id, -1),
                             )
+                            if self._session_kv_holder is not None:
+                                self._session_kv_holder.track(
+                                    internal_request_id,
+                                    request.routing_session_id,
+                                    request.group_id,
+                                )
                         except (ValueError, VLLMClientError) as exc:
                             rejected_requests.append((request.request_id, exc))
                     if rejected_requests:
@@ -1430,6 +1477,8 @@ class VLLMGenerator(Configurable):
                             break
                         with torch.no_grad():
                             request_outputs = self._engine.step()
+                        if self._session_kv_holder is not None:
+                            self._session_kv_holder.after_step()
                         self._request_dispatcher.process_finished_requests(
                             request_outputs, self.policy_version
                         )
@@ -1453,7 +1502,7 @@ class VLLMGenerator(Configurable):
         await asyncio.sleep(0)
         while not self._engine_loop_queue.empty():
             message = self._engine_loop_queue.get_nowait()
-            if isinstance(message, CloseMessage):
+            if isinstance(message, (CloseMessage, SessionReleaseMessage)):
                 continue
             if message.reply.set_running_or_notify_cancel():
                 message.reply.set_exception(exc)
@@ -1489,10 +1538,16 @@ class VLLMGenerator(Configurable):
         while not self._engine_loop_queue.empty():
             messages.append(self._engine_loop_queue.get_nowait())
 
+        released_session_ids: list[str] = []
+        released_group_ids: list[int] = []
         for message in messages:
             if isinstance(message, CloseMessage):
                 # Drops nothing: the queue rejects puts once closed, so the `CloseMessage` is the last message.
                 return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
+            if isinstance(message, SessionReleaseMessage):
+                released_session_ids.extend(message.session_ids)
+                released_group_ids.extend(message.group_ids)
+                continue
             # Skip a call its caller already cancelled; once running, the reply ignores cancellation, so only
             # the engine loop resolves it.
             if not message.reply.set_running_or_notify_cancel():
@@ -1511,29 +1566,34 @@ class VLLMGenerator(Configurable):
         # together are coalesced into one, at the highest version: every load reads the latest push from
         # one TorchStore key, so the weights read are at least as new as any version requested.
         if pending_load_messages:
-            return LoopDecision(
+            decision = LoopDecision(
                 action=LoopAction.LOAD_MODEL_STATE_DICT,
                 requests_per_dp_rank=[],
                 load_version=max(load.version for load in pending_load_messages),
             )
-
-        # `LoopAction.STEP`: admit whatever is pending (may be empty -> just keep stepping in-flight work).
-        for request in pending_engine_requests:
-            if self.config.reset_kv_cache_on_model_state_dict_load:
-                # Each load resets all KV, so requests need no pin or salt.
-                request.min_policy_version = self.policy_version
-            else:
-                request.min_policy_version = self._group_min_policy_versions.setdefault(
-                    request.group_id, self.policy_version
-                )
-        requests_per_dp_rank = self._request_dispatcher.rank0_route(
-            pending_engine_requests
-        )
-        pending_engine_requests.clear()
-        return LoopDecision(
-            action=LoopAction.STEP,
-            requests_per_dp_rank=requests_per_dp_rank,
-        )
+        else:
+            # `LoopAction.STEP`: admit whatever is pending (may be empty -> just keep stepping in-flight work).
+            for request in pending_engine_requests:
+                if self.config.reset_kv_cache_on_model_state_dict_load:
+                    # Each load resets all KV, so requests need no pin or salt.
+                    request.min_policy_version = self.policy_version
+                else:
+                    request.min_policy_version = (
+                        self._group_min_policy_versions.setdefault(
+                            request.group_id, self.policy_version
+                        )
+                    )
+            requests_per_dp_rank = self._request_dispatcher.rank0_route(
+                pending_engine_requests
+            )
+            pending_engine_requests.clear()
+            decision = LoopDecision(
+                action=LoopAction.STEP,
+                requests_per_dp_rank=requests_per_dp_rank,
+            )
+        decision.released_session_ids = released_session_ids
+        decision.released_group_ids = released_group_ids
+        return decision
 
     def _build_sampling_params(self, sampling: SamplingConfig) -> SamplingParams:
         """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1).
@@ -1572,7 +1632,7 @@ class VLLMGenerator(Configurable):
         )
 
     async def release_groups(self, group_ids: list[int]) -> None:
-        """Drop the pinned cache salts of finished rollout groups.
+        """Drop the pinned cache salts and the held KV of finished rollout groups.
 
         Args:
             group_ids: Groups with no more generation calls.
@@ -1582,6 +1642,18 @@ class VLLMGenerator(Configurable):
         # consistent snapshot of the pins, send releases through the queue instead.
         for group_id in group_ids:
             self._group_min_policy_versions.pop(group_id, None)
+        if self._session_kv_holder is not None and self._rank == 0:
+            self._engine_loop_queue.put(SessionReleaseMessage(group_ids=group_ids))
+
+    async def release_sessions(self, session_ids: list[str]) -> None:
+        """Release the held KV of sessions whose rollout ended (rank 0; a no-op without
+        ``session_kv_holder``).
+
+        Args:
+            session_ids: Routing session ids with no more generation calls.
+        """
+        if self._session_kv_holder is not None and self._rank == 0:
+            self._engine_loop_queue.put(SessionReleaseMessage(session_ids=session_ids))
 
     async def initialize_torchstore_client(self, requester_index: int) -> None:
         """Initialize this process as a TorchStore routing requester.
@@ -1696,6 +1768,7 @@ class VLLMGenerator(Configurable):
                 logger.info("Shutting down vLLM renderer")
                 renderer.shutdown()
             self._engine = None
+            self._session_kv_holder = None
 
 
 # ===================== helpers =====================
@@ -1712,7 +1785,19 @@ class EngineRequest:
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
     group_id: int
+    """Rollout group id. Sets the vLLM priority: lower is admitted first and preempted last.
+    Training ids grow as groups start. Validation ids count down (-1, -2, ...) and restart every run,
+    so all validation gets priority -1: it runs in arrival order (not newest first), before training.
+
+        waiting, in arrival order:  g7 turn 1   g9 turn 1   g4 turn 2   val -1      val -2
+        priority:                   7           9           4           -1          -1
+        vLLM admits:                val -1      val -2      g4 turn 2   g7 turn 1   g9 turn 1
+                                                            ^ g4 started before g7
+    """
     routing_session_id: str
+    arrival_time: float
+    """Rank 0's `time.time()` in `generate`; vLLM breaks priority ties by it and measures TTFT from it.
+    All TP ranks pass this one value, so they order ties the same way even if their clocks differ."""
     min_policy_version: int = field(init=False)
     """Oldest policy version this request's KV can come from; rank 0 sets it at admission.
     Without a KV reset on model state dict load it is the group's pinned version and salts the
@@ -1754,7 +1839,17 @@ class CloseMessage:
     returns `LoopAction.CLOSE` when it sees one."""
 
 
-EngineLoopMessage = GenerationMessage | ModelStateDictLoadMessage | CloseMessage
+@dataclass(kw_only=True, slots=True)
+class SessionReleaseMessage:
+    """Sessions (and every session of groups) whose held KV the engine loop releases; no reply."""
+
+    session_ids: list[str] = field(default_factory=list)
+    group_ids: list[int] = field(default_factory=list)
+
+
+EngineLoopMessage = (
+    GenerationMessage | ModelStateDictLoadMessage | CloseMessage | SessionReleaseMessage
+)
 
 
 class EngineLoopQueue:
@@ -1858,3 +1953,7 @@ class LoopDecision:
 
     load_version: int | None = None
     # set iff action is LOAD_MODEL_STATE_DICT
+
+    released_session_ids: list[str] = field(default_factory=list)
+    released_group_ids: list[int] = field(default_factory=list)
+    # sessions (and groups) whose held KV every rank releases before acting (session_kv_holder)

@@ -40,17 +40,17 @@ from torchtitan.config.transform import (
     transform_model_config_,
 )
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.common.async_linear import (
-    AsyncColumnParallelLinear,
-    AsyncRowParallelLinear,
-)
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
     dense_sequence_parallel_placement,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear.async_linear import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 
 DIM = 256
 N_HEADS = 8
@@ -526,7 +526,7 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
         ).transform(make())
         async_config.activation_fn = fused_swiglu(async_config.activation_fn)
         fused = async_config.build().to(dev)
-        self.assertIsInstance(fused, FeedForward)
+        self.assertIsInstance(fused, DenseFeedForward)
         self.assertIsInstance(fused.w13, AsyncColumnParallelLinear)
         self.assertIsInstance(fused.w2, AsyncRowParallelLinear)
 

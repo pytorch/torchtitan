@@ -12,7 +12,7 @@ from typing import Any
 from torchtitan.models.base.module import Module
 
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import LocalTokenDispatcher
 
 from .base import ModelConfigTransform
 

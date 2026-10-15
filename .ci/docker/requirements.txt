@@ -5,7 +5,7 @@ pyarrow < 26
 tensorboard
 wandb
 tokenizers >= 0.15.0
-renderers == 0.1.11
+renderers == 0.1.12
 safetensors
 einops
 pillow
