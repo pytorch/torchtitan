@@ -115,10 +115,12 @@ def _resolve_fsdp_placements(
     accumulation. SPMD without gradient accumulation keeps both boundaries in
     the joint graph, and PP extracts both into the schedule.
     """
+    if pp_enabled:
+        # For FSDP1 fsdp_enabled=False, but we do extraction of common params preparation,
+        # (cast, quantization) into unshard stage to do it only once.
+        return "schedule", "schedule" if fsdp_enabled else None
     if not fsdp_enabled:
         return None, None
-    if pp_enabled:
-        return "schedule", "schedule"
     if num_microbatches == 1:
         return "every_microbatch", "every_microbatch"
 
