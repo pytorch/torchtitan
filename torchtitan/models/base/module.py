@@ -540,11 +540,14 @@ class Module(nn.Module, Configurable):
                 spmd.assert_type(value, src_spmd_layout)
 
             if dst_spmd_layout is not None:
+                # Module-boundary collectives (e.g. the sequence-parallel
+                # all-gather) overlap with compute until first use.
                 value = spmd_redistribute_per_axis(
                     value,
                     current_spmd_mesh(),
                     src_spmd_layout,
                     dst_spmd_layout,
+                    async_op=True,
                 )
             new_kwargs[name] = value
 
@@ -590,6 +593,7 @@ class Module(nn.Module, Configurable):
             current_spmd_mesh(),
             out_src,
             out_dst,
+            async_op=True,
         )
 
 
