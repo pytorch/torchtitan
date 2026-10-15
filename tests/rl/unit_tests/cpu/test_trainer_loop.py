@@ -90,8 +90,14 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         optim_step=_Endpoint(optim_step),
         push_model_state_dict=_Endpoint(push),
     )
+    # DP degree 1: every trainer rank is at DP rank 0.
+    controller._trainer_by_dp_rank = [controller.trainer]
     controller.generator_router = SimpleNamespace(
         sync_log_step=_Endpoint(), pull_model_state_dict=_Endpoint(pull)
+    )
+    controller.batcher = SimpleNamespace(
+        sync_log_step=SimpleNamespace(broadcast=lambda step: None),
+        maybe_release_oldest_batch=SimpleNamespace(broadcast=lambda: None),
     )
 
     async def sync_log_step(step):
@@ -145,12 +151,13 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
     assert events == [
         "fwd_bwd 1",
         "optim 1",
-        # Step 1's push -> pull -> release starts in the background ...
-        "fwd_bwd 2",
+        # Step 1's push -> pull -> release starts in the background. The per-DP-rank
+        # forward_backward calls run as tasks, so with these instant fakes it finishes first ...
         "push start",
         "push end",
         "pull 1",
         "release 5 trained",
+        "fwd_bwd 2",
         # ... and lands before step 2's optimizer step.
         "optim 2",
         "push start",

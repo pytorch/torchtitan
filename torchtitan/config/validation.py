@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from torchtitan.models.common.attention import BaseAttention
+from torchtitan.models.common.attention import Attention, LinearAttention
 
 if TYPE_CHECKING:
     from torchtitan.config import DebugConfig, TrainingConfig
@@ -39,7 +39,7 @@ def validate_model_training_config(
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE
-    from torchtitan.models.common.token_dispatcher import (
+    from torchtitan.models.common.moe.token_dispatcher import (
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,
@@ -64,7 +64,7 @@ def validate_model_training_config(
             )
 
         tp = parallelism.tensor_parallel_degree
-        attention = model.first_base_attention
+        attention = model.first_full_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -156,10 +156,11 @@ def validate_context_parallel(
         CPInnerAttention,
         UlyssesCPInnerAttention,
     )
+    from torchtitan.models.common.decoder import Decoder
 
     cp = parallelism.context_parallel_degree
 
-    for fqn, traversed, _, _ in model.traverse(BaseAttention.Config):
+    for fqn, traversed, _, _ in model.traverse(Attention.Config):
         attention = traversed
         inner_attention = attention.inner_attention
         is_cp_attention = isinstance(inner_attention, CPInnerAttention.Config)
@@ -195,7 +196,13 @@ def validate_context_parallel(
                     )
 
         load_balancer_config = parallelism.context_parallel_load_balancer
+        # Linear attention routes recurrent states using the shared permutation;
+        # it does not constrain which attention load balancer creates it.
+        if isinstance(attention, LinearAttention.Config):
+            continue
         if load_balancer_config is None:
+            continue
+        if isinstance(model, Decoder.Config) and model.first_full_attention is None:
             continue
         if issubclass(cp_inner_attention, UlyssesCPInnerAttention):
             raise ValueError(

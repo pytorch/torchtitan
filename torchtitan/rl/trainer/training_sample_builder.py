@@ -108,7 +108,7 @@ class TrainingSampleBuilder(Configurable):
     """Build trainable samples and metrics the trainer consumes from rollout groups.
 
     Example:
-        builder = config.async_loop.training_sample_builder.build()
+        builder = config.async_loop.batcher.training_sample_builder.build()
         output: TrainingSampleGroup = builder.build_from_group(rollout_group=rollout_group)
     """
 

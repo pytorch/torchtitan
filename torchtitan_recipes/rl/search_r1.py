@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from renderers import Qwen3RendererConfig
+from renderers import CustomRendererConfig, Qwen3RendererConfig
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
@@ -34,11 +34,10 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, TokenDispatcherTransform
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
-from torchtitan.models.muse_glimmer.renderer import MuseGlimmerRendererConfig
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
@@ -402,7 +401,11 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             validation=ValidationConfig(steps=500),
         ),
         rollouter=_search_r1_rollouter_config(),
-        renderer=MuseGlimmerRendererConfig(),
+        renderer=from_renderers(
+            CustomRendererConfig(
+                import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
+            )
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
             model=trainer_model,

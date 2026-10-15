@@ -23,6 +23,7 @@ from torchtitan.models.common.activation import UnaryActivationFn
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     GQAttention,
+    InnerAttention,
     QKVLinear,
     VarlenInnerAttention,
 )
@@ -38,14 +39,14 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_sharding_config,
     stacked_colwise_sharding_config,
 )
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
     RowParallelLinear,
 )
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import (
     BatchWiseLoadBalanceLoss,
     MicrobatchWiseLoadBalanceLoss,
@@ -53,7 +54,7 @@ from torchtitan.models.common.moe import (
     RoutedExperts,
     TokenChoiceTopKRouter,
 )
-from torchtitan.models.common.moe_sharding import (
+from torchtitan.models.common.moe.sharding import (
     moe_sharding_config,
     routed_expert_linear_sharding_config,
     routed_experts_sharding_config,
@@ -63,9 +64,9 @@ from torchtitan.models.common.moe_sharding import (
     shared_experts_output_placement,
     shared_experts_sharding_config,
 )
+from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 
 
 DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
@@ -89,7 +90,7 @@ def decoder_vocab_size(model_config: Module.Config) -> int:
 
 def get_attention_config(
     backend: str,
-) -> Module.Config:
+) -> InnerAttention.Config:
     """Map backend string to an inner_attention config.
 
     Language models always use block_causal masking (the dataloaders always
@@ -229,7 +230,7 @@ def make_gqa_config(
     n_heads: int,
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
-    inner_attention: Module.Config,
+    inner_attention: InnerAttention.Config,
     rope: RoPE.Config | None,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
@@ -304,15 +305,15 @@ def make_ffn_config(
     w13_param_init: dict[str, Callable],
     w2_param_init: dict[str, Callable],
     enable_sp: bool,
-) -> FeedForward.Config:
-    """Build a fully-specified, sharded dense FeedForward.Config.
+) -> DenseFeedForward.Config:
+    """Build a fully-specified, sharded DenseFeedForward.Config.
 
     ``w1`` and ``w3`` are the gate/up projections and share
     ``w13_param_init``; ``w2`` is the residual output projection. The input
     and output use the residual layout selected by ``enable_sp``.
     """
     x_layout = residual_activation_placement(enable_sp=enable_sp)
-    return FeedForward.Config(
+    return DenseFeedForward.Config(
         w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=hidden_dim,
@@ -361,7 +362,7 @@ def make_shared_expert_ffn_config(
     w13_param_init: dict[str, Callable],
     w2_param_init: dict[str, Callable],
     enable_sp: bool,
-) -> FeedForward.Config:
+) -> DenseFeedForward.Config:
     """Build a sharded shared-expert FFN for an MoE.
 
     ``w1`` and ``w3`` are the gate/up projections and share
@@ -369,7 +370,7 @@ def make_shared_expert_ffn_config(
     ``make_shared_expert_down_proj_config``).
     """
     x_layout = residual_activation_placement(enable_sp=enable_sp)
-    return FeedForward.Config(
+    return DenseFeedForward.Config(
         w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=hidden_dim,
@@ -392,7 +393,7 @@ def make_moe_config(
     num_experts: int = 8,
     router: TokenChoiceTopKRouter.Config,
     routed_experts: RoutedExperts.Config,
-    shared_experts: FeedForward.Config | None = None,
+    shared_experts: DenseFeedForward.Config | None = None,
     load_balance_coeff: float | None = None,
     aux_loss_coeff: float | None = None,
     aux_loss_type: Literal["microbatch_wise", "batch_wise"] = "microbatch_wise",

@@ -161,6 +161,7 @@ class TestLoss(unittest.TestCase):
             [False, False, False, False, False, False, True, True]
         )
         model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
+        routing_token_counts = torch.tensor([6, 4, 2])  # one per depth
         with patch(
             "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
@@ -176,8 +177,10 @@ class TestLoss(unittest.TestCase):
                 parallelism=SimpleNamespace(),
                 max_num_documents=2,
                 max_context_length=8,
+                global_routing_token_counts=routing_token_counts,
             )
 
+        assert extra_kwargs["aux_loss_denominators"] is routing_token_counts
         assert isinstance(input_tokens, tuple)
         assert isinstance(loss_labels, tuple)
         torch.testing.assert_close(input_tokens[0], tokens)
@@ -484,29 +487,17 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                 ):
                     # Build global test data once, then let DTensor derive the
                     # exact local shards for TP-only and DP+TP placements.
-                    generator = torch.Generator(device=self.device_type).manual_seed(
-                        seed
-                    )
-                    global_logits = torch.randn(
-                        T,
-                        vocab_size,
-                        device=self.device_type,
-                        generator=generator,
+                    # Sample on CPU and move to the test device: not every
+                    # accelerator registers a device-side torch.Generator.
+                    generator = torch.Generator().manual_seed(seed)
+                    global_logits = torch.randn(T, vocab_size, generator=generator).to(
+                        self.device_type
                     )
                     global_labels = torch.randint(
-                        0,
-                        vocab_size,
-                        (T,),
-                        device=self.device_type,
-                        dtype=torch.long,
-                        generator=generator,
-                    )
+                        0, vocab_size, (T,), dtype=torch.long, generator=generator
+                    ).to(self.device_type)
                     if ignore:
-                        mask = torch.rand(
-                            T,
-                            device=self.device_type,
-                            generator=generator,
-                        )
+                        mask = torch.rand(T, generator=generator).to(self.device_type)
                         global_labels[mask < 0.3] = IGNORE_INDEX
                     # distribute as DTensor; loss_parallel wrapper takes DTensors.
                     logits_dtensor = distribute_tensor(
@@ -607,23 +598,15 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     dtype=dtype,
                     ignore=ignore,
                 ):
-                    generator = torch.Generator(device=self.device_type).manual_seed(
-                        1729 + vocab_size
-                    )
+                    # Sample on CPU and move to the test device: not every
+                    # accelerator registers a device-side torch.Generator.
+                    generator = torch.Generator().manual_seed(1729 + vocab_size)
                     global_logits = torch.randn(
-                        T,
-                        vocab_size,
-                        device=self.device_type,
-                        dtype=dtype,
-                        generator=generator,
-                    )
+                        T, vocab_size, dtype=dtype, generator=generator
+                    ).to(self.device_type)
                     global_labels = torch.randint(
-                        0,
-                        vocab_size,
-                        (T,),
-                        device=self.device_type,
-                        generator=generator,
-                    )
+                        0, vocab_size, (T,), generator=generator
+                    ).to(self.device_type)
                     if ignore:
                         global_labels[[1, 17]] = IGNORE_INDEX
                     # Exercise masked logits without allowing 0 * -inf to

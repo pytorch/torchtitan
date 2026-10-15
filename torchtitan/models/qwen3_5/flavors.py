@@ -31,7 +31,7 @@ from torchtitan.models.common import (  # noqa: F401
     Softmax,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.attention.gdn import GatedDeltaNet, GDNKernel, InnerGDN
+from torchtitan.models.common.attention.gdn import GDN, GDNKernel, InnerGDN
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
     get_attention_config,
@@ -52,7 +52,7 @@ from torchtitan.models.common.decoder_sharding import (
     rope_cache_sharding_config,
     rowwise_sharding_config,
 )
-from torchtitan.models.common.moe_sharding import shared_experts_sharding_config
+from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
 from torchtitan.models.common.vision_encoder import (
@@ -374,8 +374,8 @@ def _qwen35_deltanet_config(
     layer_id: int,
     enable_sp: bool,
     conv_kernel_size: int = 4,
-) -> GatedDeltaNet.Config:
-    """Build a fully-specified, head-sharded GatedDeltaNet.Config.
+) -> GDN.Config:
+    """Build a fully-specified, head-sharded GDN.Config.
 
     Input projections are colwise-sharded (head-sharded output) and out_proj is
     row-parallel. Conv weights and per-head A_log/dt_bias are Shard(0). The
@@ -406,7 +406,9 @@ def _qwen35_deltanet_config(
             sharding_config=conv_weight_sharding_config(),
         )
 
-    return GatedDeltaNet.Config(
+    return GDN.Config(
+        # The recurrence has one state per value head; Q/K heads can be shared.
+        n_heads=n_value_heads,
         key_head_dim=key_head_dim,
         value_head_dim=value_head_dim,
         conv_kernel_size=conv_kernel_size,
@@ -419,7 +421,7 @@ def _qwen35_deltanet_config(
         conv_q=_conv(key_dim),
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),
-        inner_gated_delta_net=InnerGDN.Config(
+        inner_attention=InnerGDN.Config(
             conv_kernel_size=conv_kernel_size,
             kernel=GDNKernel.Config(),
             sharding_config=inner_gated_delta_net_sharding_config(),
@@ -488,10 +490,7 @@ def _build_qwen35_layers(
                 enable_sp=enable_sp,
             )
             if is_full
-            else None
-        )
-        deltanet = (
-            _qwen35_deltanet_config(
+            else _qwen35_deltanet_config(
                 dim=dim,
                 n_key_heads=n_key_heads,
                 n_value_heads=n_value_heads,
@@ -500,14 +499,11 @@ def _build_qwen35_layers(
                 layer_id=layer_id,
                 enable_sp=enable_sp,
             )
-            if not is_full
-            else None
         )
 
         layers.append(
             Qwen35TransformerBlock.Config(
                 attention=attention,
-                delta_net=deltanet,
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
@@ -572,10 +568,7 @@ def _build_qwen35_moe_layers(
                 enable_sp=enable_sp,
             )
             if is_full
-            else None
-        )
-        deltanet = (
-            _qwen35_deltanet_config(
+            else _qwen35_deltanet_config(
                 dim=dim,
                 n_key_heads=n_key_heads,
                 n_value_heads=n_value_heads,
@@ -584,15 +577,12 @@ def _build_qwen35_moe_layers(
                 layer_id=layer_id,
                 enable_sp=enable_sp,
             )
-            if not is_full
-            else None
         )
 
         layers.append(
             Qwen35TransformerBlock.Config(
                 attention=attention,
-                delta_net=deltanet,
-                moe=make_moe_config(
+                feed_forward=make_moe_config(
                     num_experts=num_experts,
                     router=make_router_config(
                         dim=dim,

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import cast, TypeVar
 
 from torchtitan.models.common.linear import GroupedLinear, Linear
-from torchtitan.models.common.token_dispatcher import (
+from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
     HybridEPTokenDispatcher,
     TorchAOTokenDispatcher,
