@@ -194,10 +194,16 @@ class MuseSparkRMSNorm(RMSNorm):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input_dtype = input.dtype
+        effective_weight_D = self._get_effective_weight()
+        if effective_weight_D is not None:
+            # F.rms_norm runs its fused kernel only when the weight matches the
+            # input dtype. The fp32 residual stream with bf16 parameters would
+            # otherwise take the composite path (~20 kernels).
+            effective_weight_D = effective_weight_D.to(input_dtype)
         output_TD = F.rms_norm(
             input,
             self.normalized_shape,
-            self._get_effective_weight(),
+            effective_weight_D,
             self.eps,
         )
         return output_TD.to(input_dtype)
