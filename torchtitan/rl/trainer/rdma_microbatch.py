@@ -175,9 +175,8 @@ class RDMAMicrobatchPrefetcher:
             while reads:
                 yield [wait_for_microbatch(reads.popleft())]
         finally:
-            # Runs when the pass ends or the generator is closed or collected (e.g. after a failed
-            # step): cancel the queued reads, which would each wait out the 60 s RDMA timeout with
-            # the batcher gone. The read in flight still finishes.
+            # Pass done, or generator closed or collected (e.g. a failed step): cancel the queued reads,
+            # which would each wait out the 60 s RDMA timeout with the batcher gone. The running one finishes.
             pool.shutdown(cancel_futures=True)
 
     def _read(self, rdma_microbatch: MonarchRDMAMicrobatch) -> TrainingMicrobatch:

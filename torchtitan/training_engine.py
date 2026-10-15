@@ -175,8 +175,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     )
             if self.training.preprocess_microbatch_groups_lazily:
                 if not self.training.disable_cuda_graphs:
-                    # TODO: with multiple smaller CUDA graphs, preprocess each group between
-                    # graph replays.
+                    # TODO: with several smaller CUDA graphs, preprocess each group between replays.
                     raise ValueError(
                         "training.preprocess_microbatch_groups_lazily requires "
                         "training.disable_cuda_graphs=True."

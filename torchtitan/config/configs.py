@@ -99,9 +99,8 @@ class TrainingConfig:
 
     preprocess_microbatch_groups_lazily: bool = False
     """Preprocess each microbatch group (host-to-device copy, masks) just before its
-    forward/backward, not all groups up front. RL needs it to overlap the controller ->
-    trainer data transfer with forward/backward. Requires ``disable_cuda_graphs=True`` and
-    no SDC replay.
+    forward/backward, not all groups up front, so RL can read the next microbatches
+    during training. Requires ``disable_cuda_graphs=True`` and no SDC replay.
     """
 
     dtype: Literal["bfloat16", "float32"] = "float32"
