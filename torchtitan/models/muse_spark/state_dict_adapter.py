@@ -30,132 +30,6 @@ if TYPE_CHECKING:
 _HF_LOAD_THREAD_COUNT = 8
 
 
-_TEXT_TOP_LEVEL_RENAMES = {
-    "model.embed_tokens.weight": "model.language_model.embed_tokens.weight",
-    "model.norm.weight": "model.language_model.norm.weight",
-    "lm_head.weight": "lm_head.weight",
-}
-
-_TEXT_LAYER_RENAMES = {
-    "self_attn.pre_qkv_proj_norm.weight": "input_layernorm.weight",
-    "self_attn.q_proj.weight": "self_attn.q_proj.weight",
-    "self_attn.k_proj.weight": "self_attn.k_proj.weight",
-    "self_attn.v_proj.weight": "self_attn.v_proj.weight",
-    "self_attn.o_proj.weight": "self_attn.o_proj.weight",
-    "self_attn.o_gate_proj.weight": "self_attn.gate_proj.weight",
-    "post_attn_norm.weight": "post_attention_layernorm.weight",
-    "pre_ffn_norm.weight": "pre_feedforward_layernorm.weight",
-    "post_ffn_norm.weight": "post_feedforward_layernorm.weight",
-    "add_attn.gate": "post_attention_residual_gate.gate",
-    "add_ffn.gate": "post_feedforward_residual_gate.gate",
-    "feed_forward.fc1_weight.w1.weight": "mlp.gate_proj.weight",
-    "feed_forward.fc1_weight.w3.weight": "mlp.up_proj.weight",
-    "feed_forward.fc2_weight.w2.weight": "mlp.down_proj.weight",
-    "feed_forward.router.weight": "mlp.gate.weight",
-    "feed_forward.expert_bias": "mlp.gate.e_score_correction_bias",
-    "feed_forward.pooler.weight": "mlp.pre_expert_proj.weight",
-    "feed_forward.pre_expert_norm.weight": "mlp.pre_expert_norm.weight",
-    "feed_forward.experts.w13_weight": "mlp.experts.gate_up_proj",
-    "feed_forward.experts.w2_weight": "mlp.experts.down_proj",
-    "feed_forward.post_expert_norm.weight": "mlp.experts.post_expert_norm.weight",
-    "feed_forward.unpooler.weight": "mlp.post_expert_proj.weight",
-}
-
-_VISION_TOP_LEVEL_RENAMES = {
-    "vision_model.positional_embedding_vlm": (
-        "model.vision_tower.patch_embedder.position_embedding_table.weight"
-    ),
-    "vision_model.conv1_linear.weight": (
-        "model.vision_tower.patch_embedder.patch_embedding.weight"
-    ),
-    "vision_model.ln_pre.weight": "model.vision_tower.ln_pre.weight",
-    "vision_model.ln_pre.bias": "model.vision_tower.ln_pre.bias",
-    "vision_model.ln_post.weight": "model.vision_tower.ln_post.weight",
-    "vision_model.ln_post.bias": "model.vision_tower.ln_post.bias",
-    "vision_model.adapter.c_fc.weight": "model.vision_adapter.fc1.weight",
-    "vision_model.adapter.c_proj.weight": "model.vision_adapter.fc2.weight",
-    "modalities.vision_perception.encoder.vision_projection.weight": (
-        "model.vision_projection.weight"
-    ),
-}
-
-_VISION_LAYER_RENAMES = {
-    "attn.q_proj.weight": "attn.q_proj.weight",
-    "attn.q_proj.bias": "attn.q_proj.bias",
-    "attn.k_proj.weight": "attn.k_proj.weight",
-    "attn.k_proj.bias": "attn.k_proj.bias",
-    "attn.v_proj.weight": "attn.v_proj.weight",
-    "attn.v_proj.bias": "attn.v_proj.bias",
-    "attn.out_proj.weight": "attn.proj.weight",
-    "attn.out_proj.bias": "attn.proj.bias",
-    "ln_1.weight": "norm1.weight",
-    "ln_1.bias": "norm1.bias",
-    "ln_2.weight": "norm2.weight",
-    "ln_2.bias": "norm2.bias",
-    "mlp.c_fc.weight": "mlp.fc1.weight",
-    "mlp.c_fc.bias": "mlp.fc1.bias",
-    "mlp.c_proj.weight": "mlp.fc2.weight",
-    "mlp.c_proj.bias": "mlp.fc2.bias",
-}
-
-_AUDIO_TOP_LEVEL_RENAMES = {
-    "norm.weight": "norm.weight",
-    "o_proj.weight": "proj.weight",
-    "o_proj.bias": "proj.bias",
-    "dual_norm.weight": "post_proj_norm.weight",
-}
-
-_AUDIO_PATCH_RENAMES = {
-    "linear.weight": "patch_embedder.proj.weight",
-    "linear.bias": "patch_embedder.proj.bias",
-    "norm.weight": "patch_embedder.norm.weight",
-}
-
-_AUDIO_BLOCK_RENAMES = {
-    "conv.conv.weight": "conv.weight",
-    "conv.conv.bias": "conv.bias",
-    "norm.weight": "norm.weight",
-    "linear1.weight": "mlp.fc1.weight",
-    "linear1.bias": "mlp.fc1.bias",
-    "linear2.weight": "mlp.fc2.weight",
-    "linear2.bias": "mlp.fc2.bias",
-}
-
-
-def _transformers_checkpoint_key(key: str) -> str:
-    if key in _TEXT_TOP_LEVEL_RENAMES:
-        return _TEXT_TOP_LEVEL_RENAMES[key]
-    if key in _VISION_TOP_LEVEL_RENAMES:
-        return _VISION_TOP_LEVEL_RENAMES[key]
-
-    match = re.match(r"model\.layers\.(\d+)\.(.+)", key)
-    if match is not None:
-        layer_id, suffix = match.groups()
-        return f"model.language_model.layers.{layer_id}.{_TEXT_LAYER_RENAMES[suffix]}"
-
-    match = re.match(r"vision_model\.encoder\.layers\.(\d+)\.(.+)", key)
-    if match is not None:
-        layer_id, suffix = match.groups()
-        return f"model.vision_tower.layers.{layer_id}.{_VISION_LAYER_RENAMES[suffix]}"
-
-    audio_prefix = "modalities.soft_audio_perception.interaction_encoder."
-    if key.startswith(audio_prefix):
-        suffix = key.removeprefix(audio_prefix)
-        if suffix in _AUDIO_TOP_LEVEL_RENAMES:
-            return f"model.audio_tower.{_AUDIO_TOP_LEVEL_RENAMES[suffix]}"
-        match = re.match(r"stages\.(\d+)\.(\d+)\.(.+)", suffix)
-        if match is not None:
-            stage_id, block_id_text, module = match.groups()
-            block_id = int(block_id_text)
-            if block_id == 0:
-                return f"model.audio_tower.layers.{stage_id}.{_AUDIO_PATCH_RENAMES[module]}"
-            return (
-                f"model.audio_tower.layers.{stage_id}.conv_blocks."
-                f"{block_id - 1}.{_AUDIO_BLOCK_RENAMES[module]}"
-            )
-    raise ValueError(f"unsupported Muse Spark checkpoint key: {key}")
-
-
 @dataclass(frozen=True)
 class _MappingSpec:
     checkpoint_key: str
@@ -361,46 +235,6 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
         }
 
     def _build_mapping_specs(self) -> list[_MappingSpec]:
-        specs = self._build_unwrapped_mapping_specs()
-        from torchtitan.models.muse_spark.model import MuseSparkAttention
-
-        config = cast(Any, self.model_config)
-        result: list[_MappingSpec] = []
-        for spec in specs:
-            native_key = spec.native_keys[0]
-            transform = spec.transform
-            num_heads: int | None = None
-            if native_key.endswith("attention.qkv_linear.wq.weight"):
-                layer_id = int(native_key.split(".")[1])
-                attention = cast(
-                    MuseSparkAttention.Config, config.layers[layer_id].attention
-                )
-                transform = "rope"
-                num_heads = attention.n_heads
-            elif native_key.endswith("attention.qkv_linear.wk.weight"):
-                layer_id = int(native_key.split(".")[1])
-                attention = cast(
-                    MuseSparkAttention.Config, config.layers[layer_id].attention
-                )
-                transform = "rope"
-                num_heads = attention.n_kv_heads
-            elif re.search(r"vision_encoder\.layers\.\d+\.attn\.w[qk]\.", native_key):
-                assert config.vision_encoder is not None
-                transform = "rope"
-                num_heads = config.vision_encoder.num_heads
-            elif native_key.endswith("feed_forward.router.gate.weight"):
-                transform = "identity"
-            result.append(
-                _MappingSpec(
-                    _transformers_checkpoint_key(spec.checkpoint_key),
-                    spec.native_keys,
-                    transform,
-                    num_heads,
-                )
-            )
-        return result
-
-    def _build_unwrapped_mapping_specs(self) -> list[_MappingSpec]:
         from torchtitan.models.muse_spark.model import (
             MuseSparkAttention,
             MuseSparkRMSNorm,
@@ -409,12 +243,12 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
         config = cast(Any, self.model_config)
         specs = [
             _MappingSpec(
-                "model.embed_tokens.weight",
+                "model.language_model.embed_tokens.weight",
                 ("tok_embeddings.embedding.weight",),
             )
         ]
         for layer_id, layer in enumerate(config.layers):
-            checkpoint = f"model.layers.{layer_id}"
+            checkpoint = f"model.language_model.layers.{layer_id}"
             native = f"layers.{layer_id}"
             attention = cast(MuseSparkAttention.Config, layer.attention)
             post_attention_norm = cast(
@@ -426,10 +260,14 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                     _MappingSpec(
                         f"{checkpoint}.self_attn.q_proj.weight",
                         (f"{native}.attention.qkv_linear.wq.weight",),
+                        "rope",
+                        attention.n_heads,
                     ),
                     _MappingSpec(
                         f"{checkpoint}.self_attn.k_proj.weight",
                         (f"{native}.attention.qkv_linear.wk.weight",),
+                        "rope",
+                        attention.n_kv_heads,
                     ),
                     _MappingSpec(
                         f"{checkpoint}.self_attn.v_proj.weight",
@@ -440,23 +278,23 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                         (f"{native}.attention.wo.weight",),
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.self_attn.pre_qkv_proj_norm.weight",
+                        f"{checkpoint}.input_layernorm.weight",
                         (f"{native}.attention_norm.weight",),
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.add_attn.gate",
+                        f"{checkpoint}.post_attention_residual_gate.gate",
                         (f"{native}.attention_residual.gate",),
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.pre_ffn_norm.weight",
+                        f"{checkpoint}.pre_feedforward_layernorm.weight",
                         (f"{native}.ffn_norm.weight",),
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.post_ffn_norm.weight",
+                        f"{checkpoint}.post_feedforward_layernorm.weight",
                         (f"{native}.post_ffn_norm.weight",),
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.add_ffn.gate",
+                        f"{checkpoint}.post_feedforward_residual_gate.gate",
                         (f"{native}.ffn_residual.gate",),
                     ),
                 ]
@@ -464,14 +302,14 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
             if attention.output_gate is not None:
                 specs.append(
                     _MappingSpec(
-                        f"{checkpoint}.self_attn.o_gate_proj.weight",
+                        f"{checkpoint}.self_attn.gate_proj.weight",
                         (f"{native}.attention.output_gate.weight",),
                     )
                 )
             if post_attention_norm.elementwise_affine:
                 specs.append(
                     _MappingSpec(
-                        f"{checkpoint}.post_attn_norm.weight",
+                        f"{checkpoint}.post_attention_layernorm.weight",
                         (f"{native}.post_attention_norm.weight",),
                     )
                 )
@@ -480,15 +318,15 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                 specs.extend(
                     [
                         _MappingSpec(
-                            f"{checkpoint}.feed_forward.fc1_weight.w1.weight",
+                            f"{checkpoint}.mlp.gate_proj.weight",
                             (f"{native}.feed_forward.w1.weight",),
                         ),
                         _MappingSpec(
-                            f"{checkpoint}.feed_forward.fc1_weight.w3.weight",
+                            f"{checkpoint}.mlp.up_proj.weight",
                             (f"{native}.feed_forward.w3.weight",),
                         ),
                         _MappingSpec(
-                            f"{checkpoint}.feed_forward.fc2_weight.w2.weight",
+                            f"{checkpoint}.mlp.down_proj.weight",
                             (f"{native}.feed_forward.w2.weight",),
                         ),
                     ]
@@ -500,37 +338,36 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
             specs.extend(
                 [
                     _MappingSpec(
-                        f"{checkpoint}.feed_forward.router.weight",
+                        f"{checkpoint}.mlp.gate.weight",
                         (f"{moe}.router.gate.weight",),
-                        "transpose",
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.feed_forward.expert_bias",
+                        f"{checkpoint}.mlp.gate.e_score_correction_bias",
                         (f"{moe}.expert_bias_E",),
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.feed_forward.pooler.weight",
+                        f"{checkpoint}.mlp.pre_expert_proj.weight",
                         (f"{moe}.pooler.weight",),
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.feed_forward.pre_expert_norm.weight",
+                        f"{checkpoint}.mlp.pre_expert_norm.weight",
                         (f"{moe}.pre_expert_norm.weight",),
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.feed_forward.experts.w13_weight",
+                        f"{checkpoint}.mlp.experts.gate_up_proj",
                         (f"{experts}.w1_EFD", f"{experts}.w3_EFD"),
                         "packed_w13",
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.feed_forward.experts.w2_weight",
+                        f"{checkpoint}.mlp.experts.down_proj",
                         (f"{experts}.w2.weight",),
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.feed_forward.post_expert_norm.weight",
+                        f"{checkpoint}.mlp.experts.post_expert_norm.weight",
                         (f"{experts}.output_postprocess.weight",),
                     ),
                     _MappingSpec(
-                        f"{checkpoint}.feed_forward.unpooler.weight",
+                        f"{checkpoint}.mlp.post_expert_proj.weight",
                         (f"{moe}.unpooler.weight",),
                     ),
                 ]
@@ -538,7 +375,7 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
 
         specs.extend(
             [
-                _MappingSpec("model.norm.weight", ("norm.weight",)),
+                _MappingSpec("model.language_model.norm.weight", ("norm.weight",)),
                 _MappingSpec("lm_head.weight", ("lm_head.weight",)),
             ]
         )
@@ -554,15 +391,15 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
         if vision_encoder is None:
             return []
 
-        checkpoint = "vision_model"
+        checkpoint = "model.vision_tower"
         native = "vision_encoder"
         specs = [
             _MappingSpec(
-                f"{checkpoint}.positional_embedding_vlm",
+                f"{checkpoint}.patch_embedder.position_embedding_table.weight",
                 (f"{native}.positional_embedding_vlm",),
             ),
             _MappingSpec(
-                f"{checkpoint}.conv1_linear.weight",
+                f"{checkpoint}.patch_embedder.patch_embedding.weight",
                 (f"{native}.conv1_linear.weight",),
             ),
         ]
@@ -576,26 +413,28 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                 )
 
         for layer_id in range(vision_encoder.num_layers):
-            checkpoint_layer = f"{checkpoint}.encoder.layers.{layer_id}"
+            checkpoint_layer = f"{checkpoint}.layers.{layer_id}"
             native_layer = f"{native}.layers.{layer_id}"
-            for checkpoint_name, native_name in (
-                ("q_proj", "wq"),
-                ("k_proj", "wk"),
-                ("v_proj", "wv"),
+            for checkpoint_name, native_name, transform, num_heads in (
+                ("q_proj", "wq", "rope", vision_encoder.num_heads),
+                ("k_proj", "wk", "rope", vision_encoder.num_heads),
+                ("v_proj", "wv", "identity", None),
             ):
                 for parameter in ("weight", "bias"):
                     specs.append(
                         _MappingSpec(
                             f"{checkpoint_layer}.attn.{checkpoint_name}.{parameter}",
                             (f"{native_layer}.attn.{native_name}.{parameter}",),
+                            transform,
+                            num_heads,
                         )
                     )
             for checkpoint_name, native_name in (
-                ("attn.out_proj", "attn.proj"),
-                ("ln_1", "norm1"),
-                ("ln_2", "norm2"),
-                ("mlp.c_fc", "mlp.linear_fc1"),
-                ("mlp.c_proj", "mlp.linear_fc2"),
+                ("attn.proj", "attn.proj"),
+                ("norm1", "norm1"),
+                ("norm2", "norm2"),
+                ("mlp.fc1", "mlp.linear_fc1"),
+                ("mlp.fc2", "mlp.linear_fc2"),
             ):
                 for parameter in ("weight", "bias"):
                     specs.append(
@@ -605,16 +444,16 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                         )
                     )
 
-        for projection in ("c_fc", "c_proj"):
+        for checkpoint_name, native_name in (("fc1", "c_fc"), ("fc2", "c_proj")):
             specs.append(
                 _MappingSpec(
-                    f"{checkpoint}.adapter.{projection}.weight",
-                    (f"vision_adapter.{projection}.weight",),
+                    f"model.vision_adapter.{checkpoint_name}.weight",
+                    (f"vision_adapter.{native_name}.weight",),
                 )
             )
         specs.append(
             _MappingSpec(
-                "modalities.vision_perception.encoder.vision_projection.weight",
+                "model.vision_projection.weight",
                 ("vision_projection.weight",),
             )
         )
@@ -628,53 +467,53 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
         if audio_encoder is None:
             return []
 
-        checkpoint = "modalities.soft_audio_perception.interaction_encoder"
+        checkpoint = "model.audio_tower"
         native = "audio_encoder"
         specs = []
         for stage_id in range(len(audio_encoder.layers)):
-            checkpoint_stage = f"{checkpoint}.stages.{stage_id}"
+            checkpoint_stage = f"{checkpoint}.layers.{stage_id}"
             native_stage = f"{native}.layers.{stage_id}"
             for parameter in ("weight", "bias"):
                 specs.append(
                     _MappingSpec(
-                        f"{checkpoint_stage}.0.linear.{parameter}",
+                        f"{checkpoint_stage}.patch_embedder.proj.{parameter}",
                         (f"{native_stage}.patchifier.linear.{parameter}",),
                     )
                 )
             specs.append(
                 _MappingSpec(
-                    f"{checkpoint_stage}.0.norm.weight",
+                    f"{checkpoint_stage}.patch_embedder.norm.weight",
                     (f"{native_stage}.patchifier.norm.weight",),
                 )
             )
-            for block_id, block_name in ((1, "block1"), (2, "block2")):
-                for module_name, parameters in (
-                    ("conv.conv", ("weight", "bias")),
-                    ("norm", ("weight",)),
-                    ("linear1", ("weight", "bias")),
-                    ("linear2", ("weight", "bias")),
+            for block_id, block_name in ((0, "block1"), (1, "block2")):
+                checkpoint_block = f"{checkpoint_stage}.conv_blocks.{block_id}"
+                for checkpoint_name, native_name, parameters in (
+                    ("conv", "conv.conv", ("weight", "bias")),
+                    ("norm", "norm", ("weight",)),
+                    ("mlp.fc1", "linear1", ("weight", "bias")),
+                    ("mlp.fc2", "linear2", ("weight", "bias")),
                 ):
                     for parameter in parameters:
                         specs.append(
                             _MappingSpec(
-                                f"{checkpoint_stage}.{block_id}.{module_name}."
-                                f"{parameter}",
+                                f"{checkpoint_block}.{checkpoint_name}.{parameter}",
                                 (
-                                    f"{native_stage}.{block_name}.{module_name}.{parameter}",
+                                    f"{native_stage}.{block_name}.{native_name}.{parameter}",
                                 ),
                             )
                         )
 
-        for module_name, parameters in (
-            ("norm", ("weight",)),
-            ("o_proj", ("weight", "bias")),
-            ("dual_norm", ("weight",)),
+        for checkpoint_name, native_name, parameters in (
+            ("norm", "norm", ("weight",)),
+            ("proj", "o_proj", ("weight", "bias")),
+            ("post_proj_norm", "dual_norm", ("weight",)),
         ):
             for parameter in parameters:
                 specs.append(
                     _MappingSpec(
-                        f"{checkpoint}.{module_name}.{parameter}",
-                        (f"{native}.{module_name}.{parameter}",),
+                        f"{checkpoint}.{checkpoint_name}.{parameter}",
+                        (f"{native}.{native_name}.{parameter}",),
                     )
                 )
         return specs
