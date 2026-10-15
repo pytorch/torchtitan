@@ -551,19 +551,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             set_to_none=not self._cuda_graph_per_accumulation_group_enabled
         )
         preprocessed_microbatch_groups = self._preprocess_microbatch_groups(
-            microbatch_groups
+            microbatch_groups,
+            global_routing_token_counts=global_routing_token_counts.to(self.device),
         )
         global_loss_token_counts = torch.as_tensor(
             global_loss_token_counts, device=self.device
         )
-        global_routing_token_counts = global_routing_token_counts.to(self.device)
-        for prepared_group in preprocessed_microbatch_groups:
-            model_kwargs_collection = (
-                prepared_group[1] if len(prepared_group) == 3 else (prepared_group[2],)
-            )
-            for model_kwargs in model_kwargs_collection:
-                if "aux_loss_denominators" in model_kwargs:
-                    model_kwargs["aux_loss_denominators"] = global_routing_token_counts
 
         if self.sdc_replayer is not None:
             result = self.sdc_replayer.run_fwd_bwd(
@@ -587,6 +580,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def _preprocess_microbatch_groups(
         self,
         microbatch_groups: list[list[TrainingMicrobatch]],
+        *,
+        global_routing_token_counts: torch.Tensor,
     ) -> list[tuple[Any, ...]]:
         """Preprocess all microbatch groups outside CUDA capture."""
         preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
@@ -605,6 +600,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
+                        global_routing_token_counts=global_routing_token_counts,
                         **self.preprocess_inputs_kwargs,
                     )
                 self.ntokens_seen += (
