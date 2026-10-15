@@ -9,7 +9,7 @@ import torch
 
 from torchtitan.components.loss import compute_logprobs, cross_entropy_loss, mse_loss
 from torchtitan.distributed.local_compile import apply_local_compile, local_compile
-from torchtitan.models.common.moe import _microbatch_load_balance_local_stats
+from torchtitan.models.common.moe.moe import _microbatch_load_balance_local_stats
 
 
 @pytest.fixture(autouse=True)

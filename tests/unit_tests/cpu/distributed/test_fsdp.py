@@ -17,13 +17,15 @@ from torchtitan.distributed.fsdp import (
     enable_fsdp_symm_mem,
     linear_param_shard_placements,
 )
+from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
 
 
 class _FSDPModule(nn.Module):
-    def __init__(self, *, moe_enabled: bool) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.moe_enabled = moe_enabled
         self.force_sum_enabled = False
         self.symm_mem_enabled = False
 
@@ -32,6 +34,10 @@ class _FSDPModule(nn.Module):
 
     def set_symm_mem_for_comm(self) -> None:
         self.symm_mem_enabled = True
+
+
+class _FSDPTransformerBlock(_FSDPModule, TransformerBlock):
+    pass
 
 
 def test_apply_fsdp_to_decoder_forwards_param_dtype_override_fn() -> None:
@@ -94,10 +100,17 @@ def test_enable_fsdp_symm_mem_scope(
     scope: FSDPSymmMemScope, dense_enabled: bool, sparse_enabled: bool
 ) -> None:
     model = nn.Module()
-    dense = _FSDPModule(moe_enabled=False)
-    sparse = _FSDPModule(moe_enabled=True)
+    dense = _FSDPTransformerBlock()
+    dense.feed_forward = DenseFeedForward.__new__(DenseFeedForward)
+    nn.Module.__init__(dense.feed_forward)
+    sparse = _FSDPTransformerBlock()
+    moe = MoE.__new__(MoE)
+    nn.Module.__init__(moe)
+    sparse.feed_forward = moe
     model.add_module("dense", dense)
     model.add_module("sparse", sparse)
+    other = _FSDPModule()
+    model.add_module("other", other)
 
     with mock.patch("torchtitan.distributed.fsdp.FSDPModule", _FSDPModule):
         enable_fsdp_symm_mem(model, scope)
@@ -106,3 +119,5 @@ def test_enable_fsdp_symm_mem_scope(
     assert dense.symm_mem_enabled == dense_enabled
     assert sparse.force_sum_enabled == sparse_enabled
     assert sparse.symm_mem_enabled == sparse_enabled
+    assert other.force_sum_enabled == dense_enabled
+    assert other.symm_mem_enabled == dense_enabled

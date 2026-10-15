@@ -802,8 +802,6 @@ def _run_with_generator_watcher(watcher) -> None:
             group_buffer=SimpleNamespace(
                 build=lambda **kwargs: SimpleNamespace(close=AsyncMock())
             ),
-            training_sample_builder=SimpleNamespace(build=lambda: None),
-            batcher=SimpleNamespace(build=lambda **kwargs: None),
         ),
         trainer=SimpleNamespace(
             training=SimpleNamespace(

@@ -27,14 +27,13 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
-    FlexInnerAttention,
     GQAttention,
     VarlenAttentionMetadata,
-    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
@@ -170,7 +169,7 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
     def __init__(self, config: Config):
         super().__init__()
         self.attention = config.attention.build()
-        assert config.feed_forward is not None
+        assert isinstance(config.feed_forward, DenseFeedForward.Config)
         self.feed_forward = config.feed_forward.build()
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -440,16 +439,12 @@ class MuseGlimmerModel(MultimodalModel):
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.pop("padding_mask", None)
         if positions is not None:
-            inner = getattr(self.config.first_base_attention, "inner_attention", None)
-            if isinstance(
-                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
-            ):
-                input_dict["attention_metadata"] = self._get_attention_metadata(
-                    positions=positions,
-                    padding_mask=padding_mask,
-                    max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
-                )
+            input_dict["attention_metadata"] = self._get_attention_metadata(
+                positions=positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
 
         input_shardings = {
             **decoder_input_sharding(),
@@ -573,9 +568,7 @@ class MuseGlimmerModel(MultimodalModel):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             h_TD = layer(
                 h_TD,

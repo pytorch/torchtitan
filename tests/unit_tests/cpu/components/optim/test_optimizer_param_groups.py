@@ -20,6 +20,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.models.common import HiMidLoLinear, Sigmoid
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.moe import (
     MoE,
     QuantileBalancedTopKRouter,
@@ -61,9 +62,9 @@ class FakeRouter(nn.Module):
         self.register_buffer("tokens_per_expert_E", torch.tensor(tokens))
 
 
-class FakeMoE(nn.Module):
+class FakeMoE(MoE):
     def __init__(self, load_balance_coeff, tokens):
-        super().__init__()
+        nn.Module.__init__(self)
         self.load_balance_coeff = load_balance_coeff
         self.freeze_expert_bias = False
         self.router = FakeRouter(tokens)
@@ -73,11 +74,10 @@ class FakeMoE(nn.Module):
             self.expert_bias_E = None
 
 
-class FakeMoEBlock(nn.Module):
+class FakeMoEBlock(TransformerBlock):
     def __init__(self, load_balance_coeff, tokens):
         super().__init__()
-        self.moe_enabled = True
-        self.moe = FakeMoE(load_balance_coeff, tokens)
+        self.feed_forward = FakeMoE(load_balance_coeff, tokens)
 
 
 class FakeMoEModel(nn.Module):
@@ -217,26 +217,26 @@ class TestOptimizerConfig(unittest.TestCase):
         container.step()
 
         torch.testing.assert_close(
-            model.layers["0"].moe.expert_bias_E,
+            model.layers["0"].feed_forward.expert_bias_E,
             torch.tensor([-0.1, 0.1]),
         )
         torch.testing.assert_close(
-            model.layers["1"].moe.expert_bias_E,
+            model.layers["1"].feed_forward.expert_bias_E,
             torch.tensor([0.2, -0.2]),
         )
         torch.testing.assert_close(
-            model.layers["0"].moe.router.tokens_per_expert_E,
+            model.layers["0"].feed_forward.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
         torch.testing.assert_close(
-            model.layers["1"].moe.router.tokens_per_expert_E,
+            model.layers["1"].feed_forward.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
 
     def test_moe_load_balancing_skips_a_frozen_bias(self):
         model = FakeMoEModel()
         for block in model.layers.values():
-            block.moe.freeze_expert_bias = True
+            block.feed_forward.freeze_expert_bias = True
         config = OptimizersContainer.Config(
             optimizers=[
                 AdamW.Config(pattern=r".*", fused=False, lr=0.0, weight_decay=0.0),
@@ -249,14 +249,14 @@ class TestOptimizerConfig(unittest.TestCase):
 
         # No hook ran: the bias and the counts keep their values.
         for block, tokens in zip(model.layers.values(), ([10, 0], [0, 10])):
-            torch.testing.assert_close(block.moe.expert_bias_E, torch.zeros(2))
+            torch.testing.assert_close(block.feed_forward.expert_bias_E, torch.zeros(2))
             torch.testing.assert_close(
-                block.moe.router.tokens_per_expert_E, torch.tensor(tokens)
+                block.feed_forward.router.tokens_per_expert_E, torch.tensor(tokens)
             )
 
     def test_moe_load_balancing_rejects_inconsistent_frozen_bias(self):
         model = FakeMoEModel()
-        model.layers["0"].moe.freeze_expert_bias = True
+        model.layers["0"].feed_forward.freeze_expert_bias = True
         config = OptimizersContainer.Config(
             optimizers=[
                 AdamW.Config(pattern=r".*", fused=False, lr=0.0, weight_decay=0.0),
@@ -332,11 +332,11 @@ class TestOptimizerConfig(unittest.TestCase):
         container.step()
 
         torch.testing.assert_close(
-            model.mtp_layers[0].moe.expert_bias_E,
+            model.mtp_layers[0].feed_forward.expert_bias_E,
             torch.tensor([-0.3, 0.3]),
         )
         torch.testing.assert_close(
-            model.mtp_layers[0].moe.router.tokens_per_expert_E,
+            model.mtp_layers[0].feed_forward.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
 

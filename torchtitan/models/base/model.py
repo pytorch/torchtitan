@@ -55,6 +55,7 @@ class BaseModel(Module, ABC):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
@@ -74,6 +75,9 @@ class BaseModel(Module, ABC):
         dependencies that are owned outside the trainable model. The trainer
         calls this through the ``BaseModel`` interface. There is no meaningful default;
         every model used by the training engine must implement it.
+
+        ``global_routing_token_counts``: per-depth routing-token counts over the global batch;
+        models with an aux loss return it as the ``aux_loss_denominators`` kwarg.
         """
         raise NotImplementedError(
             f"{type(self).__name__} must implement preprocess_inputs()."
