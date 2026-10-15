@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -77,24 +78,50 @@ def test_mismatched_or_indivisible_token_counts_are_rejected() -> None:
         shard_per_token_tensors({"a": torch.zeros(6)}, cp_rank=0, cp_size=4)
 
 
-def test_engine_refuses_a_cp_load_balancer_with_per_token_loss_arguments() -> None:
-    engine = SimpleNamespace(
-        config=SimpleNamespace(
-            parallelism=ParallelismConfig(
-                context_parallel_load_balancer=HeadTailCPLoadBalancer.Config()
-            )
-        )
-    )
-    with pytest.raises(ValueError, match="context_parallel_load_balancer=None"):
-        TrainingEngine._shard_loss_kwargs_for_cp(engine, _rl_loss_kwargs(8))
-
-
-def test_engine_shards_with_its_cp_mesh_coordinates() -> None:
+def _preprocess_with_cp(loss_kwargs: dict, *, load_balancer=None) -> dict:
+    """Run TrainingEngine microbatch preprocessing as CP rank 1 of 2."""
     cp_mesh = SimpleNamespace(get_local_rank=lambda: 1, size=lambda: 2)
     engine = SimpleNamespace(
-        config=SimpleNamespace(parallelism=ParallelismConfig()),
-        parallelism_context=SimpleNamespace(get_mesh=lambda axis: cp_mesh),
+        config=SimpleNamespace(
+            parallelism=ParallelismConfig(context_parallel_load_balancer=load_balancer),
+            training=SimpleNamespace(
+                num_tokens_per_microbatch_per_dp_rank=8, max_context_length=8
+            ),
+        ),
+        parallelism_context=SimpleNamespace(
+            cp=2,
+            cp_enabled=True,
+            pp_enabled=False,
+            activate_spmd=nullcontext,
+            get_mesh=lambda axis: cp_mesh,
+        ),
+        model_parts=[
+            SimpleNamespace(preprocess_inputs=lambda *_, **__: (None, None, {}))
+        ],
+        device="cpu",
+        max_num_documents=None,
+        preprocess_inputs_kwargs={},
+        ntokens_seen=0,
     )
+    microbatch = SimpleNamespace(
+        to_input_dict=lambda *_, **__: {},
+        to_loss_kwargs=lambda *_, **__: loss_kwargs,
+    )
+    *_, sharded = TrainingEngine._preprocess_microbatch_group(
+        engine, [microbatch], global_routing_token_counts=torch.zeros(1)
+    )
+    return sharded
+
+
+def test_engine_refuses_a_cp_load_balancer_with_per_token_loss_arguments() -> None:
+    with pytest.raises(ValueError, match="context_parallel_load_balancer=None"):
+        _preprocess_with_cp(
+            _rl_loss_kwargs(8), load_balancer=HeadTailCPLoadBalancer.Config()
+        )
+
+
+def test_engine_shards_loss_arguments_with_its_cp_mesh_coordinates() -> None:
     loss_kwargs = _rl_loss_kwargs(8)
-    sharded = TrainingEngine._shard_loss_kwargs_for_cp(engine, loss_kwargs)
-    torch.testing.assert_close(sharded["advantages"], loss_kwargs["advantages"][4:])
+    sharded = _preprocess_with_cp(loss_kwargs)
+    for name, value in loss_kwargs.items():
+        torch.testing.assert_close(sharded[name], value[4:])
