@@ -53,7 +53,8 @@ For a memory-bound op: ideal = (bytes of every input read once + every output wr
 
 - **On a shared GPU,** wrap each fresh-process run in a wait-for-quiet-GPU + retry loop (poll `nvidia-smi`, rerun contaminated rows); that gave clean numbers. When the GPU never goes quiet, interleaved A/B inside one process still gave correct relative deltas under 2.3x contention.
 
-- **Screen in one process, confirm in three.** In-process A/B (variants interleaved) is good for ranking. Cited numbers are medians of 3 fresh processes.
+- **Screen in one process, confirm once.** In-process A/B (variants interleaved) is good for ranking. Cited numbers come from one fresh process, two at most if noisy; don't rerun 6x to confirm a timing.
+- **Minimal tests and steps.** Add only the tests the change needs. Run the fewest steps that answer the question: 3 if 3 is enough, not 20 or 100.
 - **Busy shared GPU and many branches:** a full fresh-process matrix per branch may not fit. A fallback we used: clean 3-process medians for main vs the final stack, plus single-run per-branch deltas labelled "indicative".
 - **Host-bound regimes.** At 4k tokens per rank, eager plus many small kernels can be host-bound; walls swung 1.5-3x with other agents' CPU load. Report GPU kernel time alongside wall, and an interleaved in-process A/B to show a region's calls pay for their host cost.
 - **Record per row:** wall and kernel time, kernel count, peak memory, graph count, foreign GPU processes, commit hash.

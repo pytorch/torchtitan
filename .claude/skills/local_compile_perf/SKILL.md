@@ -82,7 +82,7 @@ Before investing in an idea: negative-results.md. If compile itself fails: compi
    ```
    Fixes interact: before rejecting a rewrite or an option, try it with the others. DSv3 `mla_qk`: real-arithmetic RoPE alone was slower (46.95 ms), the cat option alone neutral (46.37), both together 46.34 -> 45.85 ms.
 6. **Graph budget, early:** count all shapes and call sites plus a `no_grad` pass. Levers: `mark_static`, a dynamic token dim marked in eager, fewer signatures per region, `triton.mix_order_reduction_non_strict_mode`, raising the limit (we used 16 in several models; how depends on the tree, see measurement.md). Details in measurement.md.
-7. **Screen in one process, confirm with 3 fresh processes** on a quiet GPU. Every comparison reports two rows: normal launch and CUDA-graph replay of the whole fwd+bwd (harness.md). A win that disappears under graphs was host time.
+7. **Screen in one process, confirm once in a fresh process** (twice at most, if noisy) on a quiet GPU. Every comparison reports two rows: normal launch and CUDA-graph replay of the whole fwd+bwd (harness.md). A win that disappears under graphs was host time.
 8. **Correctness and side effects:** measurement.md (correctness) and gating-and-options.md (numerics, AC, parallelism); check deceiving-quirks.md.
 9. **Commit each validated change locally** before the next. Enable new regions in the target model's config or recipe, not a shared default list. A region enabled in a model config also reaches every config that subclasses it (DSv3 -> Kimi K2.7): check subclasses or enable per recipe. List which recipes reach the change.
 10. **Package** the stack and findings doc (Output).
@@ -116,7 +116,7 @@ Lessons from specific cases, not rules:
 - [ ] Ideal-time table; kernel diff; ranked candidates (ms, % of layer).
 - [ ] Region boundaries chosen by measurement.
 - [ ] Graph count: all shapes + `no_grad`, headroom under the limit.
-- [ ] 3 fresh processes; outputs and all grads vs eager (bf16, fp32) and fp64.
+- [ ] one fresh process (two at most); outputs and all grads vs eager (bf16, fp32) and fp64.
 - [ ] Gate chosen from eager cost (gating-and-options.md).
 - [ ] Quirks checked: TP, EP, hardware, dispatch mode, AC, compile mode.
 - [ ] Regions per model config; reaching recipes listed; each change committed.
