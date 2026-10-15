@@ -104,10 +104,13 @@ class RoPE(Module):
         beta_slow: float = 1.0
         original_seq_len: int = 4096
         truncate: bool = True
+        # V4.1 partial RoPE: un-rotated prefix width (0 = rotate everything).
+        split: int = 0
 
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
+        self.split = getattr(config, "split", 0)
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
 
     def _precompute_cache(self) -> torch.Tensor:
@@ -158,6 +161,18 @@ class RoPE(Module):
         """
         raise NotImplementedError
 
+    def _split_channels(self, x: torch.Tensor | None) -> torch.Tensor | None:
+        """Return the trailing channels to rotate (after the ``split`` prefix)."""
+        if x is None or not self.split:
+            return x
+        return x[..., self.split:]
+
+    def _unsplit_channels(self, rotated: torch.Tensor, x: torch.Tensor | None) -> torch.Tensor:
+        """Put the untouched prefix back in front of the rotated channels."""
+        if x is None or not self.split:
+            return rotated
+        return torch.cat([x[..., : self.split], rotated], dim=-1)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -166,9 +181,20 @@ class RoPE(Module):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary embeddings to query and optional key tensors."""
-        reshaped_cache = self._reshape_cache(query, positions)
-        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
+        """Apply rotary embeddings to query and optional key tensors.
+
+        With a non-zero ``split`` the leading ``split`` channels are left
+        untouched: the trailing ``dim`` channels are rotated and the prefix is
+        concatenated back.
+        """
+        reshaped_cache = self._reshape_cache(self._split_channels(query), positions)
+        rotated = self.apply_rotary_emb(
+            self._split_channels(query), self._split_channels(key), reshaped_cache, inverse=inverse
+        )
+        if key is None:
+            return self._unsplit_channels(rotated, query)
+        rotated_query, rotated_key = rotated
+        return self._unsplit_channels(rotated_query, query), self._unsplit_channels(rotated_key, key)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device
@@ -289,7 +315,7 @@ class CosSinRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super().forward(query, key, positions, inverse=inverse)
+        return RoPE.forward(self, query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute cos/sin values.
@@ -392,6 +418,11 @@ def _reshape_for_broadcast(
     num_tokens = query_shape[0]
     if positions is None:
         rope_cache = rope_cache[:num_tokens]
+    elif rope_cache.is_complex():
+        # NPU does not support indexing complex64 tensors (error 161002);
+        # use a real-valued view for the gather, then restore complex dtype.
+        real_cache = torch.view_as_real(rope_cache)
+        rope_cache = torch.view_as_complex(real_cache[positions].contiguous())
     else:
         rope_cache = rope_cache[positions]
     return rope_cache.view(num_tokens, 1, cache_width)

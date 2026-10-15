@@ -310,7 +310,7 @@ class TokenChoiceTopKRouter(Module):
             )
             if not remat.is_recomputing():
                 with torch.no_grad():
-                    self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
+                    self.tokens_per_expert_E = self.tokens_per_expert_E + masked_routing_map_TE.sum(dim=0)
             if self.aux_loss is not None:
                 if aux_loss_denominator is None:
                     raise ValueError("An auxiliary-loss denominator is required.")
