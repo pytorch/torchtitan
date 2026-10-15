@@ -15,6 +15,7 @@ from typing import Any
 
 import torchstore as ts
 from monarch.actor import ProcMesh
+from monarch.rdma import get_rdma_backend
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
@@ -171,6 +172,11 @@ class MonarchActorSystem(ActorSystem):
         )
 
     async def spawn_batcher(self, config: Batcher.Config, **kwargs: Any) -> Any:
+        if config.rdma_min_tensor_bytes is not None and get_rdma_backend() == "none":
+            raise ValueError(
+                "Monarch has no RDMA backend (no ibverbs, and TCP fallback is off); "
+                "set async_loop.batcher.rdma_min_tensor_bytes=None."
+            )
         assert self._batcher_mesh is not None, "provision before spawning"
         return self._batcher_mesh.spawn("batcher", BatcherActor, config, **kwargs)
 

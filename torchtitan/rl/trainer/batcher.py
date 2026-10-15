@@ -142,7 +142,7 @@ class TrainerStepBatch:
     """
 
     # [num_groups][num_microbatches_per_group][dp_degree]; under PP, each group runs as one
-    # pipeline step. RDMAMicrobatches when `rdma_min_tensor_bytes` is set.
+    # pipeline step. RDMAMicrobatches unless `rdma_min_tensor_bytes` is None.
     microbatch_groups: (
         list[list[list[TrainingMicrobatch]]] | list[list[list[RDMAMicrobatch]]]
     )
@@ -231,7 +231,7 @@ class Batcher(Configurable):
     Example:
         # num_prompts_per_train_step=2, dp_degree=2, 256 tokens/rank
         # The trigger is 2 trainable GROUPS, regardless of how many samples/tokens each contains.
-        batcher = Batcher.Config().build(
+        batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
             num_tokens_per_microbatch_per_dp_rank=256,
             max_context_length=128,
             num_prompts_per_train_step=2,
@@ -244,7 +244,7 @@ class Batcher(Configurable):
         # pending is None; batch.microbatch_groups: [num_groups][1][2 ranks];
         # each TrainingMicrobatch.input: [256 tokens]
 
-    With `rdma_min_tensor_bytes` set, it returns `RDMAMicrobatch`es registered with
+    Unless `rdma_min_tensor_bytes` is None, it returns `RDMAMicrobatch`es registered with
     `register_rdma_microbatch`, the actor system's RDMA registration (e.g.
     `MonarchRDMAMicrobatch.register`), which is then required.
 
@@ -267,14 +267,13 @@ class Batcher(Configurable):
         When unset, the trainer uses the microbatch token capacity as the
         CUDA-graph-safe metadata bound without imposing a tighter packing cap.
         """
-        rdma_min_tensor_bytes: int | None = None
+        rdma_min_tensor_bytes: int | None = 1024
         """Send microbatch tensors of at least this many bytes as RDMA buffers (the actor system's
-        `RDMAMicrobatch`), not in the RPC message:
-            None (default): every tensor in the message.
-            e.g. 1024: tensors >= 1 KiB stay in the batcher; token counts (8 B) and empty tensors go in the message.
-        The Monarch actor system uses ibverbs where the host has it, else TCP; a host that lists unusable
-        ibverbs devices fails instead. MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process, weight sync
-        included."""
+        `RDMAMicrobatch`), not in the RPC message. None: every tensor in the message.
+        Default 1 KiB: registering a buffer costs far more than sending a few bytes. `RDMABuffer` rejects empty tensors.
+        Monarch uses ibverbs where the host has it, else TCP. With neither, spawning the batcher raises.
+        A host that lists ibverbs devices it can't use fails at the first batch: set None, or
+        MONARCH_RDMA_DISABLE_IBVERBS=1 (TCP in every process, weight sync included)."""
         build_mrope_positions: bool = False
         """Give microbatches with images 3D M-RoPE positions (``mrope_positions``), as SFT's
         ``MultiModalCollator.Config.build_mrope_positions`` does: True for models whose image
@@ -416,7 +415,7 @@ class Batcher(Configurable):
             training_sample_group: One rollout group's trainable samples plus rollout metrics.
 
         Example:
-            batcher = Batcher.Config().build(
+            batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
                 num_tokens_per_microbatch_per_dp_rank=16384,
                 max_context_length=2048,
                 num_prompts_per_train_step=2,

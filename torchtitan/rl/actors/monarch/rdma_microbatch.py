@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Monarch's RDMA microbatch for the opt-in RDMA path (`Batcher.Config.rdma_min_tensor_bytes`): the
+"""Monarch's RDMA microbatch for the RDMA path (`Batcher.Config.rdma_min_tensor_bytes`): the
 batcher registers each microbatch's large tensors as Monarch RDMA buffers, and each trainer rank reads its own
 column.
 """
@@ -127,8 +127,8 @@ _CU_LIMIT_STACK_SIZE = 0
 def create_cuda_context_to_silence_monarch_log() -> None:
     """Make a CUDA context current on GPU 0, so Monarch stops printing `[RdmaXcel] No CUDA context ...`
     for every registered buffer (its CUDA driver check on each pointer needs a context)."""
-    # TODO: this costs ~256 MiB on GPU 0 (H100). Remove it when Monarch prints this line once, not per
-    # buffer (https://github.com/meta-pytorch/monarch/issues/5049; per buffer in torchmonarch 0.7.0).
+    # TODO: this costs ~256 MiB on GPU 0 (H100). Remove it once we require torchmonarch>=0.8.0, which prints
+    # this line once per process; 0.7.0 prints it per buffer (https://github.com/meta-pytorch/monarch/issues/5049).
     if not torch.cuda.is_available() or torch.version.cuda is None:
         return
     try:

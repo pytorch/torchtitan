@@ -22,11 +22,12 @@ from torch.utils import _pytree as pytree
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.models.qwen3_5 import QWEN3_5_VISION_PROCESSOR_KWARGS
-from torchtitan.rl.actors.monarch import rdma_microbatch
+from torchtitan.rl.actors.monarch import rdma_microbatch, system as monarch_system
 from torchtitan.rl.actors.monarch.rdma_microbatch import (
     _TensorRef,
     MonarchRDMAMicrobatch,
 )
+from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 from torchtitan.rl.rollout.types import RolloutTurnID
 from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
@@ -196,6 +197,16 @@ def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> N
     assert isinstance(batch.microbatch_groups[0][0][0], TrainingMicrobatch)
 
 
+def test_spawn_batcher_rejects_rdma_without_a_monarch_rdma_backend(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(monarch_system, "get_rdma_backend", lambda: "none")
+    actor_system = MonarchActorSystem.Config().build()
+
+    with pytest.raises(ValueError, match="no RDMA backend"):
+        asyncio.run(actor_system.spawn_batcher(Batcher.Config()))
+
+
 def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> None:
     monkeypatch.setattr(rdma_microbatch, "RDMABuffer", _FakeRDMABuffer)
     batcher = _build_batcher(rdma_min_tensor_bytes=1024)
@@ -345,7 +356,9 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
     rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(
         **batcher_kwargs, register_rdma_microbatch=MonarchRDMAMicrobatch.register
     )
-    by_value_batcher = Batcher.Config().build(**batcher_kwargs)
+    by_value_batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+        **batcher_kwargs
+    )
 
     async def run() -> None:
         mesh = this_host().spawn_procs(per_host={"procs": 4})

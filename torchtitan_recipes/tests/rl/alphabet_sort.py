@@ -930,6 +930,8 @@ def rl_grpo_pp2_interleaved1f1b_fsdp2_gen_tp2() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 2
     config.trainer.parallelism.tensor_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 2
+    # TODO: drop once trainer ranks read RDMA microbatches in pipeline-step groups.
+    config.async_loop.batcher.rdma_min_tensor_bytes = None
     # Tied embeddings cannot be split across pipeline stages, and the generator
     # must hold the same untied weights as the trainer.
     for model_config in (config.trainer.model, config.generator.model):
