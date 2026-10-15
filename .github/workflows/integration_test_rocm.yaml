@@ -49,7 +49,7 @@ jobs:
       timeout: 60
       script: |
         GPU_ARCH_TYPE="${{ matrix.runner_config['gpu-arch-type'] }}" \
-        TORCH_VERSION="${{ matrix.runner_config['torch-version'] }}" \
+        TORCH_VERSION="2.16.0.dev20261015+rocm10.0" \
         INDEX_URL="${{ matrix.runner_config['index-url'] }}" \
         TEST_SUITE="${{ matrix.test_suite }}" \
         EXPORT_RESULTS="false" \
