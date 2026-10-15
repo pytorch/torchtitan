@@ -54,6 +54,7 @@ from torchtitan.rl.generator.generator import (
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.registry import register_to_vllm
+from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
@@ -137,6 +138,7 @@ def _generator():
     per-request helpers (`_build_sampling_params`) read."""
     generator = VLLMGenerator.__new__(VLLMGenerator)
     generator._engine = _FakeEngine()
+    generator._session_kv_holder = None
     generator._rank = 0
     generator.policy_version = 7
     generator.config = SimpleNamespace(
@@ -567,6 +569,18 @@ def test_batch_invariant_requires_kv_cache_reset():
             model=_MODEL_CONFIG,
             parallelism=_PARALLELISM,
             debug=DebugConfig(batch_invariant=True),
+        )
+
+
+def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load():
+    with pytest.raises(
+        ValueError, match="needs reset_kv_cache_on_model_state_dict_load=False"
+    ):
+        VLLMGenerator.Config(
+            model=_MODEL_CONFIG,
+            parallelism=_PARALLELISM,
+            session_kv_holder=VLLMSessionKVHolder.Config(),
+            reset_kv_cache_on_model_state_dict_load=True,
         )
 
 
