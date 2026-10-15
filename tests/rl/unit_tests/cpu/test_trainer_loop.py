@@ -13,7 +13,6 @@ the ordering that makes the overlap safe.
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -94,6 +93,10 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     controller.generator_router = SimpleNamespace(
         sync_log_step=_Endpoint(), pull_model_state_dict=_Endpoint(pull)
     )
+    controller.batcher = SimpleNamespace(
+        sync_log_step=SimpleNamespace(broadcast=lambda step: None),
+        maybe_release_oldest_batch=SimpleNamespace(broadcast=lambda: None),
+    )
 
     async def sync_log_step(step):
         pass
@@ -134,9 +137,7 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
 def _run(controller: Controller, *, num_training_steps: int) -> None:
     asyncio.run(
         controller._trainer_loop(
-            _batch_queue(num_training_steps),
-            num_training_steps=num_training_steps,
-            batcher=SimpleNamespace(maybe_release_oldest_batch=AsyncMock()),
+            _batch_queue(num_training_steps), num_training_steps=num_training_steps
         )
     )
 

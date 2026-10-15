@@ -14,7 +14,7 @@ import heapq
 import logging
 import math
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -24,9 +24,12 @@ from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 
 from torchtitan.config import Configurable
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
+from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.rollout.types import RolloutGroup
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
+    TrainingSampleBuilder,
     TrainingSampleGroup,
 )
 
@@ -195,6 +198,9 @@ class Batcher(Configurable):
             e.g. 1024: tensors >= 1 KiB stay in the batcher; token counts (8 B) and empty tensors go in the message.
         Monarch uses ibverbs where the host has it, else TCP; a host that lists unusable ibverbs devices
         fails instead. MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process, weight sync included."""
+        training_sample_builder: TrainingSampleBuilder.Config = field(
+            default_factory=TrainingSampleBuilder.Config
+        )
 
         def __post_init__(self) -> None:
             if self.num_mtp_layers < 0:
@@ -221,6 +227,7 @@ class Batcher(Configurable):
         pad_id: int,
         temperature: float,
     ) -> None:
+        self._training_sample_builder = config.training_sample_builder.build()
         self.seq_len = max_context_length
         self._num_rows_per_microbatch, remainder = divmod(
             num_tokens_per_microbatch_per_dp_rank,
@@ -283,6 +290,19 @@ class Batcher(Configurable):
             f"({self._num_consecutive_zero_output_groups} rollout groups); "
             "check reward diversity and training-sample filters."
         )
+
+    def add_group(
+        self, *, rollout_group: RolloutGroup
+    ) -> tuple[TrainerStepBatch | None, bool]:
+        """Build one rollout group's training samples and add them; see `add_training_samples`."""
+        with sl.log_trace_span("training_sample_builder"):
+            training_sample_group = self._training_sample_builder.build_from_group(
+                rollout_group=rollout_group
+            )
+        with sl.log_trace_span("batcher_pack"):
+            return self.add_training_samples(
+                training_sample_group=training_sample_group
+            )
 
     def add_training_samples(
         self, *, training_sample_group: TrainingSampleGroup
