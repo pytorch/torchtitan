@@ -28,6 +28,7 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
+from torchtitan.distributed.context_parallel import shard_per_token_tensors
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
@@ -647,14 +648,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 self.config.training.num_tokens_per_microbatch_per_dp_rank
                 // self.parallelism_context.cp
             )
-            prepared_microbatches.append(
-                (
-                    inputs,
-                    labels,
-                    model_kwargs,
-                    microbatch.to_loss_kwargs(self.device, non_blocking=True),
-                )
-            )
+            loss_kwargs = microbatch.to_loss_kwargs(self.device, non_blocking=True)
+            if loss_kwargs and self.parallelism_context.cp_enabled:
+                loss_kwargs = self._shard_loss_kwargs_for_cp(loss_kwargs)
+            prepared_microbatches.append((inputs, labels, model_kwargs, loss_kwargs))
 
         if not self.parallelism_context.pp_enabled:
             assert len(prepared_microbatches) == 1
@@ -677,6 +674,25 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             else None
         )
         return (arg_mbs, kwarg_mbs, target_mbs)
+
+    def _shard_loss_kwargs_for_cp(self, loss_kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Keep this CP rank's token shard of the per-token loss arguments.
+
+        ``preprocess_inputs`` shards the labels over CP; per-token loss arguments
+        (such as RL advantages and sampling-policy logprobs) must follow the same
+        contiguous layout, which holds only without a load-balancing permutation.
+        """
+        if self.config.parallelism.context_parallel_load_balancer is not None:
+            raise ValueError(
+                "Per-token loss arguments under context parallelism require "
+                "parallelism.context_parallel_load_balancer=None."
+            )
+        cp_mesh = self.parallelism_context.get_mesh("cp")
+        return shard_per_token_tensors(
+            loss_kwargs,
+            cp_rank=cp_mesh.get_local_rank(),
+            cp_size=cp_mesh.size(),
+        )
 
     def _forward_backward_body(
         self,

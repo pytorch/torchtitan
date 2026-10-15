@@ -42,6 +42,7 @@ __all__ = [
     "PTRRFlexAttentionCPLoadBalancer",
     "get_cp_input_seq_len",
     "get_token_fragments",
+    "shard_per_token_tensors",
     "shard_tensors",
     "supports_cp_inner_attention",
 ]
@@ -363,3 +364,50 @@ def shard_tensors(
             dst=spmd.S(seq_dim),
         )
     return input_dict
+
+
+def shard_per_token_tensors(
+    tensors: Mapping[str, Any],
+    *,
+    cp_rank: int,
+    cp_size: int,
+) -> dict[str, Any]:
+    """Keep this CP rank's token shard of each per-token tensor.
+
+    Matches ``shard_tensors`` without a load-balancing permutation: CP rank
+    ``r`` keeps tokens ``[r * T / cp_size, (r + 1) * T / cp_size)`` along dim 0.
+    Used for per-token loss arguments (e.g. RL advantages and sampling-policy
+    logprobs), which must line up with the CP-sharded labels. Non-tensor values
+    pass through unchanged.
+
+    Raises:
+        ValueError: if the tensors do not share one leading token dimension, or
+            it is not divisible by ``cp_size``.
+    """
+    num_tokens = {
+        name: value.shape[0]
+        for name, value in tensors.items()
+        if isinstance(value, torch.Tensor)
+    }
+    if len(set(num_tokens.values())) > 1:
+        raise ValueError(
+            "Per-token tensors sharded for CP must share one leading token "
+            f"dimension, but got {num_tokens}."
+        )
+    if not num_tokens:
+        return dict(tensors)
+    total = next(iter(num_tokens.values()))
+    if total % cp_size:
+        raise ValueError(
+            f"The token count ({total}) must be divisible by the CP degree "
+            f"({cp_size})."
+        )
+    local = total // cp_size
+    return {
+        name: (
+            value.narrow(0, cp_rank * local, local)
+            if isinstance(value, torch.Tensor)
+            else value
+        )
+        for name, value in tensors.items()
+    }
