@@ -80,6 +80,13 @@ def load_npy_video_frames(path: str | Path) -> torch.Tensor:
     return torch.from_numpy(frames_THWC)
 
 
+def format_video_timestamp(seconds: float) -> str:
+    """Format a time offset in seconds as ``hh:mm:ss.fff``."""
+    whole = int(seconds)
+    millis = int((seconds % 1) * 1000)
+    return f"{whole // 3600:02d}:{whole // 60 % 60:02d}:{whole % 60:02d}.{millis:03d}"
+
+
 def load_video(
     path: str,
     fps: float = 2.0,

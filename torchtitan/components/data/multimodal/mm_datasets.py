@@ -79,7 +79,7 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from .utils.audio import resample_waveform
 from .utils.image import calculate_vision_tokens, process_image, resize_to_pixel_budget
 from .utils.text import insert_vision_placeholders
-from .utils.video import process_video
+from .utils.video import format_video_timestamp, process_video
 
 
 logger = logging.getLogger(__name__)
@@ -232,6 +232,90 @@ def _process_video_text_sample(
     if text_fields is None:
         return None
     return {**text_fields, "pixel_values_videos": [processed_video]}
+
+
+def _process_chunked_video_text_sample(
+    text: str,
+    frames: torch.Tensor,
+    tokenizer: MultiModalTokenizer,
+    patch_size: int,
+    temporal_patch_size: int,
+    spatial_merge_size: int,
+    min_pixels: int,
+    max_pixels: int,
+    image_mean: tuple[float, ...],
+    image_std: tuple[float, ...],
+    resize_fn: Callable[..., tuple[int, int, int, int]],
+    max_patches: int,
+    max_patches_per_side: int,
+    *,
+    frames_per_chunk: int,
+    fps: float,
+    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
+) -> dict[str, Any] | None:
+    """Process sampled frames and a caption as timestamped image-stream chunks."""
+    video_token = cast(
+        str,
+        tokenizer.video_token,  # pyrefly: ignore [missing-attribute]
+    )
+    image_token = cast(
+        str,
+        tokenizer.image_token,  # pyrefly: ignore [missing-attribute]
+    )
+    if video_token != image_token:
+        raise ValueError(
+            "Video chunks join the image stream, so the tokenizer must use one "
+            "placeholder for images and videos."
+        )
+    if temporal_patch_size != 1:
+        raise ValueError(
+            "Video chunks pool time in the encoder; temporal_patch_size must be 1."
+        )
+    processed_video = process_video(
+        frames,
+        patch_size=patch_size,
+        merge_size=spatial_merge_size,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+        image_mean=image_mean,
+        image_std=image_std,
+        resize_fn=resize_fn,
+        image_interpolation_mode=image_interpolation_mode,
+        max_patches=max_patches,
+        max_patches_per_side=max_patches_per_side,
+    )
+    num_chunk_tokens, _, _ = calculate_vision_tokens(
+        num_frames=1,
+        height=processed_video.shape[1],
+        width=processed_video.shape[2],
+        patch_size=patch_size,
+        spatial_merge_size=spatial_merge_size,
+        temporal_patch_size=temporal_patch_size,
+    )
+    chunks = list(processed_video.split(frames_per_chunk))
+    input_parts: list[str | None] = []
+    for index in range(len(chunks)):
+        input_parts += [format_video_timestamp(index * frames_per_chunk / fps), None]
+    input_parts.append(text)
+
+    processed_text = insert_vision_placeholders(
+        input_parts,
+        [num_chunk_tokens] * len(chunks),
+        vision_start_token=cast(
+            str,
+            tokenizer.vision_start_token,  # pyrefly: ignore [missing-attribute]
+        ),
+        vision_token=video_token,
+        vision_end_token=cast(
+            str,
+            tokenizer.vision_end_token,  # pyrefly: ignore [missing-attribute]
+        ),
+        eos_token=cast(str, tokenizer.eos_token),
+    )
+    text_fields = _tokenize_mm_text(processed_text, tokenizer)
+    if text_fields is None:
+        return None
+    return {**text_fields, "pixel_values": chunks}
 
 
 def _process_mm_sample(

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import replace
 
 import torch
 from torch.nn.attention.flex_attention import BlockMask
@@ -161,6 +162,45 @@ class TestKimiK3(unittest.TestCase):
         self.assertRegex(
             "layers.1.feed_forward.routed_experts.w2.weight", muon_config.pattern
         )
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA is required.")
+    def test_video_chunks_and_images_scatter_in_document_order(self):
+        torch.manual_seed(0)
+        config = _small_model_config()
+        assert config.vision_encoder is not None
+        config = replace(
+            config, vision_encoder=replace(config.vision_encoder, max_num_frames=4)
+        )
+        with torch.device("cuda"):
+            model = config.build()
+            model.init_states()
+        encoder = model.vision_encoder
+        assert encoder is not None
+        grids = [[1, 2, 2], [4, 2, 4], [2, 4, 2]]
+        items = [
+            torch.randn(t * h * w, encoder.patch_embed.in_features, device="cuda")
+            for t, h, w in grids
+        ]
+        placeholder_id = 7
+        tokens = torch.tensor([5, 7, 5, 7, 7, 5, 7, 7, 5], device="cuda")
+
+        with torch.no_grad():
+            embeds_TD = model._prepare_multimodal_embeds(
+                tokens,
+                pixel_values=torch.cat(items),
+                grid_thw=torch.tensor(grids, device="cuda"),
+                special_tokens={"image_id": placeholder_id, "video_id": placeholder_id},
+            )
+            expected = [
+                encoder(item, grid_thw=torch.tensor([grid], device="cuda"))
+                for item, grid in zip(items, grids, strict=True)
+            ]
+            text_TD = model.tok_embeddings(tokens)
+
+        torch.testing.assert_close(embeds_TD[[1]], expected[0])
+        torch.testing.assert_close(embeds_TD[[3, 4]], expected[1])
+        torch.testing.assert_close(embeds_TD[[6, 7]], expected[2])
+        torch.testing.assert_close(embeds_TD[[0, 2, 5, 8]], text_TD[[0, 2, 5, 8]])
 
     def test_flex_attention_mask(self):
         config = _small_model_config()
