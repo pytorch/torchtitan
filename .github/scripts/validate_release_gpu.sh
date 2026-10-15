@@ -83,7 +83,6 @@ install_release_candidate
 
 if [[ "${VALIDATION_SUITE}" == "b200" ]]; then
   python -m pip install \
-    -r "${REPO_ROOT}/.ci/docker/requirements-vlm.txt" \
     "pytest==7.3.2" "expecttest>=0.2.0" \
     "flash-attn-4[cu13]>=4.0.0b31" \
     "git+https://github.com/meta-pytorch/dist_moe.git@main"
