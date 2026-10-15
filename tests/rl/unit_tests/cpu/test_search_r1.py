@@ -17,7 +17,7 @@ from renderers.base import ParsedToolCall
 
 from torchtitan.components.renderer import RenderersConfigAdapter
 from torchtitan.config import ConfigLoader
-from torchtitan.rl.controller import Controller
+from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.examples.search_r1 import (
     env as sr1_env,
     RewardExactMatch,
