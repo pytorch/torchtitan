@@ -257,7 +257,7 @@ TORCHINDUCTOR_MULTI_KERNEL=1, with or without multi_kernel_hints: no change
 
 **Why:** each scan (the one-hot cumsum, then the per-expert offsets) and the `index_put` that the gathers read end an Inductor kernel. At decode every kernel is 1.2-2.1 us of launch-bound work.
 
-**Workaround:** none in Inductor. A hand-written dispatch kernel (or FlashInfer's routing) would replace the region.
+**Workaround:** rank the routes without a scan. Each route's row is the number of routes with a smaller `(expert, route)` key: one `(N, N)` compare-and-count, which Inductor fuses with the sort's `index_put` into one kernel. Dispatch at T=34: 5 kernels (9.1 us) -> 3 (5.1 us). It is O(N^2), so TorchTitan uses it up to 2048 routes (256 tokens) and a radix sort above. The ask stands for scans in general.
 
 **Repro:** `repros/ask10_dispatch_codegen.py`.
 
@@ -268,7 +268,7 @@ TORCHINDUCTOR_MULTI_KERNEL=1, with or without multi_kernel_hints: no change
 - **Shared expert on a side stream** under `no_grad`, as vLLM does: -7.6 us per MoE layer at T=34 (measured).
 - **Skip the router's routing map, per-expert counts and eager offsets cumsum** at inference; the dispatch recomputes the counts: ~-10 us per layer at T=34 (6 kernels, estimate).
 - **Size-split region compile and 2D tiles:** the workaround for asks 8 and 9.
-- **A histogram (atomic-slot) dispatch for prefill** instead of argsort (cub radix sort, 67.5 us at T=4096): ~-55 us per layer at T=4096 (estimate).
+- **Sort narrow keys for prefill:** argsort of int64 expert ids is a radix sort with 8 passes; on uint8 ids it is 1 pass, same order. 32,768 routes (T=4096): 69 -> 24 us.
 - **Opt-in FlashInfer routed experts in the generator:** -74 us per layer at T=34. The generator's MoE output would then differ from the trainer's by ~5e-3 relative L2, instead of matching within ~5e-5.
 
 ## Known behaviors (one line each)
