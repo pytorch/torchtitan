@@ -10,6 +10,7 @@
   - hard failures: graph budgets ending in `FailOnRecompileLimitHit`; an FX graph cache serving code from a stale custom-op fake;
   - biggest perf gaps: opaque deterministic scatter-add (~2.0% of a Kimi K3 microbatch), symbolic strides on packed views (~2%), small reductions not unrolled (~1.6%).
 - One GB300, torch 2.15.0.dev20260926; every repro re-run on 2026-10-09 (within ~1%).
+- MoE decode in the RL generator (vs vLLM's FlashInfer MoE): 10 more asks with repros in [`moe_decode/`](moe_decode/README.md).
 
 **Terms.**
 - Region: a function decorated with TorchTitan's `@local_compile`, i.e. `torch.compile(fn, fullgraph=True, **options)`. Block compile: `torch.compile` of a whole transformer layer.
