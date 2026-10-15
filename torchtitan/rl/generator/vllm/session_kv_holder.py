@@ -20,9 +20,8 @@ from torchtitan.rl.generator.vllm.cpu_kv_offload import CPUKVOffload
 
 
 class VLLMSessionKVHolder(Configurable):
-    """Keeps each multi-turn session's reusable KV between its turns: held on GPU
-    (`hold_gpu_blocks`), and with `cpu_kv_offload` in host RAM, where ended sessions are evicted
-    first.
+    """Keeps each multi-turn session's reusable KV between its turns: on GPU (`hold_gpu_blocks`),
+    in host RAM (`cpu_kv_offload`), or both.
 
     Between turns (a tool call, an env step) a session has no request in vLLM, so its blocks sit in
     vLLM's free queue, where any new request can take them; the next turn then recomputes its
@@ -77,9 +76,8 @@ class VLLMSessionKVHolder(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         hold_gpu_blocks: bool = True
-        """Keep each session's reusable prefix on GPU between its turns. False needs
-        `cpu_kv_offload`: no GPU blocks are held, and a turn whose history left the GPU reloads it
-        from CPU (8k-token turn, 1 H100: ~24 ms, vs ~16 ms GPU hit and ~196 ms recomputed)."""
+        """Hold each session's reusable prefix on GPU between turns. False needs `cpu_kv_offload`.
+        8k-token turn on 1 H100: GPU hit ~16 ms, CPU reload ~24 ms, recompute ~196 ms."""
 
         cpu_kv_offload: CPUKVOffload.Config | None = None
         """vLLM's native CPU KV offload (see `CPUKVOffload`). None: off."""
@@ -109,9 +107,8 @@ class VLLMSessionKVHolder(Configurable):
         # Sessions past their first prefill, until `release`.
         self._session_groups: dict[str, int] = {}
         self._group_sessions: dict[int, set[str]] = {}
-        # With offload: each session's latest request's block hashes. Its prompt holds the earlier
-        # turns, and vLLM appends decode blocks to this list. If a turn re-renders the history,
-        # chunks only an earlier turn had are not evicted first.
+        # With offload: each session's latest request's block hashes, which cover its earlier turns
+        # (vLLM appends decode blocks). If a turn re-renders history, old chunks keep their place.
         self._session_hashes: dict[str, list[bytes]] = {}
         # Plain ints, so other threads (e.g. a logging endpoint) can read them safely.
         self.num_sessions = 0
