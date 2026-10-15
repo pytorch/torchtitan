@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
@@ -958,7 +959,9 @@ class VLLMGenerator(Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        attention_backend = model_config.first_base_attention_backend
+        attention = model_config.first_full_attention
+        assert attention is not None, "No full attention layer found in the model spec."
+        attention_backend = attention.inner_attention
         assert isinstance(
             attention_backend,
             (VarlenInnerAttention.Config, FlexInnerAttention.Config),
@@ -1027,9 +1030,10 @@ class VLLMGenerator(Configurable):
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
-        # Continuous batching requires FCFS scheduling: admission order must equal the
-        # broadcast order on every rank
-        engine_kwargs["scheduling_policy"] = "fcfs"
+        # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
+        # (-1 for all validation), so older groups have higher priority (see its docstring).
+        # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.
+        engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.
         # - 0 (vLLM default since v0.29): only the replay boundary (the last block
@@ -1283,7 +1287,8 @@ class VLLMGenerator(Configurable):
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
             group_id: Rollout group id. Requests of one group share a prefix cache
-                salt; `release_groups` drops it.
+                salt; `release_groups` drops it. Also sets the vLLM priority; see
+                `EngineRequest.group_id`.
             routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
@@ -1319,6 +1324,7 @@ class VLLMGenerator(Configurable):
                     sampling=sampling,
                     group_id=group_id,
                     routing_session_id=routing_session_id,
+                    arrival_time=time.time(),
                 ),
                 metrics_prefix=metrics_prefix,
                 reply=reply,
@@ -1416,7 +1422,7 @@ class VLLMGenerator(Configurable):
                         )
                     # Admit only this rank's DP replica slice. TP ranks in the same
                     # replica compute the same _dp_rank, so they add the identical
-                    # set in the same FCFS order.
+                    # set in the same order.
                     local_requests = decision.requests_per_dp_rank[
                         self._request_dispatcher._dp_rank
                     ]
@@ -1446,6 +1452,8 @@ class VLLMGenerator(Configurable):
                                 request_id=request.request_id,
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
+                                arrival_time=request.arrival_time,
+                                priority=max(request.group_id, -1),
                             )
                             if self._session_kv_holder is not None:
                                 self._session_kv_holder.track(
@@ -1777,7 +1785,19 @@ class EngineRequest:
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
     group_id: int
+    """Rollout group id. Sets the vLLM priority: lower is admitted first and preempted last.
+    Training ids grow as groups start. Validation ids count down (-1, -2, ...) and restart every run,
+    so all validation gets priority -1: it runs in arrival order (not newest first), before training.
+
+        waiting, in arrival order:  g7 turn 1   g9 turn 1   g4 turn 2   val -1      val -2
+        priority:                   7           9           4           -1          -1
+        vLLM admits:                val -1      val -2      g4 turn 2   g7 turn 1   g9 turn 1
+                                                            ^ g4 started before g7
+    """
     routing_session_id: str
+    arrival_time: float
+    """Rank 0's `time.time()` in `generate`; vLLM breaks priority ties by it and measures TTFT from it.
+    All TP ranks pass this one value, so they order ties the same way even if their clocks differ."""
     min_policy_version: int = field(init=False)
     """Oldest policy version this request's KV can come from; rank 0 sets it at admission.
     Without a KV reset on model state dict load it is the group's pinned version and salts the

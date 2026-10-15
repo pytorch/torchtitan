@@ -29,7 +29,7 @@ def test_decoder_accepts_wrapped_transformer_blocks() -> None:
     class WrappedBlock(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.attention = SimpleNamespace(attention_metadata_key="wrapped")
+            self.attention = SimpleNamespace(inner_attention=torch.nn.Identity())
             self.attention_metadata: object | None = None
 
         def forward(
@@ -58,7 +58,7 @@ def test_decoder_accepts_wrapped_transformer_blocks() -> None:
     output = model(
         tokens,
         positions=torch.arange(2),
-        attention_metadata=cast(Any, {"wrapped": "metadata"}),
+        attention_metadata=cast(Any, {torch.nn.Identity: "metadata"}),
     )
 
     torch.testing.assert_close(output, tokens + 1)
