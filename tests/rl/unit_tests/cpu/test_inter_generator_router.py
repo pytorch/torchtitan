@@ -54,6 +54,7 @@ class _Actor:
         self.generate = _Endpoint(name, wait=wait_generate)
         self.prefetch_model_state_dict = _Endpoint(wait=wait_prefetch)
         self.load_model_state_dict = _Endpoint(None, wait=wait_pull, raises=raises_pull)
+        self.release_sessions = _Endpoint()
 
     def flatten(self, *args, **kwargs):
         return self
@@ -379,12 +380,28 @@ def test_sticky_session_release_drops_its_assignment():
         first = asyncio.create_task(_generate(router, group_id=0, session_id="s0"))
         await actors[0].generate.started.wait()
 
-        router._release_session(session_id="s0")
+        await router._release_session(session_id="s0")
         # Released, s0 is a new session: least-loaded picks idle gen1 over busy gen0.
         assert await _generate(router, group_id=0, session_id="s0") == "gen1"
 
         actors[0].generate.release.set()
         assert await first == "gen0"
+
+    asyncio.run(_run())
+
+
+def test_session_release_reaches_only_its_pinned_generator():
+    """The generator a session is pinned to releases its held KV."""
+
+    async def _run():
+        actors = [_Actor("gen0"), _Actor("gen1")]
+        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
+        assert await _generate(router, group_id=0, session_id="s0") == "gen0"
+
+        await router._release_session(session_id="s0")
+
+        assert actors[0].release_sessions.calls == [((["s0"],), {})]
+        assert actors[1].release_sessions.calls == []
 
     asyncio.run(_run())
 
