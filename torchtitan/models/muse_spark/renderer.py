@@ -85,7 +85,6 @@ class MuseSparkRendererConfig(RendererConfig):
             raise TypeError("current_date must be a string or None")
 
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
-        # pyrefly: ignore [bad-return]
         return MuseSparkRenderer(RendererTokenizerWrapper(tokenizer), self)
 
 
@@ -691,7 +690,11 @@ class MuseSparkRenderer:
         token_ids: list[int],
         *,
         tools: list[ToolSpec] | None = None,
+        prompt_ids: list[int] | None = None,
     ) -> ParsedResponse:
+        # The generation prompt ends after "assistant", so the completion contains
+        # the recipient and channel body without needing prompt context.
+        del prompt_ids
         text = self._tokenizer.decode(token_ids, skip_special_tokens=False)
         param_index = _build_param_type_index(tools)
         reasoning: list[str] = []

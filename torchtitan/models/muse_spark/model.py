@@ -310,12 +310,8 @@ class MuseSparkTransformerBlock(TransformerBlock):
     class Config(TransformerBlock.Config):
         # pyrefly: ignore [bad-override]
         attention: MuseSparkAttention.Config
-        # pyrefly: ignore [bad-override]
-        attention_norm: MuseSparkRMSNorm.Config
         post_attention_norm: MuseSparkRMSNorm.Config
         attention_residual: MuseSparkNormPreservingResidualConnection.Config
-        # pyrefly: ignore [bad-override]
-        ffn_norm: MuseSparkRMSNorm.Config
         post_ffn_norm: MuseSparkRMSNormWithInputScale.Config
         ffn_residual: MuseSparkNormPreservingResidualConnection.Config
         branch_dtype: torch.dtype = torch.bfloat16
@@ -409,10 +405,6 @@ class MuseSparkModel(MultimodalModel):
         # pyrefly: ignore [bad-override]
         tok_embeddings: MuseSparkEmbeddingWithNorm.Config
         layers: list[MuseSparkTransformerBlock.Config]
-        # pyrefly: ignore [bad-override]
-        norm: MuseSparkRMSNorm.Config
-        # pyrefly: ignore [bad-override]
-        lm_head: MuseSparkLMHead.Config
         residual_dtype: torch.dtype = torch.float32
         final_norm_input_dtype: torch.dtype | None = None
         dataset_modalities: tuple[Literal["vision", "audio"], ...] = ()
