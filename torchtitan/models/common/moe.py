@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import cast, Protocol
@@ -346,10 +345,9 @@ class TokenChoiceTopKRouter(Module):
         Outside the region:
         - gate: ``HiMidLoLinear`` raises when traced with ``inplace_wgrad_accum=True`` (the
           default); with it off, a compiled region would round its fp32 weight grad to bf16.
-        - counts, aux loss: they update buffers. Compiled, ``remat.is_recomputing()`` is
-          always False, so a recompute pass would count them twice.
-        A router whose ``_select_experts`` updates state must run this method eagerly, as
-        ``QuantileBalancedTopKRouter`` does.
+        - counts, aux loss, ``QuantileBalancedTopKRouter``'s histogram: they update buffers.
+          Compiled, ``remat.is_recomputing()`` is always False, so a recompute pass would
+          count them twice. ``_select_experts`` runs here, so it must not update state.
 
         Returns:
             scores_TE: Router scores ``(T, E)`` in FP32.
@@ -420,13 +418,6 @@ class RoundRobinTokenChoiceTopKRouter(TokenChoiceTopKRouter):
 class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
     """Top-k router that uses a biased Top-(k+1) cutoff during training."""
 
-    # Eager even with moe_router_topk enabled: ``_select_experts`` updates the histogram,
-    # and compiled, ``remat.is_recomputing()`` is always False, so a recompute would update
-    # it twice. ``inspect.unwrap`` strips the local_compile wrapper.
-    _score_and_select_experts = inspect.unwrap(
-        TokenChoiceTopKRouter._score_and_select_experts
-    )
-
     @dataclass(kw_only=True, slots=True)
     class Config(TokenChoiceTopKRouter.Config):
         num_bins: int
@@ -441,30 +432,33 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
             num_bins=config.num_bins,
         ).build()
 
-    def _select_experts(
+    def _score_and_select_experts(
         self,
-        scores_TE: torch.Tensor,
-        expert_bias_E: torch.Tensor | None = None,
-        padding_mask_T: torch.Tensor | None = None,
+        gate_TE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None,
+        *,
+        padding_mask_T: torch.Tensor | None,
         **router_kwargs,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run the base method (compiled when ``moe_router_topk`` is on), then update the
+        histogram in eager, as ``forward`` does for its counts."""
         if expert_bias_E is None:
             raise ValueError("Quantile balancing requires an expert bias.")
-        biased_scores_TE = scores_TE + expert_bias_E
-        topk_plus_one_scores, topk_plus_one_expert_ids = torch.topk(
-            biased_scores_TE,
-            k=self.top_k + 1,
-            dim=-1,
-            sorted=True,
+        outputs = super()._score_and_select_experts(
+            gate_TE,
+            expert_bias_E,
+            padding_mask_T=padding_mask_T,
+            **router_kwargs,
         )
+        scores_TE, _, _, routing_map_TE = outputs
         if self.training and not remat.is_recomputing():
             self.quantile_balancer.observe(
                 scores_TE,
-                topk_plus_one_scores[:, self.top_k :],
+                routing_map_TE,
                 expert_bias_E,
                 padding_mask_T,
             )
-        return topk_plus_one_expert_ids[:, : self.top_k].contiguous()
+        return outputs
 
 
 class QuantileBalancer(Module):
@@ -497,7 +491,7 @@ class QuantileBalancer(Module):
     def observe(
         self,
         scores_TE: torch.Tensor,
-        cutoff_T1: torch.Tensor,
+        routing_map_TE: torch.Tensor,
         expert_bias_E: torch.Tensor,
         padding_mask_T: torch.Tensor | None,
     ) -> None:
@@ -506,6 +500,12 @@ class QuantileBalancer(Module):
             return
 
         with spmd.no_typecheck(), torch.no_grad():
+            # The Top-(k+1) cutoff: the best biased score among the unpicked experts.
+            cutoff_T1 = (
+                (scores_TE + expert_bias_E)
+                .masked_fill(routing_map_TE, float("-inf"))
+                .amax(dim=-1, keepdim=True)
+            )
             lower_bound = expert_bias_E.min() - 1.0
             bin_width = (
                 expert_bias_E.max() - expert_bias_E.min() + 2.0
