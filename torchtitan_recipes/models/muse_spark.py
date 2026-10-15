@@ -91,11 +91,6 @@ _MUSE_SPARK_DIST_MOE_SAVE_REGIONS = [
     "attention.inner_attention",
     "feed_forward.routed_experts.dist_moe",
 ]
-_MUSE_SPARK_SCALE_LOCAL_COMPILE_REGIONS = [
-    "muse_spark_input_scaled_rmsnorm",
-    "muse_spark_logit_postprocess",
-    "muse_spark_residual",
-]
 
 
 def _muse_spark_context_parallel_transform() -> ContextParallelTransform:
@@ -522,14 +517,6 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     p.num_pp_microbatches = 1
     p.fsdp_reshard_after_forward = "always"
 
-    # Compile only the elementwise regions with measured fusion wins. Activation
-    # remat saves the expensive inner-attention and effectful Dist-MoE outputs
-    # while recomputing projections, routing preparation, norms, and pool/unpool.
-    config.model.local_compile_regions.extend(
-        region
-        for region in _MUSE_SPARK_SCALE_LOCAL_COMPILE_REGIONS
-        if region not in config.model.local_compile_regions
-    )
     if fake_backend:
         config.hf_assets_path = "./tests/assets/tokenizer"
         config.dataloader = GrainDataLoader.Config(
