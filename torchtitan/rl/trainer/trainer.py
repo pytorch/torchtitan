@@ -252,9 +252,8 @@ class Trainer(Configurable):
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
-            microbatches: This rank's microbatches, `[num_microbatches]`: one column of the
-                batcher's `[num_microbatches][dp_degree]` grid; `MonarchRDMAMicrobatch`es when
-                `rdma_min_tensor_bytes` is set, read a few ahead of training.
+            microbatches: This rank's column of the batcher's `[num_microbatches][dp_degree]` grid;
+                `MonarchRDMAMicrobatch`es when `rdma_min_tensor_bytes` is set, read a few ahead of training.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -264,10 +263,9 @@ class Trainer(Configurable):
             dict[str, float]: Globally-reduced metrics.
 
         Example:
-            # dp_degree=2, tp=2: ranks 0-1 share DP rank 0, ranks 2-3 share DP rank 1.
-            # grid = [[mb_00, mb_01], [mb_10, mb_11]]
-            # ranks 0 and 1 get microbatches = [mb_00, mb_10]
-            # ranks 2 and 3 get microbatches = [mb_01, mb_11]
+            # dp_degree=2, tp=2, grid = [[mb_00, mb_01], [mb_10, mb_11]]
+            # ranks 0, 1 (DP rank 0) get microbatches = [mb_00, mb_10]
+            # ranks 2, 3 (DP rank 1) get microbatches = [mb_01, mb_11]
         """
         logger.debug(
             f"{os.getpid()=} Trainer forward_backward "
