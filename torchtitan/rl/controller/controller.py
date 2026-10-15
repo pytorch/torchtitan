@@ -1175,7 +1175,7 @@ class Controller(Configurable):
                     step_timer.record("timing/step/forward_backward"),
                 ):
                     # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over TCP).
-                    # Send the MonarchRDMAMicrobatches during the previous optim_step to read microbatch 0 then.
+                    # Sending the MonarchRDMAMicrobatches during the previous optim_step would hide it.
                     try:
                         fwd_bwd_metrics = self._get_rank_0_value(
                             await self.trainer.forward_backward.call(
