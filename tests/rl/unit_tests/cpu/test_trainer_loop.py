@@ -90,8 +90,14 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         optim_step=_Endpoint(optim_step),
         push_model_state_dict=_Endpoint(push),
     )
+
+    async def get_session_kv_metrics():
+        return []
+
     controller.generator_router = SimpleNamespace(
-        sync_log_step=_Endpoint(), pull_model_state_dict=_Endpoint(pull)
+        sync_log_step=_Endpoint(),
+        pull_model_state_dict=_Endpoint(pull),
+        get_session_kv_metrics=_Endpoint(get_session_kv_metrics),
     )
 
     async def sync_log_step(step):
