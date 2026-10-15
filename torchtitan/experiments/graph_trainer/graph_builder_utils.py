@@ -30,6 +30,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.fx as fx
 
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     BOXED_CODEGEN_META,
@@ -73,12 +74,13 @@ class GraphTrainerConfigView:
 
     GraphPP is entered through TorchTitan's generic pipelining function API,
     which passes decomposed config fields instead of the full
-    ``GraphTrainer.Config``. PP graph construction reads only ``compile``,
-    ``parallelism``, and ``model``, so GraphPP exposes exactly those fields
-    instead of synthesizing a fake full trainer config. Both SPMD paths pass
-    the full ``GraphTrainer.Config``, which has the same fields.
+    ``GraphTrainer.Config``. PP graph construction reads only ``training``,
+    ``compile``, ``parallelism``, and ``model``, so GraphPP exposes exactly
+    those fields instead of synthesizing a fake full trainer config. Both SPMD
+    paths pass the full ``GraphTrainer.Config``, which has the same fields.
     """
 
+    training: TrainingConfig
     compile: GraphTrainerCompileConfig
     parallelism: ParallelismConfig
     model: BaseModel.Config
@@ -231,6 +233,7 @@ def _compile_graph_pp_module(
     *,
     compile_config: GraphTrainerCompileConfig,
     graph_name: str,
+    use_cuda_graph: bool,
 ) -> fx.GraphModule:
     """Compile one extracted GraphPP callable with GraphTrainer Inductor passes."""
     if compile_config is None or not compile_config.enable_passes:
@@ -242,7 +245,7 @@ def _compile_graph_pp_module(
         example_inputs,
         final_inductor_compile_passes(
             compile_config,
-            use_cuda_graph=False,
+            use_cuda_graph=use_cuda_graph,
             boxed_codegen=True,
         ),
         compile_config=compile_config,
@@ -314,7 +317,6 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
     passes = compile_time_passes(
         traced,
         config,
-        use_cuda_graph=False,
         parallelism_context=parallelism_context,
         include_inductor=False,
         include_mandatory_normalization=False,

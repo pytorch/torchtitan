@@ -23,9 +23,11 @@ from torchtitan.distributed.batch_invariant import (
     set_batch_invariance,
 )
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.model import gdn, vllm_registry as registry
-from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
-from torchtitan.rl.model.linear_attention import (
+from torchtitan.rl.generator.vllm import gdn, registry
+from torchtitan.rl.generator.vllm.batch_invariance import (
+    force_logprobs_fn_for_batch_invariance,
+)
+from torchtitan.rl.generator.vllm.linear_attention import (
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionMetadata,
 )

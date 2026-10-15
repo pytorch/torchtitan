@@ -15,15 +15,15 @@ from renderers import ParsedResponse, Qwen3RendererConfig
 from torchtitan.components.renderer import from_renderers
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 
-from torchtitan.rl.generator import SamplingConfig
+from torchtitan.rl.generator.generator import SamplingConfig
 from torchtitan.rl.rollout import RolloutStatus
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.rollouter import RolloutWorker
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 
 class _Config:
@@ -264,6 +264,9 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             finish_reason="stop",
         )
 
+    async def release_session_fn(**kwargs) -> None:
+        pass
+
     async def run() -> None:
         for rollout_id in range(20):
             renderer = _RewritingRenderer(rng)
@@ -273,6 +276,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             )
             rollout = await worker._run_single_rollout(
                 generate_fn=generate_fn,
+                release_session_fn=release_session_fn,
                 env=env,
                 sampling=SamplingConfig(),
                 group_id=0,

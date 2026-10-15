@@ -60,6 +60,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.parallelism_context = parallelism_context
 
         optim = object.__new__(Optim)
+        optim._is_first_step_call = True
         optim.config = SimpleNamespace(max_norm=1.0)
         optim.parallelism_context = parallelism_context
         optim.pp_has_last_stage = True

@@ -25,12 +25,13 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import LMHeadFP32OutputConverter
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
-from torchtitan.rl.components.data import IterableRLDataLoader
-from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.rl.controller.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
 from torchtitan.rl.examples.verifiers.data import (
     register_local_taskset_alias,
@@ -42,11 +43,17 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
     VerifiersRollouter,
 )
-from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
-from torchtitan.rl.losses import DAPOLoss
+from torchtitan.rl.generator.generator import (
+    SamplingConfig,
+    VLLMCudaGraphConfig,
+    VLLMGenerator,
+)
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.observability.metrics import MetricsProcessor
+from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.rubric import Rubric
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.trainer.losses import DAPOLoss
+from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
@@ -119,7 +126,6 @@ def _qwen3_4b_verifiers_config(
         "4B",
         seq_len=max_total_tokens,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
