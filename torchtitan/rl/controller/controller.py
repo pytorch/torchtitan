@@ -419,8 +419,8 @@ class Controller(Configurable):
             apply_overrides(config.override, config)
         config.maybe_log()
         self.trainer: Trainer | None = None
-        # One trainer mesh slice per DP replica, in DP-rank order; set in setup_async.
-        self._trainer_dp_replicas = []
+        # One trainer sub-mesh per DP rank (its cp * tp ranks); set in setup_async.
+        self._trainer_by_dp_rank = []
         self.generator_router: InterGeneratorRouter | None = None
         self.batcher: BatcherActor | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
@@ -703,22 +703,22 @@ class Controller(Configurable):
             )
 
         # Torch ranks follow this mesh's order and the trainer lays them out as
-        # (dp, cp, tp) with no PP, so a DP replica is cp * tp consecutive ranks.
-        trainer_by_dp_rank = self.trainer.flatten("rank").split(
+        # (dp, cp, tp) with no PP, so each DP rank's cp * tp ranks are consecutive.
+        trainer_dp_cp_tp = self.trainer.flatten("rank").split(
             rank=("dp", "cp_tp"), dp=self.trainer_dp_degree
         )
-        self._trainer_dp_replicas = [
-            trainer_by_dp_rank.slice(dp=dp_rank)
+        self._trainer_by_dp_rank = [
+            trainer_dp_cp_tp.slice(dp=dp_rank)
             for dp_rank in range(self.trainer_dp_degree)
         ]
         # Check that layout once: if it drifts, one TP group's ranks get different columns.
-        for dp_rank, trainer_dp_replica in enumerate(self._trainer_dp_replicas):
+        for dp_rank, trainer_at_dp_rank in enumerate(self._trainer_by_dp_rank):
             reported_dp_ranks = list(
-                (await trainer_dp_replica.get_dp_rank.call()).values()
+                (await trainer_at_dp_rank.get_dp_rank.call()).values()
             )
             if set(reported_dp_ranks) != {dp_rank}:
                 raise RuntimeError(
-                    f"Trainer ranks in DP replica {dp_rank} report DP ranks "
+                    f"Trainer ranks at DP rank {dp_rank} report DP ranks "
                     f"{reported_dp_ranks}; the controller assumes the trainer orders "
                     "ranks as (dp, cp, tp)."
                 )
@@ -1200,16 +1200,16 @@ class Controller(Configurable):
                     # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over TCP).
                     # Sending the MonarchRDMAMicrobatches during the previous optim_step would hide it.
                     try:
-                        # Each DP replica receives only its column of the grid.
+                        # Send each DP rank only its column of the grid.
                         fwd_bwd_results = await asyncio.gather(
                             *(
-                                trainer_dp_replica.forward_backward.call(
+                                trainer_at_dp_rank.forward_backward.call(
                                     [row[dp_rank] for row in packed.microbatches],
                                     packed.global_loss_token_counts,
                                     packed.global_routing_token_counts,
                                 )
-                                for dp_rank, trainer_dp_replica in enumerate(
-                                    self._trainer_dp_replicas
+                                for dp_rank, trainer_at_dp_rank in enumerate(
+                                    self._trainer_by_dp_rank
                                 )
                             )
                         )
