@@ -13,6 +13,7 @@ the ordering that makes the overlap safe.
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -133,7 +134,9 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
 def _run(controller: Controller, *, num_training_steps: int) -> None:
     asyncio.run(
         controller._trainer_loop(
-            _batch_queue(num_training_steps), num_training_steps=num_training_steps
+            _batch_queue(num_training_steps),
+            num_training_steps=num_training_steps,
+            batcher=SimpleNamespace(maybe_release_oldest_batch=AsyncMock()),
         )
     )
 

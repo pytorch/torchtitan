@@ -130,6 +130,9 @@ from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.trainer.controller_state import DATALOADER_STATE_KEY
+from torchtitan.rl.trainer.rdma_microbatch import (
+    create_cuda_context_to_silence_monarch_log,
+)
 from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 from torchtitan.tools.garbage_collector import GarbageCollector
@@ -691,6 +694,8 @@ class Controller(Configurable):
             )
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
+        if config.async_loop.batcher.rdma_min_tensor_bytes is not None:
+            create_cuda_context_to_silence_monarch_log()
 
         # Start each generator's engine loop on all ranks once, before any
         # rank-0-only generate / pull (rank 0 drives the followers through this
@@ -896,7 +901,9 @@ class Controller(Configurable):
         # trainer_loop
         trainer_task = asyncio.create_task(
             self._trainer_loop(
-                training_batch_queue, num_training_steps=num_training_steps
+                training_batch_queue,
+                num_training_steps=num_training_steps,
+                batcher=batcher,
             ),
             name="trainer",
         )
@@ -1100,6 +1107,7 @@ class Controller(Configurable):
         training_batch_queue: "asyncio.Queue[TrainerStepBatch | None]",
         *,
         num_training_steps: int,
+        batcher: Batcher,
     ) -> None:
         """Run num_training_steps optimizer steps: train one packed batch, push the trainer's model
         state dict, then pull it into the generators, log metrics.
@@ -1170,13 +1178,17 @@ class Controller(Configurable):
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
-                    fwd_bwd_metrics = self._get_rank_0_value(
-                        await self.trainer.forward_backward.call(
-                            packed.microbatches,
-                            packed.global_loss_token_counts,
-                            packed.global_routing_token_counts,
+                    try:
+                        fwd_bwd_metrics = self._get_rank_0_value(
+                            await self.trainer.forward_backward.call(
+                                packed.microbatches,
+                                packed.global_loss_token_counts,
+                                packed.global_routing_token_counts,
+                            )
                         )
-                    )
+                    finally:
+                        # With RDMA, every rank has read its column (or the step failed).
+                        await batcher.maybe_release_oldest_batch()
 
                     if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                         logger.error("Loss is NaN/Inf; training diverged")
