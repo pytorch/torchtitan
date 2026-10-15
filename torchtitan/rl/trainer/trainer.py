@@ -253,7 +253,8 @@ class Trainer(Configurable):
 
         Args:
             microbatches: This rank's column of the batcher's `[num_microbatches][dp_degree]` grid;
-                `MonarchRDMAMicrobatch`es when `rdma_min_tensor_bytes` is set, read a few ahead of training.
+                `MonarchRDMAMicrobatch`es unless `rdma_min_tensor_bytes` is None. With
+                `preprocess_microbatch_groups_lazily`, they are read a few ahead of training.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -298,8 +299,8 @@ class Trainer(Configurable):
                         f"{identity}, expected {expected}."
                     )
             self._num_rdma_batches_read += 1
-            # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
-            # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
+            # TODO: the cp * tp ranks at one DP rank read the same column. Read it once and broadcast it
+            # over that cp * tp group, to cut the trainer's reads by cp * tp.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
         result = engine.forward_backward(
             microbatch_groups=microbatch_groups,

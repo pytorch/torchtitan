@@ -116,7 +116,7 @@ def _untrainable_group(group_id: int) -> TrainingSampleGroup:
 def _build_batcher(
     *, num_prompts_per_train_step: int, num_mtp_layers: int = 0
 ) -> Batcher:
-    config = Batcher.Config()
+    config = Batcher.Config(rdma_min_tensor_bytes=None)
     config.num_mtp_layers = num_mtp_layers
     return config.build(
         num_tokens_per_microbatch_per_dp_rank=16384,
@@ -235,7 +235,7 @@ def test_batcher_raises_at_consecutive_untrainable_group_limit() -> None:
 def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
     # Five two-token samples need four rank inputs across two microbatches.
     # Redistributing one sample keeps every rank input trainable.
-    batcher = Batcher.Config(max_num_documents=4).build(
+    batcher = Batcher.Config(max_num_documents=4, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=2,
         num_prompts_per_train_step=1,
@@ -257,7 +257,7 @@ def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
 
 
 def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -283,7 +283,9 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
 
 
 def test_flat_rank_packing_preserves_padding_mask() -> None:
-    batcher = Batcher.Config(per_sample_pad_multiple=4).build(
+    batcher = Batcher.Config(
+        per_sample_pad_multiple=4, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -312,7 +314,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
 
 
 def test_batcher_balances_packing_across_dp_ranks() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -427,7 +429,7 @@ def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
 
 
 def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> None:
-    batcher = Batcher.Config(max_num_documents=3).build(
+    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=6,
         max_context_length=3,
         num_prompts_per_train_step=1,
@@ -453,7 +455,7 @@ def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> No
 def test_document_limit_applies_to_each_local_microbatch() -> None:
     # A local microbatch is capped at three documents. The batcher must keep all
     # five documents and distribute them 2 + 3 across two microbatches.
-    batcher = Batcher.Config(max_num_documents=3).build(
+    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -477,7 +479,7 @@ def test_document_limit_applies_to_each_local_microbatch() -> None:
 
 
 def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
-    batcher = Batcher.Config(max_num_documents=1).build(
+    batcher = Batcher.Config(max_num_documents=1, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=2,
         num_prompts_per_train_step=1,

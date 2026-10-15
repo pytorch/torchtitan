@@ -83,16 +83,16 @@ def _microbatch(num_tokens: int) -> TrainingMicrobatch:
     )
 
 
+@pytest.mark.parametrize("min_bytes", [1024, 1025])
 def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
-    monkeypatch,
+    monkeypatch, min_bytes
 ) -> None:
     monkeypatch.setattr(rdma_microbatch, "RDMABuffer", _FakeRDMABuffer)
     monkeypatch.setattr(rdma_microbatch, "RDMAAction", _FakeRDMAAction)
-    # At 512 tokens the int64 (4 KiB), float (2 KiB) and routed-id (2 KiB, in model_kwargs)
-    # tensors go by ref; the bool masks (512 B), token counts and empty tensor go by value.
-    microbatch = _microbatch(num_tokens=512)
+    # At 256 tokens the int64 tensors are 2 KiB, the float and routed-id (in model_kwargs) ones exactly
+    # 1 KiB, the bool masks 256 B. So the 1 KiB tensors go by ref at min_bytes=1024 and by value at 1025.
+    microbatch = _microbatch(num_tokens=256)
 
-    min_bytes = 1024
     registered = MonarchRDMAMicrobatch.register(
         microbatch, min_bytes=min_bytes, batch_index=0, dp_rank=0, microbatch_index=0
     )
@@ -147,12 +147,22 @@ def _training_sample_group(group_id: int, num_samples: int = 1) -> TrainingSampl
     return TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])
 
 
-def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("rdma_min_tensor_bytes", "rdma_backend"),
+    [(None, "ibverbs"), (1024, "none")],
+    ids=["opted_out", "no_rdma_backend"],
+)
+def test_batcher_sends_by_value_when_opted_out_or_without_rdma(
+    monkeypatch, rdma_min_tensor_bytes, rdma_backend
+) -> None:
     def fail_to_register(tensor: torch.Tensor) -> None:
-        pytest.fail("registered an RDMA buffer with rdma_min_tensor_bytes unset")
+        pytest.fail("registered an RDMA buffer")
 
     monkeypatch.setattr(rdma_microbatch, "RDMABuffer", fail_to_register)
-    batcher = _build_batcher(rdma_min_tensor_bytes=None)
+    monkeypatch.setattr(
+        "torchtitan.rl.trainer.batcher.get_rdma_backend", lambda: rdma_backend
+    )
+    batcher = _build_batcher(rdma_min_tensor_bytes=rdma_min_tensor_bytes)
 
     batch, _ = batcher.add_training_samples(
         training_sample_group=_training_sample_group(0)
@@ -164,7 +174,14 @@ def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> N
 
 def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> None:
     monkeypatch.setattr(rdma_microbatch, "RDMABuffer", _FakeRDMABuffer)
+    cuda_contexts_created = []
+    monkeypatch.setattr(
+        rdma_microbatch,
+        "create_cuda_context_to_silence_monarch_log",
+        lambda: cuda_contexts_created.append(1),
+    )
     batcher = _build_batcher(rdma_min_tensor_bytes=1024)
+    assert not cuda_contexts_created
 
     batches = [
         batcher.add_training_samples(
@@ -187,6 +204,8 @@ def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> No
     assert buffers[0] and all(buffer.dropped for buffer in buffers[0])
     assert buffers[1] and not any(buffer.dropped for buffer in buffers[1])
     assert [batch.microbatches[0][0].batch_index for batch in batches] == [0, 1]
+    # Once, at the first batch.
+    assert len(cuda_contexts_created) == 1
 
 
 def _fake_rdma_microbatch(index: int, started: list[int]) -> SimpleNamespace:
@@ -272,16 +291,19 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
 ) -> None:
     # Real Monarch RDMA over TCP (works on any CI host; the rank processes inherit the env var).
     monkeypatch.setenv("MONARCH_RDMA_DISABLE_IBVERBS", "1")
+    # 256 tokens per rank, so the int64 (2 KiB) and float (1 KiB) tensors reach the default 1 KiB.
     batcher_kwargs = dict(
-        num_tokens_per_microbatch_per_dp_rank=64,
+        num_tokens_per_microbatch_per_dp_rank=256,
         max_context_length=16,
         num_prompts_per_train_step=1,
         dp_degree=4,
         pad_id=0,
         temperature=1.0,
     )
-    rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(**batcher_kwargs)
-    by_value_batcher = Batcher.Config().build(**batcher_kwargs)
+    rdma_batcher = Batcher.Config().build(**batcher_kwargs)
+    by_value_batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+        **batcher_kwargs
+    )
 
     async def run() -> None:
         mesh = this_host().spawn_procs(per_host={"procs": 4})
@@ -299,6 +321,7 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
                 columns = list(
                     (await ranks.read_column.call(batch.microbatches)).values()
                 )
+                assert isinstance(batch.microbatches[0][0].fields["input"], _TensorRef)
                 for dp_rank, column in enumerate(columns):
                     torch.testing.assert_close(
                         [dataclasses.asdict(microbatch) for microbatch in column],
@@ -313,6 +336,20 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
                     # Free the previous batch; the next one registers fresh buffers.
                     await rdma_batcher.maybe_release_oldest_batch()
             await rdma_batcher.maybe_release_oldest_batch()
+
+            # Large microbatches go by RDMA too: one of 42 MiB, read by all 4 ranks at once.
+            large = _microbatch(num_tokens=1 << 20)
+            rdma_large = MonarchRDMAMicrobatch.register(
+                large, min_bytes=1024, batch_index=0, dp_rank=0, microbatch_index=0
+            )
+            for column in (await ranks.read_column.call([[rdma_large] * 4])).values():
+                torch.testing.assert_close(
+                    dataclasses.asdict(column[0]),
+                    dataclasses.asdict(large),
+                    rtol=0,
+                    atol=0,
+                )
+            await rdma_large.drop()
         finally:
             await mesh.stop()
 

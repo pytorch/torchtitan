@@ -390,7 +390,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             advantages=torch.tensor([1.0]),
         )
 
-        # This rank's column (dp_rank 1); with `rdma_min_tensor_bytes` the trainer reads it.
+        # This rank's column (dp_rank 1); with RDMA, the trainer reads it.
         microbatches = (
             [
                 MagicMock(
