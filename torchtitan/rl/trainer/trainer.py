@@ -5,9 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import concurrent.futures
 import logging
 import os
+import threading
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
@@ -153,7 +156,13 @@ class Trainer(Configurable):
                 "Configure checkpointer to load from a checkpoint."
             )
 
-        engine.start_profiler()
+        self._start_compute_thread()
+        # The current CUDA device is per thread, and a new thread starts on device 0.
+        self._call_on_compute_thread(
+            self._staging_device_module.set_device, engine.device
+        ).result()
+        # The profiler records CPU ops only on the thread that starts it.
+        self._call_on_compute_thread(engine.start_profiler).result()
         engine.device_memory_monitor.reset_peak_stats()
 
         # Data parallelism: mesh is available after model construction builds it.
@@ -195,7 +204,9 @@ class Trainer(Configurable):
         the final teardown. Destroying it from this endpoint can race with mesh
         shutdown and hang at process exit.
         """
-        self.engine.close()
+        # On the compute thread: the profiler stops on the thread that started it, and close
+        # waits for the compute queued before it.
+        await asyncio.wrap_future(self._call_on_compute_thread(self.engine.close))
         logger.debug("Trainer close requested; ProcMesh.stop owns PG teardown.")
 
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
@@ -236,6 +247,36 @@ class Trainer(Configurable):
         )
         return out
 
+    def _start_compute_thread(self) -> None:
+        """Start one daemon thread that runs forward_backward, optim_step and staging, in call order.
+
+        - Off the event loop: the weight push replies during forward_backward.
+        - One thread: every rank issues its collectives in the same order.
+        - Daemon, like the generator's engine thread: a rank stuck in a collective doesn't block exit.
+        """
+        self._compute_loop = asyncio.new_event_loop()
+        threading.Thread(
+            target=self._compute_loop.run_forever, name="trainer_compute", daemon=True
+        ).start()
+
+    def _call_on_compute_thread(
+        self, fn: Callable[..., Any], *args, **kwargs
+    ) -> concurrent.futures.Future:
+        """Queue `fn` on the compute thread, in the caller's contextvars."""
+        result: concurrent.futures.Future = concurrent.futures.Future()
+
+        def call() -> None:
+            # Skip `fn` if the awaiting caller was cancelled before it started.
+            if result.set_running_or_notify_cancel():
+                try:
+                    result.set_result(fn(*args, **kwargs))
+                except BaseException as exc:
+                    result.set_exception(exc)
+
+        # `call_soon_threadsafe` runs `call` in a copy of the caller's contextvars.
+        self._compute_loop.call_soon_threadsafe(call)
+        return result
+
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
@@ -243,7 +284,7 @@ class Trainer(Configurable):
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
-        """Run one optimizer step's forward/backward microbatches.
+        """Run one optimizer step's forward/backward microbatches on the compute thread.
 
         Args:
             training_data: Microbatch-major grid with shape
@@ -256,6 +297,21 @@ class Trainer(Configurable):
         Returns:
             dict[str, float]: Globally-reduced metrics.
         """
+        return await asyncio.wrap_future(
+            self._call_on_compute_thread(
+                self._forward_backward,
+                training_data,
+                global_loss_token_counts,
+                global_routing_token_counts,
+            )
+        )
+
+    def _forward_backward(
+        self,
+        training_data: list[list[TrainingMicrobatch]],
+        global_loss_token_counts: torch.Tensor,
+        global_routing_token_counts: torch.Tensor,
+    ) -> dict[str, float]:
         logger.debug(
             f"{os.getpid()=} Trainer forward_backward "
             f"policy_version={self.policy_version}"
@@ -296,6 +352,15 @@ class Trainer(Configurable):
         self, *, controller_state: dict[str, Any], last_step: bool = False
     ) -> OptimizerStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
+        return await asyncio.wrap_future(
+            self._call_on_compute_thread(
+                self._optim_step, controller_state=controller_state, last_step=last_step
+            )
+        )
+
+    def _optim_step(
+        self, *, controller_state: dict[str, Any], last_step: bool
+    ) -> OptimizerStepOutput:
         # TODO: Accept optional optimizer params (e.g. learning rate)
         # to allow controller-owned schedules.
 
@@ -364,15 +429,15 @@ class Trainer(Configurable):
         `Controller._trainer_loop`), which is safe because:
         - The staging stream waits for the last optimizer step before copying, and
           forward/backward does not mutate persistent model state.
-        - The CUDA-event wait and the TorchStore put run together in an
-          `asyncio.to_thread` worker, so they progress while a synchronous
-          forward/backward blocks this actor's event loop.
+        - forward/backward runs on the compute thread, so this push and its reply
+          run on the event loop meanwhile. Staging runs on the compute thread too,
+          before forward/backward, and the blocking CUDA-event wait and TorchStore
+          put run in an `asyncio.to_thread` worker.
         - The controller awaits this push before the next optimizer step mutates
           the model, and awaits the generators' pull of it before the next push
           reuses the staging buffers and TorchStore key.
         """
 
-        model_state_dict = self.model.state_dict()
         # Today we copy the model into reusable pinned CPU buffers before calling
         # TorchStore. Parameter destinations use the generator dtype, so copy_()
         # performs the cast; buffers keep their registered dtype.
@@ -380,14 +445,19 @@ class Trainer(Configurable):
         # copy directly into the StorageVolume, eliminating the duplicate CPU
         # snapshot while preserving this overlap and making buffer lifetime
         # explicit.
-        staging_complete = await self._stage_model_state_dict(model_state_dict)
+        # On the compute thread, so state_dict() can't run in the middle of a forward/backward.
+        staging_complete = await asyncio.wrap_future(
+            self._call_on_compute_thread(
+                lambda: self._stage_model_state_dict(self.model.state_dict())
+            )
+        )
         await asyncio.to_thread(
             self._wait_for_staging_and_put_model_state_dict,
             staging_complete,
         )
 
     @sl.log_trace_span("stage_model_state_dict")
-    async def _stage_model_state_dict(
+    def _stage_model_state_dict(
         self, model_state_dict: dict[str, torch.Tensor]
     ) -> torch.Event | None:
         """Enqueue model-state copies into pinned CPU buffers."""
