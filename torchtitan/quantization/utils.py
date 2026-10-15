@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import functools
 from dataclasses import dataclass
 from typing import cast, TypeVar
@@ -12,6 +13,7 @@ from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     HybridEPTokenDispatcher,
+    MoriTokenDispatcher,
     TorchAOTokenDispatcher,
 )
 
@@ -52,7 +54,7 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
 
     Takes the ``RoutedExperts.Config`` (which owns the ``token_dispatcher`` child) and
     swaps its dispatcher in place. Requires a dispatcher that handles padding
-    (TorchAOTokenDispatcher or DeepEP hybridep). Raises ValueError if the
+    (TorchAOTokenDispatcher, DeepEP hybridep or MORI). Raises ValueError if the
     dispatcher doesn't support it.
     """
     dispatcher = routed_experts_config.token_dispatcher
@@ -73,10 +75,15 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
             hidden_dim=dispatcher.hidden_dim,
             num_max_tokens_per_rank=dispatcher.num_max_tokens_per_rank,
         )
+    elif isinstance(dispatcher, MoriTokenDispatcher.Config):
+        routed_experts_config.token_dispatcher = dataclasses.replace(
+            dispatcher, pad_multiple=pad_multiple
+        )
     else:
         raise ValueError(
             f"MoE quantization requires a token dispatcher that supports "
-            f"padding (TorchAOTokenDispatcher or HybridEPTokenDispatcher), "
+            f"padding (TorchAOTokenDispatcher, HybridEPTokenDispatcher or "
+            f"MoriTokenDispatcher), "
             f"got {type(dispatcher).__name__}."
         )
 
