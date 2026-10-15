@@ -390,10 +390,9 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             advantages=torch.tensor([1.0]),
         )
 
-        # This rank (dp_rank 1) reads only its own column.
-        if rdma:
-            other_rank = MagicMock(spec=MonarchRDMAMicrobatch)
-            own = [
+        # This rank's column (dp_rank 1); with `rdma_min_tensor_bytes` the trainer reads it.
+        microbatches = (
+            [
                 MagicMock(
                     spec=MonarchRDMAMicrobatch,
                     read=AsyncMock(return_value=batch),
@@ -403,12 +402,13 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
                 )
                 for microbatch_index in range(2)
             ]
-        else:
-            other_rank, own = MagicMock(spec=TrainingMicrobatch), [batch, batch]
+            if rdma
+            else [batch, batch]
+        )
 
         result = await Trainer.forward_backward(
             trainer,
-            [[other_rank, own[0]], [other_rank, own[1]]],
+            microbatches,
             torch.tensor([3]),
             torch.tensor([2]),
         )
@@ -426,7 +426,6 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
         )
         if rdma:
-            other_rank.read.assert_not_called()
             assert trainer._num_rdma_batches_read == 1
             # The read time is reported only when there was a read.
             assert result.pop("timing/trainer/read_microbatches/max") >= 0
@@ -459,7 +458,7 @@ def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
     with pytest.raises(ValueError, match=r"expected \(0, 1, 0\)"):
         asyncio.run(
             Trainer.forward_backward(
-                trainer, [[MagicMock(), wrong]], torch.tensor([1]), torch.tensor([1])
+                trainer, [wrong], torch.tensor([1]), torch.tensor([1])
             )
         )
     wrong.read.assert_not_called()

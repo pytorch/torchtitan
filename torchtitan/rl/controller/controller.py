@@ -419,6 +419,8 @@ class Controller(Configurable):
             apply_overrides(config.override, config)
         config.maybe_log()
         self.trainer: Trainer | None = None
+        # One trainer sub-mesh per DP rank (its cp * tp ranks); set in setup_async.
+        self._trainer_by_dp_rank = []
         self.generator_router: InterGeneratorRouter | None = None
         self.batcher: BatcherActor | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
@@ -699,6 +701,27 @@ class Controller(Configurable):
                     for requester_index, generator in enumerate(generators)
                 ),
             )
+
+        # Torch ranks follow this mesh's order and the trainer lays them out as
+        # (dp, cp, tp) with no PP, so each DP rank's cp * tp ranks are consecutive.
+        trainer_dp_cp_tp = self.trainer.flatten("rank").split(
+            rank=("dp", "cp_tp"), dp=self.trainer_dp_degree
+        )
+        self._trainer_by_dp_rank = [
+            trainer_dp_cp_tp.slice(dp=dp_rank)
+            for dp_rank in range(self.trainer_dp_degree)
+        ]
+        # Check that layout once: if it drifts, one TP group's ranks get different columns.
+        for dp_rank, trainer_at_dp_rank in enumerate(self._trainer_by_dp_rank):
+            reported_dp_ranks = list(
+                (await trainer_at_dp_rank.get_dp_rank.call()).values()
+            )
+            if set(reported_dp_ranks) != {dp_rank}:
+                raise RuntimeError(
+                    f"Trainer ranks at DP rank {dp_rank} report DP ranks "
+                    f"{reported_dp_ranks}; the controller assumes the trainer orders "
+                    "ranks as (dp, cp, tp)."
+                )
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored
         # policy version and controller-owned data state.
@@ -1177,13 +1200,20 @@ class Controller(Configurable):
                     # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over TCP).
                     # Sending the MonarchRDMAMicrobatches during the previous optim_step would hide it.
                     try:
-                        fwd_bwd_metrics = self._get_rank_0_value(
-                            await self.trainer.forward_backward.call(
-                                packed.microbatches,
-                                packed.global_loss_token_counts,
-                                packed.global_routing_token_counts,
+                        # Send each DP rank only its column of the grid.
+                        fwd_bwd_results = await asyncio.gather(
+                            *(
+                                trainer_at_dp_rank.forward_backward.call(
+                                    [row[dp_rank] for row in packed.microbatches],
+                                    packed.global_loss_token_counts,
+                                    packed.global_routing_token_counts,
+                                )
+                                for dp_rank, trainer_at_dp_rank in enumerate(
+                                    self._trainer_by_dp_rank
+                                )
                             )
                         )
+                        fwd_bwd_metrics = self._get_rank_0_value(fwd_bwd_results[0])
                     finally:
                         # With RDMA, every rank has read its column (or the step failed).
                         # Not awaited: it would wait behind an in-flight add_group.
