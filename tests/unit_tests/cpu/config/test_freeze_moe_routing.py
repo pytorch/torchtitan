@@ -17,6 +17,7 @@ from torchtitan.config.transform import (
     FreezeMoERoutingTransform,
     transform_model_config_,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.moe import (
     MoE,
     register_moe_load_balancing_hook,
@@ -83,8 +84,8 @@ def test_freezes_every_moe_family(
         None if moe.expert_bias_E is None else moe.expert_bias_E.clone()
     )
     # The balancing hooks look for MoE blocks under `layers`.
-    block = nn.Module()
-    block.moe, block.moe_enabled = moe, True
+    block = TransformerBlock()
+    block.feed_forward = moe
     model_part = nn.ModuleDict({"layers": nn.ModuleList([block])})
     optimizers = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", lr=1e-2, fused=False)]

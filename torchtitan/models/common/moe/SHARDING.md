@@ -1,9 +1,9 @@
 # MoE Sharding
 
 Config-based sharding for MoE submodules, implemented in
-[`moe_sharding.py`](moe_sharding.py). Mesh axis names (`ep`, `edp_shard`) and how
+[`sharding.py`](sharding.py). Mesh axis names (`ep`, `edp_shard`) and how
 EP reuses ranks from the dense world mesh are in
-[`torchtitan/distributed/PARALLELISM_CONTEXT.md`](../../distributed/PARALLELISM_CONTEXT.md).
+[`torchtitan/distributed/PARALLELISM_CONTEXT.md`](../../../distributed/PARALLELISM_CONTEXT.md).
 
 ## Overview
 
@@ -11,7 +11,7 @@ The diagram below shows the MoE layer's SPMD layout flow using `spmd_types` for
 the two supported expert-parallel configurations (SP on/off). For MoE models,
 `expert_parallel_degree` must be at least `tensor_parallel_degree`.
 
-![MoE Sharding](../../../assets/images/moe_sharding.png)
+![MoE Sharding](../../../../assets/images/moe_sharding.png)
 
 [Excalidraw source](https://excalidraw.com/#json=fZ1o2BuwXSVIGQhXM5gbr,KHKKckUbQXm68uiS3i_L7w)
 

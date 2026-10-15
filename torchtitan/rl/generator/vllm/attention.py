@@ -298,7 +298,7 @@ class _VLLMAttention(Attention, Module):
     """vLLM attention that participates in the TorchTitan Module protocol."""
 
 
-class VLLMAttentionWrapper(Module):
+class VLLMAttentionWrapper(InnerAttention):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
@@ -321,8 +321,7 @@ class VLLMAttentionWrapper(Module):
     )
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        attention_metadata_key: type[InnerAttention]
+    class Config(InnerAttention.Config):
         hidden_size: int
         num_heads: int
         num_kv_heads: int
@@ -332,9 +331,12 @@ class VLLMAttentionWrapper(Module):
         sliding_window_size: int | None = None
         """Causal sliding-window size (``None`` => full attention)."""
 
+        @property
+        def is_full_attention(self) -> bool:
+            return self.sliding_window_size is None
+
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.attention_metadata_key = config.attention_metadata_key
 
         from vllm.config import get_current_vllm_config
 

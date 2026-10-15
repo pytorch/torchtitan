@@ -12,7 +12,7 @@ import pytest
 import torchtitan_recipes.rl
 import torchtitan_recipes.tests.rl
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
@@ -36,7 +36,10 @@ _OPTIONAL_PACKAGE_RECIPES = {
     "rl_grpo_moe_debug_dist_moe_tp2_ep4",
 }
 # SoftCappedLinear head: LMHeadFP32OutputConverter can't convert it (see the recipe's TODO).
-_BF16_HEAD_RECIPES = {"rl_grpo_muse_glimmer_30b_search_r1"}
+_BF16_HEAD_RECIPES = {
+    "rl_grpo_muse_glimmer_30b_search_r1",
+    "rl_grpo_muse_glimmer_30b_terminal_bench",
+}
 
 
 @pytest.mark.parametrize("module_name", _RECIPE_MODULES)

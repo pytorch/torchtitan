@@ -31,8 +31,7 @@ from torchtitan.models.common.activation import (
     SwiGLU,
 )
 from torchtitan.models.common.attention import GQAttention
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
@@ -40,6 +39,7 @@ from torchtitan.models.common.linear import (
     maybe_gather_tp_input,
     RowParallelLinear,
 )
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import (
     MoE,
     QuantileBalancedTopKRouter,
@@ -47,7 +47,7 @@ from torchtitan.models.common.moe import (
     RoutedExperts,
     TokenChoiceTopKRouter,
 )
-from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import LocalTokenDispatcher
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
@@ -400,8 +400,8 @@ def _linear_config(in_features: int, out_features: int) -> Linear.Config:
     return Linear.Config(in_features=in_features, out_features=out_features)
 
 
-def _feed_forward_config() -> FeedForward.Config:
-    return FeedForward.Config(
+def _feed_forward_config() -> DenseFeedForward.Config:
+    return DenseFeedForward.Config(
         w13=ColumnParallelLinear.Config(in_features=4, out_features=8, num_linears=2),
         w2=RowParallelLinear.Config(in_features=8, out_features=4),
     )
@@ -544,7 +544,7 @@ class TestRematRegions(unittest.TestCase):
 
     def test_saved_projection_returning_a_view_reaches_its_bare_consumer(self):
         # MXFP8 linears return the unpadded slice of a padded output buffer.
-        # Linear reshapes that view, and FeedForward pins the reshape for the
+        # Linear reshapes that view, and DenseFeedForward pins the reshape for the
         # activation, a bare consumer that recomputation replays. The default
         # policy saves w13, so its output must still be persisted for the
         # activation even though nothing references the region's output object.
@@ -596,7 +596,7 @@ class TestRematRegions(unittest.TestCase):
                 block = remat_model.layers["0"]
                 assert isinstance(block, _FeedForwardBlock)
                 feed_forward = block.feed_forward
-                assert isinstance(feed_forward, FeedForward)
+                assert isinstance(feed_forward, DenseFeedForward)
                 self.assertEqual(
                     (
                         feed_forward.w13.num_forwards,
@@ -650,7 +650,7 @@ class TestRematRegions(unittest.TestCase):
         for save_regions in ([], ["feed_forward.w2.linear"], ["*"]):
             with self.subTest(save_regions=save_regions):
                 torch.manual_seed(42)
-                feed_forward = FeedForward.Config(
+                feed_forward = DenseFeedForward.Config(
                     w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
                     w2=Linear.Config(in_features=8, out_features=4),
                 ).build()
@@ -776,15 +776,15 @@ class TestRematRegions(unittest.TestCase):
 
                 with (
                     patch(
-                        "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                        "torchtitan.models.common.moe.moe.spmd_dense_sp_enabled",
                         return_value=False,
                     ),
                     patch(
-                        "torchtitan.models.common.moe.spmd_mesh_group",
+                        "torchtitan.models.common.moe.moe.spmd_mesh_group",
                         return_value=object(),
                     ),
                     patch(
-                        "torchtitan.models.common.moe.spmd.redistribute",
+                        "torchtitan.models.common.moe.moe.spmd.redistribute",
                         new=counted_redistribute,
                     ),
                 ):
@@ -804,7 +804,7 @@ class TestRematRegions(unittest.TestCase):
         ):
             with self.subTest(save_regions=save_regions):
                 torch.manual_seed(42)
-                feed_forward = FeedForward.Config(
+                feed_forward = DenseFeedForward.Config(
                     w13=ColumnParallelLinear.Config(
                         in_features=4, out_features=8, num_linears=2
                     ),
@@ -831,15 +831,15 @@ class TestRematRegions(unittest.TestCase):
 
                 with (
                     patch(
-                        "torchtitan.models.common.linear.spmd_dense_sp_enabled",
+                        "torchtitan.models.common.linear.linear.spmd_dense_sp_enabled",
                         return_value=True,
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd_mesh_group",
+                        "torchtitan.models.common.linear.linear.spmd_mesh_group",
                         return_value=object(),
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd.redistribute",
+                        "torchtitan.models.common.linear.linear.spmd.redistribute",
                         new=counted_redistribute,
                     ),
                 ):
@@ -887,15 +887,15 @@ class TestRematRegions(unittest.TestCase):
 
                 with (
                     patch(
-                        "torchtitan.models.common.linear.spmd_dense_sp_enabled",
+                        "torchtitan.models.common.linear.linear.spmd_dense_sp_enabled",
                         return_value=True,
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd_mesh_group",
+                        "torchtitan.models.common.linear.linear.spmd_mesh_group",
                         return_value=object(),
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd.redistribute",
+                        "torchtitan.models.common.linear.linear.spmd.redistribute",
                         new=counted_redistribute,
                     ),
                 ):
@@ -933,7 +933,7 @@ class TestRematRegions(unittest.TestCase):
         ):
             with self.subTest(save_regions=save_regions):
                 torch.manual_seed(42)
-                feed_forward = FeedForward.Config(
+                feed_forward = DenseFeedForward.Config(
                     w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
                     w2=RowParallelLinear.Config(in_features=8, out_features=4),
                 ).build()
@@ -954,15 +954,15 @@ class TestRematRegions(unittest.TestCase):
 
                 with (
                     patch(
-                        "torchtitan.models.common.linear.spmd_dense_sp_enabled",
+                        "torchtitan.models.common.linear.linear.spmd_dense_sp_enabled",
                         return_value=True,
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd_mesh_group",
+                        "torchtitan.models.common.linear.linear.spmd_mesh_group",
                         return_value=object(),
                     ),
                     patch(
-                        "torchtitan.models.common.linear.spmd.redistribute",
+                        "torchtitan.models.common.linear.linear.spmd.redistribute",
                         new=counted_redistribute,
                     ),
                 ):

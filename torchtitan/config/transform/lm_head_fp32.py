@@ -9,8 +9,9 @@
 from dataclasses import dataclass, fields
 from typing import Literal
 
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import Linear
+
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
 from .converter import ModelConfigConverter
 

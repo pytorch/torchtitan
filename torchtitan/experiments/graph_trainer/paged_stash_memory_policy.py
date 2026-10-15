@@ -38,6 +38,7 @@ in a recipe derived from one that builds such a model::
     import dataclasses
 
     from torchtitan.models.common.moe import (
+        MoE,
         RoundRobinTokenChoiceTopKRouter,
         TokenChoiceTopKRouter,
     )
@@ -56,9 +57,9 @@ in a recipe derived from one that builds such a model::
         # Route round-robin, with exact balance (see below).
         router_fields = dataclasses.fields(TokenChoiceTopKRouter.Config)
         for layer in config.model.layers:
-            if getattr(layer, "moe", None) is not None:
-                router = layer.moe.router
-                layer.moe.router = RoundRobinTokenChoiceTopKRouter.Config(
+            if isinstance(layer.feed_forward, MoE.Config):
+                router = layer.feed_forward.router
+                layer.feed_forward.router = RoundRobinTokenChoiceTopKRouter.Config(
                     **{f.name: getattr(router, f.name) for f in router_fields}
                 )
         return config
@@ -100,7 +101,7 @@ Options
     Megatron's). 0 reloads an activation when backward first reads it.
 ``compile.paged_stash.module_fqn``
     Module-FQN pattern of the modules annotated as the paged-stash region
-    (default ``layers.*.moe.routed_experts``).
+    (default ``layers.*.feed_forward.routed_experts``).
 ``compile.paged_stash.skip_immediate_backward``
     Keep the last paged layer resident instead of stashing it when the schedule
     runs that microbatch's backward next (default on). Matches Megatron's
@@ -255,6 +256,9 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     _default_memory_policy_pass,
 )
 from torchtitan.experiments.graph_trainer.registry import register_memory_policy
+
+from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.moe import MoE
 
 if TYPE_CHECKING:
     from torchtitan.components.optim.optimizer import OptimizersContainer
@@ -1988,7 +1992,7 @@ PAGED_STASH_REGION = "paged_stash_region"
 # Default module-FQN pattern of the paged-stash region: the routed experts, so
 # the region holds the dispatcher's output and everything inside
 # ``inner_experts``.
-DEFAULT_MODULE_FQN = "layers.*.moe.routed_experts"
+DEFAULT_MODULE_FQN = "layers.*.feed_forward.routed_experts"
 
 # Paging a tensor costs one full round trip through the stash, so tiny tensors
 # are never worth it. Same rationale as cpu_offload's ``_MIN_OFFLOAD_BYTES``.
@@ -3094,9 +3098,12 @@ def moe_expert_biases(model_parts: Sequence[nn.Module]) -> list[torch.Tensor]:
             layer_containers.append(mtp_layers)
         for layers in layer_containers:
             for block in layers.children():
-                if not getattr(block, "moe_enabled", False):
+                if not isinstance(block, TransformerBlock):
                     continue
-                bias = block.moe.expert_bias_E
+                moe = block.feed_forward
+                if not isinstance(moe, MoE):
+                    continue
+                bias = moe.expert_bias_E
                 if bias is not None:
                     # A buffer, so no gradient flows through ``to_local``.
                     biases.append(

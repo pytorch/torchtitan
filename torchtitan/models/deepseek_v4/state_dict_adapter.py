@@ -45,14 +45,14 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             "layers.{}.attn_norm.weight": "layers.{}.attention_norm.weight",
             "layers.{}.ffn_norm.weight": "layers.{}.ffn_norm.weight",
             # MoE
-            "layers.{}.ffn.experts.{}.w1.weight": "layers.{}.moe.routed_experts.w1_EFD",
-            "layers.{}.ffn.experts.{}.w3.weight": "layers.{}.moe.routed_experts.w3_EFD",
-            "layers.{}.ffn.experts.{}.w2.weight": "layers.{}.moe.routed_experts.w2.weight",
-            "layers.{}.ffn.gate.weight": "layers.{}.moe.router.gate.weight",
-            "layers.{}.ffn.gate.bias": "layers.{}.moe.expert_bias_E",
-            "layers.{}.ffn.shared_experts.w1.weight": "layers.{}.moe.shared_experts.w1.weight",
-            "layers.{}.ffn.shared_experts.w3.weight": "layers.{}.moe.shared_experts.w3.weight",
-            "layers.{}.ffn.shared_experts.w2.weight": "layers.{}.moe.shared_experts.w2.weight",
+            "layers.{}.ffn.experts.{}.w1.weight": "layers.{}.feed_forward.routed_experts.w1_EFD",
+            "layers.{}.ffn.experts.{}.w3.weight": "layers.{}.feed_forward.routed_experts.w3_EFD",
+            "layers.{}.ffn.experts.{}.w2.weight": "layers.{}.feed_forward.routed_experts.w2.weight",
+            "layers.{}.ffn.gate.weight": "layers.{}.feed_forward.router.gate.weight",
+            "layers.{}.ffn.gate.bias": "layers.{}.feed_forward.expert_bias_E",
+            "layers.{}.ffn.shared_experts.w1.weight": "layers.{}.feed_forward.shared_experts.w1.weight",
+            "layers.{}.ffn.shared_experts.w3.weight": "layers.{}.feed_forward.shared_experts.w3.weight",
+            "layers.{}.ffn.shared_experts.w2.weight": "layers.{}.feed_forward.shared_experts.w2.weight",
             # mHC
             "layers.{}.hc_attn_base": "layers.{}.hc_attn_pre.hc_base",
             "layers.{}.hc_attn_fn": "layers.{}.hc_attn_pre.hc_fn",
@@ -121,10 +121,10 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                         ),
                     }
                 )
-            if layer_id < model_config.layers[0].moe.router.n_hash_layers:
+            if layer_id < model_config.layers[0].feed_forward.router.n_hash_layers:
                 self.from_hf_map.update(
                     {
-                        f"layers.{layer_id}.ffn.gate.tid2eid": f"layers.{layer_id}.moe.router.tid2eid",
+                        f"layers.{layer_id}.ffn.gate.tid2eid": f"layers.{layer_id}.feed_forward.router.tid2eid",
                     }
                 )
 
