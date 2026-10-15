@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -14,11 +15,18 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import LinearAttention, VarlenInnerAttention
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.lora import get_lora_linear
+from torchtitan.models.deepseek_v3 import build_model_config as build_dsv3_config
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.generator.vllm import gdn, kda
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.vllm import gdn, kda, registry
 from torchtitan.rl.generator.vllm.registry import model_config_to_hf_config_dict
 
 from transformers import GenerationConfig, PretrainedConfig
+from vllm.transformers_utils.model_arch_config_convertor import (
+    MODEL_ARCH_CONFIG_CONVERTORS,
+)
 
 
 def test_hf_config_adds_no_stop_token():
@@ -213,3 +221,61 @@ def test_batch_invariant_kda_registers_attention_gym_replay_state(monkeypatch):
         temporal_copy,
         *(temporal_copy for _ in range(6)),
     )
+
+
+def test_compressed_mla_configures_vllm_native_mla(monkeypatch):
+    config = build_dsv3_config(
+        "debugmodel", parallelism=ParallelismConfig(), attn_backend="varlen"
+    )
+    assert registry.uses_vllm_compressed_mla(config)
+    assert registry.vllm_attention_backend(config) is None
+    hf = model_config_to_hf_config_dict(config)
+    mla_attention = config.first_full_attention
+    for name in ("kv_lora_rank", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"):
+        assert hf[name] == getattr(mla_attention, name)
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
+    monkeypatch.delitem(
+        MODEL_ARCH_CONFIG_CONVERTORS, registry.TORCHTITAN_MODEL_TYPE, raising=False
+    )
+    registry.register_to_vllm(
+        config, parallelism=InferenceParallelismConfig(), checkpointer_config=None
+    )
+    hf_config = PretrainedConfig.from_dict(hf)
+    assert MODEL_ARCH_CONFIG_CONVERTORS[hf_config.model_type](
+        hf_config, hf_config
+    ).is_deepseek_mla()
+
+
+@pytest.mark.parametrize(
+    "wkv_b_variant, compressed",
+    [("lora", True), ("mxfp8", False), ("nvfp4", False), ("bias", False)],
+)
+def test_wkv_b_variant_selects_compressed_mla(wkv_b_variant, compressed):
+    """Only a plain or LoRA wkv_b keeps the compressed cache."""
+    config = build_dsv3_config("debugmodel", parallelism=ParallelismConfig())
+    for layer in config.layers:
+        mla_config = layer.attention.inner_attention
+        wkv_b = mla_config.wkv_b
+        fields = {
+            "in_features": wkv_b.in_features,
+            "out_features": wkv_b.out_features,
+            "sharding_config": wkv_b.sharding_config,
+        }
+        if wkv_b_variant == "lora":
+            wkv_b = get_lora_linear(Linear).Config(**fields, rank=4, alpha=8.0)
+        elif wkv_b_variant == "mxfp8":
+            pytest.importorskip("torchao")
+            from torchtitan.quantization.mxfp8.linear import MXFP8Linear
+
+            wkv_b = MXFP8Linear.Config(**fields)
+        elif wkv_b_variant == "nvfp4":
+            pytest.importorskip("torchao")
+            from torchtitan.quantization.nvfp4.linear import NVFP4Linear
+
+            wkv_b = NVFP4Linear.Config(**fields)
+        else:
+            wkv_b = dataclasses.replace(wkv_b, bias=True)
+        layer.attention.inner_attention = dataclasses.replace(mla_config, wkv_b=wkv_b)
+
+    assert registry.uses_vllm_compressed_mla(config) is compressed

@@ -26,15 +26,30 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    MLAAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.lora import get_lora_linear
+from torchtitan.observability.logging import warn_once
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+logger = logging.getLogger(__name__)
 
 # Model-agnostic name used for vLLM model registration.
 VLLM_MODEL_NAME = "TorchTitanCausalLM"
@@ -43,8 +58,84 @@ VLLM_MODEL_NAME = "TorchTitanCausalLM"
 # torchtitan ConfigParser registered below.
 TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 
+# ``model_type`` of the HF-shaped config; selects the arch config converter
+# registered below.
+TORCHTITAN_MODEL_TYPE = "torchtitan"
+
 # Selects the experiment-owned runner that pads tokens for dense and expert SP.
 TORCHTITAN_WORKER_CLS = "torchtitan.rl.generator.vllm.worker.TorchTitanGPUWorker"
+
+VLLM_MLA_LATENT_DIMS = (512, 64)
+"""``(kv_lora_rank, qk_rope_head_dim)`` that every vLLM MLA backend supports.
+
+``MLACommonBackend.get_supported_head_sizes()`` also lists 320 and 512, but
+backends that pass vLLM's selection for those sizes (CUTLASS MLA, FlashInfer
+MLA) reject them at runtime instead of falling back.
+"""
+
+
+def uses_vllm_compressed_mla(cfg: Decoder.Config) -> bool:
+    """Whether vLLM caches compressed MLA latents instead of materialized K/V.
+
+    Batch-invariant mode keeps materialized K/V so the generator runs the
+    trainer's attention ops and stays bitwise identical to it.
+    """
+    mla_attention = cfg.first_full_attention
+    if (
+        mla_attention is None
+        or not isinstance(mla_attention.inner_attention, MLAAttention.Config)
+        or is_in_batch_invariant_mode()
+    ):
+        return False
+    if (
+        mla_attention.kv_lora_rank,
+        mla_attention.qk_rope_head_dim,
+    ) != VLLM_MLA_LATENT_DIMS:
+        warn_once(
+            logger,
+            f"vLLM MLA backends do not support (kv_lora_rank, qk_rope_head_dim) = "
+            f"({mla_attention.kv_lora_rank}, {mla_attention.qk_rope_head_dim}) "
+            f"(supported: {VLLM_MLA_LATENT_DIMS}). "
+            "Falling back to a materialized K/V cache, which uses more memory.",
+        )
+        return False
+    wkv_b = mla_attention.inner_attention.wkv_b
+    if (
+        wkv_b._owner not in (Linear, get_lora_linear(Linear))
+        or wkv_b.num_linears != 1
+        or wkv_b.bias
+    ):
+        warn_once(
+            logger,
+            f"vLLM's native MLA needs wkv_b to be a bias-free linear map it can read "
+            f"as one matrix, but wkv_b is {type(wkv_b).__qualname__} "
+            f"(num_linears={wkv_b.num_linears}, bias={wkv_b.bias}). Falling back to "
+            "a materialized K/V cache, which uses more memory.",
+        )
+        return False
+    return True
+
+
+def vllm_attention_backend(cfg: Decoder.Config) -> AttentionBackendEnum | None:
+    """Return the vLLM attention backend for ``cfg``'s full attention layers.
+
+    ``None`` lets vLLM select a native MLA backend for compressed MLA caches.
+    """
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    attention = cfg.first_full_attention
+    if attention is None:
+        raise ValueError("No full attention layer found in the model spec.")
+    if uses_vllm_compressed_mla(cfg):
+        return None
+    kernel_config = attention.inner_attention
+    if isinstance(kernel_config, MLAAttention.Config):
+        kernel_config = kernel_config.inner_attention
+    if isinstance(kernel_config, FlexInnerAttention.Config):
+        return AttentionBackendEnum.FLEX_ATTENTION
+    if isinstance(kernel_config, VarlenInnerAttention.Config):
+        return AttentionBackendEnum.CUSTOM
+    raise ValueError("Only varlen and flex attention backends are supported.")
 
 
 def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
@@ -91,7 +182,7 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
         "head_dim": head_dim,  # FA3 scheduler headdim
         "max_position_embeddings": cfg.max_context_length,  # caps max_model_len
         # Presence required
-        "model_type": "torchtitan",  # any non-empty string
+        "model_type": TORCHTITAN_MODEL_TYPE,  # selects the arch config converter
         "num_hidden_layers": len(
             cfg.layers
         ),  # positive int; only PP/KV-transfer read magnitude
@@ -109,6 +200,12 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
         "bos_token_id": None,
         "eos_token_id": None,
     }
+
+    if uses_vllm_compressed_mla(cfg):
+        hf["kv_lora_rank"] = attn.kv_lora_rank
+        hf["qk_nope_head_dim"] = attn.qk_nope_head_dim
+        hf["qk_rope_head_dim"] = attn.qk_rope_head_dim
+        hf["v_head_dim"] = attn.v_head_dim
 
     if ffn is not None:
         # Unused: only v1/metrics/perf.py reads it (off by default).
@@ -136,7 +233,7 @@ def register_to_vllm(
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
     Single entry point for vLLM integration. Must be called before creating
-    a vLLM engine that uses a TorchTitan model. Registers two things:
+    a vLLM engine that uses a TorchTitan model. Registers three things:
 
       1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
@@ -146,6 +243,11 @@ def register_to_vllm(
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
          produces the HF-shaped ``PretrainedConfig`` from ``model_config``.
+      3. ``TorchTitanModelArchConfigConvertor`` with vLLM's arch config
+         converters under ``TORCHTITAN_MODEL_TYPE``. It reports MLA when the
+         HF config has ``kv_lora_rank``, which ``model_config_to_hf_config_dict``
+         sets only for compressed MLA caches, so vLLM sizes the cache from the
+         latent and sets ``use_mla``.
 
     Per-engine torchtitan config (parallelism and checkpoint) is
     delivered to the wrapper via closure rather than via vLLM's
@@ -176,7 +278,6 @@ def register_to_vllm(
         # be contiguous in vLLM's convolution state cache.
         os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
 
-    from vllm.logger import init_logger
     from vllm.model_executor.models.registry import ModelRegistry
 
     # Pull ``PretrainedConfig`` through vLLM's transformers re-export rather
@@ -186,10 +287,12 @@ def register_to_vllm(
     # disappears with it.
     from vllm.transformers_utils.config import PretrainedConfig, register_config_parser
     from vllm.transformers_utils.config_parser_base import ConfigParserBase
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        MODEL_ARCH_CONFIG_CONVERTORS,
+        ModelArchConfigConvertorBase,
+    )
 
     from torchtitan.rl.generator.vllm.model_wrapper import VLLMModelWrapper
-
-    logger = init_logger(__name__)
 
     # Dynamic model class capturing torchtitan config in the closure.
     class VLLMModelFromSpec(VLLMModelWrapper):
@@ -232,6 +335,18 @@ def register_to_vllm(
         ):
             config_dict = model_config_to_hf_config_dict(model_config)
             return config_dict, PretrainedConfig.from_dict(config_dict)
+
+    class TorchTitanModelArchConfigConvertor(ModelArchConfigConvertorBase):
+        def is_deepseek_mla(self) -> bool:
+            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
+
+    # vLLM sets is_mla based on specific model types, and we pass in
+    # model_type="torchtitan", so is_mla would be False.
+    # TODO: Wait until the vLLM PR adding register_model_arch_config_convertor
+    # lands, then remove this direct registry write and use that API.
+    MODEL_ARCH_CONFIG_CONVERTORS[
+        TORCHTITAN_MODEL_TYPE
+    ] = TorchTitanModelArchConfigConvertor
 
     logger.info(
         f"Registered {VLLM_MODEL_NAME} + ConfigParser({TORCHTITAN_CONFIG_FORMAT!r}) "
