@@ -451,6 +451,7 @@ def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
     batch_index: int, dp_rank: int, microbatch_index: int
 ) -> None:
     trainer = object.__new__(Trainer)
+    trainer._start_compute_thread()
     trainer.engine = SimpleNamespace(num_completed_steps=0)
     trainer.config = Trainer.Config(model=MagicMock())
     trainer.dp_rank = 1
@@ -593,6 +594,7 @@ class _BlockingTrainer(Trainer):
 
     def __init__(self) -> None:
         self._start_compute_thread()
+        self.config = Trainer.Config(model=MagicMock())
         self.engine = SimpleNamespace(
             num_completed_steps=0, forward_backward=_blocking_engine_forward_backward
         )
