@@ -10,6 +10,7 @@ import copy
 import dataclasses
 from collections.abc import Callable
 from functools import partial
+from typing import cast
 
 import spmd_types as spmd
 import torch.nn as nn
@@ -39,6 +40,7 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_shared_expert_ffn_config,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
     dense_activation_placement,
@@ -503,7 +505,7 @@ def _build_v4_layers(
     dense_layers: set[int] | None = None,
     enable_sp: bool,
     enable_ep: bool,
-) -> list[DeepSeekV4TransformerBlock.Config]:
+) -> list[TransformerBlock.Config]:
     if dense_layers is None:
         dense_layers = set()
     if dense_hidden_dim is None:
@@ -511,7 +513,7 @@ def _build_v4_layers(
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     hc_pre_sharding = hc_pre_sharding_config(enable_sp=enable_sp)
 
-    layers = []
+    layers: list[DeepSeekV4TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         actual_layer_id = layer_offset + layer_id
         cr = compress_ratios[layer_id] if layer_id < len(compress_ratios) else 1
@@ -600,7 +602,7 @@ def _build_v4_layers(
                 ),
             )
         )
-    return layers
+    return cast(list[TransformerBlock.Config], layers)
 
 
 def _make_mtp_inner_block(
@@ -851,7 +853,7 @@ def _debugmodel(
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
             _build_mtp_layers(
-                layers[-1],
+                cast(DeepSeekV4TransformerBlock.Config, layers[-1]),
                 dim=dim,
                 num_mtp_layers=n_mtp_layers,
                 n_main_layers=n_layers,
@@ -997,7 +999,7 @@ def _deepseek_v4_flash(
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
             _build_mtp_layers(
-                layers[-1],
+                cast(DeepSeekV4TransformerBlock.Config, layers[-1]),
                 dim=dim,
                 num_mtp_layers=n_mtp_layers,
                 n_main_layers=n_layers,
@@ -1143,7 +1145,7 @@ def _deepseek_v4_pro(
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
             _build_mtp_layers(
-                layers[-1],
+                cast(DeepSeekV4TransformerBlock.Config, layers[-1]),
                 dim=dim,
                 num_mtp_layers=n_mtp_layers,
                 n_main_layers=n_layers,

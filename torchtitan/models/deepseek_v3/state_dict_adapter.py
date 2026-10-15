@@ -68,7 +68,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         }
 
         # Adjustments for from_hf_map based on model architecture
-        if model_config.layers[0].attention.q_lora_rank != 0:
+        if getattr(model_config.layers[0].attention, "q_lora_rank", 0) != 0:
             self.from_hf_map.update(
                 {
                     "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",

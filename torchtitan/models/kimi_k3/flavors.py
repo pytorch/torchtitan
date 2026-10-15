@@ -9,6 +9,7 @@
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
+from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -20,6 +21,7 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.base.sharding import ShardingConfig
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common import (
     Conv1d,
     DenseFeedForward,
@@ -596,7 +598,7 @@ def _kimi_k3_config(
             ),
         )
 
-    layers = []
+    layers: list[KimiK3TransformerBlock.Config] = []
     for layer_idx in range(num_layers):
         is_full_attention = layer_idx in full_attention_layers
         layers.append(
@@ -670,7 +672,7 @@ def _kimi_k3_config(
                 else token_embedding_sharding_config(enable_sp=enable_sp)
             ),
         ),
-        layers=layers,
+        layers=cast(list[TransformerBlock.Config], layers),
         norm=_norm(
             dim, sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp)
         ),
