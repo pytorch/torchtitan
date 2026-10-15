@@ -84,7 +84,8 @@ class CPUKVOffload(Configurable):
                step s+1  rank 0: -             rank 1: load 7 done  both schedulers: done
 
         3. The TP ranks' schedulers must stay identical: request ids get a counter suffix, not vLLM's
-           random one, and PYTHONHASHSEED=0 (vLLM iterates sets). Each gather raises if they differ.
+           random one, and procs run with PYTHONHASHSEED=0 (vLLM iterates sets). Each gather raises if
+           the ranks' scheduler fingerprints differ.
         """
         # Imported here: runs without CPU offload never load vLLM's offload code.
         from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
