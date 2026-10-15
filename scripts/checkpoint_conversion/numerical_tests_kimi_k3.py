@@ -45,9 +45,9 @@ from torchtitan.components.data.multimodal.utils.image import (
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.activation import SiTUGLU
-from torchtitan.models.common.attention.kda import InnerKDA
+from torchtitan.models.common.attention.kda import InnerKDA, KDA
 from torchtitan.models.kimi_k3 import build_model_config
-from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.model import KimiK3Model, KimiMLAAttention
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
 
@@ -72,19 +72,21 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
     hf_full_attention_layers = [
         layer_idx + 1
         for layer_idx, layer in enumerate(tt_config.layers)
-        if layer.attention is not None
+        if isinstance(layer.attention, KimiMLAAttention.Config)
     ]
     hf_kda_layers = [
         layer_idx + 1
         for layer_idx, layer in enumerate(tt_config.layers)
-        if layer.delta_attention is not None
+        if isinstance(layer.attention, KDA.Config)
     ]
-    mla = next(layer.attention for layer in tt_config.layers if layer.attention)
+    mla = tt_config.first_full_attention
     kda = next(
-        layer.delta_attention for layer in tt_config.layers if layer.delta_attention
+        layer.attention
+        for layer in tt_config.layers
+        if isinstance(layer.attention, KDA.Config)
     )
-    inner_kda = cast(InnerKDA.Config, kda.inner_kda)
-    kda_kernel = inner_kda.kernel
+    inner_attention = cast(InnerKDA.Config, kda.inner_attention)
+    kda_kernel = inner_attention.kernel
     dense_ffn = next(
         layer.feed_forward for layer in tt_config.layers if layer.feed_forward
     )
@@ -127,7 +129,7 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
             "full_attn_layers": hf_full_attention_layers,
             "kda_layers": hf_kda_layers,
             "head_dim": kda.head_dim,
-            "num_heads": kda.num_heads,
+            "num_heads": kda.n_heads,
             "short_conv_kernel_size": kda.conv_kernel_size,
             "gate_lower_bound": kda_kernel.lower_bound,
             "use_full_rank_gate": True,
