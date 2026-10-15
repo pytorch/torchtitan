@@ -195,9 +195,13 @@ class InterGeneratorRouter(Actor, Configurable):
         finally:
             self._release(h, routing_ctx.estimated_cost)
 
-    def _release_session(self, session_id: str) -> None:
-        """Drop a session's affinity."""
+    async def _release_session(self, session_id: str) -> None:
+        """Drop a session's affinity, and tell its generator to release the session's held KV."""
+        pinned = self._strategy.pinned_candidate(RoutingContext(session_id=session_id))
         self._strategy.release_session(session_id)
+        # Without a pin (non-sticky routing), `release_groups` frees the held KV at group end.
+        if pinned is not None:
+            await pinned.rank0_actor.release_sessions.call_one([session_id])
 
     async def _fanout(
         self,
@@ -324,8 +328,9 @@ class InterGeneratorRouter(Actor, Configurable):
 
     @concurrent_endpoint
     async def release_session(self, routing_session_id: str) -> None:
-        """Forget a routing session after its rollout's last generation call."""
-        self._release_session(routing_session_id)
+        """Forget a routing session after its rollout's last generation call, and tell its
+        generator to release the session's held KV."""
+        await self._release_session(routing_session_id)
 
     @concurrent_endpoint
     async def release_groups(self, group_ids: list[int]) -> None:
