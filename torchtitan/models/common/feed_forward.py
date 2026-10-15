@@ -17,7 +17,7 @@ from torchtitan.models.common.linear import Linear
 # Shape suffix legend:
 #   T = token dimensions, D = model dimension, F = feed-forward hidden dimension
 
-__all__ = ["FeedForward", "compute_ffn_hidden_dim"]
+__all__ = ["FeedForward", "DenseFeedForward", "compute_ffn_hidden_dim"]
 
 
 def compute_ffn_hidden_dim(
@@ -37,6 +37,14 @@ def compute_ffn_hidden_dim(
 
 
 class FeedForward(Module):
+    """Base class for dense and mixture-of-experts feed-forward modules."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+
+class DenseFeedForward(FeedForward):
     """SwiGLU feed-forward with one physical gate-and-up projection.
 
     ``w13`` stores the gate and up projections as ``[2, F, D]``. Config takes the
@@ -45,7 +53,7 @@ class FeedForward(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(FeedForward.Config):
         w13: Linear.Config
         w2: Linear.Config
         activation_fn: BinaryActivationFn.Config = field(default_factory=SwiGLU.Config)
@@ -54,7 +62,7 @@ class FeedForward(Module):
         super().__init__()
         if config.w13.num_linears != 2:
             raise ValueError(
-                "FeedForward w13 requires num_linears=2 for gate/up projections"
+                "DenseFeedForward w13 requires num_linears=2 for gate/up projections"
             )
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()

@@ -43,8 +43,8 @@ from torchtitan.models.common.dist_moe import (
 from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
@@ -240,6 +240,7 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
+            preprocess_microbatch_groups_lazily=False,
         ),
         parallelism=SimpleNamespace(
             fsdp_defer_gradient_reduction=False,

@@ -246,7 +246,7 @@ def test_training_recipe_uses_separate_datasets() -> None:
     assert config.trainer.training.mixed_precision_reduce == "float32"
     (optimizer,) = config.trainer.optim.optimizer.optimizers
     assert optimizer.fused
-    assert config.async_loop.training_sample_builder.drop_zero_std_reward_groups
+    assert config.async_loop.batcher.training_sample_builder.drop_zero_std_reward_groups
     assert isinstance(config.trainer.activation_remat, FullActivationRematConfig)
     assert config.trainer.checkpointer.interval == 20
     assert config.generator.cuda_graph.mode == "FULL_DECODE_ONLY"
@@ -268,11 +268,8 @@ def _num_kv_heads(model: object) -> int:
 
 
 def _num_experts(model: object) -> int | None:
-    for layer in model.layers:
-        moe = getattr(layer, "moe", None)
-        if moe is not None:
-            return moe.num_experts
-    return None
+    moe = model.first_moe
+    return moe.num_experts if moe is not None else None
 
 
 @pytest.mark.parametrize(
@@ -353,7 +350,7 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     assert config.trainer.training.dtype == "float32"
     assert config.async_loop.num_samples_per_prompt == 32
     assert config.async_loop.num_training_steps == 100
-    assert config.async_loop.training_sample_builder.drop_zero_std_reward_groups
+    assert config.async_loop.batcher.training_sample_builder.drop_zero_std_reward_groups
     assert config.generator.sampling.max_tokens == 16384
     agent = config.rollouter.verifiers_env_server.environment.agent
     assert agent.max_turns == 120
