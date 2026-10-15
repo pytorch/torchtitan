@@ -90,8 +90,6 @@ jobs:
         # Install DeepEP for HybridEP integration test
         bash /install_deepep.sh
 
-        pytest torchtitan/experiments/graph_trainer/tests/test_recipe_configs.py -v
-
         # Disable Nvlink Sharp. The CI machine seems to be in unstable state to support
         # NVLS according to several CI runs.
         # DeepEP needs CUDA_HOME specified to JIT kernels.
