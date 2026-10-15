@@ -78,6 +78,27 @@ class TestFlexCrossDocumentLeakage(unittest.TestCase):
         self.assertFalse(torch.allclose(out1[:, :len_a], out2[:, :len_a]))
 
 
+class TestHFTransformerConfig(unittest.TestCase):
+    def test_local_compile_backend_defaults_to_inductor(self):
+        from torchtitan.experiments.transformers_modeling_backend import (
+            TitanModelConfig,
+        )
+        from torchtitan.experiments.transformers_modeling_backend.model import (
+            HFTransformerModel,
+        )
+
+        config = HFTransformerModel.Config(
+            model_config=TitanModelConfig(
+                dim=256,
+                n_layers=2,
+                n_heads=16,
+                n_kv_heads=16,
+            ),
+        )
+
+        self.assertEqual(config.local_compile_backend, "inductor")
+
+
 class TestAttnMaskTypeValidation(unittest.TestCase):
     """A block_causal config builds a flex BlockMask and is supported.
 

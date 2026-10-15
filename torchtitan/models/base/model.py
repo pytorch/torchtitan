@@ -96,6 +96,9 @@ class BaseModel(Module, ABC):
         FlexAttention manages its own compilation and is not controlled by this list.
         """
 
+        local_compile_backend: str = "inductor"
+        """Backend for TorchTitan-owned local and attention compile sites."""
+
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             pass

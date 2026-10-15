@@ -35,6 +35,7 @@ from torchtitan.distributed.cuda_graph import (
     wrap_fwd_bwd_with_cuda_graph,
     wrap_with_cuda_graph,
 )
+from torchtitan.distributed.local_compile import set_local_compile_backend
 from torchtitan.models.base import BaseModel
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
@@ -309,6 +310,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         create_seed_checkpoint: bool = False,
     ) -> None:
         """Initialize model execution and the state required to train it."""
+        set_local_compile_backend(self.model_config.local_compile_backend)
         self._initialize_model(
             hf_assets_path=hf_assets_path,
             create_seed_checkpoint=create_seed_checkpoint,

@@ -15,6 +15,22 @@ import torch
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 
 
+_BACKEND: str = "inductor"
+_COMPILED_HELPER_RESETS: list[Callable[[], None]] = []
+
+
+def _reset_compiled_helpers() -> None:
+    for reset in _COMPILED_HELPER_RESETS:
+        reset()
+
+
+def set_local_compile_backend(backend: str) -> None:
+    """Set the process-wide backend used by local compile helpers."""
+    global _BACKEND
+    _BACKEND = backend
+    _reset_compiled_helpers()
+
+
 def apply_local_compile(regions: list[str]) -> None:
     """Bind registered functions to eager or compiled implementations.
 
@@ -52,6 +68,7 @@ def local_compile(
     """
     if compile_kwargs.pop("fullgraph", True) is not True:
         raise ValueError("local_compile requires fullgraph=True.")
+    explicit_backend = compile_kwargs.pop("backend", None)
 
     def decorate(reference: Callable[..., Any]) -> Callable[..., Any]:
         fn = reference
@@ -66,7 +83,13 @@ def local_compile(
                     "batch-invariant mode; remove it from local_compile_regions."
                 )
             if enabled:
-                fn = torch.compile(reference, fullgraph=True, **compile_kwargs)
+                backend = _BACKEND if explicit_backend is None else explicit_backend
+                fn = torch.compile(
+                    reference,
+                    fullgraph=True,
+                    backend=backend,
+                    **compile_kwargs,
+                )
             else:
                 fn = reference
 
@@ -80,4 +103,55 @@ def local_compile(
     return decorate
 
 
-__all__ = ["apply_local_compile", "local_compile"]
+def compiled(
+    reference: Callable[..., Any],
+    *,
+    inductor_options: dict[str, Any] | None = None,
+    **compile_kwargs: Any,
+) -> Callable[..., Any]:
+    """Compile ``reference`` lazily with the configured local backend.
+
+    ``inductor_options`` are passed as ``torch.compile(options=...)`` only when
+    the effective backend is Inductor.
+    """
+    explicit_backend = compile_kwargs.pop("backend", None)
+    explicit_options = compile_kwargs.pop("options", None)
+    fn: Callable[..., Any] | None = None
+
+    def reset() -> None:
+        nonlocal fn
+        fn = None
+
+    @functools.wraps(reference)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        nonlocal fn
+        if fn is None:
+            backend = _BACKEND if explicit_backend is None else explicit_backend
+            options = explicit_options
+            if backend == "inductor" and inductor_options is not None:
+                options = inductor_options
+            if options is None:
+                fn = torch.compile(
+                    reference,
+                    backend=backend,
+                    **compile_kwargs,
+                )
+            else:
+                fn = torch.compile(
+                    reference,
+                    backend=backend,
+                    options=options,
+                    **compile_kwargs,
+                )
+        return fn(*args, **kwargs)
+
+    _COMPILED_HELPER_RESETS.append(reset)
+    return wrapped
+
+
+__all__ = [
+    "apply_local_compile",
+    "compiled",
+    "local_compile",
+    "set_local_compile_backend",
+]
