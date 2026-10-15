@@ -93,6 +93,7 @@ class TrainingConfig:
     identical to eager accumulation, which all-reduces once.
     This mode supports RL workloads where the number of accumulation groups can
     change.
+    No effect with ``disable_cuda_graphs=True``.
     """
     # TODO: Remove this option when multiple CUDA graphs support variable group
     # counts without duplicating the gradient accumulation logic.

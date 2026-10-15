@@ -151,6 +151,7 @@ def _qwen3_4b_dapo_math_config(
             # A minimum factor of 1 keeps the learning rate constant.
             training=TrainingConfig(
                 disable_cuda_graphs=True,
+                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
                 max_context_length=max_total_tokens,
             ),

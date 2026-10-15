@@ -159,11 +159,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "The optimization CUDA graph requires CUDA graphs to be enabled."
                 )
-            if self.training.cuda_graph_per_accumulation_group:
-                if self.training.disable_cuda_graphs:
-                    raise ValueError(
-                        "Per-group CUDA graphs require CUDA graphs to be enabled."
-                    )
+            if (
+                self.training.cuda_graph_per_accumulation_group
+                and not self.training.disable_cuda_graphs
+            ):
                 if self.sdc_replayer is not None:
                     raise ValueError("Per-group CUDA graphs do not support SDC replay.")
                 if self.parallelism.fsdp_defer_gradient_reduction:

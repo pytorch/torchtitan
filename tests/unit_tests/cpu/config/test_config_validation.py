@@ -47,13 +47,14 @@ def test_training_token_counts_are_positive() -> None:
 
 
 def test_per_group_cuda_graph_config_restrictions() -> None:
-    with pytest.raises(ValueError, match="require CUDA graphs to be enabled"):
-        TrainingEngine.Config(
-            training=TrainingConfig(
-                cuda_graph_per_accumulation_group=True,
-                disable_cuda_graphs=True,
-            )
-        )
+    # Per-group is a no-op with CUDA graphs off, so its restrictions are skipped.
+    TrainingEngine.Config(
+        training=TrainingConfig(
+            cuda_graph_per_accumulation_group=True,
+            disable_cuda_graphs=True,
+        ),
+        parallelism=ParallelismConfig(fsdp_defer_gradient_reduction=True),
+    )
     with pytest.raises(ValueError, match="fsdp_defer_gradient_reduction=False"):
         TrainingEngine.Config(
             training=TrainingConfig(cuda_graph_per_accumulation_group=True),

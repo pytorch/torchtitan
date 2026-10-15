@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -18,9 +18,10 @@ from torch.distributed.tensor import DTensor
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.config import Configurable, TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
+from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.distributed.utils import get_local_tensor
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
@@ -66,6 +67,13 @@ class Trainer(Configurable):
         model: BaseModel.Config
         """Trainer model config, built for ``parallelism``."""
 
+        training: TrainingConfig = field(
+            default_factory=lambda: TrainingConfig(
+                cuda_graph_per_accumulation_group=True
+            )
+        )
+        """The microbatch count changes per step, so CUDA graphs replay per group."""
+
         def __post_init__(self) -> None:
             TrainingEngine.Config.__post_init__(self)
             if self.parallelism.pipeline_parallel_degree > 1:
@@ -96,6 +104,17 @@ class Trainer(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        if (
+            not config.training.disable_cuda_graphs
+            and cuda_graphs_supported()
+            and not config.training.cuda_graph_per_accumulation_group
+        ):
+            raise ValueError(
+                "RL microbatch counts change per step, but a whole-step CUDA "
+                "graph needs a fixed count. Set "
+                "training.cuda_graph_per_accumulation_group=True or "
+                "training.disable_cuda_graphs=True."
+            )
         validate_model_training_config(
             config.model,
             parallelism=config.parallelism,

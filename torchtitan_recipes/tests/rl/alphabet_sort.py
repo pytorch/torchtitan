@@ -126,6 +126,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
+                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -230,6 +231,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             # forward (mixed_precision_param="bfloat16" is the default).
             training=TrainingConfig(
                 disable_cuda_graphs=True,
+                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -316,6 +318,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
+                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -472,6 +475,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
             # forward (mixed_precision_param="bfloat16" is the default).
             training=TrainingConfig(
                 disable_cuda_graphs=True,
+                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -547,6 +551,7 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
+                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
@@ -679,6 +684,7 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
+                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
