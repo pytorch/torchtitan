@@ -178,8 +178,8 @@ class Trainer(Configurable):
         self._call_on_compute_thread(
             self._staging_device_module.set_device, engine.device
         ).result()
-        # So is multithreaded autograd. init_distributed turns it off here, so the backward's
-        # recompute runs on the calling thread and finds its thread-local device mesh.
+        # So is multithreaded autograd. init_distributed turned it off on this thread, so
+        # the backward's recompute runs on the calling thread and finds its thread-local mesh.
         self._call_on_compute_thread(
             torch.autograd.set_multithreading_enabled,
             torch.autograd.is_multithreading_enabled(),
@@ -500,8 +500,8 @@ class Trainer(Configurable):
     @_on_compute_thread
     def _stage_model_state_dict(self) -> torch.Event | None:
         """Enqueue model-state copies into pinned CPU buffers."""
-        # On the compute thread: during forward/backward, FSDP swaps the unsharded
-        # params into the model, and state_dict() would return those.
+        # On the compute thread: FSDP's state_dict() hook reshards, which would free the
+        # unsharded params a running forward/backward uses.
         model_state_dict = self.model.state_dict()
         stream = self._staging_model_state_dict_stream
         stream_context = (
