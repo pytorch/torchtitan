@@ -190,13 +190,11 @@ class Batcher(Configurable):
         CUDA-graph-safe metadata bound without imposing a tighter packing cap.
         """
         rdma_min_tensor_bytes: int | None = None
-        """Send tensors of at least this many bytes as Monarch RDMA buffers instead of in the RPC
-        message; each trainer rank then reads only its own microbatches:
+        """Send microbatch tensors of at least this many bytes as Monarch RDMA buffers, not in the RPC message:
             None (default): every tensor in the message.
-            e.g. 1024: tensors >= 1 KiB stay in the batcher; token counts (8 B) and empty ones go in the message.
-        Monarch uses ibverbs where the host has it, else TCP. A host that lists ibverbs devices it can't
-        use fails instead of falling back; MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process,
-        weight sync included."""
+            e.g. 1024: tensors >= 1 KiB stay in the batcher; token counts (8 B) and empty tensors go in the message.
+        Monarch uses ibverbs where the host has it, else TCP; a host that lists unusable ibverbs devices
+        fails instead. MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process, weight sync included."""
 
         def __post_init__(self) -> None:
             if self.num_mtp_layers < 0:
@@ -244,7 +242,7 @@ class Batcher(Configurable):
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
         self._num_consecutive_zero_output_groups = 0
         self._rdma_min_tensor_bytes = config.rdma_min_tensor_bytes
-        # Batches trainer ranks may still read, oldest first; each buffer keeps its tensor alive until drop().
+        # Batches that trainer ranks may still read, oldest first; each buffer keeps its tensor alive until drop().
         self._batches_being_read: deque[list[list[MonarchRDMAMicrobatch]]] = deque()
         self._num_batches_registered = 0
 
