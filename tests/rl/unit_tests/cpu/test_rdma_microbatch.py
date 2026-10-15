@@ -345,7 +345,9 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
     rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(
         **batcher_kwargs, register_rdma_microbatch=MonarchRDMAMicrobatch.register
     )
-    by_value_batcher = Batcher.Config().build(**batcher_kwargs)
+    by_value_batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+        **batcher_kwargs
+    )
 
     async def run() -> None:
         mesh = this_host().spawn_procs(per_host={"procs": 4})
