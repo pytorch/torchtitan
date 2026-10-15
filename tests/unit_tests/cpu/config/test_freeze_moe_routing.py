@@ -40,6 +40,24 @@ def test_removes_router_aux_loss() -> None:
     assert routers and all(router.aux_loss is None for router in routers)
 
 
+def test_false_knobs_leave_moe_as_built() -> None:
+    model = build_deepseek_v3_model_config(
+        "debugmodel", parallelism=ParallelismConfig()
+    )
+    for _, moe, _, _ in model.traverse(MoE.Config):
+        moe.freeze_expert_bias = moe.router.freeze_gate = True
+
+    transform = FreezeMoERoutingTransform(
+        freeze_expert_bias=False, freeze_gate=False, drop_aux_loss=False
+    )
+    model = transform_model_config_(model, [transform])
+    moe_configs = [moe for _, moe, _, _ in model.traverse(MoE.Config)]
+    assert moe_configs
+    for moe in moe_configs:
+        assert moe.freeze_expert_bias and moe.router.freeze_gate
+        assert moe.router.aux_loss is not None
+
+
 # (family, debug flavor, load_balance_coeff): every MoE family in torchtitan/models.
 # 1e-3 builds a sign-balanced expert bias, e.g. for a checkpoint that ships one.
 _MOE_DEBUG_MODELS = [
@@ -56,23 +74,28 @@ _MOE_DEBUG_MODELS = [
 ]
 
 
-@pytest.mark.parametrize("freeze", [True, False])
+@pytest.mark.parametrize("freeze_gate", [False, True])
+@pytest.mark.parametrize("freeze_expert_bias", [True, False])
 @pytest.mark.parametrize("family,flavor,load_balance_coeff", _MOE_DEBUG_MODELS)
 def test_freezes_every_moe_family(
-    family: str, flavor: str, load_balance_coeff: float | None, freeze: bool
+    family: str,
+    flavor: str,
+    load_balance_coeff: float | None,
+    freeze_expert_bias: bool,
+    freeze_gate: bool,
 ) -> None:
     build_model_config = importlib.import_module(
         f"torchtitan.models.{family}"
     ).build_model_config
     model = build_model_config(flavor, parallelism=ParallelismConfig())
-    if freeze:
-        model = transform_model_config_(model, [FreezeMoERoutingTransform()])
+    # Default drop_aux_loss=True: the aux loss raises without an `aux_loss_denominator`.
+    transform = FreezeMoERoutingTransform(
+        freeze_expert_bias=freeze_expert_bias, freeze_gate=freeze_gate
+    )
+    model = transform_model_config_(model, [transform])
     # The last MoE layer: DeepSeek-V4's first MoE layers route by token id hash.
     moe_config = [moe for _, moe, _, _ in model.traverse(MoE.Config)][-1]
     moe_config.load_balance_coeff = load_balance_coeff
-    # freeze=False keeps the aux loss, which raises without an `aux_loss_denominator`.
-    # test_removes_router_aux_loss covers the aux loss.
-    moe_config.router.aux_loss = None
     torch.manual_seed(0)
     moe = moe_config.build()
     moe.init_states()
@@ -101,11 +124,11 @@ def test_freezes_every_moe_family(
     if moe.expert_bias_E is None:
         assert load_balance_coeff is None
     else:
-        assert torch.equal(moe.expert_bias_E, expert_bias_before) == freeze
+        assert torch.equal(moe.expert_bias_E, expert_bias_before) == freeze_expert_bias
     for name, param in moe.named_parameters():
         # router.gate.weight, and router.gate.bias on gpt-oss. Every other parameter
         # trains, including the Qwen3.5 shared-expert gate.
-        is_frozen = freeze and name.startswith("router.gate.")
+        is_frozen = freeze_gate and name.startswith("router.gate.")
         assert torch.equal(param, params_before[name]) == is_frozen, name
         has_state = any(param in optimizer.state for optimizer in optimizers)
         assert has_state != is_frozen, name
