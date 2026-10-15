@@ -129,21 +129,20 @@ def test_muse_glimmer_renderer_survives_verifiers_worker_config() -> None:
         bos_id=None,
         eos_id=None,
     )
-    config = from_renderers(
-        CustomRendererConfig(
-            import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
-            reasoning_strength="low",
-            knowledge_cutoff="2025-01-01",
-            current_date="2026-10-13",
-            retain_reasoning_in_history=False,
-            answer_from_reasoning_fallback=True,
-            thinking_retention="tool_cycle",
-        )
+    renderers_config = CustomRendererConfig(
+        import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
+        reasoning_strength="low",
+        knowledge_cutoff="2025-01-01",
+        current_date="2026-10-13",
+        retain_reasoning_in_history=False,
+        answer_from_reasoning_fallback=True,
+        thinking_retention="tool_cycle",
     )
+    config = from_renderers(renderers_config)
     sent = TrainClientConfig(
         base_url="http://127.0.0.1:1",
         api_key_var="",
-        renderer=config.to_renderers(),
+        renderer=renderers_config,
         renderer_model_name="muse-tokenizer",
     )
     received = TrainClientConfig.model_validate_json(sent.model_dump_json())
@@ -243,12 +242,11 @@ def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> 
     rollouter._generation_server = None
     rollouter._verifiers_env_client = None
     rollouter._verifiers_train_client_config = None
-    config = from_renderers(
-        CustomRendererConfig(
-            import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
-            reasoning_strength="low",
-        )
+    renderers_config = CustomRendererConfig(
+        import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
+        reasoning_strength="low",
     )
+    config = from_renderers(renderers_config)
 
     asyncio.run(
         rollouter.setup_async(
@@ -260,7 +258,7 @@ def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> 
 
     sent = rollouter._verifiers_train_client_config
     assert sent is not None
-    assert sent.renderer == config.to_renderers()
+    assert sent.renderer == renderers_config
     assert sent.renderer_model_name == "muse-checkpoint"
     asyncio.run(rollouter.close())
 

@@ -21,20 +21,12 @@ class RendererConfig(Configurable.Config):
     """Base config of a renderer; `build` returns a `renderers.Renderer` on TorchTitan's tokenizer.
 
     `RenderersConfigAdapter` adapts library configs, including in-tree renderers
-    selected with `CustomRendererConfig`. A renderer usable with Verifiers exports
-    a library config through `to_renderers`.
+    selected with `CustomRendererConfig`.
     """
 
     # pyrefly: ignore[bad-override]
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
         raise NotImplementedError
-
-    def to_renderers(self) -> PrimeRendererConfig:
-        """Return the config Verifiers can serialize and rebuild in its workers."""
-        raise ValueError(
-            f"{type(self).__name__} cannot be used with Verifiers: use "
-            "from_renderers(...) or provide a renderers config for this renderer."
-        )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -71,7 +63,8 @@ class RenderersConfigAdapter(RendererConfig):
     def to_dict(self) -> dict[str, Any]:
         return {"renderers_config": self.renderers_config.model_dump(mode="json")}
 
-    def to_renderers(self) -> PrimeRendererConfig:
+    def get_renderers_config(self) -> PrimeRendererConfig:
+        """Return the `renderers` config that Verifiers workers rebuild the renderer from."""
         return self.renderers_config
 
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:

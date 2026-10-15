@@ -20,7 +20,7 @@ from verifiers.v1.dialects.chat import message_to_wire
 from verifiers.v1.serve.client import EnvClient as VerifiersEnvClient
 from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 
-from torchtitan.components.renderer import RendererConfig
+from torchtitan.components.renderer import RendererConfig, RenderersConfigAdapter
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.rl.components.data import IterableRLDataLoader
@@ -176,7 +176,12 @@ class VerifiersRollouter(Rollouter):
         del tokenizer_config
         if self._verifiers_env_client is not None:
             return
-        verifiers_renderer_config = renderer_config.to_renderers()
+        if not isinstance(renderer_config, RenderersConfigAdapter):
+            raise ValueError(
+                "Verifiers requires a renderer configured with from_renderers(...) "
+                "so its client can construct the same renderer in the "
+                "environment-server process"
+            )
 
         # Verifiers generates through an HTTP endpoint, while TorchTitan exposes
         # an in-process GenerateFn. This server bridges those interfaces.
@@ -196,7 +201,7 @@ class VerifiersRollouter(Rollouter):
                 # The local endpoint does not authenticate. An empty environment
                 # variable name makes Verifiers send its required "EMPTY" value.
                 api_key_var="",
-                renderer=verifiers_renderer_config,
+                renderer=renderer_config.get_renderers_config(),
                 multiplex=self._verifiers_config.renderer_multiplex,
                 renderer_model_name=hf_assets_path,
             )
