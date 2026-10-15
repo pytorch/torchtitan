@@ -275,7 +275,7 @@ class TestYaRNScaling(unittest.TestCase):
 
     def test_deepseek_mscale_applies_below_original_sequence_length(self):
         from torchtitan.models.deepseek_v3 import build_model_config, MODEL_FLAVORS
-        from torchtitan.models.deepseek_v3.model import Attention
+        from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
 
         _, max_context_length = MODEL_FLAVORS["debugmodel"]
         model_config = build_model_config(
@@ -285,7 +285,7 @@ class TestYaRNScaling(unittest.TestCase):
             parallelism=ParallelismConfig(),
         )
         attention_config = model_config.layers[0].attention
-        assert isinstance(attention_config, Attention.Config)
+        assert isinstance(attention_config, DeepSeekMLAAttention.Config)
         attention_config.rope = dataclasses.replace(
             attention_config.rope,
             max_context_length=attention_config.rope.original_seq_len // 2,

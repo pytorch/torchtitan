@@ -50,24 +50,24 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             # ===== Language Model =====
             "model.language_model.embed_tokens.weight": "tok_embeddings.weight",
             # Full attention layers (self_attn.*)
-            "model.language_model.layers.{}.self_attn.q_proj.weight": "layers.{}.attn.wq.weight",
-            "model.language_model.layers.{}.self_attn.k_proj.weight": "layers.{}.attn.wk.weight",
-            "model.language_model.layers.{}.self_attn.v_proj.weight": "layers.{}.attn.wv.weight",
-            "model.language_model.layers.{}.self_attn.o_proj.weight": "layers.{}.attn.wo.weight",
-            "model.language_model.layers.{}.self_attn.q_norm.weight": "layers.{}.attn.q_norm.weight",
-            "model.language_model.layers.{}.self_attn.k_norm.weight": "layers.{}.attn.k_norm.weight",
+            "model.language_model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
+            "model.language_model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
+            "model.language_model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
+            "model.language_model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
+            "model.language_model.layers.{}.self_attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
+            "model.language_model.layers.{}.self_attn.k_norm.weight": "layers.{}.attention.k_norm.weight",
             "model.language_model.layers.{}.self_attn.rotary_emb.inv_freq": None,
             # GatedDeltaNet layers (linear_attn.*)
             # QKV and Conv1d: HF fused → TT separate (handled in to_hf/from_hf)
             "model.language_model.layers.{}.linear_attn.in_proj_qkv.weight": None,
             "model.language_model.layers.{}.linear_attn.conv1d.weight": None,
-            "model.language_model.layers.{}.linear_attn.in_proj_z.weight": "layers.{}.attn.in_proj_z.weight",
-            "model.language_model.layers.{}.linear_attn.in_proj_a.weight": "layers.{}.attn.in_proj_a.weight",
-            "model.language_model.layers.{}.linear_attn.in_proj_b.weight": "layers.{}.attn.in_proj_b.weight",
-            "model.language_model.layers.{}.linear_attn.A_log": "layers.{}.attn.A_log",
-            "model.language_model.layers.{}.linear_attn.dt_bias": "layers.{}.attn.dt_bias",
-            "model.language_model.layers.{}.linear_attn.norm.weight": "layers.{}.attn.norm.weight",
-            "model.language_model.layers.{}.linear_attn.out_proj.weight": "layers.{}.attn.out_proj.weight",
+            "model.language_model.layers.{}.linear_attn.in_proj_z.weight": "layers.{}.attention.in_proj_z.weight",
+            "model.language_model.layers.{}.linear_attn.in_proj_a.weight": "layers.{}.attention.in_proj_a.weight",
+            "model.language_model.layers.{}.linear_attn.in_proj_b.weight": "layers.{}.attention.in_proj_b.weight",
+            "model.language_model.layers.{}.linear_attn.A_log": "layers.{}.attention.A_log",
+            "model.language_model.layers.{}.linear_attn.dt_bias": "layers.{}.attention.dt_bias",
+            "model.language_model.layers.{}.linear_attn.norm.weight": "layers.{}.attention.norm.weight",
+            "model.language_model.layers.{}.linear_attn.out_proj.weight": "layers.{}.attention.out_proj.weight",
             # Non-MoE MLP
             "model.language_model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
             "model.language_model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
@@ -170,16 +170,18 @@ class Qwen35StateDictAdapter(StateDictAdapter):
 
                 # Collect deltanet q/k/v projections and conv weights for fusing
                 if tt_abstract_key in (
-                    "layers.{}.attn.in_proj_q.weight",
-                    "layers.{}.attn.in_proj_k.weight",
-                    "layers.{}.attn.in_proj_v.weight",
-                    "layers.{}.attn.conv_q.weight",
-                    "layers.{}.attn.conv_k.weight",
-                    "layers.{}.attn.conv_v.weight",
+                    "layers.{}.attention.in_proj_q.weight",
+                    "layers.{}.attention.in_proj_k.weight",
+                    "layers.{}.attention.in_proj_v.weight",
+                    "layers.{}.attention.conv_q.weight",
+                    "layers.{}.attention.conv_k.weight",
+                    "layers.{}.attention.conv_v.weight",
                 ):
                     if layer_num not in deltanet_qkv_by_layer:
                         deltanet_qkv_by_layer[layer_num] = {}
-                    short_key = tt_abstract_key.split("attn.")[-1].replace("{}", "")
+                    short_key = tt_abstract_key.split("attention.")[-1].replace(
+                        "{}", ""
+                    )
                     deltanet_qkv_by_layer[layer_num][short_key] = value
                     continue
 
@@ -305,13 +307,13 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     == f"{self.hf_language_model_prefix}.layers.{{}}.linear_attn.in_proj_qkv.weight"
                 ):
                     # pyrefly: ignore [missing-attribute]
-                    dn = self.model_config.layers[int(idx)].delta_net
+                    dn = self.model_config.layers[int(idx)].attention
                     kd = dn.in_proj_q.out_features
                     vd = dn.in_proj_v.out_features
                     q, k, v = value.split([kd, kd, vd], dim=0)
-                    tt_state_dict[f"layers.{idx}.attn.in_proj_q.weight"] = q
-                    tt_state_dict[f"layers.{idx}.attn.in_proj_k.weight"] = k
-                    tt_state_dict[f"layers.{idx}.attn.in_proj_v.weight"] = v
+                    tt_state_dict[f"layers.{idx}.attention.in_proj_q.weight"] = q
+                    tt_state_dict[f"layers.{idx}.attention.in_proj_k.weight"] = k
+                    tt_state_dict[f"layers.{idx}.attention.in_proj_v.weight"] = v
                     continue
 
                 # GatedDeltaNet fused conv1d → split into conv_q/k/v
@@ -320,13 +322,13 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     == f"{self.hf_language_model_prefix}.layers.{{}}.linear_attn.conv1d.weight"
                 ):
                     # pyrefly: ignore [missing-attribute]
-                    dn = self.model_config.layers[int(idx)].delta_net
+                    dn = self.model_config.layers[int(idx)].attention
                     kd = dn.in_proj_q.out_features
                     vd = dn.in_proj_v.out_features
                     cq, ck, cv = value.split([kd, kd, vd], dim=0)
-                    tt_state_dict[f"layers.{idx}.attn.conv_q.weight"] = cq
-                    tt_state_dict[f"layers.{idx}.attn.conv_k.weight"] = ck
-                    tt_state_dict[f"layers.{idx}.attn.conv_v.weight"] = cv
+                    tt_state_dict[f"layers.{idx}.attention.conv_q.weight"] = cq
+                    tt_state_dict[f"layers.{idx}.attention.conv_k.weight"] = ck
+                    tt_state_dict[f"layers.{idx}.attention.conv_v.weight"] = cv
                     continue
 
                 # Vision fused QKV → split into wq/wk/wv

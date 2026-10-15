@@ -314,7 +314,7 @@ def _kda_config(
         )
 
     return KDA.Config(
-        num_heads=num_heads,
+        n_heads=num_heads,
         head_dim=head_dim,
         conv_kernel_size=conv_kernel_size,
         q_proj=colwise_linear(dim, projection_dim),
@@ -329,7 +329,7 @@ def _kda_config(
         forget_b=colwise_linear(head_dim, projection_dim),
         beta=colwise_linear(dim, num_heads),
         output_gate=colwise_linear(dim, projection_dim),
-        inner_kda=InnerKDA.Config(
+        inner_attention=InnerKDA.Config(
             head_dim=head_dim,
             conv_kernel_size=conv_kernel_size,
             kernel=KDAKernel.Config(),
@@ -615,11 +615,6 @@ def _kimi_k3_config(
                         attn_backend=attn_backend,
                         enable_sp=enable_sp,
                     )
-                    if is_full_attention
-                    else None
-                ),
-                delta_attention=(
-                    None
                     if is_full_attention
                     else _kda_config(
                         dim=dim,
