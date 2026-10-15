@@ -174,6 +174,12 @@ class Trainer(Configurable):
         self._call_on_compute_thread(
             self._staging_device_module.set_device, engine.device
         ).result()
+        # So is multithreaded autograd. init_distributed turns it off here, so the backward's
+        # recompute runs on the calling thread and finds its thread-local device mesh.
+        self._call_on_compute_thread(
+            torch.autograd.set_multithreading_enabled,
+            torch.autograd.is_multithreading_enabled(),
+        ).result()
         # The profiler records CPU ops only on the thread that starts it.
         self._call_on_compute_thread(engine.start_profiler).result()
         engine.device_memory_monitor.reset_peak_stats()
