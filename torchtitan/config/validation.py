@@ -39,7 +39,7 @@ def validate_model_training_config(
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE
-    from torchtitan.models.common.token_dispatcher import (
+    from torchtitan.models.common.moe.token_dispatcher import (
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,

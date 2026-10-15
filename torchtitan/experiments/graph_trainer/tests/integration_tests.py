@@ -21,6 +21,7 @@ from torchtitan_recipes.tests.graph_trainer import (
 )
 
 from torchtitan.models.common.moe import (
+    MoE,
     RoundRobinTokenChoiceTopKRouter,
     TokenChoiceTopKRouter,
 )
@@ -163,7 +164,7 @@ def deepseek_v3_regional_ep_overlap_moe_batch():
     return _deepseek_v3_ep_overlap(
         inductor_compilation="regional",
         chunk_dim="batch",
-        module_fqn="layers.*.moe",
+        module_fqn="layers.*.feed_forward",
     )
 
 
@@ -171,7 +172,7 @@ def deepseek_v3_regional_ep_overlap_moe_seq():
     return _deepseek_v3_ep_overlap(
         inductor_compilation="regional",
         chunk_dim="seq",
-        module_fqn="layers.*.moe",
+        module_fqn="layers.*.feed_forward",
     )
 
 
@@ -185,13 +186,13 @@ def deepseek_v3_full_ep_overlap_moe_batch():
     return _deepseek_v3_ep_overlap(
         inductor_compilation="full",
         chunk_dim="batch",
-        module_fqn="layers.*.moe",
+        module_fqn="layers.*.feed_forward",
     )
 
 
 def deepseek_v3_full_ep_overlap_moe_seq():
     return _deepseek_v3_ep_overlap(
-        inductor_compilation="full", chunk_dim="seq", module_fqn="layers.*.moe"
+        inductor_compilation="full", chunk_dim="seq", module_fqn="layers.*.feed_forward"
     )
 
 
@@ -224,9 +225,9 @@ def _round_robin_routing(config):
     """Route token-expert assignments round-robin, with exact balance."""
     router_fields = dataclasses.fields(TokenChoiceTopKRouter.Config)
     for layer in config.model.layers:
-        if getattr(layer, "moe", None) is not None:
-            router = layer.moe.router
-            layer.moe.router = RoundRobinTokenChoiceTopKRouter.Config(
+        if isinstance(layer.feed_forward, MoE.Config):
+            router = layer.feed_forward.router
+            layer.feed_forward.router = RoundRobinTokenChoiceTopKRouter.Config(
                 **{f.name: getattr(router, f.name) for f in router_fields}
             )
     return config

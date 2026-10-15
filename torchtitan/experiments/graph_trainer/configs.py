@@ -21,7 +21,7 @@ from torchtitan.trainer import Trainer
 EpOverlapChunkDim = Literal["batch", "seq"]
 
 TRANSFORMER_BLOCK_FQN = "layers.*"
-MOE_BLOCK_FQN = "layers.*.moe"
+MOE_BLOCK_FQN = "layers.*.feed_forward"
 SUPPORTED_EP_OVERLAP_MODULE_FQNS = frozenset({TRANSFORMER_BLOCK_FQN, MOE_BLOCK_FQN})
 
 
@@ -41,7 +41,7 @@ class EpOverlapConfig:
     """Single module FQN pattern chunked for EP overlap.
 
     v1 supports all transformer blocks (``layers.*``) or all MoE blocks
-    (``layers.*.moe``). Selected module forwards are wrapped with eager chunking
+    (``layers.*.feed_forward``). Selected module forwards are wrapped with eager chunking
     before tracing, and the overlap scheduler consumes the resulting chunk
     metadata.
     """
@@ -167,7 +167,7 @@ class PagedStashConfig:
             applies an invalid step, recovers in process and works with any
             optimizer, but costs one device sync per step."""
 
-    module_fqn: str = "layers.*.moe.routed_experts"
+    module_fqn: str = "layers.*.feed_forward.routed_experts"
     """Module FQN pattern of the modules annotated as the paged-stash region.
     The annotation covers everything traced inside their forward, so the
     default covers the whole routed-expert subtree including inner_experts."""
@@ -237,7 +237,7 @@ class GraphTrainerCompileConfig:
 
     Each selector has the form ``MODULE_FQN_PATTERN::OP``. Separate multiple
     selectors with ``|`` and quote the full argument in the shell. For example:
-    ``layers.*.moe.router.gate::aten.mm.dtype | layers.*.attention.wkv_a::aten.mm.default``.
+    ``layers.*.feed_forward.router.gate::aten.mm.dtype | layers.*.attention.wkv_a::aten.mm.default``.
     """
 
     pass_pipeline: str = "default"
@@ -321,12 +321,12 @@ def validate_ep_overlap_config(
     if module_fqn not in SUPPORTED_EP_OVERLAP_MODULE_FQNS:
         raise ValueError(
             "compile.ep_overlap.module_fqn must be either 'layers.*' "
-            "or 'layers.*.moe' for ep_overlap"
+            "or 'layers.*.feed_forward' for ep_overlap"
         )
     if chunk_dim == "seq" and module_fqn != MOE_BLOCK_FQN:
         raise ValueError(
             "compile.ep_overlap.chunk_dim='seq' is only supported with "
-            "compile.ep_overlap.module_fqn='layers.*.moe'"
+            "compile.ep_overlap.module_fqn='layers.*.feed_forward'"
         )
 
     return chunk_dim, module_fqn
