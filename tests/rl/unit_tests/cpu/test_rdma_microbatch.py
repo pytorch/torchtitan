@@ -4,10 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for `MonarchRDMAMicrobatch` and `RDMAMicrobatchPrefetcher`.
-
-Monarch's RDMA classes are faked, except in one test over real Monarch (TCP).
-"""
+"""Unit tests for `MonarchRDMAMicrobatch` and `RDMAMicrobatchPrefetcher`, with Monarch's RDMA
+classes faked except in one test over real Monarch (TCP)."""
 
 import asyncio
 import contextvars

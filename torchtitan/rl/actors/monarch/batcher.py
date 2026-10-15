@@ -56,9 +56,8 @@ class _BatcherActorEndpoints:
     async def add_group(
         self, *, rollout_group: RolloutGroup
     ) -> tuple[TrainerStepBatch | None, bool]:
-        """Plain `@endpoint`, not `@concurrent_endpoint` like the other actors: each call finishes
-        before the next starts, so groups reach the stateful batcher in arrival order. `async`
-        because Monarch rejects mixing sync and async endpoints."""
+        """Plain `@endpoint`, not `@concurrent_endpoint`: calls run one at a time, so groups reach the
+        stateful batcher in arrival order. `async` because Monarch rejects mixing sync and async endpoints."""
         return super().add_group(rollout_group=rollout_group)
 
     @endpoint
@@ -67,8 +66,7 @@ class _BatcherActorEndpoints:
 
     @endpoint
     async def sync_log_step(self, step: int) -> None:
-        """Plain `@endpoint` like `add_group`, so messages stay in order: the step is set before
-        the next group's spans."""
+        """Plain `@endpoint` like `add_group`, so the step is set before the next group's spans."""
         sl.set_step(step)
 
 
@@ -84,16 +82,10 @@ class BatcherActor(Actor, _BatcherActorEndpoints, Batcher):
             "batcher",
             BatcherActor,
             Batcher.Config(rdma_min_tensor_bytes=1024),
-            num_tokens_per_microbatch_per_dp_rank=256,
-            max_context_length=16,
             num_prompts_per_train_step=2,
-            dp_degree=1,
-            pad_id=0,
-            temperature=1.0,
-            output_dir="outputs",
-            enable_structured_logging=False,
+            **other_init_kwargs,  # see `_BatcherActorEndpoints.__init__`
         )
         await batcher.add_group.call_one(rollout_group=group0)  # -> (None, True)
-        await batcher.add_group.call_one(rollout_group=group1)  # -> (TrainerStepBatch of MonarchRDMAMicrobatches, True)
+        await batcher.add_group.call_one(rollout_group=group1)  # -> (batch of MonarchRDMAMicrobatches, True)
         batcher.maybe_release_oldest_batch.broadcast()  # once every trainer rank has read group1's batch
     """
