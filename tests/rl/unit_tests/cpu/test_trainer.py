@@ -286,7 +286,9 @@ def test_forward_backward_uses_global_token_count() -> None:
     engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
     assert engine.num_accumulation_steps == 3
-    engine._preprocess_microbatch_groups.assert_called_once_with(microbatch_groups)
+    engine._preprocess_microbatch_groups.assert_called_once_with(
+        microbatch_groups, global_routing_token_counts=torch.tensor([19])
+    )
 
 
 def test_close_stops_training_engine() -> None:

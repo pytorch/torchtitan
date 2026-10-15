@@ -316,7 +316,7 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
         ),
     ]
     [(arg_mbs, kwarg_mbs, target_mbs)] = TrainingEngine._preprocess_microbatch_groups(
-        trainer, [microbatches]
+        trainer, [microbatches], global_routing_token_counts=torch.tensor([7])
     )
 
     assert arg_mbs is not None
@@ -375,6 +375,7 @@ def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs(monkeypatch) -> Non
         TrainingEngine._preprocess_microbatch_groups(
             trainer,
             [[microbatch]],
+            global_routing_token_counts=torch.tensor([7]),
         )
 
 
@@ -393,12 +394,12 @@ def test_forward_backward_runs_whole_accumulation(
         def modules(self):
             return iter(())
 
-        def preprocess_inputs(self, input_dict, **kw):
+        def preprocess_inputs(self, input_dict, *, global_routing_token_counts, **kw):
             captured["preprocess_kwargs"] = kw
             return (
                 "INPUTS",
                 torch.ones(7),
-                {"positions": 1, "aux_loss_denominators": None},
+                {"positions": 1, "aux_loss_denominators": global_routing_token_counts},
             )
 
     losses = iter((torch.tensor(1.0), torch.tensor(2.0)))
@@ -998,7 +999,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
     engine._preprocess_microbatch_groups = MagicMock(
-        side_effect=lambda groups: [
+        side_effect=lambda groups, global_routing_token_counts: [
             ("input", group[0].labels, {}, {}) for group in groups
         ]
     )
