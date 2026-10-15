@@ -10,7 +10,6 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
-    attention_activation_placement,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
@@ -50,17 +49,6 @@ def muse_spark_activation_placement(*, enable_sp: bool) -> SpmdType:
     )
 
 
-def per_head_norm_sharding_config() -> ShardingConfig:
-    head_layout = attention_activation_placement()
-    return ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={"x": head_layout},
-        in_dst_shardings={"x": head_layout},
-        out_src_shardings=head_layout,
-        out_dst_shardings=head_layout,
-    )
-
-
 def audio_wrapper_sharding_config(input_name: str) -> ShardingConfig:
     invariant = SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I})
     return ShardingConfig(
@@ -73,24 +61,14 @@ def audio_wrapper_sharding_config(input_name: str) -> ShardingConfig:
 
 def audio_invariant_state_sharding_config(
     *,
-    input_name: str = "input",
-    has_weight: bool = True,
     has_bias: bool = False,
 ) -> ShardingConfig:
-    invariant = SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I})
+    config = audio_wrapper_sharding_config("input")
     invariant_state = SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})
-    state_shardings = {}
-    if has_weight:
-        state_shardings["weight"] = invariant_state
+    config.state_shardings = {"weight": invariant_state}
     if has_bias:
-        state_shardings["bias"] = invariant_state
-    return ShardingConfig(
-        state_shardings=state_shardings,
-        in_src_shardings={input_name: invariant},
-        in_dst_shardings={input_name: invariant},
-        out_src_shardings=invariant,
-        out_dst_shardings=invariant,
-    )
+        config.state_shardings["bias"] = invariant_state
+    return config
 
 
 def transformer_block_sharding_config(*, enable_sp: bool) -> ShardingConfig:
