@@ -12,8 +12,12 @@ No GPU, no retrieval server: the retrieval call is monkeypatched.
 import asyncio
 
 import numpy as np
+from renderers import CustomRendererConfig
 from renderers.base import ParsedToolCall
 
+from torchtitan.components.renderer import RenderersConfigAdapter
+from torchtitan.config import ConfigLoader
+from torchtitan.rl.controller import Controller
 from torchtitan.rl.examples.search_r1 import (
     env as sr1_env,
     RewardExactMatch,
@@ -22,6 +26,25 @@ from torchtitan.rl.examples.search_r1 import (
 )
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.rl.rollout.types import RolloutTurnID
+
+
+def test_muse_glimmer_search_recipe_uses_worker_loadable_renderer():
+    config = ConfigLoader().load(
+        [
+            "--module",
+            "torchtitan_recipes.rl.search_r1",
+            "--config",
+            "rl_grpo_muse_glimmer_30b_search_r1",
+        ]
+    )
+
+    assert isinstance(config, Controller.Config)
+    assert isinstance(config.renderer, RenderersConfigAdapter)
+    renderer_config = config.renderer.get_renderers_config()
+    assert isinstance(renderer_config, CustomRendererConfig)
+    assert renderer_config.import_path == (
+        "torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
+    )
 
 
 def _build_env(monkeypatch, question="Who wrote Hamlet?"):

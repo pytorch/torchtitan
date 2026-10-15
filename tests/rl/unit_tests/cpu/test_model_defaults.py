@@ -36,7 +36,10 @@ _OPTIONAL_PACKAGE_RECIPES = {
     "rl_grpo_moe_debug_dist_moe_tp2_ep4",
 }
 # SoftCappedLinear head: LMHeadFP32OutputConverter can't convert it (see the recipe's TODO).
-_BF16_HEAD_RECIPES = {"rl_grpo_muse_glimmer_30b_search_r1"}
+_BF16_HEAD_RECIPES = {
+    "rl_grpo_muse_glimmer_30b_search_r1",
+    "rl_grpo_muse_glimmer_30b_terminal_bench",
+}
 
 
 @pytest.mark.parametrize("module_name", _RECIPE_MODULES)
