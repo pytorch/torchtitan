@@ -10,15 +10,15 @@ from dataclasses import dataclass, fields
 from typing import cast
 
 from torchtitan.models.base.module import Module
-
-from torchtitan.models.common.async_linear import (
-    AsyncColumnParallelLinear,
-    AsyncRowParallelLinear,
-)
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
+)
+
+from torchtitan.models.common.linear.async_linear import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
 )
 
 from .base import ModelConfigTransform

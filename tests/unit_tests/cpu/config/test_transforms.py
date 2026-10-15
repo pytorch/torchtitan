@@ -23,10 +23,6 @@ from torchtitan.config.transform import (
     transform_model_config_,
     TransformRelations,
 )
-from torchtitan.models.common.async_linear import (
-    AsyncColumnParallelLinear,
-    AsyncRowParallelLinear,
-)
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     SlidingWindowFlexInnerAttention,
@@ -44,8 +40,12 @@ from torchtitan.models.common.linear import (
     Linear,
     RowParallelLinear,
 )
+from torchtitan.models.common.linear.async_linear import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import (
+from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
 )
@@ -656,13 +656,13 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         from torchtitan.models.deepseek_v3 import build_model_config
 
         model = build_model_config("debugmodel", parallelism=ParallelismConfig())
-        moe = model.layers[1].moe
+        moe = model.layers[1].feed_forward
         assert moe is not None and moe.shared_experts is not None
 
         transformed = AsyncTensorParallelTransform(
             enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
         ).transform(model)
-        transformed_moe = transformed.layers[1].moe
+        transformed_moe = transformed.layers[1].feed_forward
         assert transformed_moe is not None
         config = transformed_moe.shared_experts
         assert config is not None

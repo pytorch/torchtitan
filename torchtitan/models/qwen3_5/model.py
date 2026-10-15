@@ -47,6 +47,7 @@ from torchtitan.models.common.flops import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.linear import maybe_gather_tp_input
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -233,13 +234,7 @@ class Qwen35TransformerBlock(TransformerBlock):
         self.full_attn = isinstance(config.attention, Qwen35Attention.Config)
         self.attention = config.attention.build()
 
-        self.moe_enabled = config.moe is not None
-        if self.moe_enabled:
-            # pyrefly: ignore [missing-attribute]
-            self.moe = config.moe.build()
-        else:
-            assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build()
+        self.feed_forward = config.feed_forward.build()
 
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -263,8 +258,8 @@ class Qwen35TransformerBlock(TransformerBlock):
         x_TD = x_TD + h_TD
 
         h_TD = self.ffn_norm(x_TD)
-        if self.moe_enabled:
-            h_TD = self.moe(
+        if isinstance(self.feed_forward, MoE):
+            h_TD = self.feed_forward(
                 h_TD,
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
@@ -544,7 +539,9 @@ class Qwen35Model(MultimodalModel):
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
-        if any(layer.moe is not None for layer in self.config.layers):
+        if any(
+            isinstance(layer.feed_forward, MoE.Config) for layer in self.config.layers
+        ):
             input_dict["aux_loss_denominators"] = global_routing_token_counts
         return inputs, labels, input_dict
 

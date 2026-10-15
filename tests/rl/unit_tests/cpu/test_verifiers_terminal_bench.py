@@ -268,11 +268,8 @@ def _num_kv_heads(model: object) -> int:
 
 
 def _num_experts(model: object) -> int | None:
-    for layer in model.layers:
-        moe = getattr(layer, "moe", None)
-        if moe is not None:
-            return moe.num_experts
-    return None
+    moe = model.first_moe
+    return moe.num_experts if moe is not None else None
 
 
 @pytest.mark.parametrize(

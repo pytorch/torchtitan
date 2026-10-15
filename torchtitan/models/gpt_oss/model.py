@@ -33,6 +33,7 @@ from torchtitan.models.common.flops import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rope import RoPE
 
 from .state_dict_adapter import GptOssStateDictAdapter
@@ -153,9 +154,8 @@ class GptOssTransformerBlock(TransformerBlock):
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
 
-        assert config.moe is not None
-        self.moe = config.moe.build()
-        self.moe_enabled = True  # for composability with load balancing
+        assert isinstance(config.feed_forward, MoE.Config)
+        self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -183,7 +183,7 @@ class GptOssTransformerBlock(TransformerBlock):
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
-        moe_out = self.moe(
+        moe_out = self.feed_forward(
             self.ffn_norm(x),
             padding_mask_T=padding_mask,
             aux_loss_denominator=aux_loss_denominator,
