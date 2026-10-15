@@ -140,7 +140,7 @@ class HostMeshes:
 
 
 def generator_launch_env(generator_config: VLLMGenerator.Config) -> dict[str, str]:
-    """Env generator procs need for CPU KV offload, on top of ``RL_ENV_DEFAULTS``:
+    """Extra env for generator procs with CPU KV offload, on top of ``RL_ENV_DEFAULTS``:
     - ``expandable_segments:False``: vLLM refuses a KV connector under ``expandable_segments:True``.
     - ``PYTHONHASHSEED=0``: TP ranks must iterate vLLM's sets in the same order.
 
