@@ -23,6 +23,7 @@ from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
     DefaultActivationRematConfig,
 )
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
@@ -1153,6 +1154,15 @@ class TestRematRegions(unittest.TestCase):
             12,
         )
         self.assertIsNotNone(x_TD.grad)
+
+    def test_quantile_router_statistics_are_recorded_once_with_topk_region(self):
+        # A compiled region inside this eager checkpoint would update the histogram again
+        # on recompute (12 -> 24); the quantile router stays out of moe_router_topk.
+        apply_local_compile(["moe_router_topk"])
+        try:
+            self.test_quantile_router_statistics_are_recorded_once()
+        finally:
+            apply_local_compile([])
 
     def test_forced_router_statistics_are_recorded_once(self):
         router = RoundRobinTokenChoiceTopKRouter.Config(
