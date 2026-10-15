@@ -57,7 +57,7 @@ class CPUKVOffload(Configurable):
         # Set by `attach`: vLLM's CPU LRU, and the KV cache groups each block has a chunk in.
         self._lru: Any = None
         self._num_kv_cache_groups = 0
-        # CPU store bytes, added by `stat_logger` on the engine thread; a plain int any thread reads.
+        # CPU store bytes, added by `stat_logger` (engine thread); a plain int any thread can read.
         self.store_bytes = 0
 
     def engine_kwargs(self) -> dict[str, Any]:
