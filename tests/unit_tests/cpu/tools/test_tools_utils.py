@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import subprocess
-import sys
 from unittest.mock import Mock
 
 import pytest
@@ -97,13 +95,3 @@ def test_get_cuda_flash_attention_impl_on_rocm(monkeypatch):
     monkeypatch.setattr(torch.version, "hip", "7.0")
 
     assert get_cuda_flash_attention_impl() is None
-
-
-def test_event_loop_thread_does_not_block_process_exit() -> None:
-    # Like a rank stuck in a collective: the call never returns, and the process still exits.
-    code = (
-        "import threading\n"
-        "from torchtitan.tools.utils import EventLoopThread\n"
-        "EventLoopThread(name='stuck').submit(threading.Event().wait)\n"
-    )
-    subprocess.run([sys.executable, "-c", code], check=True, timeout=120)

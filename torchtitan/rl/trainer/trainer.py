@@ -5,11 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
-import functools
 import logging
 import os
 import time
-from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
@@ -48,18 +46,6 @@ class OptimizerStepOutput:
 
     policy_version: int
     metrics: dict[str, float]
-
-
-def _on_compute_thread(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Turn a sync `Trainer` method into an async one that runs on the compute thread."""
-
-    @functools.wraps(fn)
-    async def wrapper(self: "Trainer", *args, **kwargs) -> Any:
-        return await asyncio.wrap_future(
-            self._compute_thread.submit(fn, self, *args, **kwargs)
-        )
-
-    return wrapper
 
 
 class Trainer(Configurable):
@@ -171,20 +157,7 @@ class Trainer(Configurable):
                 "Configure checkpointer to load from a checkpoint."
             )
 
-        # forward_backward runs on this thread, so the event loop can reply to the weight push meanwhile.
-        self._compute_thread = utils.EventLoopThread(name="trainer_compute")
-        # The current CUDA device is per thread, and a new thread starts on device 0.
-        self._compute_thread.submit(
-            utils.device_module.set_device, engine.device
-        ).result()
-        # Autograd multithreading is per thread too. init_distributed turned it off so the
-        # backward's recompute runs on the calling thread, where the thread-local mesh is.
-        self._compute_thread.submit(
-            torch.autograd.set_multithreading_enabled,
-            torch.autograd.is_multithreading_enabled(),
-        ).result()
-        # The profiler records CPU ops only on the thread that starts and steps it.
-        self._compute_thread.submit(engine.start_profiler).result()
+        engine.start_profiler()
         engine.device_memory_monitor.reset_peak_stats()
 
         # Data parallelism: mesh is available after model construction builds it.
@@ -228,8 +201,7 @@ class Trainer(Configurable):
         the final teardown. Destroying it from this endpoint can race with mesh
         shutdown and hang at process exit.
         """
-        # On the compute thread: the profiler stops on the thread that started it.
-        await asyncio.wrap_future(self._compute_thread.submit(self.engine.close))
+        self.engine.close()
         logger.debug("Trainer close requested; ProcMesh.stop owns PG teardown.")
 
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
@@ -271,8 +243,7 @@ class Trainer(Configurable):
         return out
 
     @sl.log_trace_span("forward_backward")
-    @_on_compute_thread
-    def forward_backward(
+    async def forward_backward(
         self,
         microbatches: list[TrainingMicrobatch] | list[MonarchRDMAMicrobatch],
         global_loss_token_counts: torch.Tensor,
@@ -397,9 +368,7 @@ class Trainer(Configurable):
         )
 
         engine.save_checkpoint(last_step=last_step)
-        # On the compute thread, so the trace has forward_backward's CPU ops but not this method's.
-        # TODO: torch's experimental `profile_all_threads` profiler option would record both.
-        self._compute_thread.submit(engine.step_profiler).result()
+        engine.step_profiler()
         device_mem_stats = engine.device_memory_monitor.get_peak_stats()
         engine.device_memory_monitor.reset_peak_stats()
 
@@ -444,15 +413,13 @@ class Trainer(Configurable):
         - The staging stream waits for the last optimizer step before copying, and
           forward/backward does not mutate persistent model state.
         - The CUDA-event wait and the TorchStore put run together in an
-          `asyncio.to_thread` worker, and forward/backward runs on the compute
-          thread, so this actor's event loop is free to reply when the put ends.
+          `asyncio.to_thread` worker, so they progress while a synchronous
+          forward/backward blocks this actor's event loop.
         - The controller awaits this push before the next optimizer step mutates
           the model, and awaits the generators' pull of it before the next push
           reuses the staging buffers and TorchStore key.
         """
 
-        # state_dict() frees FSDP's unsharded params, so it must not overlap forward_backward. It doesn't:
-        # the controller sends forward_backward after this push, and staging never yields the event loop.
         model_state_dict = self.model.state_dict()
         # Today we copy the model into reusable pinned CPU buffers before calling
         # TorchStore. Parameter destinations use the generator dtype, so copy_()

@@ -6,7 +6,6 @@
 
 import asyncio
 import threading
-import time
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -14,7 +13,6 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 
 import torch
-from monarch.actor import Actor, this_proc
 from torchstore import RankRole
 from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
@@ -22,7 +20,7 @@ from torchtitan.components.data.types import (
 from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
-from torchtitan.rl.actors.monarch.trainer import _TrainerActorEndpoints, TrainerActor
+from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.controller_state import MirroredState
 from torchtitan.rl.trainer.rdma_microbatch import (
@@ -30,7 +28,6 @@ from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatchPrefetcher,
 )
 from torchtitan.rl.trainer.trainer import Trainer
-from torchtitan.tools.utils import EventLoopThread
 from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
@@ -302,7 +299,6 @@ def test_forward_backward_uses_global_token_count() -> None:
 def test_close_stops_training_engine() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
-        trainer._compute_thread = EventLoopThread(name="trainer_compute")
         engine = SimpleNamespace(
             close=MagicMock(),
         )
@@ -346,7 +342,6 @@ def test_get_controller_state_returns_restored_state() -> None:
 def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
-        trainer._compute_thread = EventLoopThread(name="trainer_compute")
         engine = SimpleNamespace(
             num_completed_steps=4,
             ntokens_seen=10,
@@ -449,7 +444,6 @@ def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
     batch_index: int, dp_rank: int, microbatch_index: int
 ) -> None:
     trainer = object.__new__(Trainer)
-    trainer._compute_thread = EventLoopThread(name="trainer_compute")
     trainer.engine = SimpleNamespace(num_completed_steps=0)
     trainer.config = Trainer.Config(model=MagicMock())
     trainer.dp_rank = 1
@@ -473,7 +467,6 @@ def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
 def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
-        trainer._compute_thread = EventLoopThread(name="trainer_compute")
         device_mem_stats = SimpleNamespace(
             max_active_gib=3.0,
             max_active_pct=4.0,
@@ -573,66 +566,5 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         )
         device_memory_monitor.get_peak_stats.assert_called_once_with()
         device_memory_monitor.reset_peak_stats.assert_called_once_with()
-
-    asyncio.run(run())
-
-
-_CALL_ORDER: list[str] = []
-_FORWARD_BACKWARD_STARTED = threading.Event()
-_FORWARD_BACKWARD_MAY_RETURN = threading.Event()
-
-
-def _model_state_dict() -> dict[str, torch.Tensor]:
-    # Slow, so a forward_backward started before staging would reach the engine first.
-    time.sleep(0.1)
-    _CALL_ORDER.append("state_dict")
-    return {"weight": torch.ones(2)}
-
-
-def _blocking_engine_forward_backward(**kwargs) -> ForwardBackwardResult:
-    _CALL_ORDER.append("forward_backward")
-    _FORWARD_BACKWARD_STARTED.set()
-    _FORWARD_BACKWARD_MAY_RETURN.wait()  # like the real engine, never yields to the event loop
-    return ForwardBackwardResult(loss=torch.tensor(0.0), loss_metrics=[])
-
-
-class _BlockingTrainerActor(Actor, _TrainerActorEndpoints, Trainer):
-    """The real push and `forward_backward` endpoints, over an engine that blocks until the push replies."""
-
-    def __init__(self) -> None:
-        self._compute_thread = EventLoopThread(name="trainer_compute")
-        self.config = Trainer.Config(model=MagicMock())
-        self.engine = SimpleNamespace(
-            num_completed_steps=0, forward_backward=_blocking_engine_forward_backward
-        )
-        self.model = SimpleNamespace(state_dict=_model_state_dict)
-        self._staging_state_dict = {"weight": torch.zeros(2)}
-        self._staging_model_state_dict_stream = None
-
-    def _wait_for_staging_and_put_model_state_dict(self, staging_complete) -> None:
-        # Like a real step, the put is still running when forward_backward starts.
-        assert _FORWARD_BACKWARD_STARTED.wait(10)
-
-
-def test_trainer_actor_push_replies_during_forward_backward() -> None:
-    async def run() -> None:
-        _CALL_ORDER.clear()
-        _FORWARD_BACKWARD_STARTED.clear()
-        _FORWARD_BACKWARD_MAY_RETURN.clear()
-        # In the test process, so the engine can wait on the test's threading.Event.
-        trainer = this_proc().spawn("trainer", _BlockingTrainerActor)
-        # The controller's order: push N, then forward_backward N+1.
-        push = asyncio.ensure_future(trainer.push_model_state_dict.call())
-        forward_backward = asyncio.ensure_future(
-            trainer.forward_backward.call([], torch.zeros(1), torch.zeros(1))
-        )
-        try:
-            # The push can reply only if forward_backward leaves the event loop free.
-            await asyncio.wait_for(push, timeout=10)
-        finally:
-            _FORWARD_BACKWARD_MAY_RETURN.set()
-        await forward_backward
-        # Staging read the model before forward_backward started.
-        assert _CALL_ORDER == ["state_dict", "forward_backward"]
 
     asyncio.run(run())
