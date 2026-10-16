@@ -20,6 +20,7 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
+from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataLoader, RLDataset
 from torchtitan.rl.rollout.message_env import MessageEnv
@@ -175,6 +176,8 @@ class Rollouter(Configurable):
             RolloutWorkerActor,
             worker_config=self._config.worker,
             num_threads=self._config.num_threads_per_worker,
+            # The controller's structured-log init fn, or None when off; workers override its source and rank.
+            structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
         )
         await self._worker_actors.setup_async.call(
             tokenizer_config=tokenizer_config,
