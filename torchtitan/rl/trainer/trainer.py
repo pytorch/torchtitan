@@ -15,6 +15,7 @@ from typing import Any
 import torch
 import torchstore as ts
 from torch.distributed.tensor import DTensor
+from torch.numa import binding as numa_binding
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -118,6 +119,13 @@ class Trainer(Configurable):
         engine = self.engine
         self._controller_state = MirroredState()
         maybe_apply_numa_binding(engine.device.index, engine.device.type)
+        if engine.device.type == "cuda":
+            # torch defaults to one thread per physical core of the host, which oversubscribes the
+            # bound node: the weight push takes 1.0 s instead of 0.08 s at Qwen3-0.6B. Set it before
+            # the push's worker thread starts: a thread reads the count on its first parallel op.
+            torch.set_num_threads(
+                _num_cpu_threads_per_rank(device_index=engine.device.index)
+            )
 
         # Only cast when the generator and training dtypes differ. A CPU
         # staging snapshot is still required when no cast is needed.
@@ -500,3 +508,28 @@ class Trainer(Configurable):
     async def initialize_torchstore_client(self) -> None:
         """Initialize this process as a TorchStore routing publisher."""
         await ts.client(role=RankRole.PUBLISHER)
+
+
+def _num_cpu_threads_per_rank(device_index: int) -> int:
+    """Return this rank's share of its NUMA node's physical cores.
+
+    Assumes one trainer rank per visible GPU, as `train.py` launches them.
+
+    Example (2 sockets x 96 cores x 2 threads; GPUs 0-3 on NUMA node 0, GPUs 4-7 on node 1):
+        trainer on GPU 0     -> 192 logical CPUs / 2 per core / 1 rank on node 0  = 96 threads
+        trainer on GPUs 0-3  -> 192 logical CPUs / 2 per core / 4 ranks on node 0 = 24 threads
+        trainer on GPUs 0-7  -> 192 logical CPUs / 2 per core / 4 ranks per node  = 24 threads
+    """
+    cpus = os.sched_getaffinity(0)
+    threads_per_core = len(
+        numa_binding._get_logical_cpu_indices_sharing_same_physical_core_as(
+            logical_cpu_index=min(cpus)
+        )
+    )
+    numa_node_index = numa_binding._get_numa_node_index_for_device_index(
+        device_index=device_index
+    )
+    num_ranks_on_node = len(
+        numa_binding._get_device_indices_for_numa_node(numa_node_index=numa_node_index)
+    )
+    return max(1, len(cpus) // threads_per_core // num_ranks_on_node)
