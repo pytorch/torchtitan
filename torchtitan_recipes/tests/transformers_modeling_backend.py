@@ -13,6 +13,7 @@ from torchtitan.components.data import (
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
 )
+from torchtitan.components.data.text_datasets import ChatProcessor, DATASETS
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -22,13 +23,12 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 from torchtitan.experiments.transformers_modeling_backend import build_model_config
 from torchtitan.experiments.transformers_modeling_backend.tokenizer import (
     HFBackendTokenizer,
 )
-from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
@@ -77,7 +77,7 @@ def transformers_modeling_backend_debugmodel(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -135,7 +135,7 @@ def transformers_modeling_backend_debugmodel_moe(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -199,7 +199,7 @@ def transformers_modeling_backend_sft_debugmodel(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 

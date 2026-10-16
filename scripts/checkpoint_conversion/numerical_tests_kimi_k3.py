@@ -37,16 +37,19 @@ import torch
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from PIL import Image
-
-from torchtitan.hf_datasets.multimodal.utils.image import (
+from torchtitan.components.data.multimodal.utils.image import (
     process_image,
     resize_to_navit_patch_grid,
     vision_to_patches,
 )
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.activation import SiTUGLU
+from torchtitan.models.common.attention.kda import InnerKDA, KDA
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.kimi_k3 import build_model_config
-from torchtitan.models.kimi_k3.kda import InnerKDA
-from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.model import KimiK3Model, KimiMLAAttention
+from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
 
@@ -71,24 +74,33 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
     hf_full_attention_layers = [
         layer_idx + 1
         for layer_idx, layer in enumerate(tt_config.layers)
-        if layer.attention is not None
+        if isinstance(layer.attention, KimiMLAAttention.Config)
     ]
     hf_kda_layers = [
         layer_idx + 1
         for layer_idx, layer in enumerate(tt_config.layers)
-        if layer.delta_attention is not None
+        if isinstance(layer.attention, KDA.Config)
     ]
-    mla = next(layer.attention for layer in tt_config.layers if layer.attention)
+    mla = tt_config.first_full_attention
     kda = next(
-        layer.delta_attention for layer in tt_config.layers if layer.delta_attention
+        layer.attention
+        for layer in tt_config.layers
+        if isinstance(layer.attention, KDA.Config)
     )
-    inner_kda = cast(InnerKDA.Config, kda.inner_kda)
-    kda_kernel = inner_kda.kernel
+    inner_attention = cast(InnerKDA.Config, kda.inner_attention)
+    kda_kernel = inner_attention.kernel
     dense_ffn = next(
-        layer.feed_forward for layer in tt_config.layers if layer.feed_forward
+        layer.feed_forward
+        for layer in tt_config.layers
+        if isinstance(layer.feed_forward, DenseFeedForward.Config)
     )
     dense_activation = cast(SiTUGLU.Config, dense_ffn.activation_fn)
-    moe = next(layer.moe for layer in tt_config.layers if layer.moe)
+    moe = next(
+        layer.feed_forward
+        for layer in tt_config.layers
+        if isinstance(layer.feed_forward, KimiLatentMoE.Config)
+    )
+    assert moe.shared_experts is not None
     shared_hidden_dim = moe.shared_experts.w13.out_features
     expert_hidden_dim = moe.routed_experts.w2.in_features
     if shared_hidden_dim % expert_hidden_dim:
@@ -119,14 +131,16 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
         "routed_expert_hidden_size": moe.routed_down.out_features,
         "routed_scaling_factor": moe.router.route_scale,
         "first_k_dense_replace": next(
-            layer_idx for layer_idx, layer in enumerate(tt_config.layers) if layer.moe
+            layer_idx
+            for layer_idx, layer in enumerate(tt_config.layers)
+            if isinstance(layer.feed_forward, KimiLatentMoE.Config)
         ),
         "attn_res_block_size": tt_config.layers[0].attn_res_block_size,
         "linear_attn_config": {
             "full_attn_layers": hf_full_attention_layers,
             "kda_layers": hf_kda_layers,
             "head_dim": kda.head_dim,
-            "num_heads": kda.num_heads,
+            "num_heads": kda.n_heads,
             "short_conv_kernel_size": kda.conv_kernel_size,
             "gate_lower_bound": kda_kernel.lower_bound,
             "use_full_rank_gate": True,
@@ -351,7 +365,8 @@ def _print_routing_comparison(
 def _force_hf_routing(model, expert_indices, device) -> None:
     """Use HF expert IDs with TorchTitan's independently computed scores."""
     for layer_idx, layer in model.layers.items():
-        if (moe := cast(Any, layer.moe)) is None:
+        moe = layer.feed_forward
+        if not isinstance(moe, KimiLatentMoE):
             continue
         ids = expert_indices[int(layer_idx)].to(device)
         router, original = moe.router, moe.router.forward
@@ -396,9 +411,8 @@ def run_tt(
 
     expert_indices: dict[int, torch.Tensor] = {}
     for layer_idx, layer in model.layers.items():
-        if layer.moe is not None:
-            # pyrefly: ignore [missing-attribute]
-            layer.moe.router.register_forward_hook(
+        if isinstance(layer.feed_forward, KimiLatentMoE):
+            layer.feed_forward.router.register_forward_hook(
                 lambda _module, _inputs, output, layer_idx=int(layer_idx): (
                     expert_indices.__setitem__(
                         layer_idx,
@@ -439,7 +453,7 @@ def run_tt(
         dtype=torch.int32,
         device=device,
     )
-    attention_masks = model.get_attention_masks(positions)
+    attention_metadata = model._get_attention_metadata(positions)
 
     print(
         f"tokens={tuple(tokens.shape)} pixel_values={tuple(pixel_values.shape)} "
@@ -472,7 +486,7 @@ def run_tt(
         grid_thw=grid_thw,
         special_tokens={"image_id": _MEDIA_TOKEN_ID},
         positions=positions,
-        attention_masks=attention_masks,
+        attention_metadata=attention_metadata,
     )
     _print_routing_comparison(ref["expert_indices"], expert_indices)
     return logits[-1].float().cpu()
@@ -531,7 +545,7 @@ def main() -> None:
     )
 
     tt_config = _use_released_vocab(
-        build_model_config(args.model_flavor),
+        build_model_config(args.model_flavor, parallelism=ParallelismConfig()),
         hf_model_path,
     )
     torch.manual_seed(args.seed)

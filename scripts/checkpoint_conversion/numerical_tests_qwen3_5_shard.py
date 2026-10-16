@@ -31,7 +31,7 @@ import torchtitan.components.loss  # noqa: F401
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.qwen3_5 import build_model_config, Qwen35Model
 from torchtitan.tools import utils
 
@@ -57,7 +57,17 @@ def run_worker(args):
     torch.cuda.manual_seed(seed)
 
     seq_len = 128
-    config = build_model_config("debugmodel_moe", attn_backend="flex", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        tensor_parallel_degree=args.tp,
+        data_parallel_shard_degree=dp_shard,
+        expert_parallel_degree=args.ep,
+    )
+    config = build_model_config(
+        "debugmodel_moe",
+        attn_backend="flex",
+        seq_len=seq_len,
+        parallelism=parallelism,
+    )
 
     parallelism_context = ParallelismContext(
         dp_shard=dp_shard,
@@ -71,12 +81,6 @@ def run_worker(args):
     )
     parallelism_context.build_mesh()
 
-    parallelism = ParallelismConfig(
-        tensor_parallel_degree=args.tp,
-        data_parallel_shard_degree=dp_shard,
-        expert_parallel_degree=args.ep,
-    )
-    config.set_sharding_(parallelism)
     training = TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=1 * 128,
         max_context_length=seq_len,
@@ -95,7 +99,7 @@ def run_worker(args):
         training=training,
         parallelism=parallelism,
         local_compile_regions=config.local_compile_regions,
-        ac_config=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
         dump_folder="/tmp",
     )
 
@@ -107,13 +111,15 @@ def run_worker(args):
     # BlockMask, which the model normally builds in its preprocess_inputs; build
     # it here directly since we call the model outside the trainer.
     positions = torch.arange(seq_len, device="cuda").unsqueeze(0)
-    attention_masks = cast(Qwen35Model, model).get_attention_masks(positions=positions)
+    attention_metadata = cast(Qwen35Model, model)._get_attention_metadata(
+        positions=positions
+    )
 
     with torch.no_grad():
         output = model(
             tokens,
             positions=positions,
-            attention_masks=attention_masks,
+            attention_metadata=attention_metadata,
             special_tokens={"image_id": 248056, "video_id": 248057},
         )
 

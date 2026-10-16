@@ -12,10 +12,13 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import (
+    FlexAttentionMetadata,
+    VarlenAttentionMetadata,
+)
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.utils import (
+from torchtitan.models.common.feed_forward import DenseFeedForward
+from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
@@ -40,7 +43,7 @@ class Llama3TransformerBlock(TransformerBlock):
     def __init__(self, config: Config):
         super().__init__()
         self.attention = config.attention.build()
-        assert config.feed_forward is not None
+        assert isinstance(config.feed_forward, DenseFeedForward.Config)
         self.feed_forward = config.feed_forward.build()
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -48,21 +51,23 @@ class Llama3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ):
-        del padding_mask
-        attn_out = self.attention(self.attention_norm(x), attention_masks, positions)
+        del aux_loss_denominator, padding_mask
+        attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         h = x + attn_out
         ffn_out = self.feed_forward(self.ffn_norm(h))
-        # The residual add reads the feed-forward output with bare ops.
-        remat.recompute_needs_tensor(ffn_out)
-        out = h + ffn_out
-        return out
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(h, ffn_out)
 
 
 class Llama3Model(Decoder):
@@ -80,7 +85,7 @@ class Llama3Model(Decoder):
         dim: int = 4096
         vocab_size: int = 128256
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu"]
+            default_factory=lambda: ["loss", "fused_binary_activation"]
         )
 
         def get_nparams_and_flops(
@@ -102,13 +107,6 @@ class Llama3Model(Decoder):
                     seq_len=seq_len,
                 )
             return nparams, 6 * active_nparams + attention_op_flops
-
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_llama3_sharding_config
-
-            set_llama3_sharding_config(
-                self, enable_sp=parallelism.enable_sequence_parallel
-            )
 
     def __init__(self, config: Config):
         super().__init__(config)

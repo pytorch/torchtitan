@@ -45,6 +45,7 @@ describe the released model.
 | Feature | Notes |
 |---------|-------|
 | FSDP2 / HSDP | Decoder sharded per layer; vision encoder sharded as a separate unit |
+| Context parallel | Attention Gym native CP for KDA; MLA supports all-gather K/V with contiguous or head-tail partitions and Ulysses with contiguous partitions |
 | Tensor / sequence parallelism | Supported |
 | Expert parallelism | Supported |
 | Pipeline parallelism | Supported |
@@ -64,4 +65,4 @@ Test scripts:
 
 - `scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` -- Hugging Face vs.
   TorchTitan comparison
-- `tests/unit_tests/gpu/test_kimi_k3.py` -- KDA and FSDP2 correctness
+- `tests/unit_tests/gpu/models/kimi_k3/test_kimi_k3.py` -- KDA and FSDP2 correctness

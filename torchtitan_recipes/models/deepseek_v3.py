@@ -8,8 +8,10 @@
 
 from importlib import import_module
 from types import ModuleType
+from typing import cast
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -19,11 +21,18 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import Configurable, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import apply_transforms, MXFP8LinearConverter
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.config.transform import (
+    apply_transforms,
+    MXFP8LinearConverter,
+    NVFP4GroupedLinearConverter,
+    NVFP4LinearConverter,
+    TokenDispatcherTransform,
+)
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.deepseek_v3 import build_model_config
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.deepseek_v3 import build_model_config, DeepSeekV3Model
+from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 from torchtitan.trainer import Trainer
 
 
@@ -64,7 +73,7 @@ def deepseek_v3_mxfp8_linear_converter_config(
     projections retain BF16 inputs. The language-model head is opt-in because
     some recipes intentionally keep logits on the high-precision path.
     """
-    fqns = ["attention", "shared_experts", "feed_forward"]
+    fqns = ["attention", "shared_experts", "feed_forward.w13", "feed_forward.w2"]
     if include_lm_head:
         fqns.append("lm_head")
     return MXFP8LinearConverter.Config(
@@ -78,10 +87,14 @@ def deepseek_v3_mxfp8_linear_converter_config(
 
 
 def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
+    parallelism = ParallelismConfig(
+        pipeline_parallel_schedule="Interleaved1F1B",
+        expert_parallel_degree=2,
+    )
     model_config = build_model_config(
         "671B",
         seq_len=seq_len,
-        attn_backend="flex",
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -111,12 +124,9 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
             steps=10000,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            pipeline_parallel_schedule="Interleaved1F1B",
-            expert_parallel_degree=2,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -126,10 +136,17 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_671b(seq_len=seq_len)
+    config.parallelism.data_parallel_shard_degree = 128
+    config.parallelism.pipeline_parallel_degree = 4
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.pipeline_parallel_layers_per_stage = 4
+    config.parallelism.num_pp_microbatches = 120
+    config.parallelism.expert_parallel_degree = 64
+    config.parallelism.fsdp_defer_gradient_reduction = True
     config.model = build_model_config(
         "671B",
         seq_len=seq_len,
-        attn_backend="varlen",
+        parallelism=config.parallelism,
     )
     config.loss = CrossEntropyLoss.Config(
         global_vocab_size=decoder_vocab_size(config.model)
@@ -146,19 +163,12 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
     config.training.dtype = "float32"
     config.training.mixed_precision_param = "bfloat16"
     config.training.mixed_precision_reduce = "bfloat16"
-    config.parallelism.data_parallel_shard_degree = 128
-    config.parallelism.pipeline_parallel_degree = 4
-    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-    config.parallelism.pipeline_parallel_layers_per_stage = 4
-    config.parallelism.num_pp_microbatches = 120
-    config.parallelism.expert_parallel_degree = 64
-    config.parallelism.fsdp_defer_gradient_reduction = True
-    config.activation_checkpoint = None
+    config.activation_remat = None
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
-    config.dist_moe = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(config, [DistMoeTransform()])
 
 
@@ -168,10 +178,17 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_671b(seq_len=seq_len)
+    config.parallelism.data_parallel_shard_degree = 64
+    config.parallelism.pipeline_parallel_degree = 4
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.pipeline_parallel_layers_per_stage = 4
+    config.parallelism.num_pp_microbatches = 240
+    config.parallelism.expert_parallel_degree = 64
+    config.parallelism.fsdp_defer_gradient_reduction = True
     config.model = build_model_config(
         "671B",
         seq_len=seq_len,
-        attn_backend="varlen",
+        parallelism=config.parallelism,
         converters=[
             deepseek_v3_mxfp8_linear_converter_config(include_lm_head=True),
         ],
@@ -191,19 +208,12 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
     config.training.dtype = "float32"
     config.training.mixed_precision_param = "bfloat16"
     config.training.mixed_precision_reduce = "bfloat16"
-    config.parallelism.data_parallel_shard_degree = 64
-    config.parallelism.pipeline_parallel_degree = 4
-    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-    config.parallelism.pipeline_parallel_layers_per_stage = 4
-    config.parallelism.num_pp_microbatches = 240
-    config.parallelism.expert_parallel_degree = 64
-    config.parallelism.fsdp_defer_gradient_reduction = True
-    config.activation_checkpoint = None
+    config.activation_remat = None
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
-    config.dist_moe = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(
         config,
         [
@@ -213,3 +223,50 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
             )
         ],
     )
+
+
+def deepseek_v3_671b_nvfp4_ffn_mxfp8_attn(
+    bf16_tail_fraction: float = 0.0, *, seq_len: int | None = None
+) -> Trainer.Config:
+    config = deepseek_v3_671b(seq_len=seq_len)
+    model_config = cast(DeepSeekV3Model.Config, config.model)
+    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
+    config.model = build_model_config(
+        "671B",
+        seq_len=seq_len,
+        parallelism=config.parallelism,
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=[
+                    f"{layer}{submodule}"
+                    for layer in layer_fqns
+                    for submodule in nvfp4_ffn_submodules(model_config.layers)
+                ],
+            ),
+            NVFP4GroupedLinearConverter.Config(
+                fqns=layer_fqns,
+            ),
+            MXFP8LinearConverter.Config(
+                fqns=["attention.wq", "attention.wo"],
+            ),
+        ],
+    )
+    config = apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
+                kwargs={"non_blocking_capacity_factor": 0.03125, "pad_multiple": 128},
+            )
+        ],
+    )
+    config.model.local_compile_regions = ["loss"]
+    return config

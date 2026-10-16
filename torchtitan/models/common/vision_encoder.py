@@ -30,10 +30,10 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-from torchtitan.protocols.module import Module
 
 compiled_create_block_mask = torch.compile(create_block_mask)
 
@@ -58,7 +58,7 @@ class InvariantRowParallelLinear(Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        weight, bias = self._flatten_weight_and_bias()
+        weight, bias = self.weight, self.bias
         linear_fn = remat.region(
             self._linear,
             self.remat_region_name("linear"),
@@ -77,7 +77,7 @@ class InvariantRowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = self._unflatten_output(linear_fn(input, weight, bias))
+                output = self._unflatten_output(linear_fn(input, weight, bias), weight)
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -85,7 +85,7 @@ class InvariantRowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = self._unflatten_output(linear_fn(input, weight, bias))
+            output = self._unflatten_output(linear_fn(input, weight, bias), weight)
         if tp_group is None:
             return output
         # A recomputed reduction after a saved projection keeps the TP-times
@@ -219,7 +219,7 @@ class VisionAttention(Module):
             self.flex_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
-        )(q_THDh, k_THDh, v_THDh, attention_masks=attention_mask)
+        )(q_THDh, k_THDh, v_THDh, attention_metadata=attention_mask)
         remat.recompute_needs_tensor(out_THDh)
         out_TD = out_THDh.reshape(num_tokens, -1)
         return self.proj(out_TD)
@@ -261,7 +261,8 @@ class VisionTransformerBlock(Module):
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
         mlp_out = self.mlp(self.norm2(x))
-        # The residual add reads the MLP output with bare ops.
-        remat.recompute_needs_tensor(mlp_out)
-        x = x + mlp_out
-        return x
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x, mlp_out)

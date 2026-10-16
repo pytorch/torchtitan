@@ -18,7 +18,7 @@ from torch.nn.attention.flex_attention import AuxRequest
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.deepseek_v3.model import Attention
+from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
 
 # Shape suffixes:
 # T = packed tokens, H = attention heads, D = projection rows per head,
@@ -108,7 +108,7 @@ def _scale_mla_heads(
 
 @torch.no_grad()
 def _clip_mla_weights(
-    attention: Attention,
+    attention: DeepSeekMLAAttention,
     scales_H: torch.Tensor,
     *,
     alpha: float,
@@ -148,13 +148,16 @@ def qk_clip(
         module
         for model_part in model_parts
         for module in model_part.modules()
-        if isinstance(module, Attention)
+        if isinstance(module, DeepSeekMLAAttention)
         and isinstance(module.inner_attention, QKClipFlexInnerAttention)
     ]
     if not attention_layers:
         return
 
-    inner_attentions = [layer.inner_attention for layer in attention_layers]
+    inner_attentions = [
+        cast(QKClipFlexInnerAttention, layer.inner_attention)
+        for layer in attention_layers
+    ]
     # Each entry holds one layer's local maximum logit per query head.
     layer_max_logits_H = [
         torch.stack(inner_attention.max_attention_logits_H).amax(dim=0)
@@ -176,7 +179,9 @@ def qk_clip(
         strict=True,
     ):
         _clip_mla_weights(attention, layer_scales_H, alpha=alpha)
-        attention.inner_attention.max_attention_logits_H.clear()
+        cast(
+            QKClipFlexInnerAttention, attention.inner_attention
+        ).max_attention_logits_H.clear()
 
 
 def register_qk_clip_hook(

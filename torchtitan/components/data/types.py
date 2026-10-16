@@ -17,12 +17,18 @@ from torchtitan.components.tokenizer import BaseTokenizer
 
 
 class TrainingMicrobatch(ABC):
-    """A data-parallel-rank-local input to one training forward/backward."""
+    """A data-parallel-rank-local input to one training forward/backward.
+
+    ``loss_token_counts`` is scalar for one objective and has one entry per
+    objective for MTP. ``routing_token_counts`` has one entry per routing depth.
+    Both are local counts; the standard trainer accumulates and reduces them.
+    """
 
     __slots__ = ()
 
     labels: torch.Tensor
-    num_valid_tokens: int
+    loss_token_counts: torch.Tensor
+    routing_token_counts: torch.Tensor
 
     @abstractmethod
     def as_input_dict(self) -> dict[str, Any]:
@@ -73,7 +79,8 @@ class TokenizedTrainingMicrobatch(TrainingMicrobatch):
     labels: torch.Tensor
     positions: torch.Tensor
     padding_mask: torch.Tensor
-    num_valid_tokens: int
+    loss_token_counts: torch.Tensor
+    routing_token_counts: torch.Tensor
     model_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def as_input_dict(self) -> dict[str, Any]:
@@ -96,6 +103,7 @@ class DatasetBuildContext:
     num_tokens_per_microbatch: int
     read_options: grain.ReadOptions
     max_num_documents: int | None = None
+    num_mtp_layers: int = 0
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

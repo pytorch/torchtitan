@@ -1,13 +1,16 @@
 grain == 0.2.18
 datasets >= 3.6.0, < 4.8.0
+# PyArrow 26 requires NumPy 2; PyTorch CI also covers NumPy 1.x.
+pyarrow < 26
 tensorboard
 wandb
 tokenizers >= 0.15.0
-renderers == 0.1.11
+renderers == 0.1.12
 safetensors
 einops
 pillow
-spmd_types==0.2.5
-attn-gym[linear]==0.0.16
-# Keep this commit pin in sync with pyproject.toml.
-torch_remat @ git+https://github.com/meta-pytorch/remat.git@d302699b1c58f83fa2c7b03bc2593967e9530335
+spmd_types @ git+https://github.com/meta-pytorch/spmd_types.git@fce1acb1e9bbce66f398893ff7836346f4cf03cd
+attn-gym[linear,cudnn]==0.0.17
+torch_remat @ git+https://github.com/meta-pytorch/remat.git@624f19cbdb70720bd05988d6485a1225f46c074b
+# PyPI 0.1.0 predates torch_checkpointing.default_resharder.
+torch_checkpointing @ git+https://github.com/meta-pytorch/torch_checkpointing.git@dcbb3a59cfad1cbeb95994f0d6cb1802c1d91825

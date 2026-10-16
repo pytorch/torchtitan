@@ -6,6 +6,7 @@
 
 from .activation import (
     BinaryActivationFn,
+    ClampedSwiGLU,
     Sigmoid,
     SiLU,
     SiTUGLU,
@@ -15,8 +16,11 @@ from .activation import (
     UnaryActivationFn,
 )
 from .attention import (
+    AttentionMetadata,
+    AttentionMetadataMap,
     create_attention_mask,
     create_varlen_metadata_for_document,
+    FlexAttentionMetadata,
     FlexInnerAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -25,42 +29,41 @@ from .attention import (
     get_sliding_window_mask_mod,
     GQAttention,
     InnerAttention,
+    LinearAttentionMetadata,
     QKVLinear,
-    ScaledDotProductInnerAttention,
+    SlidingWindowFlexInnerAttention,
+    VarlenAttentionMetadata,
     VarlenInnerAttention,
-    VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
-from .feed_forward import compute_ffn_hidden_dim, FeedForward
-from .linear import (
-    CastLinear,
-    ColumnParallelLinear,
-    GroupedLinear,
-    Linear,
-    RouterGateLinear,
-    RowParallelLinear,
-    SharedExpertRowParallelLinear,
-)
-from .moe import MicrobatchWiseLoadBalanceLoss, MoE
+from .feed_forward import compute_ffn_hidden_dim, DenseFeedForward, FeedForward
+from .linear import ColumnParallelLinear, GroupedLinear, Linear, RowParallelLinear
+from .linear.hi_mid_lo_linear import HiMidLoLinear
+from .moe import BatchWiseLoadBalanceLoss, MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
 from .nn_modules import Conv1d, Conv2d, GELU, GroupNorm, Identity, LayerNorm, RMSNorm
 from .norm import GatedRMSNorm
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
+    "AttentionMetadata",
+    "AttentionMetadataMap",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
-    "CastLinear",
+    "ClampedSwiGLU",
     "ColumnParallelLinear",
     "CosSinRoPE",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
+    "DenseFeedForward",
     "Embedding",
     "FeedForward",
+    "FlexAttentionMetadata",
     "FlexInnerAttention",
+    "HiMidLoLinear",
     "QKVLinear",
     "GELU",
     "GatedRMSNorm",
@@ -76,15 +79,15 @@ __all__ = [
     "InnerAttention",
     "LayerNorm",
     "Linear",
+    "LinearAttentionMetadata",
+    "BatchWiseLoadBalanceLoss",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
     "MultimodalModel",
     "RMSNorm",
     "RoPE",
     "RowParallelLinear",
-    "RouterGateLinear",
-    "SharedExpertRowParallelLinear",
-    "ScaledDotProductInnerAttention",
+    "SlidingWindowFlexInnerAttention",
     "Sigmoid",
     "SiLU",
     "BinaryActivationFn",
@@ -95,6 +98,6 @@ __all__ = [
     "TransformerBlock",
     "UnaryActivationFn",
     "VarlenInnerAttention",
-    "VarlenMetadata",
+    "VarlenAttentionMetadata",
     "compute_ffn_hidden_dim",
 ]

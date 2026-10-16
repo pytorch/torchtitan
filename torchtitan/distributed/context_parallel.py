@@ -34,17 +34,16 @@ from torchtitan.distributed.spmd_types import (
 )
 
 if TYPE_CHECKING:
-    from torchtitan.models.common.attention import (
-        AttentionMasksType,
-        FlexAttentionMetadata,
-    )
+    from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 
 __all__ = [
     "ContextParallelLoadBalancer",
     "HeadTailCPLoadBalancer",
     "PTRRFlexAttentionCPLoadBalancer",
     "get_cp_input_seq_len",
+    "get_token_fragments",
     "shard_tensors",
+    "supports_cp_inner_attention",
 ]
 
 
@@ -69,7 +68,7 @@ class HeadTailCPLoadBalancer(ContextParallelLoadBalancer):
         config: Config,
         *,
         seq_len: int,
-        attention_metadata: AttentionMasksType | None,
+        attention_metadata: BlockMask | None,
     ) -> None:
         del config, attention_metadata
         cp_group = spmd_mesh_group(MeshAxisName.CP)
@@ -95,8 +94,6 @@ class HeadTailCPLoadBalancer(ContextParallelLoadBalancer):
         return permutation
 
 
-# TODO(acisseJZhong): Maintain an explicit mapping from each CP load balancer
-# to the CP attention backends it supports, and validate configured pairs.
 class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
     """Balance FlexAttention tokens with PTRR.
 
@@ -107,47 +104,25 @@ class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
     class Config(Configurable.Config):
         """Configuration for PTRR context-parallel load balancing."""
 
-        mask_key: str | None = None
-        """Mask used to derive the partition when context metadata is a mapping."""
-
     def __init__(
         self,
         config: Config,
         *,
         seq_len: int,
-        attention_metadata: FlexAttentionMetadata,
+        attention_metadata: BlockMask | None,
     ) -> None:
-        del seq_len
-        mask_key = config.mask_key
+        del config, seq_len
 
         if attention_metadata is None:
             raise ValueError(
-                "PTRR load balancing requires context metadata to be a BlockMask "
-                "or Mapping[str, BlockMask], but got None."
+                "PTRR load balancing requires attention metadata, but got None."
             )
-        if isinstance(attention_metadata, Mapping):
-            if mask_key is None:
-                raise ValueError(
-                    "PTRR load balancing received a Mapping[str, BlockMask] but no "
-                    "mask key was specified. Set "
-                    "PTRRFlexAttentionCPLoadBalancer.Config(mask_key=...) "
-                    "to one of: "
-                    f"{sorted(attention_metadata.keys())}"
-                )
-            if mask_key not in attention_metadata:
-                raise ValueError(
-                    f"PTRR mask key '{mask_key}' is not a key in context metadata. "
-                    f"Available keys: {sorted(attention_metadata.keys())}"
-                )
-            block_mask = attention_metadata[mask_key]
-        else:
-            block_mask = attention_metadata
-        if not isinstance(block_mask, BlockMask):
+        if not isinstance(attention_metadata, BlockMask):
             raise ValueError(
-                "PTRR load balancing requires the selected metadata to be a "
-                f"BlockMask, but got {type(block_mask).__name__}."
+                "PTRR load balancing requires BlockMask metadata, but got "
+                f"{type(attention_metadata).__name__}."
             )
-        self.block_mask = block_mask
+        self.block_mask = attention_metadata
         cp_group = spmd_mesh_group(MeshAxisName.CP)
         if cp_group is None:
             raise RuntimeError(
@@ -161,6 +136,36 @@ class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
             self.block_mask, self.cp_size
         )._generate_indices()
         return permutation
+
+
+def supports_cp_inner_attention(
+    load_balancer_config: ContextParallelLoadBalancer.Config,
+    cp_inner_attention: type[CPInnerAttention[Any, Any]],
+) -> bool:
+    """Return whether a load balancer supports a CP inner attention."""
+    from torchtitan.models.common.attention.cp_attention import (
+        KVAllGatherCPFlexInnerAttention,
+        KVAllGatherCPSlidingWindowFlexInnerAttention,
+    )
+
+    supported_cp_inner_attentions: dict[type, tuple[type, ...]] = {
+        HeadTailCPLoadBalancer: (
+            KVAllGatherCPFlexInnerAttention,
+            KVAllGatherCPSlidingWindowFlexInnerAttention,
+        ),
+        PTRRFlexAttentionCPLoadBalancer: (
+            KVAllGatherCPFlexInnerAttention,
+            KVAllGatherCPSlidingWindowFlexInnerAttention,
+        ),
+    }
+    load_balancer_type = load_balancer_config._owner
+    assert load_balancer_type is not None
+    return any(
+        issubclass(cp_inner_attention, supported_cp_inner_attention)
+        for supported_cp_inner_attention in supported_cp_inner_attentions.get(
+            load_balancer_type, ()
+        )
+    )
 
 
 def _cp_shard_dims(input_shardings: dict[str, SpmdType]) -> dict[str, int]:
@@ -197,6 +202,61 @@ def get_cp_input_seq_len(
             f"but got {seq_lens}."
         )
     return next(iter(seq_lens.values()))
+
+
+def get_token_fragments(
+    num_tokens: int,
+    *,
+    cp_size: int,
+    permutation: torch.Tensor | None,
+) -> list[list[tuple[int, int]]]:
+    """Describe each CP rank's global token ranges after input sharding.
+
+    Args:
+        num_tokens: Number of tokens in the global sequence before CP sharding.
+        cp_size: Number of CP ranks sharing the sequence.
+        permutation: Optional global token order applied before splitting the
+            sequence into equal rank-local shards. Its shape must be
+            ``[1, num_tokens]``.
+
+    Returns:
+        One list per CP rank containing maximal half-open global token ranges
+        ``[start, stop)`` in the order they appear in that rank's local shard.
+    """
+    if num_tokens % cp_size:
+        raise ValueError(
+            f"The token count ({num_tokens}) must be divisible by the CP degree "
+            f"({cp_size})."
+        )
+
+    local_num_tokens = num_tokens // cp_size
+    if permutation is None:
+        return [
+            [(rank * local_num_tokens, (rank + 1) * local_num_tokens)]
+            for rank in range(cp_size)
+        ]
+    if permutation.ndim != 2 or permutation.shape != (1, num_tokens):
+        raise ValueError(
+            "CP routing requires a permutation with shape [1, num_tokens], "
+            f"but got {tuple(permutation.shape)}."
+        )
+
+    fragments: list[list[tuple[int, int]]] = []
+    for rank_indices in permutation[0].split(local_num_tokens):
+        token_indices = rank_indices.tolist()
+        rank_fragments: list[tuple[int, int]] = []
+        start = token_indices[0]
+        stop = start + 1
+        for token_idx in token_indices[1:]:
+            if token_idx == stop:
+                stop += 1
+            else:
+                rank_fragments.append((start, stop))
+                start = token_idx
+                stop = token_idx + 1
+        rank_fragments.append((start, stop))
+        fragments.append(rank_fragments)
+    return fragments
 
 
 def _permute_tensor(

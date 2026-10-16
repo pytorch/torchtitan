@@ -37,7 +37,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 )
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
-    compile_time_passes,
     construct_default_graph_passes,
     construct_mandatory_graph_passes,
 )
@@ -60,7 +59,7 @@ def make_fwd_bwd_step(model, loss_fn):
     """Return a function that computes loss and explicit parameter gradients.
 
     Calling convention:
-        ``(inputs, labels, global_valid_tokens, extra_kwargs)``
+        ``(inputs, labels, global_loss_token_counts, extra_kwargs)``
         ``-> (loss, *parameter_gradients)``
 
     ``model`` and ``loss_fn`` are captured in the closure so neither shows up
@@ -68,7 +67,7 @@ def make_fwd_bwd_step(model, loss_fn):
     to thread its parameters/buffers as static graph inputs.
     """
 
-    def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_kwargs):
+    def fwd_bwd_step(inputs, labels, global_loss_token_counts, extra_kwargs):
         pred = model(inputs, **extra_kwargs)
         # The loss function is not a submodule of the model, so
         # annotate_module_fqns won't tag it. Annotate it here so that
@@ -78,7 +77,7 @@ def make_fwd_bwd_step(model, loss_fn):
             loss_fn,
             pred,
             labels,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
         )
         named_params = [
             (name, parameter)
@@ -144,11 +143,11 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
         grad_accumulators: list[Any] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, list[Any]]:
-        global_valid_tokens = loss_kwargs["global_valid_tokens"]
+        global_loss_token_counts = loss_kwargs["global_loss_token_counts"]
         outputs = self._run(
             self._model_input(args),
             target,
-            global_valid_tokens,
+            global_loss_token_counts,
             kwargs,
         )
         if len(outputs) != self.num_param_grads + 1:
@@ -172,17 +171,10 @@ def construct_joint_train_step_passes(
     trainer_config: "GraphTrainer.Config",
     *,
     parallelism_context: ParallelismContext,
-    use_graph_trainer_cuda_graph: bool,
 ) -> list[Callable]:
     """Construct SPMD without gradient accumulation passes from the full
     config."""
     if trainer_config.compile.precompile_artifact_dir:
-        if trainer_config.compile.enable_passes and use_graph_trainer_cuda_graph:
-            return construct_default_graph_passes(
-                traced,
-                trainer_config,
-                parallelism_context=parallelism_context,
-            )
         return []
     if not trainer_config.compile.enable_passes:
         return construct_mandatory_graph_passes()
@@ -192,15 +184,7 @@ def construct_joint_train_step_passes(
         return pipeline_fn(
             traced, trainer_config, parallelism_context=parallelism_context
         )
-
-    if use_graph_trainer_cuda_graph:
-        return construct_default_graph_passes(
-            traced,
-            trainer_config,
-            parallelism_context=parallelism_context,
-        )
-
-    return compile_time_passes(
+    return construct_default_graph_passes(
         traced,
         trainer_config,
         parallelism_context=parallelism_context,
@@ -269,7 +253,6 @@ def _bind_direct_joint_stage_graph(
         traced,
         trainer_config,
         parallelism_context=parallelism_context,
-        use_graph_trainer_cuda_graph=trainer_config.training.disable_cuda_graphs,
     )
     traced.gm = apply_graph_passes(
         traced.gm,
@@ -308,11 +291,11 @@ def _trace_spmd_stage_graph(
         )
 
     # Calling convention:
-    # (model_input, target, global_valid_tokens, model_kwargs)
+    # (model_input, target, global_loss_token_counts, model_kwargs)
     runtime_args: tuple[Any, Any, Any, dict[str, Any]] = (
         args[0],
         target,
-        loss_kwargs["global_valid_tokens"],
+        loss_kwargs["global_loss_token_counts"],
         kwargs,
     )
     traced: TracedResult

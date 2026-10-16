@@ -14,7 +14,7 @@ Activate with::
 
 Scope and limitations
 ---------------------
-This override is specific to TorchTitan's DeepSeek-V3 ``Attention`` module and
+This override is specific to TorchTitan's DeepSeek-V3 ``DeepSeekMLAAttention`` module and
 its packed MLA Q/KV projection layout. It is not a generic RoPE fusion and does
 not apply to non-MLA models such as Qwen3, Qwen3.5, or GPT-OSS.
 
@@ -55,7 +55,7 @@ The implementation differs from Megatron Core in several important ways:
 * Every Triton launch is exposed as a stable ``torch.library`` custom operator,
   so GraphTrainer's fake-tensor ``make_fx`` trace keeps the fused boundaries.
 
-The override keeps the stock Attention parameters and state-dict layout.  It
+The override keeps the stock DeepSeekMLAAttention parameters and state-dict layout.  It
 only replaces the Q/KV layout boundary around ComplexRoPE:
 
 * Q RoPE rotates the positional tail of the Q projection into a new tensor.
@@ -75,12 +75,13 @@ import torch
 import torch_remat as remat
 import triton
 import triton.language as tl
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
-from torchtitan.models.deepseek_v3.model import Attention
+from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
 
 __all__ = [
     "FusedMLAAttention",
@@ -142,6 +143,32 @@ def _deterministic_default(block_h: int, num_warps: int):
     return prune
 
 
+_q_rope_trial_input: dict[str, torch.Tensor] = {}
+
+
+def _save_q_if_in_place(kwargs: dict, reset_only: bool = False) -> None:
+    """Autotune pre-hook: snapshot ``q`` before each trial of an in-place call.
+
+    The in-place caller passes the same tensor as ``q`` and ``q_out``, and the
+    autotuner runs each candidate against the same buffer, so every trial
+    after the first would otherwise rotate already-rotated data and the chosen
+    config would be benchmarked (and the caller's tensor left) wrong. This is
+    ``restore_value=["q"]`` restricted to in-place calls: the functional call
+    leaves ``q`` untouched, and restoring it anyway would bump its version
+    counter on every trial, which activation checkpointing reads as an
+    in-place modification of a saved tensor.
+    """
+    if not reset_only and kwargs["q"].data_ptr() == kwargs["q_out"].data_ptr():
+        _q_rope_trial_input["q"] = kwargs["q"].clone()
+
+
+def _restore_q_if_in_place(kwargs: dict, exception: BaseException | None) -> None:
+    """Autotune post-hook: restore ``q`` saved by ``_save_q_if_in_place``."""
+    saved = _q_rope_trial_input.pop("q", None)
+    if saved is not None:
+        kwargs["q"].copy_(saved)
+
+
 @triton.autotune(
     configs=_AUTOTUNE_CONFIGS,
     key=_AUTOTUNE_KEY,
@@ -150,11 +177,8 @@ def _deterministic_default(block_h: int, num_warps: int):
     # functional forward is nearly flat across tiles (59.6-65.3us) while the
     # in-place backward is not (14.2-20.2us), so the backward decides.
     prune_configs_by={"early_config_prune": _deterministic_default(128, 4)},
-    # The in-place caller passes the same tensor as q and q_out, and the
-    # autotuner runs each candidate against the same buffer. Without this,
-    # every trial after the first would rotate already-rotated data and the
-    # chosen config would be benchmarked (and the caller's tensor left) wrong.
-    restore_value=["q"],
+    pre_hook=_save_q_if_in_place,
+    post_hook=_restore_q_if_in_place,
 )
 @triton.jit
 def _fused_q_rope_kernel(
@@ -803,7 +827,7 @@ class _FusedMLAQ(torch.autograd.Function):
     ) -> torch.Tensor:
         ctx.q_nope_dim = q_nope_dim
         ctx.save_for_backward(rope_cache_real, positions)
-        # Deliberately out of place. Attention.forward hands us a view of the
+        # Deliberately out of place. DeepSeekMLAAttention.forward hands us a view of the
         # query projection, so rotating in place would need ctx.mark_dirty and
         # autograd would then record a CopySlices whose backward materializes
         # the entire projection -- five full-size copies at the 671B shape.
@@ -947,11 +971,11 @@ def fused_mla_kv(
     )
 
 
-class FusedMLAAttention(Attention):
+class FusedMLAAttention(DeepSeekMLAAttention):
     """Stock DeepSeek-V3 attention with fused MLA tensor assembly."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Attention.Config):
+    class Config(DeepSeekMLAAttention.Config):
         pass
 
     def __init__(self, config: Config):
@@ -965,11 +989,11 @@ class FusedMLAAttention(Attention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_metadata: BlockMask | VarlenAttentionMetadata,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not x.is_cuda:
-            return super().forward(x, attention_masks, positions)
+            return super().forward(x, attention_metadata, positions)
 
         x = maybe_gather_tp_input(self, x)
         num_tokens = x.shape[0]
@@ -1038,7 +1062,13 @@ class FusedMLAAttention(Attention):
             self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
-        )(q, k, v, attention_masks=attention_masks, scale=self.softmax_scale)
+        )(
+            q,
+            k,
+            v,
+            attention_metadata=attention_metadata,
+            scale=self.softmax_scale,
+        )
         # The copy below reads the inner_attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
@@ -1046,8 +1076,8 @@ class FusedMLAAttention(Attention):
 
 
 @override(
-    target=Attention.Config,
+    target=DeepSeekMLAAttention.Config,
     description="Fuse DeepSeek-V3 MLA Q/KV RoPE assembly with Triton kernels.",
 )
-def fused_mla(cfg: Attention.Config) -> FusedMLAAttention.Config:
+def fused_mla(cfg: DeepSeekMLAAttention.Config) -> FusedMLAAttention.Config:
     return derive(cfg, FusedMLAAttention.Config)

@@ -60,7 +60,6 @@ subdirectory named after the repo, which is the path in `hf_assets_path`:
 ```bash
 python scripts/download_hf_assets.py \
   --repo_id meta-models/Muse-Glimmer-30B \
-  --local_dir torchtitan/rl/example_checkpoint \
   --all
 ```
 
@@ -70,7 +69,7 @@ Swap `--repo_id` for the model your config selects (e.g. `Qwen/Qwen3-1.7B`).
 
 ```bash
 # example run (Qwen3-1.7B), W&B on
-python torchtitan/rl/train.py \
+python -m torchtitan.rl.train \
   --module torchtitan_recipes.rl.search_r1 \
   --config rl_grpo_qwen3_1_7b_search_r1
 ```
@@ -86,9 +85,9 @@ curve below is a snapshot — the link goes to the exact recipe it was produced 
 **Qwen3-1.7B** — EM ~0.05 → ~0.41
 ([recipe @ `e28796e0`](https://github.com/pytorch/torchtitan/blob/e28796e0df801a5b5b30c34043cdd8bba14a6ea5/torchtitan/experiments/rl/examples/search_r1/config_registry.py#L41)):
 
-![Qwen3-1.7B validation EM](./assets/validation_em_1.7b.png)
+![Qwen3-1.7B validation EM](../../../../assets/images/rl_search_r1_validation_em_1.7b.png)
 
 **Qwen3-8B** — EM ~0.26 → ~0.45
 ([recipe @ `4b183e3a`](https://github.com/pytorch/torchtitan/blob/4b183e3aa26cce5da4689593ffd0cd419a32a32e/torchtitan/experiments/rl/examples/search_r1/config.py#L130)):
 
-![Qwen3-8B validation EM](./assets/validation_em_8b.png)
+![Qwen3-8B validation EM](../../../../assets/images/rl_search_r1_validation_em_8b.png)
