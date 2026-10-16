@@ -6,7 +6,7 @@
 
 """MoonViT tower that encodes large images as row bands over sub-CP groups."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 import spmd_types as spmd
@@ -15,10 +15,13 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.models.base.module import Module
+from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import compiled_create_block_mask
+from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.kimi_k2_7.vision_encoder import (
     _tpool_patch_merger,
     MoonViTEncoder,
@@ -88,6 +91,30 @@ class _PackedInputs(NamedTuple):
     num_whole_tokens: int
 
 
+def _replicated_over_cp(layout):
+    if isinstance(layout, spmd.SpmdType):
+        if layout.local_type.get(MeshAxisName.CP) is not spmd.I:
+            return layout
+        local_type = {**layout.local_type, MeshAxisName.CP: spmd.R}
+        return spmd.SpmdType(local_type, layout.partition_spec)
+    if isinstance(layout, dict):
+        return {name: _replicated_over_cp(value) for name, value in layout.items()}
+    if isinstance(layout, tuple):
+        return tuple(_replicated_over_cp(value) for value in layout)
+    return layout
+
+
+def _sharding_replicated_over_cp(config: ShardingConfig) -> ShardingConfig:
+    return replace(
+        config,
+        state_shardings=_replicated_over_cp(config.state_shardings),
+        in_src_shardings=_replicated_over_cp(config.in_src_shardings),
+        in_dst_shardings=_replicated_over_cp(config.in_dst_shardings),
+        out_src_shardings=_replicated_over_cp(config.out_src_shardings),
+        out_dst_shardings=_replicated_over_cp(config.out_dst_shardings),
+    )
+
+
 class MoonViTCPEncoder(MoonViTEncoder):
     """MoonViT tower that splits large images over sub-CP groups under context parallelism."""
 
@@ -100,6 +127,30 @@ class MoonViTCPEncoder(MoonViTEncoder):
         super().__init__(config)
         self.dynamic_cp_min_patches = config.dynamic_cp_min_patches
         self._cp_subgroups: dict[int, dist.ProcessGroup] = {}
+
+    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
+        if parallelism_context.cp_enabled and self.dynamic_cp_min_patches is not None:
+            # Each CP rank encodes different patches, so tower gradients are partial and FSDP sums them over CP.
+            for module in self.modules():
+                if isinstance(module, Module) and module._sharding_config is not None:
+                    module._sharding_config = _sharding_replicated_over_cp(
+                        module._sharding_config
+                    )
+            pixels = multimodal_input_sharding()["pixel_values"]
+            config = self._sharding_config
+            assert config is not None
+            self._sharding_config = replace(
+                config,
+                in_src_shardings={
+                    **(config.in_src_shardings or {}),
+                    "pixel_values": pixels,
+                },
+                in_dst_shardings={
+                    **(config.in_dst_shardings or {}),
+                    "pixel_values": _replicated_over_cp(pixels),
+                },
+            )
+        super()._parallelize(parallelism_context)
 
     def set_cp_subgroups(self, subgroups: dict[int, dist.ProcessGroup]) -> None:
         """The sub-CP groups an image may be split over, from ``build_cp_subgroups``."""

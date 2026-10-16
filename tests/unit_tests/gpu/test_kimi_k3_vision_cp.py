@@ -19,9 +19,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.multimodal import build_vision_bank_indices
 from torchtitan.models.kimi_k3 import build_model_config
 from torchtitan.models.kimi_k3.vision_cp import build_cp_subgroups
 from torchtitan.models.kimi_k3.vision_cp.plan import plan_dynamic_cp
@@ -178,6 +179,110 @@ class TestKimiK3VisionDynamicCP(DTensorTestBase):
         with torch.no_grad():
             ref = reference(pixels, grid_thw=grid_thw)
         torch.testing.assert_close(out.detach(), ref, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.multi_gpu
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+class TestKimiK3VisionDynamicCPGradients(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @property
+    def device_type(self) -> str:
+        return "cuda"
+
+    def _tower_grads(
+        self,
+        parallelism_context: ParallelismContext,
+        dynamic_cp_min_patches: int | None,
+    ) -> dict[str, torch.Tensor]:
+        parallelism = ParallelismConfig(context_parallel_degree=self.world_size)
+        config = build_model_config(
+            "debugmodel", parallelism=parallelism, attn_backend="flex"
+        )
+        config = replace(
+            config,
+            vision_encoder=replace(
+                config.vision_encoder, dynamic_cp_min_patches=dynamic_cp_min_patches
+            ),
+        )
+        torch.manual_seed(0)
+        with torch.device(self.device_type):
+            model = config.build()
+            model.init_states()
+        model.parallelize(
+            parallelism_context=parallelism_context,
+            training=TrainingConfig(
+                mixed_precision_param="float32", mixed_precision_reduce="float32"
+            ),
+            parallelism=parallelism,
+            local_compile_regions=[],
+            activation_remat=None,
+            dump_folder="",
+        )
+        tower = model.vision_encoder
+        assert tower is not None
+        grids = [[1, 16, 16], [1, 12, 20]]
+        kh, kw = tower.merge_kernel_size
+        image_id = 7
+        tokens = torch.cat(
+            [
+                torch.tensor([3, 4]),
+                torch.full(((16 // kh) * (16 // kw),), image_id),
+                torch.tensor([5]),
+                torch.full(((12 // kh) * (20 // kw),), image_id),
+                torch.tensor([6]),
+            ]
+        ).to(self.device_type)
+        bank_indices = build_vision_bank_indices(tokens, placeholder_id=image_id)
+        generator = torch.Generator(device=self.device_type).manual_seed(1)
+        pixels = torch.randn(
+            sum(t * h * w for t, h, w in grids),
+            tower.patch_embed.in_features,
+            device=self.device_type,
+            generator=generator,
+        )
+        upstream = torch.randn(
+            tokens.numel(), config.dim, device=self.device_type, generator=generator
+        )
+        local = tokens.numel() // self.world_size
+        rows = slice(self.rank * local, (self.rank + 1) * local)
+        with parallelism_context.activate_spmd():
+            embeds = model._prepare_multimodal_embeds(
+                tokens[rows],
+                pixel_values=pixels,
+                grid_thw=torch.tensor(grids, device=self.device_type),
+                special_tokens={"image_id": image_id},
+                vision_bank_indices_T=bank_indices[rows],
+            )
+        (embeds * upstream[rows]).sum().backward()
+        return {
+            name: param.grad.full_tensor()
+            for name, param in tower.named_parameters()
+            if param.grad is not None
+        }
+
+    @with_comms
+    def test_split_tower_gradients_match_the_cp_invariant_tower(self) -> None:
+        _compile_flex_without_autotune()
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=self.world_size,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+        parallelism_context.build_mesh()
+        reference = self._tower_grads(parallelism_context, None)
+        split = self._tower_grads(parallelism_context, _MIN_PATCHES)
+        self.assertEqual(split.keys(), reference.keys())
+        for name, ref_grad in reference.items():
+            rel = (split[name] - ref_grad).norm() / ref_grad.norm().clamp_min(1e-30)
+            self.assertLess(rel.item(), 1e-5, name)
 
 
 if __name__ == "__main__":
