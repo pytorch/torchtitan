@@ -72,18 +72,18 @@ def test_rl_recipes_get_model_defaults(module_name: str) -> None:
             assert is_fp32_head == (name not in _BF16_HEAD_RECIPES), name
             moe_configs = [moe for _, moe, _, _ in model.traverse(MoE.Config)]
             assert all(moe.freeze_expert_bias for moe in moe_configs), name
-            assert all(moe.router.freeze_gate for moe in moe_configs), name
+            assert not any(moe.router.freeze_gate for moe in moe_configs), name
             assert all(moe.router.aux_loss is None for moe in moe_configs), name
 
 
-def test_build_rl_model_configs_freeze_moe_routing_false_trains_moe_router() -> None:
+def test_build_rl_model_configs_freeze_moe_routing_none_trains_moe_router() -> None:
     # DeepSeek-V3 builds a load-balancing aux loss on every MoE router.
     for model in build_rl_model_configs(
         build_deepseek_v3_model_config,
         "debugmodel",
         trainer_parallelism=ParallelismConfig(),
         generator_parallelism=InferenceParallelismConfig(),
-        freeze_moe_routing=False,
+        freeze_moe_routing=None,
     ):
         moe_configs = [moe for _, moe, _, _ in model.traverse(MoE.Config)]
         assert moe_configs
