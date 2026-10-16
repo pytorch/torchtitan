@@ -31,6 +31,7 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_unshard_outputs_by_param,
     is_all_gather_into_tensor,
     is_reduce_grad_collective,
+    is_wait_tensor,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     allow_fx_graph_extraction_of_side_effectful_ops,
@@ -383,6 +384,15 @@ class FSDPUnshardExtraction:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class FSDPUnshardWaitSplit:
+    """Launch and wait graphs split from an FSDP unshard action."""
+
+    launch_module: fx.GraphModule
+    wait_module: fx.GraphModule
+    num_launch_outputs: int
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class FSDPReduceGradExtraction:
     """Graph extraction result for FSDP/DDP/HSDP gradient reduction.
 
@@ -478,6 +488,91 @@ def _parameter_inputs_needed_after_boundary(
         for param_input in param_inputs
         if param_input in needed_placeholders and param_input not in boundary_nodes
     ]
+
+
+def split_fsdp_unshard_wait(
+    unshard_module: fx.GraphModule,
+) -> FSDPUnshardWaitSplit:
+    """Split an FSDP unshard into launch and wait graphs.
+
+    Input::
+
+        waits = all_gather(shard)  # launch graph
+        full = wait(waits)
+        param = reconstruct(full)
+
+    Output::
+
+        # unshard
+        waits = all_gather(shard)
+        return waits
+
+        # unshard_wait
+        full = wait(waits)
+        param = reconstruct(full)
+        return param
+    """
+    graph = deepcopy(unshard_module.graph)
+    inputs = graph.find_nodes(op="placeholder")
+    launches = [
+        node
+        for node in graph.nodes
+        if node.op == "call_function"
+        and (
+            is_all_gather_into_tensor(node)
+            or node.target
+            == torch.ops._c10d_functional.all_gather_into_tensor_out.default
+        )
+        and any(is_wait_tensor(user) for user in node.users)
+    ]
+    assert launches, "FSDP unshard action must contain a waited all-gather"
+
+    outputs = graph_outputs(graph)
+    passthrough_inputs = _parameter_inputs_needed_after_boundary(
+        outputs,
+        boundary_outputs=launches,
+        param_inputs=inputs,
+    )
+    boundary_outputs = [*launches, *passthrough_inputs]
+    output_node = graph.find_nodes(op="output")[0]
+    output_descs = pytree.arg_tree_leaves(
+        output_node.meta.get("desc", [None] * len(outputs))
+    )
+
+    with allow_fx_graph_extraction_of_side_effectful_ops(
+        {
+            torch.ops._c10d_functional.wait_tensor,
+            torch.ops._c10d_functional.wait_tensor.default,
+        }
+    ):
+        launch_graph = _extract_graph_with_inputs_outputs(
+            graph,
+            inputs,
+            boundary_outputs,
+            [None] * len(boundary_outputs),
+            "unshard_launch",
+            ignore_must_be_in_fw_bw=True,
+        )
+        wait_graph = _extract_graph_with_inputs_outputs(
+            graph,
+            boundary_outputs,
+            outputs,
+            output_descs,
+            "unshard_wait",
+            ignore_must_be_in_fw_bw=True,
+        )
+
+    launch_graph.lint()
+    wait_graph.lint()
+    launch_module = _make_graph_module(unshard_module, launch_graph)
+    wait_module = _make_graph_module(unshard_module, wait_graph)
+    tlparse_log_graph_pass(launch_module, graph_name="fsdp_unshard_launch")
+    tlparse_log_graph_pass(wait_module, graph_name="fsdp_unshard_wait")
+    return FSDPUnshardWaitSplit(
+        launch_module=launch_module,
+        wait_module=wait_module,
+        num_launch_outputs=len(boundary_outputs),
+    )
 
 
 def extract_fsdp_unshard_graph(
