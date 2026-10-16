@@ -6,7 +6,6 @@
 
 import asyncio
 import threading
-from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -129,12 +128,11 @@ def test_push_model_state_dict_reuses_final_dtype_cpu_staging_buffers() -> None:
     asyncio.run(run())
 
 
-def test_push_model_state_dict_stages_on_dedicated_cuda_stream() -> None:
+def test_push_model_state_dict_stages_on_dedicated_stream() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         trainer._staging_state_dict = {"weight": torch.empty(4)}
         trainer._staging_model_state_dict_stream = MagicMock()
-        trainer._staging_device_module = MagicMock()
         source = torch.arange(4, dtype=torch.float32)
         trainer.engine = SimpleNamespace(
             model_parts=[
@@ -142,8 +140,6 @@ def test_push_model_state_dict_stages_on_dedicated_cuda_stream() -> None:
             ]
         )
         staging_complete = MagicMock()
-        trainer._staging_device_module.stream.return_value = nullcontext()
-        trainer._staging_device_module.Event.return_value = staging_complete
         main_thread_id = threading.get_ident()
         worker_thread_ids = []
 
@@ -155,11 +151,17 @@ def test_push_model_state_dict_stages_on_dedicated_cuda_stream() -> None:
 
         staging_complete.synchronize.side_effect = synchronize
 
-        with patch(
-            "torchtitan.rl.trainer.trainer.ts.put_state_dict",
-            new_callable=AsyncMock,
-            side_effect=put_state_dict,
-        ) as put:
+        with (
+            patch(
+                "torchtitan.rl.trainer.trainer.ts.put_state_dict",
+                new_callable=AsyncMock,
+                side_effect=put_state_dict,
+            ) as put,
+            patch(
+                "torchtitan.rl.trainer.trainer.torch.Event",
+                return_value=staging_complete,
+            ),
+        ):
             await trainer.push_model_state_dict()
 
         staging_complete.record.assert_called_once_with(
@@ -564,11 +566,13 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         trainer._step_compute_start = 0.0
         trainer._step_num_tokens_per_dp_rank = 10
         trainer._staging_model_state_dict_stream = MagicMock()
-        trainer._staging_device_module = MagicMock()
         compute_stream = MagicMock()
-        trainer._staging_device_module.current_stream.return_value = compute_stream
 
         with (
+            patch(
+                "torchtitan.rl.trainer.trainer.torch.accelerator.current_stream",
+                return_value=compute_stream,
+            ),
             patch("torchtitan.rl.trainer.trainer.time.perf_counter", return_value=2.0),
             patch(
                 "torchtitan.rl.trainer.trainer.collect_aux_loss_metrics",

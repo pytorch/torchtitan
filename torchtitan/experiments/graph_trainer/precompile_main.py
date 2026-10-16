@@ -101,8 +101,8 @@ def _common_setup(config):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    device = torch.device("cuda:0")
-    torch.cuda.set_device(device)
+    device = torch.device(utils.device_type, 0)
+    torch.accelerator.set_device_index(device.index)
 
     parallelism_context = ParallelismContext(
         dp_shard=dp_shard,
