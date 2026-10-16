@@ -154,7 +154,7 @@ def validate_context_parallel(
     from torchtitan.distributed.context_parallel import supports_cp_inner_attention
     from torchtitan.models.common.attention.cp_attention import (
         CPInnerAttention,
-        UlyssesInnerAttention,
+        Ulysses,
     )
     from torchtitan.models.common.decoder import Decoder
 
@@ -173,17 +173,16 @@ def validate_context_parallel(
             )
         if cp == 1 and is_cp_attention:
             raise ValueError(
-                f"{fqn}.inner_attention is CPInnerAttention but the "
+                f"{fqn}.inner_attention uses context parallelism but the "
                 "context parallel degree is 1. Select a non-CP kernel."
             )
         if not is_cp_attention:
             continue
 
-        cp_inner_attention = inner_attention._owner
-        assert cp_inner_attention is not None and issubclass(
-            cp_inner_attention, CPInnerAttention
-        )
-        if issubclass(cp_inner_attention, UlyssesInnerAttention):
+        backend = inner_attention._owner
+        assert backend is not None and issubclass(backend, CPInnerAttention)
+        is_ulysses = issubclass(backend, Ulysses)
+        if is_ulysses:
             head_shard_degree = parallelism.tensor_parallel_degree * cp
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
@@ -204,13 +203,13 @@ def validate_context_parallel(
             continue
         if isinstance(model, Decoder.Config) and model.first_full_attention is None:
             continue
-        if issubclass(cp_inner_attention, UlyssesInnerAttention):
+        if is_ulysses:
             raise ValueError(
-                f"{fqn}.inner_attention uses {cp_inner_attention.__qualname__}, so "
+                f"{fqn}.inner_attention uses {backend.__qualname__}, so "
                 "context_parallel_load_balancer must be None."
             )
-        if not supports_cp_inner_attention(load_balancer_config, cp_inner_attention):
+        if not supports_cp_inner_attention(load_balancer_config, backend):
             raise ValueError(
                 f"{type(load_balancer_config).__qualname__} does not support "
-                f"{fqn}.inner_attention using {cp_inner_attention.__qualname__}."
+                f"{fqn}.inner_attention using {backend.__qualname__}."
             )
