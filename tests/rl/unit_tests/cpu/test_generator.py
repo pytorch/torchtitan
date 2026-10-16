@@ -47,8 +47,10 @@ from torchtitan.rl.generator.generator import (
     LoopAction,
     LoopDecision,
     OutstandingGeneration,
+    OVERLAPPED_VALIDATION_FIRST_GROUP_ID,
     RequestDispatcher,
     SamplingConfig,
+    vllm_priority,
     VLLMCudaGraphConfig,
     VLLMGenerator,
 )
@@ -367,19 +369,34 @@ def _engine_request(request_id: str, *, min_policy_version: int, group_id: int =
 
 
 def test_admission_passes_group_id_as_priority_and_arrival_time(monkeypatch):
-    # Priority is the group id (3), not the pinned version (6); every validation id shares -1.
+    # Priority is the group id (3), not the pinned version (6); every validation id of a pass
+    # training waits for shares -1, and a pass beside training gets the lowest priority.
     generator = _generator()
     engine = cast(_FakeEngine, generator._engine)
     requests = [
         _engine_request("train", min_policy_version=6, group_id=3),
         _engine_request("val_1", min_policy_version=6, group_id=-1),
         _engine_request("val_5", min_policy_version=6, group_id=-5),
+        _engine_request("val_beside", min_policy_version=6, group_id=-1_000_002),
     ]
 
     _admit_through_engine_loop(monkeypatch, generator, requests)
 
-    assert [kwargs["priority"] for _, kwargs in engine.add_requests] == [3, -1, -1]
-    assert [kwargs["arrival_time"] for _, kwargs in engine.add_requests] == [1.5] * 3
+    assert [kwargs["priority"] for _, kwargs in engine.add_requests] == [
+        3,
+        -1,
+        -1,
+        2**31 - 1,
+    ]
+    assert [kwargs["arrival_time"] for _, kwargs in engine.add_requests] == [1.5] * 4
+
+
+@pytest.mark.parametrize(
+    "group_id, priority",
+    [(7, 7), (-3, -1), (OVERLAPPED_VALIDATION_FIRST_GROUP_ID, 2**31 - 1)],
+)
+def test_vllm_priority(group_id, priority):
+    assert vllm_priority(group_id) == priority
 
 
 def test_admission_salts_prompt_with_min_policy_version(monkeypatch):

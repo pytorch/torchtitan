@@ -1030,9 +1030,8 @@ class VLLMGenerator(Configurable):
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
-        # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
-        # (-1 for all validation), so older groups have higher priority (see its docstring).
-        # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.
+        # Smaller `priority` runs first and is preempted last; `vllm_priority` maps each request's
+        # group id to one, so older groups have higher priority (see `EngineRequest.group_id`).
         engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.
@@ -1453,7 +1452,7 @@ class VLLMGenerator(Configurable):
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
                                 arrival_time=request.arrival_time,
-                                priority=max(request.group_id, -1),
+                                priority=vllm_priority(request.group_id),
                             )
                             if self._session_kv_holder is not None:
                                 self._session_kv_holder.track(
@@ -1774,6 +1773,23 @@ class VLLMGenerator(Configurable):
 # ===================== helpers =====================
 
 
+# Group ids at or below this belong to validation passes that run beside training; see `vllm_priority`.
+OVERLAPPED_VALIDATION_FIRST_GROUP_ID = -1_000_000
+
+
+def vllm_priority(group_id: int) -> int:
+    """vLLM request priority for a rollout group id: lower is admitted first and preempted last.
+
+    Example:
+        vllm_priority(7)           # 7: training groups, oldest first
+        vllm_priority(-3)          # -1: a pass training waits for, first, in arrival order
+        vllm_priority(-1_000_003)  # 2**31 - 1: a pass beside training, after all training
+    """
+    if group_id <= OVERLAPPED_VALIDATION_FIRST_GROUP_ID:
+        return 2**31 - 1
+    return max(group_id, -1)
+
+
 # ---- Engine-loop queue: rank 0's queued calls; a LoopDecision broadcasts only their EngineRequests. ----
 
 
@@ -1785,9 +1801,11 @@ class EngineRequest:
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
     group_id: int
-    """Rollout group id. Sets the vLLM priority: lower is admitted first and preempted last.
-    Training ids grow as groups start. Validation ids count down (-1, -2, ...) and restart every run,
-    so all validation gets priority -1: it runs in arrival order (not newest first), before training.
+    """Rollout group id. Sets the vLLM priority (`vllm_priority`): lower is admitted first and preempted
+    last. Training ids grow as groups start. Validation ids count down and restart every pass, so a
+    pass runs in arrival order (not newest first):
+    - a pass training waits for: -1, -2, ... -> priority -1, before training;
+    - a pass beside training: -1_000_000, -1_000_001, ... -> priority 2**31 - 1, after training.
 
         waiting, in arrival order:  g7 turn 1   g9 turn 1   g4 turn 2   val -1      val -2
         priority:                   7           9           4           -1          -1

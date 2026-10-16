@@ -915,6 +915,45 @@ def test_validation_logs_the_policies_its_rollouts_sampled() -> None:
     assert reduced["validation/mixed_policy_rollouts/mean"] == 0.5
 
 
+@pytest.mark.parametrize(
+    "overlapped, group_ids", [(False, [-1, -2]), (True, [-1_000_000, -1_000_001])]
+)
+def test_overlapped_validation_uses_lowest_priority_group_ids(
+    overlapped, group_ids
+) -> None:
+    """A pass beside training runs and releases ids at or below -1_000_000, which `vllm_priority`
+    puts after training; a pass training waits for keeps -1, -2, ..."""
+    controller = object.__new__(Controller)
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+    controller._rollouter = SimpleNamespace(
+        run_group_rollouts=AsyncMock(
+            side_effect=lambda *, group_id, **kwargs: RolloutGroup(
+                group_id=group_id, rollouts=[]
+            )
+        ),
+    )
+
+    asyncio.run(
+        controller._collect_validation_rollouts(
+            samples=["prompt", "prompt"],
+            sampling=SamplingConfig(),
+            step=3,
+            overlapped=overlapped,
+        )
+    )
+
+    run_group_ids = [
+        call.kwargs["group_id"]
+        for call in controller._rollouter.run_group_rollouts.call_args_list
+    ]
+    assert run_group_ids == group_ids
+    controller.generator_router.release_groups.call_one.assert_awaited_once_with(
+        group_ids
+    )
+
+
 class _FakeValidation:
     """Stands in for `Controller.validate`: each pass runs until the test ends it."""
 
@@ -1059,8 +1098,9 @@ def test_overlapped_validation_runs_beside_training() -> None:
     assert calls[validation_log + 1][0] == "commit"
 
 
-def test_overlapped_validation_failure_stops_training() -> None:
-    """A pass that raises stops training at the end of the next step."""
+def test_overlapped_validation_failure_does_not_stop_training(caplog) -> None:
+    """A pass that raises logs its error and `validation/pass_errors` at the step it ends; training
+    goes on, and so do the next passes."""
     controller, validation = _controller_for_validation(
         ValidationConfig(freq=1, overlap_training=True)
     )
@@ -1070,14 +1110,45 @@ def test_overlapped_validation_failure_stops_training() -> None:
         trainer = asyncio.create_task(
             controller._trainer_loop(queue, num_training_steps=3)
         )
-        await queue.put(_training_batch(1))
+        await _train(controller, queue, 1)
         await _run_until(lambda: validation.started_steps == [1])
         validation.end(1, error=RuntimeError("generator died"))
-        await queue.put(_training_batch(2))
-        with pytest.raises(RuntimeError, match="generator died"):
-            await asyncio.wait_for(trainer, timeout=5)
+        await _run_until(lambda: controller._validation_task.done())
+        await _train(controller, queue, 2)
+        await queue.put(_training_batch(3))
+        await asyncio.wait_for(trainer, timeout=5)
+        validation.end(2)
+        await controller._validation_task
 
-    asyncio.run(run())
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(run())
+    assert _logged_steps(controller, is_validation=False) == [1, 2, 3]
+    assert validation.started_steps == [1, 2]
+    [pass_1_log] = [
+        call
+        for call in controller.metrics_processor.log.call_args_list
+        if call.kwargs["is_validation"]
+    ]
+    assert pass_1_log.kwargs["step"] == 2
+    assert [
+        (metric.key, metric.value.value) for metric in pass_1_log.kwargs["metrics"]
+    ] == [("validation/pass_errors", 1.0)]
+    assert "validation_step_1 failed; training continues" in caplog.text
+
+
+def test_blocking_validation_failure_stops_training() -> None:
+    """Unlike a pass beside training, a pass that training waits for fails the run."""
+    controller, validation = _controller_for_validation(ValidationConfig(freq=1))
+    validation.end(1, error=RuntimeError("generator died"))
+
+    async def run() -> None:
+        queue: asyncio.Queue = asyncio.Queue()
+        for step in (1, 2):
+            queue.put_nowait(_training_batch(step))
+        await controller._trainer_loop(queue, num_training_steps=2)
+
+    with pytest.raises(RuntimeError, match="generator died"):
+        asyncio.run(run())
 
 
 def test_overlapped_validation_starts_no_pass_at_the_last_step() -> None:
@@ -1133,14 +1204,9 @@ def test_validation_pauses_training_by_default() -> None:
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(
-    "pass_3_ends_in_training, logged_steps", [(True, [2, 3, 4]), (False, [2, 4, 5])]
-)
-def test_overlapped_validation_before_and_after_training(
-    pass_3_ends_in_training, logged_steps
-) -> None:
-    """The pre-training pass runs while training starts. A pass still running when training
-    ends is awaited and logged at the last step; the final pass then logs one step later."""
+def _controller_for_run() -> tuple[Controller, _FakeValidation]:
+    """A `Controller` whose `run()` runs 4 steps with overlapped validation on fakes. Every loop but
+    `_trainer_loop` blocks; each test sets `_trainer_loop`."""
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
         async_loop=AsyncLoopConfig(
@@ -1166,6 +1232,21 @@ def test_overlapped_validation_before_and_after_training(
     controller._validation_task = None
     validation = _FakeValidation()
     controller.validate = validation
+    controller._data_input_loop = _block_forever
+    controller._rollout_loop = _block_forever
+    controller._batcher_loop = _block_forever
+    return controller, validation
+
+
+@pytest.mark.parametrize(
+    "pass_3_ends_in_training, logged_steps", [(True, [2, 3, 4]), (False, [2, 4, 5])]
+)
+def test_overlapped_validation_before_and_after_training(
+    pass_3_ends_in_training, logged_steps
+) -> None:
+    """The pre-training pass runs while training starts. A pass still running when training
+    ends is awaited and logged at the last step; the final pass then logs one step later."""
+    controller, validation = _controller_for_run()
 
     # Stands in for `_trainer_loop`'s overlap branch, which the tests above cover.
     async def trainer_loop(queue, *, num_training_steps: int) -> None:
@@ -1185,9 +1266,6 @@ def test_overlapped_validation_before_and_after_training(
             # Training ends with the step-3 pass still running.
             asyncio.get_running_loop().call_later(0.05, validation.end, 3)
 
-    controller._data_input_loop = _block_forever
-    controller._rollout_loop = _block_forever
-    controller._batcher_loop = _block_forever
     controller._trainer_loop = trainer_loop
     validation.end(4)
     validation.end(5)
@@ -1209,6 +1287,59 @@ def test_overlapped_validation_before_and_after_training(
     controller._log_reward_delta.assert_called_once_with(
         {"validation_reward/mean": 0.0},
         {"validation_reward/mean": float(final_pass_step)},
+    )
+
+
+def test_overlapped_validation_that_fails_after_training_does_not_fail_the_run() -> None:
+    """A pass still running when training ends, that then fails, logs `validation/pass_errors` at
+    the last step; the final pass still runs, one step later."""
+    controller, validation = _controller_for_run()
+
+    async def trainer_loop(queue, *, num_training_steps: int) -> None:
+        validation.end(0)
+        await _run_until(lambda: controller._validation_task.done())
+        controller._log_finished_validation(step=2)
+        controller._start_validation(step=3)
+        await _run_until(lambda: validation.started_steps == [0, 3])
+        asyncio.get_running_loop().call_later(
+            0.05, validation.end, 3, RuntimeError("sandbox died")
+        )
+
+    controller._trainer_loop = trainer_loop
+    validation.end(5)
+
+    asyncio.run(asyncio.wait_for(controller.run(), timeout=5))
+
+    validation_logs = [
+        (call.kwargs["step"], [metric.key for metric in call.kwargs["metrics"]])
+        for call in controller.metrics_processor.log.call_args_list
+    ]
+    assert validation_logs == [
+        (2, ["validation_reward"]),
+        (4, ["validation/pass_errors"]),
+        (5, ["validation_reward"]),
+    ]
+    controller._log_reward_delta.assert_called_once_with(
+        {"validation_reward/mean": 0.0}, {"validation_reward/mean": 5.0}
+    )
+
+
+def test_overlapped_validation_whose_pre_training_pass_fails_reports_no_pre_score() -> None:
+    controller, validation = _controller_for_run()
+
+    async def trainer_loop(queue, *, num_training_steps: int) -> None:
+        validation.end(0, error=RuntimeError("sandbox died"))
+        await _run_until(lambda: controller._validation_task.done())
+        controller._log_finished_validation(step=1)
+
+    controller._trainer_loop = trainer_loop
+    validation.end(4)
+
+    asyncio.run(asyncio.wait_for(controller.run(), timeout=5))
+
+    assert _logged_steps(controller, is_validation=True) == [1, 4]
+    controller._log_reward_delta.assert_called_once_with(
+        {}, {"validation_reward/mean": 4.0}
     )
 
 
@@ -1257,7 +1388,7 @@ def test_validation_wall_time_says_whether_the_pass_blocked(overlapped, key) -> 
     controller._sampling = SamplingConfig()
     controller.rollout_recorder = Mock()
 
-    async def collect(*, samples, sampling, step):
+    async def collect(*, samples, sampling, step, overlapped):
         return [], []
 
     controller._collect_validation_rollouts = collect
