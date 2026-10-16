@@ -416,6 +416,10 @@ class KimiK3Model(MultimodalModel):
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
 
+    def _encoder_is_cp_invariant(self, encoder: torch.nn.Module) -> bool:
+        vision = cast(KimiK3Model.Config, self.config).vision_encoder
+        return vision is None or vision.dynamic_cp_min_patches is None
+
     def parallelize(
         self,
         *,
