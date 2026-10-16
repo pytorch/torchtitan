@@ -124,33 +124,8 @@ class MuseSparkAttention(GQAttention):
         if self.output_gate is not None:
             output_gate_TO = self.output_gate(x_TD)
 
-        if self.q_norm is not None or self.k_norm is not None:
-            assert self.q_norm is not None and self.k_norm is not None
-            remat.recompute_needs_tensor(query_TNH, key_TKH)
-            query_TNH, key_TKH = self._norm_query_and_key(query_TNH, key_TKH)
-
-        floor_scale = self.position_temperature_floor_scale
-        query_scale = self.position_temperature_query_scale
-        if floor_scale is not None and query_scale is not None:
-            if positions is None:
-                raise ValueError(
-                    "positions are required for attention temperature tuning"
-                )
-            temperature_T = (
-                torch.log((positions.float() + 1.0) / floor_scale) * query_scale + 1.0
-            ).clamp_min(1.0)
-            remat.recompute_needs_tensor(query_TNH)
-            query_TNH = (query_TNH * temperature_T.reshape(-1, 1, 1)).to(
-                query_TNH.dtype
-            )
-
-        if self.rope is not None:
-            remat.recompute_needs_tensor(query_TNH, key_TKH)
-            query_TNH, key_TKH = self.rope(
-                query_TNH,
-                key_TKH,
-                positions,
-            )
+        remat.recompute_needs_tensor(query_TNH, key_TKH)
+        query_TNH, key_TKH = self._prepare_query_and_key(query_TNH, key_TKH, positions)
 
         output_TNH = remat.region(
             self.inner_attention,
@@ -171,16 +146,52 @@ class MuseSparkAttention(GQAttention):
         output_TD = self.wo(output_TO)
         return output_TD
 
-    @local_compile("muse_spark_attention_qk_norm", batch_invariant=True)
-    def _norm_query_and_key(
+    # One region for everything between the qkv projection and attention: per-head
+    # norms, query scale, position temperature and RoPE fuse into one kernel per
+    # tensor, with no bf16 round trip between norm and rotation. The cat options
+    # lower RoPE's real/imag stack as per-half copies (see ComplexRoPE.forward).
+    # recompile_limit=16: RoPE and no-RoPE layers share this region, so it needs 8
+    # graphs across training, prefill and decode shapes (default limit 8).
+    @local_compile(
+        "muse_spark_attention_qk",
+        batch_invariant=True,
+        recompile_limit=16,
+        options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
+    )
+    def _prepare_query_and_key(
         self,
         query_TNH: torch.Tensor,
         key_TKH: torch.Tensor,
+        positions: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the per-head normalized query, times ``scale_query_by``, and key."""
-        if self.q_norm is None or self.k_norm is None:
-            raise ValueError("MuseSparkAttention needs both q_norm and k_norm.")
-        return self.q_norm(query_TNH) * self.scale_query_by, self.k_norm(key_TKH)
+        """Return the query and key as attention reads them.
+
+        Applies, each when configured: per-head norms with ``scale_query_by`` on the
+        query, position temperature on the query, and RoPE on both.
+        """
+        if self.q_norm is not None or self.k_norm is not None:
+            if self.q_norm is None or self.k_norm is None:
+                raise ValueError("MuseSparkAttention needs both q_norm and k_norm.")
+            query_TNH = self.q_norm(query_TNH) * self.scale_query_by
+            key_TKH = self.k_norm(key_TKH)
+
+        floor_scale = self.position_temperature_floor_scale
+        query_scale = self.position_temperature_query_scale
+        if floor_scale is not None and query_scale is not None:
+            if positions is None:
+                raise ValueError(
+                    "positions are required for attention temperature tuning"
+                )
+            temperature_T = (
+                torch.log((positions.float() + 1.0) / floor_scale) * query_scale + 1.0
+            ).clamp_min(1.0)
+            query_TNH = (query_TNH * temperature_T.reshape(-1, 1, 1)).to(
+                query_TNH.dtype
+            )
+
+        if self.rope is not None:
+            query_TNH, key_TKH = self.rope(query_TNH, key_TKH, positions)
+        return query_TNH, key_TKH
 
     @local_compile("muse_spark_attention_output", batch_invariant=True)
     def _flatten_attention_output(
@@ -430,7 +441,7 @@ class MuseSparkModel(MultimodalModel):
                 "loss",
                 "fp32_to_bf16_split",
                 "muse_spark_attention_output",
-                "muse_spark_attention_qk_norm",
+                "muse_spark_attention_qk",
                 "muse_spark_input_scaled_rmsnorm",
                 "muse_spark_logit_postprocess",
                 "muse_spark_residual",
