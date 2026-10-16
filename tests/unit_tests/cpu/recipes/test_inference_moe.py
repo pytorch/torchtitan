@@ -23,7 +23,7 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan_recipes.overrides.fused_swiglu import FusedSwiGLU
 
 _DIM = 16

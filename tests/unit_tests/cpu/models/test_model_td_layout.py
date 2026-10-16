@@ -10,10 +10,6 @@ import torch
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.experiments.graph_trainer.common_utils import (
-    GraphTrainerScaledDotProductInnerAttention,
-)
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
     MODEL_FLAVORS as DEEPSEEK_V3_MODEL_FLAVORS,
@@ -40,26 +36,6 @@ class _AttentionOutput(nn.Module):
 
 
 class TestModelTDLayout(unittest.TestCase):
-    def test_sdpa_preserves_blhv_shape(self):
-        attention = ScaledDotProductInnerAttention.Config().build()
-        q_BLHK = torch.randn(2, 8, 4, 16)
-        k_BLHK = torch.randn(2, 8, 2, 16)
-        v_BLHV = torch.randn(2, 8, 2, 16)
-
-        out_BLHV = attention(q_BLHK, k_BLHK, v_BLHV, enable_gqa=True)
-
-        self.assertEqual(out_BLHV.shape, q_BLHK.shape)
-
-    def test_graph_trainer_sdpa_preserves_thv_shape(self):
-        attention = GraphTrainerScaledDotProductInnerAttention.Config().build()
-        q_THK = torch.randn(8, 4, 16)
-        k_THK = torch.randn(8, 2, 16)
-        v_THV = torch.randn(8, 2, 16)
-
-        out_THV = attention(q_THK, k_THK, v_THV, enable_gqa=True)
-
-        self.assertEqual(out_THV.shape, q_THK.shape)
-
     def test_gpt_oss_attention_preserves_td_shape(self):
         _, max_context_length = GPT_OSS_MODEL_FLAVORS["debugmodel"]
         config = build_gpt_oss_model_config(
@@ -114,9 +90,8 @@ class TestModelTDLayout(unittest.TestCase):
         config = build_config(
             "varlen", seq_len=max_context_length, parallelism=ParallelismConfig()
         )
-        attention_config = next(
-            layer.attention for layer in config.layers if layer.attention is not None
-        )
+        attention_config = config.first_full_attention
+        assert attention_config is not None
         attention = attention_config.build()
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)

@@ -298,10 +298,11 @@ NGPU=4 MODULE=my_graph_configs CONFIG=llama3_8b_async_tp4 ./run_train.sh
 ### CUDA Graph Kernel Annotations
 
 The `insert_kernel_annotations_pass` labels CUDA graph kernels with their
-originating `nn.Module` path in profiler traces. It runs automatically in the
-`aot_fx_trace` path (bundled with the cudagraph pass). The profiler passes the
-captured annotations to ``export_chrome_trace``, which bakes them into the trace
-as it writes, so they are merged automatically and no post-processing is needed.
+originating `nn.Module` path in profiler traces. Use
+`construct_cuda_graph_passes` to construct the correctly ordered opt-in pass
+list. The profiler passes the captured annotations to ``export_chrome_trace``,
+which bakes them into the trace as it writes, so they are merged automatically
+and no post-processing is needed.
 
 Requirements: `cuda-python` package and CUDA toolkit/driver >= 13.1
 (or `cuda-compat >= 13.1` on `LD_LIBRARY_PATH`). The pass is a no-op when

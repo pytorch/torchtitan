@@ -185,7 +185,7 @@ def _build_qwen3_moe_layers(
                     qk_norm=_qwen3_norm(head_dim),
                     enable_sp=enable_sp,
                 ),
-                moe=make_moe_config(
+                feed_forward=make_moe_config(
                     num_experts=num_experts,
                     router=make_router_config(
                         dim=dim,
@@ -746,7 +746,7 @@ def build_model_config(
     *,
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Qwen3Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]

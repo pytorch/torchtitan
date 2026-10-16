@@ -19,7 +19,7 @@ Run: torchrun --nproc_per_node=4 -m torchtitan.rl.generate \
 from __future__ import annotations
 
 # Apply process env defaults before anything imports torch.
-from torchtitan.rl._runtime import apply_env_defaults
+from torchtitan.rl._env import apply_env_defaults
 
 apply_env_defaults()
 
@@ -42,8 +42,8 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import apply_overrides, ConfigLoader
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
-from torchtitan.rl.generator import add_extra_vllm_engine_args
-from torchtitan.rl.model.vllm_registry import (
+from torchtitan.rl.generator.generator import add_extra_vllm_engine_args
+from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
@@ -123,9 +123,10 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    attention_backend = model_config.first_base_attention_backend
-    if attention_backend is None:
-        raise ValueError("No full-attention layer found in the model spec.")
+    attention = model_config.first_full_attention
+    if attention is None:
+        raise ValueError("No full attention layer found in the model spec.")
+    attention_backend = attention.inner_attention
     if not isinstance(
         attention_backend, (VarlenInnerAttention.Config, FlexInnerAttention.Config)
     ):

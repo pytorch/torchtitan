@@ -20,7 +20,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LoRATransform
 from torchtitan.distributed import DistributedTopology, ParallelismContext
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
@@ -29,7 +29,7 @@ def test_decoder_accepts_wrapped_transformer_blocks() -> None:
     class WrappedBlock(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.attention = SimpleNamespace(attention_metadata_key="wrapped")
+            self.attention = SimpleNamespace(inner_attention=torch.nn.Identity())
             self.attention_metadata: object | None = None
 
         def forward(
@@ -58,7 +58,7 @@ def test_decoder_accepts_wrapped_transformer_blocks() -> None:
     output = model(
         tokens,
         positions=torch.arange(2),
-        attention_metadata=cast(Any, {"wrapped": "metadata"}),
+        attention_metadata=cast(Any, {torch.nn.Identity: "metadata"}),
     )
 
     torch.testing.assert_close(output, tokens + 1)
@@ -69,13 +69,16 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
     # Restore shared registration and distributed state after this test.
     monkeypatch.setattr(import_module("torchtitan.config.override"), "_REGISTRY", {})
 
-    @override(target=FeedForward.Config)
+    @override(target=DenseFeedForward.Config)
     def ffn_lora(config):
         return LoRATransform(rank=1, alpha=1.0).transform(config)
 
     config = ft.FaultTolerantTrainer.Config(
         model=build_model_config(
-            "debugmodel", seq_len=2048, parallelism=ParallelismConfig()
+            "debugmodel",
+            seq_len=2048,
+            attn_backend="flex",
+            parallelism=ParallelismConfig(),
         ),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
@@ -139,7 +142,10 @@ def test_ft_trainer_composes_specialized_training_engine() -> None:
 def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None:
     config = ft.FaultTolerantTrainer.Config(
         model=build_model_config(
-            "debugmodel", seq_len=2048, parallelism=ParallelismConfig()
+            "debugmodel",
+            seq_len=2048,
+            attn_backend="flex",
+            parallelism=ParallelismConfig(),
         ),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),

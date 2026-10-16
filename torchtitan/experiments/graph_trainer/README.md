@@ -105,9 +105,8 @@ live `param.grad`. Internal values remain flat because they never leave GraphPP
 graph execution: saved-for-backward tensors, unsharded FSDP params, raw grad
 leaves, reduce-grad inputs, and multiplexed intermediate outputs.
 
-Current limitations: GraphPP does not load precompile artifacts yet, CUDA graph
-capture should target the `GraphPipelineRuntime` steady-state path in a future change,
-and EP-overlap annotations will be composed with GraphPP in a later PR.
+Current limitations: GraphPP does not load precompile artifacts yet, and
+EP-overlap annotations will be composed with GraphPP in a later PR.
 
 ### Compiler Optimizations
 
@@ -118,13 +117,20 @@ config.compile.inductor_compilation = "full"
 config.compile.numerics_changing_optim = True
 config.compile.memory_policy = "full"
 config.compile.full_recompute_save_ops = (
-    "layers.*.moe.router.gate::aten.mm.dtype | "
+    "layers.*.feed_forward.router.gate::aten.mm.dtype | "
     "layers.*.attention.wkv_a::aten.mm.default"
 )
-config.compile.disable_passes = ["custom_codegen_pass", "cuda_graph_pass"]
+config.compile.disable_passes = ["custom_codegen_pass"]
 # To disable every optional pass:
 config.compile.enable_passes = False
 ```
+
+The graph-level CUDA graph and kernel annotation passes remain available in
+`cuda_graph.py`, but are not part of the built-in pass pipeline. Custom callers
+can apply them explicitly with `construct_cuda_graph_passes`. By default, CUDA
+graph capture is owned by the client around the complete forward/backward
+execution. Users can disable CUDA graphs with
+`config.training.disable_cuda_graphs = True`.
 
 ### Expert Parallel Overlap
 
@@ -144,9 +150,9 @@ Supported chunking selections are:
 
 - `chunk_dim="batch", module_fqn="layers.*"`
   for transformer-block chunking.
-- `chunk_dim="batch", module_fqn="layers.*.moe"`
+- `chunk_dim="batch", module_fqn="layers.*.feed_forward"`
   for MoE-only batch chunking.
-- `chunk_dim="seq", module_fqn="layers.*.moe"`
+- `chunk_dim="seq", module_fqn="layers.*.feed_forward"`
   for MoE-only sequence chunking.
 
 Selected module forwards are wrapped with eager chunking before tracing; the
@@ -156,7 +162,7 @@ EP-overlap scheduler.
 Current limitations:
 
 - EP overlap is only meaningful when `expert_parallel_degree > 1`.
-- Sequence chunking is restricted to `layers.*.moe`; chunking attention over
+- Sequence chunking is restricted to `layers.*.feed_forward`; chunking attention over
   sequence is not supported.
 - EP overlap is validated against the tested DP/EP configurations in the
   graph-trainer numerics and integration suites. Composability with additional

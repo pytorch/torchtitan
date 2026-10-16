@@ -13,12 +13,12 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
-    BaseAttention,
+    Attention,
     FlexAttentionMetadata,
-    FlexInnerAttention,
+    InnerAttention,
     VarlenAttentionMetadata,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.flops import (
@@ -26,6 +26,7 @@ from torchtitan.models.common.flops import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
@@ -33,7 +34,7 @@ from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 
-class Attention(BaseAttention):
+class DeepSeekMLAAttention(Attention):
     """
     Multi-head latent attention (MLA) module.
 
@@ -41,8 +42,7 @@ class Attention(BaseAttention):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
-        n_heads: int
+    class Config(Attention.Config):
         dim: int
         wq: Linear.Config | None = None
         wq_a: Linear.Config | None = None
@@ -58,8 +58,8 @@ class Attention(BaseAttention):
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
         rope: RoPE.Config
-        inner_attention: Module.Config = field(
-            default_factory=FlexInnerAttention.Config
+        inner_attention: InnerAttention.Config = field(
+            default_factory=VarlenInnerAttention.Config
         )
         mscale: float = 1.0
 
@@ -190,13 +190,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
 
-        self.moe_enabled = config.moe is not None
-        if self.moe_enabled:
-            assert config.moe is not None
-            self.moe = config.moe.build()
-        else:
-            assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build()
+        self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -211,8 +205,8 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
-        if self.moe_enabled:
-            ffn_out = self.moe(
+        if isinstance(self.feed_forward, MoE):
+            ffn_out = self.feed_forward(
                 self.ffn_norm(x),
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
