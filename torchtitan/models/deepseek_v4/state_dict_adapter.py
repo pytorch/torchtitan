@@ -25,12 +25,23 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         model_config: DeepSeekV4Model.Config,
         hf_assets_path: str | None,
     ):
-        # V4 configs reuse the V3 decoder layout, so the V3 adapter's init
-        # accepts them; the narrower subclass type trips pyrefly here.
+        # Map keys come from the V4 override of _build_from_hf_map, so the
+        # V3 MLA isinstance check does not run. The V3 parameter type is
+        # still narrower than this config.
         # pyrefly: ignore [bad-argument-type]
         super().__init__(model_config, hf_assets_path)
 
-        self.from_hf_map = {
+        self.num_main_layers = len(model_config.layers)
+        self.compress_ratios = model_config.compress_ratios
+
+    # Parameter type is the V4 config, which is not a DeepSeekV3Model.Config.
+    # pyrefly: ignore [bad-override]
+    def _build_from_hf_map(
+        self,
+        model_config: DeepSeekV4Model.Config,
+    ) -> dict[str, str]:
+        """Return the DeepSeek V4 Hugging Face name to torchtitan name map."""
+        from_hf_map = {
             "embed.weight": "tok_embeddings.weight",
             # Attention
             "layers.{}.attn.attn_sink": "layers.{}.attention.attn_sink.weight",
@@ -76,13 +87,11 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             "head.weight": "lm_head.weight",
         }
 
-        self.num_main_layers = len(model_config.layers)
-        self.compress_ratios = model_config.compress_ratios
         for layer_id in range(model_config.n_layers):
-            cr = self.compress_ratios[layer_id]
+            cr = model_config.compress_ratios[layer_id]
             if cr != 1:
                 comp = "compressor" if cr == 4 else "compressor_128"
-                self.from_hf_map.update(
+                from_hf_map.update(
                     {
                         f"layers.{layer_id}.attn.compressor.ape": (
                             f"layers.{layer_id}.attention.{comp}.ape"
@@ -99,7 +108,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                     }
                 )
             if cr == 4:
-                self.from_hf_map.update(
+                from_hf_map.update(
                     {
                         f"layers.{layer_id}.attn.indexer.compressor.ape": (
                             f"layers.{layer_id}.attention.indexer.compressor.ape"
@@ -122,11 +131,12 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                     }
                 )
             if layer_id < model_config.layers[0].feed_forward.router.n_hash_layers:
-                self.from_hf_map.update(
+                from_hf_map.update(
                     {
                         f"layers.{layer_id}.ffn.gate.tid2eid": f"layers.{layer_id}.feed_forward.router.tid2eid",
                     }
                 )
+        return from_hf_map
 
     @staticmethod
     def _abstract_key(key: str, count: int) -> str:
