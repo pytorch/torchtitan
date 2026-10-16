@@ -8,7 +8,7 @@
 mask on every load; for this many-broadcast-load kernel that alone costs ~2x on SM103, even
 though xnumel = 7168 * T keeps its divisibility hint. A plain SwiGLU is unaffected (control).
 
-Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 12):
+Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 13):
 residual sum T static ~314 us vs T dynamic ~663 us; swiglu control ~134 us either way.
 """
 import torch

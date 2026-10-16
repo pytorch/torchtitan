@@ -12,7 +12,7 @@ dynamic N.
 
 Op: stack [T, N, D] + partial [T, D], softmax weights recomputed per element, forward only.
 
-Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 6):
+Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 7):
 N=7 static ~314 us, N=8 static ~1574 us, N=8 threshold 9 ~353 us, N=7 dynamic ~1245 us (also with threshold 64).
 """
 import torch

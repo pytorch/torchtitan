@@ -13,7 +13,7 @@ graph per F.
 SwiGLU on gate/up = unbind of [16384, 2, 6144] bf16, fwd+bwd; static = compiled only at F=6144,
 dynamic = compiled at F=3072 first, then called at F=6144 (automatic dynamic).
 
-Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 5):
+Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 6):
 F static ~361 us, F dynamic (3072 then 6144) ~601 us.
 """
 import torch

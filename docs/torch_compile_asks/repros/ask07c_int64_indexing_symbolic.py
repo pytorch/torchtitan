@@ -10,7 +10,7 @@ assume_32bit_indexing=True speeds up the residual's backward reduction.
 
 Kimi K3 residual weighted sum, stack [16384, N=7 (dynamic), 7168] + partial, fwd+bwd.
 
-Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 6(c)):
+Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 7(c)):
 default ~1918 us, torch._check ~1914 us, assume_32bit_indexing ~1816 us.
 """
 import torch

@@ -14,7 +14,7 @@ so the right choice is per region (we scope `max_pointwise_cat_inputs=0` to one 
 (b) per-head RMS norm + partial RoPE + cat on q (DeepSeek-V4 q_norm_rope): the opposite; with the
     default lowering the cat is fused into the norm's persistent reduction, ConcatKernel splits them.
 
-Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 7):
+Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 8):
 (a) default ~2155 us vs ConcatKernel ~781 us; (b) default ~1026 us vs ConcatKernel ~1502 us.
 """
 import torch

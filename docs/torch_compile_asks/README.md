@@ -6,8 +6,8 @@
 
 - TorchTitan compiles small functions ("regions") with `fullgraph=True`, `recompile_limit=8` and no eager fallback; the rest runs eager.
 - Rewrites around those regions take a 2-layer 16k fwd+bwd step from 304.6 to 192.2 ms on Kimi K3 (-37%) and 240.1 to 75.1 ms on DeepSeek-V4 (-69%), beating per-layer `torch.compile`. Several were lowering choices Inductor could make itself.
-- 13 asks, each with numbers at real shapes, our workaround, and (for 12) a pure-torch repro in `repros/`:
-  - hard failures: graph budgets ending in `FailOnRecompileLimitHit`; an FX graph cache serving code from a stale custom-op fake;
+- 14 asks, each with numbers at real shapes, our workaround, and (for 13) a pure-torch repro in `repros/`:
+  - hard failures: graph budgets ending in `FailOnRecompileLimitHit`; an FX graph cache serving code from a stale custom-op fake; FlexAttention's decode kernel failing to compile under GQA;
   - biggest perf gaps: opaque deterministic scatter-add (~2.0% of a Kimi K3 microbatch), symbolic strides on packed views (~2%), small reductions not unrolled (~1.6%).
 - One GB300, torch 2.15.0.dev20260926; every repro re-run on 2026-10-09 (within ~1%).
 - MoE decode in the RL generator (vs vLLM's FlashInfer MoE): 10 more asks with repros in [`moe_decode/`](moe_decode/README.md).
@@ -28,18 +28,19 @@ A. hard failures and stale results
 1   hard failure        graph budgets under fullgraph (grad mode, guards, call sites) FailOnRecompileLimitHit
 2   silently stale      FX graph cache ignores a custom op's fake metadata            old code after a fake fix
 3   crash               AOTAutograd AttributeError on a parameter view's ._base       BackendCompilerFailed
+4   compile error       flex decode kernel's default BLOCK_M under GQA                Q 17-127 fails; pinned BLOCK_M wrong output
 B. performance
-4   codegen             traceable fixed-order segmented sum (deterministic scatter)   3.1 ms/MoE layer; ~2.0% Kimi K3
-5   codegen             static strides/offsets on views of a packed projection        2.6-3.3 ms/MoE layer; ~1.7-2.1% Kimi K3
-6   lowering            unroll small reductions (+ GEMV decomposition, int32 index)   up to 1.2 ms/call; up to ~1.6% Kimi K3
-7   lowering            cost model for cat/stack lowering                             1.37 ms/layer; ~1.1% DSv4
-8   codegen             complex-multiply codegen                                      0.25-0.42 ms/call; ~0.2% DSv4, ~0.5% DSv3
-9   scheduling          fuse tiny-block reductions across steps (Sinkhorn)            0.2 ms/call; ~0.4% DSv4
-10  region semantics    views and in-place gradients from regions                     0.38 ms/layer; ~0.4% DSv3
-11  lowering            don't inline a producer into a high-broadcast consumer        0.95 ms/call; no_grad forward only
-12  Triton              masked loads halve a many-load kernel on SM103                0.35 ms/call; dynamic T (RL) only
+5   codegen             traceable fixed-order segmented sum (deterministic scatter)   3.1 ms/MoE layer; ~2.0% Kimi K3
+6   codegen             static strides/offsets on views of a packed projection        2.6-3.3 ms/MoE layer; ~1.7-2.1% Kimi K3
+7   lowering            unroll small reductions (+ GEMV decomposition, int32 index)   up to 1.2 ms/call; up to ~1.6% Kimi K3
+8   lowering            cost model for cat/stack lowering                             1.37 ms/layer; ~1.1% DSv4
+9   codegen             complex-multiply codegen                                      0.25-0.42 ms/call; ~0.2% DSv4, ~0.5% DSv3
+10  scheduling          fuse tiny-block reductions across steps (Sinkhorn)            0.2 ms/call; ~0.4% DSv4
+11  region semantics    views and in-place gradients from regions                     0.38 ms/layer; ~0.4% DSv3
+12  lowering            don't inline a producer into a high-broadcast consumer        0.95 ms/call; no_grad forward only
+13  Triton              masked loads halve a many-load kernel on SM103                0.35 ms/call; dynamic T (RL) only
 C. compile time
-13  partitioning        regional_inductor partitioning scales superlinearly           382 s per process start, DSv4 4 layers
+14  partitioning        regional_inductor partitioning scales superlinearly           382 s per process start, DSv4 4 layers
 ```
 
 Repros: `./repros/run_all.sh cpu` and `./repros/run_all.sh gpu`. Raw outputs: `repros/logs/`.
@@ -128,9 +129,37 @@ explain: 3 graphs, 2 breaks; graph 1 = l_w_._base ; param.is_leaf ; return ()
 
 ---
 
+### 4. FlexAttention's decode kernel fails to compile, or computes wrong results, under GQA
+
+**Ask:** derive the decode kernel's default `BLOCK_M` from the GQA-folded rows it actually tiles, and check pinned `BLOCK_M` values against the same rows.
+
+**Impact:** a compile error for every cold, short-query call (Q < 128 tokens) where `Q x (query heads / KV heads) > 128`, and silently wrong output when `BLOCK_M` is pinned. Muse Spark (128 / 16 heads, GQA 8) fails for Q = 17-127.
+
+```text
+128 / 16 heads, head dim 64, causal 128 x 128 BlockMask, cold compile per Q, no_grad
+Q                    1     8     16    17    32    64    127
+default              ok    ok    ok    FAIL  FAIL  FAIL  FAIL     (InductorError: BLOCK_M=512 vs SPARSE_Q_BLOCK_SIZE=128 at Q=64)
+fwd_BLOCK_M=128      ok    2.3   ok    ok    ok    ok    ok       (2.3 = max abs error vs eager flex at Q=8: wrong output)
+FORCE_USE_FLEX       ok    ok    ok    ok    ok    ok    ok       (regular kernel; bitwise vs decode kernel at Q=1, 8, 16)
+```
+
+**Why:**
+1. Below 128 query tokens Inductor uses its decode kernel, which folds the GQA query heads into M (`gqa_query_shape`, `torch/_inductor/kernel/flex/flex_decoding.py:330`).
+2. Its default `BLOCK_M = next_power_of_2(Q x gqa_shared_heads)` (`:312-322`), so 64 x 8 gives 512.
+3. Every config then checks `SPARSE_Q_BLOCK_SIZE % BLOCK_M == 0` (`:373-382`), which compares query positions (128) against folded rows (512), and all configs fail.
+4. A pinned `fwd_BLOCK_M` larger than the default gives wrong output (Q = 8 above): `SAFE_M_BOUNDARY` is computed from the default `BLOCK_M` before the override (`:342-345`), so the kernel skips its `Q_LEN` masks and stores the extra rows' max and logsumexp over the next head's.
+
+**Fix (drafts):** check `BLOCK_M // GQA_SHARED_HEADS` against the sparse Q block and cap the default `BLOCK_M` at 128 folded rows (https://github.com/felipemello1/pytorch/pull/10); compute `SAFE_M_BOUNDARY` from each config's `BLOCK_M`, after the `fwd_` overrides; a stale True skipped the `Q_LEN` masks and caused the wrong output (https://github.com/felipemello1/pytorch/pull/11).
+
+**Workaround:** `kernel_options={"FORCE_USE_FLEX_ATTENTION": True}` below 128 query tokens. The regular kernel is also faster at these shapes (Muse Spark two layers, CUDA graphs: Q = 64 129 -> 15.6 us, Q = 8 30.8 -> 16.5 us; DeepSeek-V3 16B, no GQA: Q = 64 28.8 -> 10.4 us).
+
+**Repro:** `repros/ask04_flex_decode_gqa_block_m.py` (GPU).
+
+---
+
 ## B. Performance
 
-### 4. A traceable fixed-order segmented sum (deterministic scatter-add)
+### 5. A traceable fixed-order segmented sum (deterministic scatter-add)
 
 **Ask:** a traceable deterministic scatter-add lowering when each output row has a fixed set of contributors, or a fixed-order segmented-sum primitive Inductor can fuse.
 
@@ -147,9 +176,9 @@ compiled per-token rewrite    1095 us    2 kernels   ideal 827 us
 
 **Workaround** (pytorch/torchtitan#5157): every token owns exactly K rows, so combine is an `autograd.Function` whose forward is an unrolled per-token fp32 sum and whose backward is a gather by token. Deterministic, no atomics, 2-3x more accurate vs fp64.
 
-**Repro:** `repros/ask04_opaque_custom_op.py` (GPU).
+**Repro:** `repros/ask05_opaque_custom_op.py` (GPU).
 
-### 5. Static strides and offsets on views of a packed projection
+### 6. Static strides and offsets on views of a packed projection
 
 **Ask:**
 - (a) keep a view's stride and offset static when they are fixed multiples of a static or specialized size;
@@ -173,9 +202,9 @@ Kimi K3 SiTUGLU, shared expert T x 6144:
 
 **Workaround:** `torch._dynamo.mark_static` on the hidden dim inside the region (on TorchTitan main).
 
-**Repro:** `repros/ask05_symbolic_hidden_dim.py` (GPU).
+**Repro:** `repros/ask06_symbolic_hidden_dim.py` (GPU).
 
-### 6. Unroll small reductions
+### 7. Unroll small reductions
 
 **Ask:** unroll when a symbol's upper bound is below `unroll_reductions_threshold`; raise or autotune the threshold (8, strict `<`) for reductions over a non-innermost dim.
 
@@ -200,7 +229,7 @@ contiguous [T,16,D] .sum over K       1001 us   (3.6x off bandwidth without any 
 
 Two related asks hit the same op:
 
-- **(b) decompose memory-bound batched GEMVs by default.** TorchTitan main writes the Kimi residual as `softmax(scores)[T,1,8] @ values.float()[T,8,7168]`. As a bmm it goes to cuBLAS with a separate materialized fp32 upcast (1.9 GB at 16k). `decompose_mm_pass` already handles the shape but is opt-in, has a 10240-row floor, and skips fp32 bmm under BF16x9 (`torch/_inductor/fx_passes/decompose_mem_bound_mm.py:62-90`). Repro `ask06b_extern_gemv.py`:
+- **(b) decompose memory-bound batched GEMVs by default.** TorchTitan main writes the Kimi residual as `softmax(scores)[T,1,8] @ values.float()[T,8,7168]`. As a bmm it goes to cuBLAS with a separate materialized fp32 upcast (1.9 GB at 16k). `decompose_mm_pass` already handles the shape but is opt-in, has a 10240-row floor, and skips fp32 bmm under BF16x9 (`torch/_inductor/fx_passes/decompose_mem_bound_mm.py:62-90`). Repro `ask07b_extern_gemv.py`:
 
   ```text
   fwd+bwd                     T=16384    T=2048
@@ -209,13 +238,13 @@ Two related asks hit the same op:
   explicit sum                2157 us    275 us   ideal 794 / 99 us
   ```
 
-- **(c) int32 indexing for bounded symbolic sizes.** `_decide_tl_dtype` types every symbolic size argument as `tl.int64` (`torch/_inductor/codegen/triton_utils.py:259-278`) and ignores `torch._check` bounds: dynamic-N residual fwd+bwd 1919 us default, 1915 us with `torch._check(N <= 8)`, 1817 us with `assume_32bit_indexing`. That knob fails to compile once T*N*D > int32 max (T=65536, N=8). 0.14 ms per call, up to ~0.2%. Repro `ask06c_int64_indexing_symbolic.py`.
+- **(c) int32 indexing for bounded symbolic sizes.** `_decide_tl_dtype` types every symbolic size argument as `tl.int64` (`torch/_inductor/codegen/triton_utils.py:259-278`) and ignores `torch._check` bounds: dynamic-N residual fwd+bwd 1919 us default, 1915 us with `torch._check(N <= 8)`, 1817 us with `assume_32bit_indexing`. That knob fails to compile once T*N*D > int32 max (T=65536, N=8). 0.14 ms per call, up to ~0.2%. Repro `ask07c_int64_indexing_symbolic.py`.
 
 **Workaround:** an `autograd.Function` with a hand-written backward and an explicit weighted sum (pytorch/torchtitan#5156: 16k fwd+bwd 3642 -> 2652 us vs 2403 static); a Python loop over `top_k` for dispatch (pytorch/torchtitan#5157). A region-scoped `unroll_reductions_threshold=17` gives the same dispatch kernel bitwise.
 
-**Repros:** `repros/ask06a_symbolic_small_dim.py`, `ask06a_small_k_in_tile.py`, `ask06b_extern_gemv.py`, `ask06c_int64_indexing_symbolic.py` (GPU).
+**Repros:** `repros/ask07a_symbolic_small_dim.py`, `ask07a_small_k_in_tile.py`, `ask07b_extern_gemv.py`, `ask07c_int64_indexing_symbolic.py` (GPU).
 
-### 7. A cost model for cat/stack lowering
+### 8. A cost model for cat/stack lowering
 
 **Ask:** a cost model (or autotuning) between pointwise-cat and ConcatKernel lowering that accounts for input layouts and downstream reductions; and lower an interleave/cat consumed by a reduction without re-loading the row per branch.
 
@@ -234,9 +263,9 @@ DeepSeek-V4 attention shapes [16384, 64, 512] bf16, fwd+bwd
 
 **Workaround:** `options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0}` per region, chosen by measurement (pytorch/torchtitan#5197, #5161).
 
-**Repro:** `repros/ask07_cat_lowering.py` (GPU).
+**Repro:** `repros/ask08_cat_lowering.py` (GPU).
 
-### 8. Complex-multiply codegen
+### 9. Complex-multiply codegen
 
 **Ask:** lower complex `mul` (with `view_as_complex` / `view_as_real`) to real arithmetic.
 
@@ -253,9 +282,9 @@ compiled real arithmetic   199 us   2 kernels
 
 **Workaround:** a real-arithmetic branch under `torch.compiler.is_compiling()` (pytorch/torchtitan#5196).
 
-**Repro:** `repros/ask08_complex_ops.py` (GPU).
+**Repro:** `repros/ask09_complex_ops.py` (GPU).
 
-### 9. Fuse tiny-block reductions across steps (Sinkhorn)
+### 10. Fuse tiny-block reductions across steps (Sinkhorn)
 
 **Ask:** fuse reductions over a tiny trailing block (4 x 4 per token) across steps, e.g. by keeping the block in registers.
 
@@ -271,9 +300,9 @@ DeepSeek-V4 hyper-connection Sinkhorn: 20 row/column normalizations of [16384, 4
 
 **Workaround:** 16 per-entry tensors in the compiled branch (pytorch/torchtitan#5199), at ~42 s more cold compile for a 2-layer harness.
 
-**Repro:** `repros/ask09_sinkhorn_transposed_reads.py` (GPU).
+**Repro:** `repros/ask10_sinkhorn_transposed_reads.py` (GPU).
 
-### 10. Views and in-place gradients from regions
+### 11. Views and in-place gradients from regions
 
 **Ask:** let regions return views of their inputs without a gradient copy, and allow in-place updates of an incoming gradient used nowhere else.
 
@@ -295,7 +324,7 @@ Kimi K3 MLA k/v: a region returning v as a view of kv leaves a 419 us eager copy
 
 **Repro:** none standalone (numbers from the comparison script in pytorch/torchtitan#5161).
 
-### 11. Don't inline a producer into a high-broadcast consumer
+### 12. Don't inline a producer into a high-broadcast consumer
 
 **Ask:** account for the consumer's broadcast factor when deciding to inline a producer with expensive per-element ops (exp, div).
 
@@ -311,9 +340,9 @@ realize_reads_threshold=1     277 us   the [T, 8] probs are realized first      
 
 **Workaround:** none for `no_grad`.
 
-**Repro:** `repros/ask11_inline_recompute.py` (GPU).
+**Repro:** `repros/ask12_inline_recompute.py` (GPU).
 
-### 12. Triton (not Inductor): masked loads halve a many-load kernel on SM103
+### 13. Triton (not Inductor): masked loads halve a many-load kernel on SM103
 
 Dynamic T (RL) only; packed training is unaffected.
 
@@ -331,13 +360,13 @@ standalone generated kernels, us by XBLOCK/num_warps:
 
 **Why:** the two sources differ only by `xmask = xindex < xnumel` on 18 loads (8 broadcast loads of per-token softmax values); both carry `tt.divisibility=16`. The slowdown holds at every config, so it is not autotuning. The mechanism is not established.
 
-**Repros:** `repros/ask12_masked_loads_symbolic_T.py`, `ask12_standalone_masked_kernels.py` (GPU).
+**Repros:** `repros/ask13_masked_loads_symbolic_T.py`, `ask13_standalone_masked_kernels.py` (GPU).
 
 ---
 
 ## C. Compile time
 
-### 13. `regional_inductor` partitioning scales superlinearly
+### 14. `regional_inductor` partitioning scales superlinearly
 
 **Ask:** build the dependency map once and share it across regions (or partition all region ids in one pass), and bound the merge loop's cycle checks.
 
@@ -354,7 +383,7 @@ one region id per layer      0.18    1.17    7.69   62.10  s   (~N^2.9)
 
 **Workaround:** none.
 
-**Repro:** `repros/ask13_regional_partition_scaling.py` (CPU).
+**Repro:** `repros/ask14_regional_partition_scaling.py` (CPU).
 
 ---
 

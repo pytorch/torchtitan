@@ -1,4 +1,4 @@
-== CUDA_VISIBLE_DEVICES= python ask13_regional_partition_scaling.py
+== CUDA_VISIBLE_DEVICES= python ask14_regional_partition_scaling.py
 one inductor_region per layer
 tagged nodes   200  regions   25  scoop_regions     0.05 s
 tagged nodes   400  regions   50  scoop_regions     0.18 s  x3.2 vs half

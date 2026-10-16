@@ -10,7 +10,7 @@ math on 16 per-entry [T] tensors (every read same-index) fuses into a handful of
 
 DeepSeek-V4 mHC: 20 iterations of row then column normalization, T=16384, fp32, fwd+bwd.
 
-Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 9):
+Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 10):
 [T,4,4] form ~289-316 us / 159 kernels, per-entry form ~86 us / 32 kernels, both rel vs fp64 8.8e-8.
 """
 import torch

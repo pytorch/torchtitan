@@ -9,7 +9,7 @@
 The same rotation spelled in real arithmetic fuses into one kernel per tensor.
 Shape: DeepSeek-V4 attention rope channels, q [16384, 64, 64] bf16, complex cache [16384, 1, 32].
 
-Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 8):
+Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 9):
 eager ~446 us / 7 kernels, compiled complex ~444 us / 7 kernels, compiled real arithmetic ~199 us / 2 kernels.
 """
 import warnings

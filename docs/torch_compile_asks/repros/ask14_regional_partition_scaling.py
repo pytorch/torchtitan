@@ -12,7 +12,7 @@ the next layer; tagged either with one `inductor_region` id per layer or with on
 Times only `_RegionScooper.scoop_regions` (CapabilityBasedPartitioner per region id +
 fuse_by_partitions), the step that runs before any partition is compiled. CPU only.
 
-Expected (CPU; see ../README.md, ask 13): with one region id per layer, 0.17 / 1.15 / 7.9 / 64 s at
+Expected (CPU; see ../README.md, ask 14): with one region id per layer, 0.17 / 1.15 / 7.9 / 64 s at
 400 / 800 / 1600 / 3200 tagged nodes (~N^2.9); with one shared id, 0.24 / 1.44 / 11 s at 400 / 800 / 1600.
 """
 import time

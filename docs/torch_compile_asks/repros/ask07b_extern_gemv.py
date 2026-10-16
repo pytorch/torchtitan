@@ -12,7 +12,7 @@ Inductor's decompose_mm_pass (fx_passes/decompose_mem_bound_mm.py:62-90: mat1.sh
 2 of m, k, n < 32) does handle this shape, but it is opt-in
 (post_grad_fusion_options={"decompose_mm_pass": {}}) and its first-dim floor excludes small T.
 
-Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 6(b)):
+Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 7(b)):
 T=16384: bmm ~3475 us, bmm + decompose_mm_pass ~2357 us, explicit sum ~2155 us; T=2048: 459 / 459 / 276 us.
 """
 import torch

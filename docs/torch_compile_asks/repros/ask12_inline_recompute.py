@@ -11,7 +11,7 @@ kernel is fast; in a no_grad forward they are not. realize_reads_threshold=1 sho
 
 Kimi K3 residual, stack width N=7 (dynamic, read with clamped indices up to 8), D=7168, T=16384.
 
-Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 11):
+Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 12):
 default ~1225 us, realize_reads_threshold=1 ~278 us.
 """
 import torch

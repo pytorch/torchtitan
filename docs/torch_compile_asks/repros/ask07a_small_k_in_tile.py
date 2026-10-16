@@ -11,7 +11,7 @@ unroll_reductions_threshold > K, strict <) it becomes a pointwise kernel at roof
 Case: MoE dispatch-gather backward, grad rows [T*K, D] gathered per token and summed over K.
 Kimi K3: T=16384, K=16, D=3584. Also the same sum over a contiguous [T, K, D] (no gather).
 
-Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 6):
+Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 7):
 gather .sum ~1354 us (threshold 8 or 16), ~290 us (threshold 17) = unrolled loop ~290 us; contiguous 999 -> 278 us.
 """
 import torch

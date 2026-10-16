@@ -10,7 +10,7 @@ deterministic scatter_add only fuses the scaling; the op's deterministic index_p
 Rewritten as per-token sums (each token owns exactly K rows) it fuses and stays deterministic.
 Shape: Kimi K3 rank-local combine, T=16384 tokens, K=16, D=3584 (N = 262144 rows) bf16.
 
-Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 4):
+Expected on 1x GB300 (torch 2.15.0.dev20260926+cu130, triton 3.8.0; see ../README.md, ask 5):
 eager ~13540 us, compiled as written ~4248 us, per-token Function ~1102 us.
 """
 import torch
