@@ -780,19 +780,16 @@ def test_optim_update_clips_before_parameter_update() -> None:
     events = []
     optimizers = MagicMock()
     optimizers.step.side_effect = lambda: events.append("step")
-    optim = cast(
-        Optim,
-        SimpleNamespace(
-            config=SimpleNamespace(max_norm=1.0),
-            parallelism_context=SimpleNamespace(
-                pp_enabled=False,
-                ep_enabled=False,
-                get_optional_mesh=lambda name: None,
-            ),
-            parameters=[],
-            optimizers=optimizers,
-        ),
+    optim = object.__new__(Optim)
+    optim.config = SimpleNamespace(max_norm=1.0)
+    optim.parallelism_context = SimpleNamespace(
+        pp_enabled=False,
+        ep_enabled=False,
+        get_optional_mesh=lambda name: None,
     )
+    optim.parameters = []
+    optim.optimizers = optimizers
+    optim.gradient_clipper = None
 
     def clip_grad_norm(*args, **kwargs):
         events.append("clip")
@@ -802,7 +799,7 @@ def test_optim_update_clips_before_parameter_update() -> None:
         "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_",
         side_effect=clip_grad_norm,
     ):
-        grad_norm = Optim._update(optim, torch.tensor(1.0))
+        grad_norm = optim._update(torch.tensor(1.0))
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
     assert events == ["clip", "step"]
