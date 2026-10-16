@@ -509,6 +509,31 @@ GrainDataLoader     -> batches and collates that rank's samples
 
 For random-access training, each rank receives a contiguous slice of the globally shuffled index space, not a contiguous region of the original corpus.
 
+Set `GrainDataLoader.Config(data_parallel_sharding="strided")` when each
+global index identifies one fixed sample. After global ordering, local sample
+`i` on effective-DP rank `r` reads global index `i * dp_world_size + r`:
+
+```text
+global order:  0  1  2  3  4  5  6  7
+DP rank 0:    0     2     4     6
+DP rank 1:       1     3     5     7
+```
+
+Repetition happens before strided ownership, so interleaving the ranks still
+reconstructs the global stream when the corpus length is not divisible by DP.
+This policy applies to indexed `SingleDatasetConfig` and
+`DatasetConcatConfig` graphs. Streaming sources own their sharding and reject
+the strided policy.
+
+An external indexed provider can implement `SourceConfig.build()` and return
+a `RandomAccessDataSource` whose rows are already-tokenized `TextSequence`
+objects. Use `SingleDatasetConfig(source=provider_config)` without a processor
+or packing node to preserve one frozen sample per global index. The source
+owns next-token alignment; return aligned `input_ids` and `labels`, continuous
+positions, and no padding for fixed single-document samples. The existing
+config override mechanism can select the external source independently for
+training and validation without adding a storage-client dependency here.
+
 With effective DP greater than one, `repeat=False` is rejected because ranks can exhaust at different steps and hang training collectives. Use `repeat=True` and let the trainer's step count stop training.
 
 `GrainDataLoader.state_dict()` records:
