@@ -299,12 +299,21 @@ def _build_muse_glimmer_layers(
     return layers
 
 
+def _configure_glimmer_vision(
+    encoder: NaViTEncoder.Config, adapter: MuseSparkNaViTAdapter.Config
+) -> None:
+    encoder.pos_emb_grid_order = "raster"
+    for config in (encoder, adapter):
+        for _, linear_config, _, _ in config.traverse(Linear.Config):
+            linear_config.param_init = _LINEAR_INIT
+
+
 def muse_glimmer_vision_configs(
     vision_adapter_dim: int = 4096,
 ) -> tuple[NaViTEncoder.Config, MuseSparkNaViTAdapter.Config]:
     """Build the production vision tower with Glimmer's raster positional grid."""
     encoder, adapter = muse_spark_navit_configs(vision_adapter_dim)
-    encoder.pos_emb_grid_order = "raster"
+    _configure_glimmer_vision(encoder, adapter)
     return encoder, adapter
 
 
@@ -476,11 +485,11 @@ def _muse_glimmer_debugmodel_mm(
         pos_emb_grid_h=2,
         pos_emb_grid_w=2,
     )
-    encoder.pos_emb_grid_order = "raster"
     adapter_dim = 128
     adapter = muse_spark_navit_adapter_config(
         input_dim=encoder.output_dim, output_dim=adapter_dim
     )
+    _configure_glimmer_vision(encoder, adapter)
     return _muse_glimmer_config(
         dim=256,
         n_layers=8,
