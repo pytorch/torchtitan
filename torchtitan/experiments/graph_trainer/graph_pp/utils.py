@@ -26,7 +26,6 @@ import torch.fx as fx
 import torch.fx.node
 import torch.utils._pytree as pytree
 from torch._dynamo.source import ConstantSource
-from torch._logging import trace_structured
 from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 from torch.distributed.pipelining.schedules import (
     _Action,
@@ -51,23 +50,6 @@ _UNSUPPORTED_SYMBOLIC_META_TYPES: tuple[type[Any], ...] = tuple(
     )
     if typ is not None
 )
-
-
-def trace_graph_pp_graph(name: str, gm: fx.GraphModule) -> None:
-    """Emit a readable FX graph artifact for tlparse."""
-
-    trace_structured(
-        "artifact",
-        metadata_fn=lambda: {
-            "name": name,
-            "encoding": "string",
-        },
-        payload_fn=lambda: gm.print_readable(
-            print_output=False,
-            include_stride=True,
-            include_device=True,
-        ),
-    )
 
 
 def _iter_meta_leaves(value: Any):
@@ -336,40 +318,6 @@ def unique_in_order(values: Iterable[T]) -> list[T]:
 
 def is_getitem_node(node: fx.Node) -> bool:
     return node.op == "call_function" and node.target is operator.getitem
-
-
-def is_mutation_node(node: fx.Node) -> bool:
-    """Return whether ``node`` writes to one of its aliased arguments."""
-
-    if node.op != "call_function":
-        return False
-    # ``target`` is a Torch operator overload when this metadata exists.
-    # Python callables/literals do not have schemas and cannot be mutations.
-    schema = getattr(node.target, "_schema", None)
-    if schema is None:
-        return False
-    return any(
-        arg.alias_info is not None and arg.alias_info.is_write
-        for arg in schema.arguments
-    )
-
-
-def base_tensor_for_mutation_target(value: object) -> fx.Node | None:
-    """Return the placeholder/intermediate base reached through view nodes."""
-
-    if not isinstance(value, fx.Node):
-        return None
-    node = value
-    while (
-        node.op == "call_function"
-        # Operator overloads expose ``is_view``; other call targets do not.
-        and hasattr(node.target, "is_view")
-        and node.target.is_view
-        and node.args
-        and isinstance(node.args[0], fx.Node)
-    ):
-        node = node.args[0]
-    return node
 
 
 def is_fake_tensor_node(node: fx.Node) -> bool:

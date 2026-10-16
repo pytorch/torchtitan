@@ -4,182 +4,54 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import TYPE_CHECKING
+"""Sharding configs for DeepSeek V3 components.
+
+Declarations only: ``flavors.py`` sets these on each sub-config as it builds
+it, and ``model.parallelize()`` applies them through the Module protocol.
+"""
 
 import spmd_types as spmd
 
+from torchtitan.models.base.sharding import ShardingConfig
+
 from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
-    dense_activation_placement,
     dense_param_placement,
-    dense_sequence_parallel_placement,
-    norm_config,
-    pre_lm_head_norm_config,
-    rowwise_config,
-    set_decoder_sharding_config,
-    set_dense_ffn_sharding,
-    set_gqa_inner_attention_local_spmd,
+    residual_activation_placement,
     token_id_placement,
 )
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
-from torchtitan.models.deepseek_v3.model import Attention
-from torchtitan.protocols.sharding import ShardingConfig
 
-if TYPE_CHECKING:
-    from torchtitan.models.deepseek_v3.model import (
-        DeepSeekV3Model,
-        DeepSeekV3TransformerBlock,
+
+def mla_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
+    """MLA attention boundary: ``x`` in and out in the residual layout.
+
+    ``DeepSeekMLAAttention.forward`` explicitly gathers x once for all MLA branches. This
+    config only declares its external input and output layout contracts.
+    """
+    layout = residual_activation_placement(enable_sp=enable_sp)
+    return ShardingConfig(
+        in_src_shardings={"x": layout},
+        out_src_shardings=layout,
     )
 
 
-def set_deepseek_v3_sharding_config(
-    config: "DeepSeekV3Model.Config",
-    *,
-    enable_sp: bool,
-    enable_ep: bool,
-) -> None:
-    """Fill ``sharding_config`` on all DeepSeek V3 sub-configs.
-
-    Dense sub-configs (attention, norms, dense FFN) are populated
-    unconditionally — ``Module.parallelize`` filters disabled axes
-    at runtime.
-
-    MoE sub-configs (router, shared experts, routed experts) are
-    populated unconditionally — ``resolve_mesh`` filters disabled
-    axes at runtime.
-    """
-
-    set_decoder_sharding_config(config, enable_sp=enable_sp)
-    for layer_cfg in config.layers:
-        _set_deepseek_v3_layer_sharding(
-            layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
-        )
-    if len(config.mtp_layers) > 0:
-        _set_deepseek_v3_mtp_sharding(
-            config,
-            enable_sp=enable_sp,
-            enable_ep=enable_ep,
-        )
-
-
-def _set_deepseek_v3_layer_sharding(
-    layer_cfg: "DeepSeekV3TransformerBlock.Config",
-    *,
-    enable_sp: bool,
-    enable_ep: bool,
-) -> None:
-    """Set sharding on one DeepSeek V3 transformer layer.
-
-    MLA attention: low-rank projections (wkv_a, wq_a, kv_norm, q_norm)
-    stay replicated. Up-projections (wkv_b, wq_b, wq) are colwise.
-    MoE FFN is routed through ``set_moe_sharding_config``.
-    """
-    attention = layer_cfg.attention
-    assert isinstance(attention, Attention.Config)
-
-    norm = norm_config(enable_sp=enable_sp)
-    layer_cfg.attention_norm.sharding_config = norm
-    layer_cfg.ffn_norm.sharding_config = norm
-    attn_x_layout = (
-        dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-    )
-    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-
-    # Attention.forward explicitly gathers x once for all MLA branches. This
-    # config only declares its external input and output layout contracts.
-    attention.sharding_config = ShardingConfig(
+def mtp_block_sharding_config(*, enable_sp: bool) -> ShardingConfig | None:
+    """MTP block boundary: the valid mask follows token IDs under SP."""
+    if not enable_sp:
+        return None
+    return ShardingConfig(
         in_src_shardings={
-            "x": attn_x_layout,
+            "mtp_input_valid_mask": token_id_placement(),
         },
-        out_src_shardings=attn_x_layout,
     )
-    attention.rope.sharding_config = ShardingConfig(
-        state_shardings={"cache": dense_param_placement(tp=spmd.R)},
+
+
+def mtp_projection_sharding_config(*, enable_sp: bool) -> ShardingConfig:
+    """MTP ``eh_proj``: replicated weight over residual-layout activations."""
+    activation = residual_activation_placement(enable_sp=enable_sp)
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.R),
+        },
+        in_src_shardings={"input": activation},
+        out_src_shardings=activation,
     )
-    # Low-rank projections and norms keep replicated weights on TP so their
-    # SPMD types compose with the surrounding activations.
-    replicate_weight = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-    )
-    attention.wkv_a.sharding_config = replicate_weight
-    attention.kv_norm.sharding_config = replicate_weight
-
-    attention.wkv_b.sharding_config = colwise_config(
-        input_layout=replicated_input_layout
-    )
-    attention.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
-
-    set_gqa_inner_attention_local_spmd(attention.inner_attention)
-
-    # Query projection: depends on q_lora_rank
-    if attention.q_lora_rank == 0:
-        assert attention.wq is not None
-        attention.wq.sharding_config = colwise_config(
-            input_layout=replicated_input_layout
-        )
-    else:
-        # Low-rank: wq_a + q_norm stay replicated; wq_b is colwise.
-        assert attention.wq_a is not None
-        assert attention.wq_b is not None
-        attention.wq_a.sharding_config = replicate_weight
-        attention.q_norm.sharding_config = replicate_weight
-        attention.wq_b.sharding_config = colwise_config(
-            input_layout=replicated_input_layout
-        )
-
-    # Dense FFN (non-MoE layers only)
-    if layer_cfg.feed_forward is not None:
-        set_dense_ffn_sharding(
-            layer_cfg.feed_forward,
-            attn_x_layout=attn_x_layout,
-            enable_sp=enable_sp,
-        )
-
-    # MoE FFN (MoE-enabled layers only).
-    if layer_cfg.moe is not None:
-        set_moe_sharding_config(
-            layer_cfg.moe,
-            enable_ep=enable_ep,
-            enable_sp=enable_sp,
-        )
-
-
-def _set_deepseek_v3_mtp_sharding(
-    config,
-    *,
-    enable_sp: bool,
-    enable_ep: bool,
-) -> None:
-    activation = (
-        dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-    )
-    norm = norm_config(enable_sp=enable_sp)
-
-    for mtp_layer_cfg in config.mtp_layers:
-        if enable_sp:
-            mtp_layer_cfg.sharding_config = ShardingConfig(
-                in_src_shardings={
-                    "mtp_input_valid_mask": token_id_placement(),
-                },
-            )
-        _set_deepseek_v3_layer_sharding(
-            mtp_layer_cfg,
-            enable_sp=enable_sp,
-            enable_ep=enable_ep,
-        )
-        mtp_layer_cfg.enorm.sharding_config = norm
-        mtp_layer_cfg.hnorm.sharding_config = norm
-        mtp_layer_cfg.mtp_norm.sharding_config = pre_lm_head_norm_config(
-            enable_sp=enable_sp
-        )
-        mtp_layer_cfg.eh_proj.sharding_config = ShardingConfig(
-            state_shardings={
-                "weight": dense_param_placement(tp=spmd.R),
-            },
-            in_src_shardings={"input": activation},
-            out_src_shardings=activation,
-        )

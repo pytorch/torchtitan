@@ -14,7 +14,10 @@ from typing import Any, TYPE_CHECKING
 import torch
 from torch.distributed.tensor import DTensor
 
-from torchtitan.models.utils import MoEStateDictAdapter
+from torchtitan.models.common.attention.kda import KDA
+from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
+
+from .moe import KimiLatentMoE
 
 if TYPE_CHECKING:
     from .model import KimiK3Model
@@ -49,27 +52,33 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             "language_model.model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
             # MoE.
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w1.weight": (
-                "layers.{}.moe.routed_experts.w1_EFD"
+                "layers.{}.feed_forward.routed_experts.w1_EFD"
             ),
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w2.weight": (
-                "layers.{}.moe.routed_experts.w2.weight"
+                "layers.{}.feed_forward.routed_experts.w2.weight"
             ),
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w3.weight": (
-                "layers.{}.moe.routed_experts.w3_EFD"
+                "layers.{}.feed_forward.routed_experts.w3_EFD"
             ),
-            "language_model.model.layers.{}.block_sparse_moe.gate.weight": "layers.{}.moe.router.gate.weight",
-            "language_model.model.layers.{}.block_sparse_moe.gate.e_score_correction_bias": "layers.{}.moe.expert_bias_E",
-            "language_model.model.layers.{}.block_sparse_moe.routed_expert_down_proj.weight": "layers.{}.moe.routed_down.weight",
-            "language_model.model.layers.{}.block_sparse_moe.routed_expert_up_proj.weight": "layers.{}.moe.routed_up.weight",
-            "language_model.model.layers.{}.block_sparse_moe.routed_expert_norm.weight": "layers.{}.moe.routed_norm.weight",
+            "language_model.model.layers.{}.block_sparse_moe.gate.weight": "layers.{}.feed_forward.router.gate.weight",
+            "language_model.model.layers.{}.block_sparse_moe.gate.e_score_correction_bias": "layers.{}.feed_forward.expert_bias_E",
+            "language_model.model.layers.{}.block_sparse_moe.routed_expert_down_proj.weight": (
+                "layers.{}.feed_forward.routed_down.weight"
+            ),
+            "language_model.model.layers.{}.block_sparse_moe.routed_expert_up_proj.weight": (
+                "layers.{}.feed_forward.routed_up.weight"
+            ),
+            "language_model.model.layers.{}.block_sparse_moe.routed_expert_norm.weight": (
+                "layers.{}.feed_forward.routed_norm.weight"
+            ),
             "language_model.model.layers.{}.block_sparse_moe.shared_experts.gate_proj.weight": (
-                "layers.{}.moe.shared_experts.w1.weight"
+                "layers.{}.feed_forward.shared_experts.w1.weight"
             ),
             "language_model.model.layers.{}.block_sparse_moe.shared_experts.up_proj.weight": (
-                "layers.{}.moe.shared_experts.w3.weight"
+                "layers.{}.feed_forward.shared_experts.w3.weight"
             ),
             "language_model.model.layers.{}.block_sparse_moe.shared_experts.down_proj.weight": (
-                "layers.{}.moe.shared_experts.w2.weight"
+                "layers.{}.feed_forward.shared_experts.w2.weight"
             ),
             "language_model.model.output_attn_res_norm.weight": "output_res_norm.weight",
             "language_model.model.output_attn_res_proj.weight": "output_res_proj.weight",
@@ -99,20 +108,20 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             "language_model.model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
         }
         self.kda_from_hf_map = {
-            "language_model.model.layers.{}.self_attn.q_proj.weight": "layers.{}.delta_attention.q_proj.weight",
-            "language_model.model.layers.{}.self_attn.k_proj.weight": "layers.{}.delta_attention.k_proj.weight",
-            "language_model.model.layers.{}.self_attn.v_proj.weight": "layers.{}.delta_attention.v_proj.weight",
-            "language_model.model.layers.{}.self_attn.q_conv1d.weight": "layers.{}.delta_attention.q_conv.weight",
-            "language_model.model.layers.{}.self_attn.k_conv1d.weight": "layers.{}.delta_attention.k_conv.weight",
-            "language_model.model.layers.{}.self_attn.v_conv1d.weight": "layers.{}.delta_attention.v_conv.weight",
-            "language_model.model.layers.{}.self_attn.f_a_proj.weight": "layers.{}.delta_attention.forget_a.weight",
-            "language_model.model.layers.{}.self_attn.f_b_proj.weight": "layers.{}.delta_attention.forget_b.weight",
-            "language_model.model.layers.{}.self_attn.b_proj.weight": "layers.{}.delta_attention.beta.weight",
-            "language_model.model.layers.{}.self_attn.g_proj.weight": "layers.{}.delta_attention.output_gate.weight",
-            "language_model.model.layers.{}.self_attn.o_norm.weight": "layers.{}.delta_attention.output_norm.weight",
-            "language_model.model.layers.{}.self_attn.o_proj.weight": "layers.{}.delta_attention.output_proj.weight",
-            "language_model.model.layers.{}.self_attn.A_log": "layers.{}.delta_attention.A_log",
-            "language_model.model.layers.{}.self_attn.dt_bias": "layers.{}.delta_attention.dt_bias",
+            "language_model.model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.q_proj.weight",
+            "language_model.model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.k_proj.weight",
+            "language_model.model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.v_proj.weight",
+            "language_model.model.layers.{}.self_attn.q_conv1d.weight": "layers.{}.attention.q_conv.weight",
+            "language_model.model.layers.{}.self_attn.k_conv1d.weight": "layers.{}.attention.k_conv.weight",
+            "language_model.model.layers.{}.self_attn.v_conv1d.weight": "layers.{}.attention.v_conv.weight",
+            "language_model.model.layers.{}.self_attn.f_a_proj.weight": "layers.{}.attention.forget_a.weight",
+            "language_model.model.layers.{}.self_attn.f_b_proj.weight": "layers.{}.attention.forget_b.weight",
+            "language_model.model.layers.{}.self_attn.b_proj.weight": "layers.{}.attention.beta.weight",
+            "language_model.model.layers.{}.self_attn.g_proj.weight": "layers.{}.attention.output_gate.weight",
+            "language_model.model.layers.{}.self_attn.o_norm.weight": "layers.{}.attention.output_norm.weight",
+            "language_model.model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.output_proj.weight",
+            "language_model.model.layers.{}.self_attn.A_log": "layers.{}.attention.A_log",
+            "language_model.model.layers.{}.self_attn.dt_bias": "layers.{}.attention.dt_bias",
         }
 
         # The released index contains MXFP4 packed/scale FQNs, while this
@@ -130,14 +139,21 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
 
         layer_config = self.kimi_config.layers[int(layer_num)]
         attention_map = (
-            self.mla_from_hf_map
-            if layer_config.attention is not None
-            else self.kda_from_hf_map
+            self.kda_from_hf_map
+            if isinstance(layer_config.attention, KDA.Config)
+            else self.mla_from_hf_map
         )
         return attention_map.get(abstract_key)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """Convert a TorchTitan state dict to unquantized HuggingFace format."""
+        if to_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         state_dict = self._native_fused_linears_to_hf(
             state_dict,
             split_routed_experts=True,
@@ -181,8 +197,8 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                         )
                     )
                 else:
-                    moe_config = self.kimi_config.layers[int(layer_num)].moe
-                    assert moe_config is not None
+                    moe_config = self.kimi_config.layers[int(layer_num)].feed_forward
+                    assert isinstance(moe_config, KimiLatentMoE.Config)
                     split_values = self._split_experts_weights(
                         value,
                         moe_config.num_experts,
@@ -215,7 +231,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 if hf_abstract_key is None:
                     unmapped.append(key)
                     continue
-                if abstract_key == "layers.{}.delta_attention.dt_bias":
+                if abstract_key == "layers.{}.attention.dt_bias":
                     value = value.reshape(-1)
                 hf_state_dict[hf_abstract_key.format(layer_num)] = value
                 continue
@@ -271,8 +287,15 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             )
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """Convert an unquantized HuggingFace state dict to TorchTitan."""
+        if is_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         state_dict: dict[str, Any] = {}
         expert_weights_by_layer: dict[str, dict[str, dict[int, torch.Tensor]]] = {}
         unmapped: list[str] = []
@@ -320,8 +343,8 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                         layer_num,
                     )
                 else:
-                    moe_config = self.kimi_config.layers[int(layer_num)].moe
-                    assert moe_config is not None
+                    moe_config = self.kimi_config.layers[int(layer_num)].feed_forward
+                    assert isinstance(moe_config, KimiLatentMoE.Config)
                     stacked_value = self._concatenate_expert_weights(
                         expert_weights_by_layer,
                         titan_abstract_key,
@@ -358,14 +381,12 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 if new_abstract_key is None:
                     unmapped.append(key)
                     continue
-                if new_abstract_key == "layers.{}.delta_attention.dt_bias":
-                    delta_config = self.kimi_config.layers[
-                        int(layer_num)
-                    ].delta_attention
-                    if delta_config is None:
+                if new_abstract_key == "layers.{}.attention.dt_bias":
+                    delta_config = self.kimi_config.layers[int(layer_num)].attention
+                    if not isinstance(delta_config, KDA.Config):
                         raise ValueError(f"HF key '{key}' targets a non-KDA layer.")
                     value = value.reshape(
-                        delta_config.num_heads,
+                        delta_config.n_heads,
                         delta_config.head_dim,
                     )
                 state_dict[new_abstract_key.format(layer_num)] = value

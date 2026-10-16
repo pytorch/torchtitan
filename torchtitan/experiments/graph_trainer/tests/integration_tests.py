@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import dataclasses
 import os
 
 from tests.integration_tests import IntegrationTestDefinition
@@ -12,10 +13,18 @@ from tests.integration_tests.run_tests import run_tests
 from torchtitan_recipes.graph_trainer.llama3 import graph_trainer_llama3_8b
 
 from torchtitan_recipes.tests.graph_trainer import (
+    b200 as b200_recipes,
     deepseek_v3 as deepseek_v3_recipes,
     llama3 as llama3_recipes,
     muse_glimmer as muse_glimmer_recipes,
     qwen3 as qwen3_recipes,
+)
+
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.moe import (
+    MoE,
+    RoundRobinTokenChoiceTopKRouter,
+    TokenChoiceTopKRouter,
 )
 
 # TODO: Re-enable after regional_inductor can trace the CP load balancer's
@@ -25,7 +34,6 @@ _FLEX_CP_INDUCTOR_DISABLED = True
 
 def llama3_fsdp_tp_cp():
     config = llama3_recipes.graph_trainer_llama3_debugmodel()
-    config.compile.disable_passes = ["cuda_graph_pass"]
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -46,10 +54,12 @@ def llama3_spmd_gradient_accumulation():
     return config
 
 
-def _llama3_fsdp_collectives(*, param_unshard_mode: str, gradient_sync_mode: str):
+def _llama3_fsdp_collectives(*, param_unshard_mode: str, grad_reduce_mode: str):
     config = llama3_recipes.graph_trainer_llama3_debugmodel()
-    config.compile.fsdp_param_unshard_mode = param_unshard_mode
-    config.compile.fsdp_gradient_sync_mode = gradient_sync_mode
+    config.compile.spmd_gradient_accumulation.fsdp_param_unshard_mode = (
+        param_unshard_mode
+    )
+    config.compile.spmd_gradient_accumulation.fsdp_grad_reduce_mode = grad_reduce_mode
     config.parallelism.data_parallel_shard_degree = 4
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.num_tokens_per_train_step = 16384
@@ -59,28 +69,14 @@ def _llama3_fsdp_collectives(*, param_unshard_mode: str, gradient_sync_mode: str
 def llama3_ga_per_microbatch_fsdp_collectives():
     return _llama3_fsdp_collectives(
         param_unshard_mode="every_microbatch",
-        gradient_sync_mode="every_microbatch",
+        grad_reduce_mode="every_microbatch",
     )
 
 
-def llama3_ga_deferred_fsdp_reduce_grad():
+def llama3_ga_first_unshard_last_reduce_fsdp_collectives():
     return _llama3_fsdp_collectives(
-        param_unshard_mode="every_microbatch",
-        gradient_sync_mode="deferred_as_schedule_stage",
-    )
-
-
-def llama3_ga_extracted_fsdp_unshard_per_microbatch_reduce_grad():
-    return _llama3_fsdp_collectives(
-        param_unshard_mode="extracted_in_schedule_stage",
-        gradient_sync_mode="every_microbatch",
-    )
-
-
-def llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad():
-    return _llama3_fsdp_collectives(
-        param_unshard_mode="extracted_in_schedule_stage",
-        gradient_sync_mode="deferred_as_schedule_stage",
+        param_unshard_mode="first_microbatch",
+        grad_reduce_mode="last_microbatch",
     )
 
 
@@ -97,11 +93,12 @@ def llama3_fsdp_tp_regional_inductor():
 
 
 def deepseek_v3_fused_mla_swiglu_fsdp_tp_ep():
-    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel()
+    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
     config.training.disable_cuda_graphs = True
     config.compile.disable_passes = [
         "joint_transformer_block_bucketing_reordering_pass",
-        "cuda_graph_pass",
     ]
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
@@ -109,24 +106,35 @@ def deepseek_v3_fused_mla_swiglu_fsdp_tp_ep():
     ]
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 2
+    return config
+
+
+def deepseek_v3_hsdp_edp_shard_ep():
+    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
+    config.training.disable_cuda_graphs = True
+    config.parallelism.data_parallel_replicate_degree = 2
+    config.parallelism.data_parallel_shard_degree = 4
     return config
 
 
 def deepseek_v3_fsdp_tp_cp_ep():
-    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel()
+    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=4)
+    )
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 4
     return config
 
 
 def deepseek_v3_fsdp_tp_ep():
-    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel()
+    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=4)
+    )
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 4
     return config
 
 
@@ -139,7 +147,9 @@ def deepseek_v3_fsdp_tp_ep_regional_inductor():
 def _deepseek_v3_ep_overlap(
     *, inductor_compilation: str, chunk_dim: str, module_fqn: str
 ):
-    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel()
+    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=4)
+    )
     config.training.disable_cuda_graphs = True
     config.compile.inductor_compilation = inductor_compilation
     config.compile.ep_overlap.enabled = True
@@ -147,7 +157,6 @@ def _deepseek_v3_ep_overlap(
     config.compile.ep_overlap.module_fqn = module_fqn
     config.parallelism.data_parallel_shard_degree = 8
     config.parallelism.tensor_parallel_degree = 1
-    config.parallelism.expert_parallel_degree = 4
     return config
 
 
@@ -161,7 +170,7 @@ def deepseek_v3_regional_ep_overlap_moe_batch():
     return _deepseek_v3_ep_overlap(
         inductor_compilation="regional",
         chunk_dim="batch",
-        module_fqn="layers.*.moe",
+        module_fqn="layers.*.feed_forward",
     )
 
 
@@ -169,7 +178,7 @@ def deepseek_v3_regional_ep_overlap_moe_seq():
     return _deepseek_v3_ep_overlap(
         inductor_compilation="regional",
         chunk_dim="seq",
-        module_fqn="layers.*.moe",
+        module_fqn="layers.*.feed_forward",
     )
 
 
@@ -183,13 +192,13 @@ def deepseek_v3_full_ep_overlap_moe_batch():
     return _deepseek_v3_ep_overlap(
         inductor_compilation="full",
         chunk_dim="batch",
-        module_fqn="layers.*.moe",
+        module_fqn="layers.*.feed_forward",
     )
 
 
 def deepseek_v3_full_ep_overlap_moe_seq():
     return _deepseek_v3_ep_overlap(
-        inductor_compilation="full", chunk_dim="seq", module_fqn="layers.*.moe"
+        inductor_compilation="full", chunk_dim="seq", module_fqn="layers.*.feed_forward"
     )
 
 
@@ -206,7 +215,9 @@ def deepseek_v3_graph_pp_dual_pipe_v():
 
 
 def _deepseek_v3_graph_pp(schedule: str):
-    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel()
+    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
     config.training.disable_cuda_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.compile.inductor_compilation = "full"
@@ -214,21 +225,47 @@ def _deepseek_v3_graph_pp(schedule: str):
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = schedule
     config.parallelism.data_parallel_shard_degree = 4
-    config.parallelism.expert_parallel_degree = 2
     return config
 
 
-def deepseek_v3_hybrid_ep():
+def _round_robin_routing(config):
+    """Route token-expert assignments round-robin, with exact balance."""
+    router_fields = dataclasses.fields(TokenChoiceTopKRouter.Config)
+    for layer in config.model.layers:
+        if isinstance(layer.feed_forward, MoE.Config):
+            router = layer.feed_forward.router
+            layer.feed_forward.router = RoundRobinTokenChoiceTopKRouter.Config(
+                **{f.name: getattr(router, f.name) for f in router_fields}
+            )
+    return config
+
+
+def deepseek_v3_hybrid_ep_paged_stash():
     config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel_hybridep()
+    # Paged stash may release and reallocate buffers after an overflow.
+    config.training.disable_cuda_graphs = True
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 2
-    return config
+    config.compile.memory_policy = "sac_and_paged_stash"
+    return _round_robin_routing(config)
+
+
+def deepseek_v3_graph_pp_hybrid_ep_paged_stash():
+    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel_hybridep()
+    config.training.disable_cuda_graphs = True
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 4
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.compile.memory_policy = "sac_and_paged_stash"
+    return _round_robin_routing(config)
 
 
 def qwen3_fsdp_tp_cp():
     config = qwen3_recipes.graph_trainer_qwen3_debugmodel()
-    config.compile.disable_passes = ["cuda_graph_pass"]
+    config.training.disable_cuda_graphs = True
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -268,7 +305,7 @@ def llama3_fsdp_tp_async_tp():
 
 
 def llama3_autoparallel_fsdp_tp():
-    config = llama3_recipes.graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss()
+    config = llama3_recipes.graph_trainer_llama3_debugmodel_varlen_cross_entropy_loss()
     config.compile.enable_autoparallel = True
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -276,10 +313,11 @@ def llama3_autoparallel_fsdp_tp():
 
 
 def deepseek_v3_autoparallel_edp_shard_ep():
-    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel()
+    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
     config.compile.enable_autoparallel = True
     config.parallelism.data_parallel_shard_degree = 4
-    config.parallelism.expert_parallel_degree = 2
     return config
 
 
@@ -328,33 +366,12 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[llama3_ga_deferred_fsdp_reduce_grad],
-            test_descr="aot_fx_trace llama3 GA with deferred FSDP REDUCE_GRAD",
-            test_name="aot_fx_trace_llama3_ga_deferred_fsdp_reduce_grad",
-            ngpu=4,
-            skip_rocm_test=True,
-        ),
-        IntegrationTestDefinition(
-            configs=[llama3_ga_extracted_fsdp_unshard_per_microbatch_reduce_grad],
+            configs=[llama3_ga_first_unshard_last_reduce_fsdp_collectives],
             test_descr=(
-                "aot_fx_trace llama3 GA with extracted FSDP UNSHARD and "
-                "per-microbatch REDUCE_GRAD"
+                "aot_fx_trace llama3 GA with first-microbatch FSDP unshard and "
+                "last-microbatch grad reduction"
             ),
-            test_name=(
-                "aot_fx_trace_llama3_ga_extracted_unshard_per_microbatch_reduce_grad"
-            ),
-            ngpu=4,
-            skip_rocm_test=True,
-        ),
-        IntegrationTestDefinition(
-            configs=[llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad],
-            test_descr=(
-                "aot_fx_trace llama3 GA with extracted FSDP UNSHARD and "
-                "deferred REDUCE_GRAD"
-            ),
-            test_name=(
-                "aot_fx_trace_llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad"
-            ),
+            test_name="aot_fx_trace_llama3_ga_first_unshard_last_reduce_fsdp",
             ngpu=4,
             skip_rocm_test=True,
         ),
@@ -429,6 +446,12 @@ def _build_deepseek_v3_tests() -> list[IntegrationTestDefinition]:
 
     return [
         # === GraphRuntime tests ===
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_hsdp_edp_shard_ep],
+            test_descr="aot_fx_trace deepseek_v3 HSDP+edp_shard+EP",
+            test_name="aot_fx_trace_deepseek_v3_hsdp_edp_shard_ep",
+            ngpu=8,
+        ),
         # Note: standard DSv3 MoE load-balancing introduces CUDA-to-CPU
         # transfers incompatible with CUDA graph capture, so this fused test
         # explicitly disables CUDA graphs in both the trainer and graph passes.
@@ -519,12 +542,21 @@ def _build_deepseek_v3_tests() -> list[IntegrationTestDefinition]:
             test_name="aot_fx_trace_deepseek_v3_graph_pp_dual_pipe_v_full_inductor",
             ngpu=8,
         ),
+        # Paged stashing under GraphTrainer's CUDA graph pass and under GraphPP.
+        # Round-robin routing keeps the stash footprint steady across steps: the
+        # buffers are sized from the first step, and a step that outgrows them is
+        # fatal under the default overflow check.
         IntegrationTestDefinition(
-            configs=[deepseek_v3_hybrid_ep],
-            test_descr="aot_fx_trace deepseek_v3 FSDP+TP+HybridEP",
-            test_name="aot_fx_trace_deepseek_v3_hybridep",
+            configs=[deepseek_v3_hybrid_ep_paged_stash],
+            test_descr="aot_fx_trace deepseek_v3 FSDP+TP+HybridEP+paged_stash",
+            test_name="aot_fx_trace_deepseek_v3_hybridep_paged_stash",
             ngpu=4,
-            disabled=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_graph_pp_hybrid_ep_paged_stash],
+            test_descr="aot_fx_trace deepseek_v3 GraphPP+HybridEP+paged_stash",
+            test_name="aot_fx_trace_deepseek_v3_graph_pp_hybridep_paged_stash",
+            ngpu=4,
         ),
     ]
 
@@ -608,15 +640,8 @@ def _build_async_tp_tests() -> list[IntegrationTestDefinition]:
 def _build_autoparallel_tests() -> list[IntegrationTestDefinition]:
     """AutoParallel integration tests for default runners."""
     return [
-        # Uses the SDPA backend: AutoParallel's dynamo export
-        # (_dynamo_graph_capture_for_export) pytree-flattens the default
-        # FlexInnerAttention BlockMask to plain (Fake)Tensors, so flex_attention then
-        # fails with "'FakeTensor' object has no attribute 'BLOCK_SIZE'". SDPA is
-        # maskless (is_causal) and carries no BlockMask, and its input_fn
-        # (tokens, positions) binds correctly now that Decoder.forward lists
-        # positions before attention_masks.
-        # TODO: re-test on FlexInnerAttention once BlockMask survives AutoParallel
-        # graph capture.
+        # TODO: Before re-enabling, wire Varlen metadata through AutoParallel
+        # input_fn and its input sharding constraints.
         # TODO: Disabled due to upstream AutoParallel/PyTorch API skew. PyTorch
         # #186754 (2026-06-24) removed propagate_single_input_strategy in favor
         # of propagate_single_input_single_dim_strategy, but AutoParallel's
@@ -654,6 +679,30 @@ def build_graph_trainer_h100_test_list() -> list[IntegrationTestDefinition]:
     return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_async_tp_tests()
 
 
+def build_graph_trainer_b200_test_list() -> list[IntegrationTestDefinition]:
+    """Dist-MoE tests that require B200-class hardware."""
+    return [
+        IntegrationTestDefinition(
+            configs=[
+                b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2
+            ],
+            test_descr="GraphTrainer BF16 Dist-MoE with FSDP and EP",
+            test_name="graph_trainer_dist_moe_fsdp_ep",
+            ngpu=2,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[
+                b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2
+            ],
+            test_descr="GraphPP MXFP8 Dist-MoE activation-slot reuse",
+            test_name="graph_trainer_dist_moe_mxfp8_fsdp_ep_pp",
+            ngpu=4,
+            use_real_pg=True,
+        ),
+    ]
+
+
 def build_graph_trainer_autoparallel_test_list() -> list[IntegrationTestDefinition]:
     """AutoParallel tests for default runners."""
     return _build_autoparallel_tests()
@@ -670,6 +719,7 @@ _TEST_SUITES_FUNCTION = {
     "graph_trainer": build_graph_trainer_test_list,
     "graph_trainer_default": build_graph_trainer_default_test_list,
     "graph_trainer_h100": build_graph_trainer_h100_test_list,
+    "graph_trainer_b200": build_graph_trainer_b200_test_list,
     "graph_trainer_autoparallel": build_graph_trainer_autoparallel_test_list,
     "graph_trainer_autoparallel_h100": build_graph_trainer_autoparallel_h100_test_list,
 }

@@ -31,11 +31,10 @@ from torch.distributed.checkpoint.state_dict_saver import (
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
-from torchtitan.tools.utils import GarbageCollection
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 from .base import (
     BaseCheckpointManager,
-    DATALOADER,
     EMA,
     LR_SCHEDULER,
     MODEL,
@@ -50,8 +49,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     import torch.nn as nn
 
-    from torchtitan.components.data.loader import BaseDataLoader
-
     # The EMA class shares its name with the ``EMA = "ema"`` state-dict key
     # constant imported above, so alias it here.
     from torchtitan.components.optim import (  # noqa: N811
@@ -59,7 +56,7 @@ if TYPE_CHECKING:
         LRSchedulersContainer,
         OptimizersContainer,
     )
-    from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+    from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 
 
 class AsyncMode(str, enum.Enum):
@@ -121,14 +118,13 @@ class CheckpointManager(BaseCheckpointManager):
 
     Args:
         config (Checkpoint): The config used to configure the checkpointing.
-        dataloader (BaseDataLoader): The dataloader used to load the data.
         model_parts (List[nn.Module]): List of model parts to be optimized.
         optimizers (OptimizersContainer): The optimizers used to optimize the model.
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize
             the model.
         ema (Optional[EMA]): Online EMA of model weights, or None when the
             user hasn't configured one (see torchtitan.components.optim.ema.EMA).
-        states (Dict[str, Any]): The states that need to be saved, other than the
+        extra_states (Dict[str, Any]): States to save in addition to the
             previous components.
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert
             model state dicts between native format and other formats.
@@ -157,12 +153,11 @@ class CheckpointManager(BaseCheckpointManager):
         self,
         config: Config,
         *,
-        dataloader: BaseDataLoader | None,
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         ema: EMAContainer | None,
-        states: dict[str, Any],
+        extra_states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
     ) -> None:
@@ -171,12 +166,12 @@ class CheckpointManager(BaseCheckpointManager):
         self.interval = config.interval
         self._storage = _FilesystemCheckpointStorage()
 
-        self.states = states
+        self._validate_extra_state_keys(extra_states)
+        self.states = dict(extra_states)
         self.states.update(
             {
                 MODEL: ModelWrapper(model_parts),
                 OPTIMIZER: optimizers,
-                DATALOADER: dataloader,
                 LR_SCHEDULER: lr_schedulers,
             }
         )
@@ -352,7 +347,7 @@ class CheckpointManager(BaseCheckpointManager):
             )
 
         if enable_garbage_collection:
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            GarbageCollector.collect("GC collection invoked by checkpointer.")
 
         return ret
 
@@ -390,14 +385,18 @@ class CheckpointManager(BaseCheckpointManager):
                 "but sd_adapter is not provided."
             )
 
-            hf_state_dict = self.sd_adapter.to_hf(state_dict)
+            hf_state_dict = self.sd_adapter.to_hf(
+                state_dict, to_quantized_layout=from_quantized
+            )
             hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
                 checkpoint_id, from_quantized
             )
 
             dcp.load(hf_state_dict, storage_reader=hf_storage_reader)
 
-            state_dict = self.sd_adapter.from_hf(hf_state_dict)
+            state_dict = self.sd_adapter.from_hf(
+                hf_state_dict, is_quantized_layout=from_quantized
+            )
             states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
@@ -459,7 +458,7 @@ class CheckpointManager(BaseCheckpointManager):
         async_save_started_at: float | None = None
 
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            GarbageCollector.collect("GC collection invoked by checkpointer.")
             if self.stager is None:
                 self.stager = DefaultStager(
                     StagingOptions(
@@ -483,14 +482,14 @@ class CheckpointManager(BaseCheckpointManager):
             self.save_future = result.upload_completion
 
         elif self.async_mode == AsyncMode.ASYNC:
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            GarbageCollector.collect("GC collection invoked by checkpointer.")
             async_save_started_at = time.monotonic()
             result = self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
                 async_mode=self.async_mode,
             )
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            GarbageCollector.collect("GC collection invoked by checkpointer.")
 
             assert isinstance(result, Future)
             self.save_future = result

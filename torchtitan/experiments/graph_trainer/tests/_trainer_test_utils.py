@@ -16,7 +16,7 @@ import torch.nn as nn
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     maybe_register_blockmask_pytree_node,
@@ -25,7 +25,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
 )
-from torchtitan.experiments.graph_trainer.graph_builder import make_fwd_bwd_step
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
@@ -36,6 +35,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     construct_mandatory_graph_passes,
 )
 from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
+from torchtitan.experiments.graph_trainer.spmd_graph_builder import make_fwd_bwd_step
 from torchtitan.experiments.graph_trainer.trainer import (
     GraphTrainer,
     GraphTrainingEngine,
@@ -79,7 +79,7 @@ def build_minimal_trainer(
     model_config,
     trainer_cls: type[Trainer],
     *,
-    activation_checkpoint_mode: str = "none",
+    activation_remat: ActivationRematConfig | None = None,
     compile_enable_passes: bool = True,
     compile_passes: list[str] | None = None,
     compile_ep_overlap_enabled: bool = False,
@@ -91,6 +91,7 @@ def build_minimal_trainer(
     tokenizer=None,
     fsdp_reshard_after_forward: str = "default",
     parallelism_context: ParallelismContext,
+    max_num_documents: int | None = None,
 ) -> Trainer:
     """Build the minimal Trainer/GraphTrainer needed for single-GPU test steps."""
     trainer = object.__new__(trainer_cls)
@@ -103,12 +104,13 @@ def build_minimal_trainer(
     engine.device = torch.device("cuda")
     engine.preprocess_inputs_kwargs = {}
     trainer.tokenizer = tokenizer
-    trainer.dataloader = SimpleNamespace(max_num_documents=None)
-    engine.max_num_documents = None
+    trainer.dataloader = SimpleNamespace(max_num_documents=max_num_documents)
+    engine.max_num_documents = max_num_documents
     engine.ntokens_seen = 0
     engine.num_completed_steps = 0
     engine.sdc_replayer = None
-    engine.gc_handler = SimpleNamespace(run=lambda _step: False)
+    engine._cuda_graph_per_accumulation_group_enabled = False
+    engine.garbage_collector = SimpleNamespace(run=lambda _step: False)
     engine.optim = SimpleNamespace(zero_grad=model.zero_grad)
     engine.loss_metrics = {}
 
@@ -131,12 +133,8 @@ def build_minimal_trainer(
                 ),
             ),
             model=model_config,
-            activation_checkpoint={
-                "none": None,
-                "selective": SelectiveAC.Config(),
-                "full": FullAC.Config(),
-            }[activation_checkpoint_mode],
-            dataloader=SimpleNamespace(max_num_documents=None),
+            activation_remat=activation_remat,
+            dataloader=SimpleNamespace(max_num_documents=max_num_documents),
             debug=DebugConfig(),
             training=TrainingConfig(disable_cuda_graphs=True),
             parallelism=SimpleNamespace(
@@ -164,7 +162,7 @@ def build_minimal_trainer(
                     engine._traced_step = minimal_fx_tracer(fwd_bwd_fn, module=model,)(
                         inputs,
                         labels,
-                        loss_kwargs["global_valid_tokens"],
+                        loss_kwargs["global_loss_token_counts"],
                         model_kwargs,
                     )
                 if trainer.config.compile.enable_passes:
@@ -194,7 +192,7 @@ def build_minimal_trainer(
             outputs = engine._test_graph_call(
                 inputs,
                 labels,
-                loss_kwargs["global_valid_tokens"],
+                loss_kwargs["global_loss_token_counts"],
                 model_kwargs,
             )
             params = tuple(
@@ -208,7 +206,7 @@ def build_minimal_trainer(
             return outputs[0]
 
         def run_direct_graph_accumulation(
-            microbatch_groups, global_valid_tokens
+            microbatch_groups, global_loss_token_counts
         ) -> ForwardBackwardResult:
             """Run all groups through the test's unsplit graph adapter."""
             accumulated_loss = None
@@ -218,7 +216,7 @@ def build_minimal_trainer(
                     inputs=inputs,
                     labels=labels,
                     model_kwargs=model_kwargs,
-                    loss_kwargs={"global_valid_tokens": global_valid_tokens},
+                    loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
                 ).detach()
                 if accumulated_loss is None:
                     accumulated_loss = loss.clone()
@@ -233,7 +231,7 @@ def build_minimal_trainer(
         engine._run_forward_backward = run_direct_graph_accumulation
     else:
         trainer.config = SimpleNamespace(
-            dataloader=SimpleNamespace(max_num_documents=None),
+            dataloader=SimpleNamespace(max_num_documents=max_num_documents),
             debug=DebugConfig(),
             training=TrainingConfig(disable_cuda_graphs=True),
             parallelism=SimpleNamespace(

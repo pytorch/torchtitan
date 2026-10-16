@@ -77,7 +77,7 @@ tree and replaces matching nodes with the factory's output.
   model.
 - **Minimal surface.** The whole mechanism lives in
   `torchtitan/config/override.py`, reusing the `Configurable.Config.traverse()` +
-  replace pattern that the Float8 converter and LoRA transform already use.
+  replace pattern that quantization converters and the LoRA transform already use.
 
 ## How It Works
 
@@ -174,18 +174,13 @@ OverrideConfig(imports=["my_pkg.triton_rope.triton_rope"])                      
 OverrideConfig(imports=[("my_pkg.triton_rope.triton_rope", {"block_size": 256})])
 ```
 
-(The RL trainer and generator use this to activate one HybridEP dispatch override
-with opposite `capacity_factor` values — blocking `None` for the trainer, a float
-for the CUDA-graph-capturing generator — instead of two modules or a hardcoded
-per-actor branch.)
-
 The factory declares the keyword parameters it accepts (or `**kwargs`); a kwarg
 it does not accept raises rather than silently no-op'ing. On the CLI, attach
 kwargs to the target as `target=<json-object>` (quote it as a single shell token;
 `my_pkg.triton_rope.triton_rope` is a placeholder for your own override):
 
 ```bash
-torchtitan_train --module torchtitan_recipes.models.llama3 --config llama3_8b \
+python -m torchtitan.train --module torchtitan_recipes.models.llama3 --config llama3_8b \
     --override 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
 ```
 
@@ -198,16 +193,16 @@ the override package and defeat the no-touch goal.
 
 ```bash
 # Replace the torch-native SwiGLU activation with the Triton implementation:
-torchtitan_train --module torchtitan_recipes.models.llama3 --config llama3_8b \
+python -m torchtitan.train --module torchtitan_recipes.models.llama3 --config llama3_8b \
     --override torchtitan_recipes.overrides.fused_swiglu.fused_swiglu
 
 # Async tensor-parallel linear subclasses are preserved by the same override:
-torchtitan_train --module torchtitan_recipes.tests.models.llama3 --config llama3_debugmodel_dist_gemm \
+python -m torchtitan.train --module torchtitan_recipes.tests.models.llama3 --config llama3_debugmodel_dist_gemm \
     --override torchtitan_recipes.overrides.fused_swiglu.fused_swiglu
 
 # A target with per-entry kwargs -- attached as target=<json>, quoted as one
 # shell token (my_pkg.triton_rope.triton_rope is a placeholder for your override):
-torchtitan_train --module torchtitan_recipes.models.llama3 --config llama3_8b \
+python -m torchtitan.train --module torchtitan_recipes.models.llama3 --config llama3_8b \
     --override 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
 ```
 
@@ -233,15 +228,20 @@ In `Trainer.__init__`, before any component is built:
 7. Log every replacement.
 
 ```
-INFO: [Override] fused_swiglu: model.layers.0.feed_forward FeedForward.Config -> FeedForward.Config
-INFO: [Override] fused_swiglu: model.layers.1.feed_forward FeedForward.Config -> FeedForward.Config
+INFO: [Override] fused_swiglu: model.layers.0.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
+INFO: [Override] fused_swiglu: model.layers.1.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
 ...
 INFO: Applied 32 override(s)
 ```
 
 The model config is a `Configurable.Config` nested directly at `model` in the
 trainer config. FQNs are kept as full paths from the `Trainer.Config` root, so a
-component is `model.layers.0.feed_forward`. Preserving the full path (rather
+component is `model.layers.0.feed_forward`. An RL `Controller.Config` holds an
+`override` field too, applied to its whole tree before actors spawn; there the
+same component is both `trainer.model.layers.0.feed_forward` and
+`generator.model.layers.0.feed_forward`, so an override changes both models.
+Settings that must differ between the RL trainer and generator (for example the
+MoE token dispatcher) belong in per-role model config transforms instead. Preserving the full path (rather
 than resetting to bare model names) lets per-node conflict detection recognize
 a whole-model override as an ancestor of a component override. (This differs
 from converter `filter_fqns`, which are bare because converters traverse the
@@ -263,7 +263,7 @@ def vendor_x_moe(cfg: MoE.Config) -> "VendorXFusedMoE.Config":
 
 ```bash
 pip install torchtitan-vendor-x
-torchtitan_train --module torchtitan_recipes.models.deepseek_v3 --config deepseek_v3_671b \
+python -m torchtitan.train --module torchtitan_recipes.models.deepseek_v3 --config deepseek_v3_671b \
     --override vendor_x.overrides.vendor_x_moe
 ```
 
@@ -311,7 +311,7 @@ def nvfp4_linear(cfg: Linear.Config) -> "NVFP4Linear.Config":
     return NVFP4Linear.Config(in_features=cfg.in_features, ...)
 
 # Fused MoE only on the later layers
-@override(target=MoE.Config, fqns=["*.layers.1[0-9].moe"])
+@override(target=MoE.Config, fqns=["*.layers.1[0-9].feed_forward"])
 def vendor_moe(cfg: MoE.Config) -> "VendorMoE.Config":
     return VendorMoE.Config(num_experts=cfg.num_experts, ...)
 ```
@@ -340,11 +340,11 @@ This same rule answers the parent/child question directly. Say override A
 targets a parent Config (e.g. `MoE.Config`) and override B targets a Config
 nested inside it (e.g. `GroupedLinear.Config`):
 
-- **Disjoint subtrees** (A on `...layers.0.moe`, B on
-  `...layers.1.moe.routed_experts.w13`) — the claimed nodes are
+- **Disjoint subtrees** (A on `...layers.0.feed_forward`, B on
+  `...layers.1.feed_forward.routed_experts.w13`) — the claimed nodes are
   unrelated, so both apply.
-- **Overlapping** (A on `...layers.0.moe`, B on
-  `...layers.0.moe.routed_experts.w13`) — B's node is inside A's, the
+- **Overlapping** (A on `...layers.0.feed_forward`, B on
+  `...layers.0.feed_forward.routed_experts.w13`) — B's node is inside A's, the
   ancestor case above, so we **error**.
 
 We error rather than pick one of the two plausible behaviors implicitly:
@@ -372,7 +372,7 @@ because it is a `Configurable.Config` subclass.
 
 ## Interaction with Converters and Transforms
 
-In-repo converters such as Float8 run first inside `build_model_config()` during
+In-repo quantization converters run first inside `build_model_config()` during
 config construction. Model config transforms such as LoRA run afterward when
 the recipe calls `apply_transforms`. Overrides run later in `Trainer.__init__`
 and see the post-converter, post-transform tree. The order is deliberate:
@@ -384,14 +384,14 @@ machinery.
 
 | Override Target | Conflicts with a converter? | Notes |
 |-----------------|------------------------------|-------|
-| RoPE / FeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
-| GroupedLinear.Config | Possibly | `Float8GroupedLinearConverter` rewrites this |
-| Linear.Config | Yes | Float8 and LoRA can replace these |
+| RoPE / DenseFeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
+| GroupedLinear.Config | Possibly | Quantization converters can rewrite this |
+| Linear.Config | Yes | Quantization and LoRA can replace these |
 
 Where a converter already rewrote a node, target that node by location with
 `fqns` so the override only claims the instances you intend (e.g. specific
 layers the converter left as plain `Linear.Config`). Field/type-based exclusion
-— "skip instances already turned into `Float8Linear.Config`" — is not expressible
+-- "skip instances already turned into a quantized config" -- is not expressible
 with FQN globs alone and motivates the future predicate selector.
 
 ### Override vs. converter: which to use
@@ -411,14 +411,16 @@ checkpoint FQNs. By default an override checkpoints whatever real parameters it
 defines. Keep format-specific layout conversion in a model-level
 `BaseStateDictAdapter` (for example, `Llama3StateDictAdapter` converts native
 `w13.weight` into Hugging Face `gate_proj.weight` and `up_proj.weight`). This
-keeps native DCP checkpoints and per-step RL weight synchronization in the
+keeps native DCP checkpoints and per-step RL model state dict pushes in the
 model's physical layout without hook-produced copies.
 
 ## Parallelism
 
 Parallelism is expressed entirely through the `Module` protocol: a replacement
 satisfies `init_states` and declares a `ShardingConfig` for the states and
-activations it wants sharded. `Module._parallelize()` reads that `ShardingConfig`
+activations it wants sharded. The matched config is already sharded for its
+parallelism (`build_model_config(..., parallelism=...)`), so a replacement keeps
+the matched `sharding_config` (`derive` copies it) or sets the sharding it needs. `Module._parallelize()` reads that `ShardingConfig`
 exactly as it does for core modules, so an override composes with TP/FSDP by
 declaring its own sharding — nothing model-specific is required, and the
 mechanism deliberately stays config-driven rather than depending on imperative
@@ -428,7 +430,7 @@ One thing worth stating plainly:
 
 - **Fusion under TP.** Fusing weights can interact subtly with tensor
   parallelism -- the fused tensor's row order must admit a correct shard.
-  The default `FeedForward` stores a `Linear` weight
+  The default `DenseFeedForward` stores a `Linear` weight
   `(2, hidden, dim)`. Sharding dimension 1 gives each TP rank matching feature
   slices of the gate and up projections while keeping their rows in separate
   contiguous slabs. The output retains the same `(2, hidden)` structure. This
@@ -473,11 +475,11 @@ for the full recipe.
 
 - `torchtitan_recipes/overrides/fused_swiglu.py` -- **the custom Triton activation
   example.** It replaces the default torch-native SiLU and multiply operations
-  while retaining the core `FeedForward` parameter layout and checkpoint
+  while retaining the core `DenseFeedForward` parameter layout and checkpoint
   behavior. Because the override targets `SwiGLU.Config`, it also applies to
   grouped experts and dist-GEMM feed-forwards that use that activation.
 - `torchtitan_recipes/overrides/helion_rope.py` — **the custom-kernel example.** Swaps
-  `CosSinRoPE` for a fused Helion kernel (forward + backward) wrapped in a
+  `ComplexRoPE` for a fused Helion kernel (forward + backward) wrapped in a
   `torch.library.custom_op` (with `register_fake` / `register_autograd`), the
   recipe from "Custom kernels and `torch.compile`". `helion` is an optional
   dependency, so the module imports without it and falls back to the PyTorch RoPE
@@ -493,10 +495,11 @@ RoPE is an ordinary component override.
 |------|------|
 | `torchtitan/config/override.py` | The mechanism: `OverrideConfig`, `Override`, `override`, `derive`, `apply_overrides`, `clear_overrides`. |
 | `torchtitan/config/__init__.py` | Re-exports the override API. |
-| `torchtitan/protocols/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
+| `torchtitan/models/base/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field and applies recipe-provided overrides before builds. |
+| `torchtitan/rl/controller/controller.py` | Holds the RL `override` field and applies it to the trainer and generator models before spawning actors. |
 | `torchtitan_recipes/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
-| `tests/unit_tests/cpu/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
+| `tests/unit_tests/cpu/config/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
 
 Overriding a component requires no changes to a recipe or model package; that
 is the point of the design.
@@ -527,4 +530,4 @@ is the point of the design.
 
 - **Predicate `fqns` selector.** A `(fqn, cfg) -> bool` selector to complement
   the glob strings, enabling field/type-based selection (e.g. skipping linears a
-  converter already turned into `Float8Linear.Config`).
+  converter already turned into a quantized config).

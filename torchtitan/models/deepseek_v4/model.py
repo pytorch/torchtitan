@@ -4,36 +4,38 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
-from typing import Any, cast, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import cast, TYPE_CHECKING
 
+import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.base.module import ModuleList
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    create_varlen_metadata_for_document,
-    VarlenMetadata,
+    AttentionMetadataMap,
+    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.flops import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
     roll_mtp_sequence,
 )
-from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
-from torchtitan.protocols.module import ModuleList
 
+from .attention import DeepSeekV4Attention
 from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 if TYPE_CHECKING:
-    from .attention import Attention  # noqa: F401
     from .mtp import MTPBlock
 
 
@@ -41,7 +43,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
     """Transformer block with HC pre/post mixing around attention and FFN."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config["Attention.Config"]):
+    class Config(TransformerBlock.Config[DeepSeekV4Attention.Config]):
         hc_attn_pre: HcPre.Config
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
@@ -53,15 +55,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         self.attention = cfg.attention.build()
         self.attention_norm = cfg.attention_norm.build()
         self.ffn_norm = cfg.ffn_norm.build()
-        if cfg.moe is not None:
-            assert cfg.moe is not None
-            self.moe = cfg.moe.build()
-            self.moe_enabled = True
-        else:
-            assert cfg.feed_forward is not None
-            self.moe = None
-            self.feed_forward = cfg.feed_forward.build()
-            self.moe_enabled = False
+        self.feed_forward = cfg.feed_forward.build()
 
         self.hc_attn_pre = cfg.hc_attn_pre.build()
         self.hc_ffn_pre = cfg.hc_ffn_pre.build()
@@ -71,18 +65,19 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         self,
         x: torch.Tensor,
         input_ids_T: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ):
         """Run one DeepSeek V4 decoder block.
 
         Args:
             x: Hidden states of shape ``[T, hc_mult, D]``.
             input_ids_T: Token IDs of shape ``[T]`` used by hash routing.
-            attention_masks: Optional decoder mask handle; sparse attention may
-                ignore it and build masks internally.
+            attention_metadata: Optional document offsets consumed by sparse
+                attention.
             positions: Optional position IDs of shape ``[T]``.
 
         Returns:
@@ -90,23 +85,37 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         """
         residual = x
         x, post, comb = self.hc_attn_pre(x)
-        x = self.attention(self.attention_norm(x), attention_masks, positions)
+        x = self.attention(
+            self.attention_norm(x),
+            attention_metadata,
+            positions,
+            aux_loss_denominator=aux_loss_denominator,
+            padding_mask=padding_mask,
+        )
+        # hc_post reads the attention output (wo_b projection) with bare ops.
+        remat.recompute_needs_tensor(x)
         x = self.hc_post(x, residual, post, comb)
         residual = x
         x, post, comb = self.hc_ffn_pre(x)
-        if self.moe_enabled:
-            assert self.moe is not None
+        if isinstance(self.feed_forward, MoE):
             ffn_input = self.ffn_norm(x)
-            if getattr(self.moe.router, "hash", False):
-                x = self.moe(
+            if getattr(self.feed_forward.router, "hash", False):
+                x = self.feed_forward(
                     ffn_input,
                     padding_mask_T=padding_mask,
+                    aux_loss_denominator=aux_loss_denominator,
                     input_ids_T=input_ids_T,
                 )
             else:
-                x = self.moe(ffn_input, padding_mask_T=padding_mask)
+                x = self.feed_forward(
+                    ffn_input,
+                    padding_mask_T=padding_mask,
+                    aux_loss_denominator=aux_loss_denominator,
+                )
         else:
             x = self.feed_forward(self.ffn_norm(x))
+        # hc_post reads the MoE / feed-forward output with bare ops.
+        remat.recompute_needs_tensor(x)
         x = self.hc_post(x, residual, post, comb)
         return x
 
@@ -116,13 +125,17 @@ class DeepSeekV4Model(Decoder):
 
     """DeepSeek V4 decoder model with HC branches and sparse attention."""
 
+    mtp_layers: "ModuleList[MTPBlock]"
+
     @classmethod
     def _register_optimizer_hooks(
         cls, optimizers, model_parts, parallelism_context
     ) -> None:
+        from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
         from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+        register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
     def _apply_fsdp(
         self,
@@ -159,6 +172,13 @@ class DeepSeekV4Model(Decoder):
     class Config(Decoder.Config[DeepSeekV4TransformerBlock.Config]):
         dim: int
         vocab_size: int
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: [
+                "loss",
+                "fused_binary_activation",
+                "fp32_to_bf16_split",
+            ]
+        )
         hc_mult: int = 4
         n_mtp_layers: int = 0
         compress_ratios: tuple[int, ...] = (1, 1, 4, 4)
@@ -217,15 +237,6 @@ class DeepSeekV4Model(Decoder):
 
             return nparams, 6 * active_nparams + attention_op_flops
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_deepseek_v4_sharding_config
-
-            set_deepseek_v4_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size
 
@@ -261,66 +272,13 @@ class DeepSeekV4Model(Decoder):
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
 
-    def get_attention_masks(
-        self,
-        positions,
-        *,
-        padding_mask=None,
-        max_num_documents=None,
-        max_context_length=None,
-    ):
-        # gather_attn, the indexer, and the compressors all consume the same
-        # per-document offsets; padding segments become their own documents.
-        return create_varlen_metadata_for_document(
-            positions,
-            padding_mask=padding_mask,
-            max_num_documents=max_num_documents,
-            max_context_length=max_context_length,
-        )
-
-    def preprocess_inputs(
-        self,
-        input_dict: dict[str, Any],
-        *,
-        parallelism_context: ParallelismContext,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-        **kwargs: Any,
-    ):
-        """Build document offsets, then run the shared decoder preprocessing.
-
-        ``Decoder.preprocess_inputs`` calls ``get_attention_masks`` only for
-        Flex/Varlen cores, which DeepSeek V4 does not use.
-        """
-        positions = input_dict.get("positions")
-        if positions is not None:
-            input_dict["attention_masks"] = self.get_attention_masks(
-                positions,
-                padding_mask=input_dict.get("padding_mask"),
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
-            )
-        inputs, labels, input_dict = super().preprocess_inputs(
-            input_dict,
-            parallelism_context=parallelism_context,
-            max_num_documents=max_num_documents,
-            max_context_length=max_context_length,
-            **kwargs,
-        )
-        # The offsets sit inside VarlenMetadata, out of reach of the named-input
-        # annotation in Decoder.preprocess_inputs.
-        attention_masks = input_dict.get("attention_masks")
-        if isinstance(attention_masks, VarlenMetadata):
-            with parallelism_context.activate_spmd():
-                attention_masks.annotate_spmd_types()
-        return inputs, labels, input_dict
-
     def forward(
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
@@ -335,14 +293,24 @@ class DeepSeekV4Model(Decoder):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         h = h.unsqueeze(1).repeat(1, self.hc_mult, 1)
 
+        with spmd.no_typecheck():
+            main_aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
         for i in range(self.n_main_layers):
             layer = self.layers[str(i)]
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(type(layer.attention.inner_attention))
+            )
             h = layer(
                 h,
                 input_ids_T,
-                attention_masks,
+                layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
+                aux_loss_denominator=main_aux_loss_denominator,
             )
 
         prev_hc_hidden = h
@@ -357,21 +325,23 @@ class DeepSeekV4Model(Decoder):
         outputs = [main_hidden] + self.mtp_forward(
             prev_hc_hidden,
             tokens,
-            attention_masks,
+            attention_metadata,
             positions,
             padding_mask,
+            aux_loss_denominators,
         )
-        return [
+        return tuple(
             self.lm_head(item) if self.lm_head is not None else item for item in outputs
-        ]
+        )
 
     def mtp_forward(
         self,
         prev_hc_hidden: torch.Tensor,
         tokens: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
         """Run auxiliary MTP depths and return prediction hidden states."""
         mtp_outputs = []
@@ -384,14 +354,26 @@ class DeepSeekV4Model(Decoder):
                 padding_mask=padding_mask,
                 return_valid_mask=True,
             )
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(type(mtp_block.attention.inner_attention))
+            )
+            with spmd.no_typecheck():
+                aux_loss_denominator = (
+                    None
+                    if aux_loss_denominators is None
+                    else aux_loss_denominators[depth]
+                )
             prev_hc_hidden, prediction_hidden = mtp_block(
                 self.tok_embeddings(mtp_tokens),
                 prev_hc_hidden,
                 mtp_tokens.detach().long(),
                 valid_mask,
-                attention_masks,
+                layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
             )
             mtp_outputs.append(prediction_hidden)
         return mtp_outputs

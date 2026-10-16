@@ -14,7 +14,8 @@ trap 'rm -rf "${DEEPEP_V2_DIR}"' EXIT
 sudo apt-get update -qq
 sudo apt-get install -y -qq rdma-core libibverbs1 libmlx5-1 libibverbs-dev
 
-git clone --recursive https://github.com/deepseek-ai/DeepEP.git "${DEEPEP_V2_DIR}"
+# No --recursive: DeepEP main has an SSH-only submodule. The pin's submodules are fetched below.
+git clone https://github.com/deepseek-ai/DeepEP.git "${DEEPEP_V2_DIR}"
 git -C "${DEEPEP_V2_DIR}" checkout "${DEEPEP_V2_COMMIT}"
 git -C "${DEEPEP_V2_DIR}" submodule update --init --recursive
 

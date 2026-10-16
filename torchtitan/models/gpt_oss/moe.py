@@ -10,33 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch_remat as remat
 from torch import nn
 
-from torchtitan.models.common.activation import BinaryActivationFn
 from torchtitan.models.common.linear import GroupedLinear
-
-
-class GptOssSwiGLU(BinaryActivationFn):
-    """GPT-OSS clamped SwiGLU activation."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(BinaryActivationFn.Config):
-        swiglu_limit: float = 7.0
-
-    def __init__(self, config: Config):
-        self.swiglu_limit = config.swiglu_limit
-
-    def __call__(
-        self,
-        gate_RF: torch.Tensor,
-        up_RF: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        del kwargs
-        gate_RF = gate_RF.clamp(max=self.swiglu_limit)
-        up_RF = up_RF.clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
-        silu_RF = gate_RF * torch.sigmoid(1.702 * gate_RF)
-        return torch.addcmul(silu_RF, silu_RF, up_RF)
 
 
 class GptOssGroupedLinear(GroupedLinear):
@@ -52,6 +29,8 @@ class GptOssGroupedLinear(GroupedLinear):
 
     def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
         output_RO = super().forward(input_RI, offsets_E)
+        # The bias add below reads the grouped_mm output with bare ops.
+        remat.recompute_needs_tensor(output_RO)
         bias_RO = self._expand_grouped_bias(
             self.bias.flatten(1), offsets_E, output_RO.shape[0]
         ).reshape_as(output_RO)

@@ -8,20 +8,26 @@ import copy
 import operator
 from dataclasses import dataclass
 
+import torch
 import torch.fx as fx
 from torch._functorch.partitioners import (
     _extract_fwd_bwd_outputs,
     _extract_graph_with_inputs_outputs,
+    _free_symbols_without_replacements,
     is_sym_node,
 )
 from torch.fx._lazy_graph_module import _make_graph_module
+from torch.fx.experimental.symbolic_shapes import (
+    find_symbol_binding_fx_nodes,
+    free_symbols,
+)
 
+from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     is_fake_tensor_node,
     output_names,
     placeholder_names,
     rename_placeholder,
-    trace_graph_pp_graph,
     unique_in_order,
 )
 
@@ -91,6 +97,12 @@ def _collect_saved_values_for_dw(
     di_graph: fx.Graph,
     dw_output_nodes: list[fx.Node] | None = None,
 ) -> tuple[list[fx.Node], list[fx.Node]]:
+    """Return the values and SymInts that the dW graph needs from dI.
+
+    The SymInts include the binding node for every symbol referenced by the
+    returned values, mirroring the backward-input symbol binding in
+    ``torch._functorch.partitioners._extract_fwd_bwd_modules``.
+    """
     di_node_names = {node.name for node in di_graph.nodes if node.op != "output"}
     dw_output_set = set(dw_output_nodes or ())
     saved_values: list[fx.Node] = []
@@ -142,10 +154,46 @@ def _collect_saved_values_for_dw(
             else:
                 saved_values.append(node)
 
+    # Inductor binds graph-input symbols only from SymInt inputs or from
+    # single-symbol tensor sizes/strides, so a live-in shaped (u0 + u1, D),
+    # such as MoE tokens received from an EP all-to-all, needs u0/u1 saved too.
+    symbol_bindings = find_symbol_binding_fx_nodes(bw_gm.graph)
+    for node in [*saved_values, *saved_sym_nodes]:
+        val = node.meta.get("val")
+        symbols = _free_symbols_without_replacements(val) | free_symbols(val)
+        saved_sym_nodes.extend(
+            symbol_bindings[symbol]
+            for symbol in sorted(symbols, key=lambda s: s.name)
+            if symbol in symbol_bindings
+        )
+
     return (
         unique_in_order(saved_values),
         unique_in_order(saved_sym_nodes),
     )
+
+
+def _add_symint_live_in_uses(dw_graph: fx.Graph) -> None:
+    """Give each unused SymInt live-in of the dW graph an explicit use.
+
+    SymInts that only bind symbols of other dW live-in shapes have no users,
+    and ``regional_inductor`` only makes FX-used nodes inputs of a compiled
+    region. ``sym_constrain_range_for_size`` records that each one is a size;
+    it is side-effectful, so DCE keeps it, and Inductor decomposes it away.
+
+    TODO: Drop once ``regional_inductor`` passes symbol-binding inputs into
+    regions itself.
+    """
+    first_op = next(node for node in dw_graph.nodes if node.op != "placeholder")
+    for placeholder in list(dw_graph.find_nodes(op="placeholder")):
+        val = placeholder.meta.get("val")
+        if placeholder.users or not isinstance(val, torch.SymInt):
+            continue
+        with dw_graph.inserting_before(first_op):
+            use = dw_graph.call_function(
+                torch.ops.aten.sym_constrain_range_for_size.default, (placeholder,)
+            )
+        use.meta["val"] = None
 
 
 def split_di_dw_graph(
@@ -171,7 +219,8 @@ def split_di_dw_graph(
       ``num_param_grads`` is the leading output count for parameter gradients.
       ``input_grads_to_prev`` are remaining backward outputs sent to the
       previous PP stage. ``dw_live_ins`` are values computed by bw_di that the
-      dW graph still needs. ``saved_sym_nodes`` carries symbolic shape live-ins.
+      dW graph still needs. ``saved_sym_nodes`` carries symbolic shape live-ins,
+      including bindings for every symbol in the dW live-in shapes.
 
     If a stage has no input grads, GraphPP skips ``BACKWARD_INPUT`` and keeps
     the original full backward graph for ``BACKWARD_WEIGHT``. This pass runs
@@ -208,7 +257,7 @@ def split_di_dw_graph(
     num_input_grads = _reorder_backward_outputs_for_di(
         bw_gm, num_param_grads=num_param_grads
     )
-    trace_graph_pp_graph("graph_pp_split_di_dw_input", bw_gm)
+    tlparse_log_graph_pass(bw_gm, graph_name="graph_pp_split_di_dw_input")
     if num_input_grads == 0:
         return None
 
@@ -249,14 +298,15 @@ def split_di_dw_graph(
         "bw_dw",
         ignore_must_be_in_fw_bw=True,
     )
+    _add_symint_live_in_uses(bw_dw_graph)
     bw_di_module = _make_graph_module(bw_gm, bw_di_graph)
     bw_dw_module = _make_graph_module(bw_gm, bw_dw_graph)
     bw_di_module.graph.lint()
     bw_dw_module.graph.lint()
     bw_di_module.recompile()
     bw_dw_module.recompile()
-    trace_graph_pp_graph("graph_pp_bw_di", bw_di_module)
-    trace_graph_pp_graph("graph_pp_bw_dw", bw_dw_module)
+    tlparse_log_graph_pass(bw_di_module, graph_name="graph_pp_bw_di")
+    tlparse_log_graph_pass(bw_dw_module, graph_name="graph_pp_bw_dw")
 
     return GraphPPDiDwSplit(
         bw_di_module=bw_di_module,

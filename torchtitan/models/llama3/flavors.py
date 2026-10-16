@@ -11,6 +11,7 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
@@ -28,6 +29,12 @@ from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
     make_gqa_config,
+)
+from torchtitan.models.common.decoder_sharding import (
+    lm_head_sharding_config,
+    norm_sharding_config,
+    pre_lm_head_norm_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 
@@ -73,17 +80,25 @@ def _build_llama3_layers(
     rope: RoPE.Config,
     n_kv_heads: int | None = None,
     attn_backend: str,
+    enable_sp: bool,
 ) -> list[Llama3TransformerBlock.Config]:
-    """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
+    """Build sharded per-layer TransformerBlock configs with depth-scaled inits."""
     inner_attention = get_attention_config(attn_backend)
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     layers = []
     for layer_id in range(n_layers):
         layers.append(
             Llama3TransformerBlock.Config(
                 attention_norm=RMSNorm.Config(
-                    normalized_shape=dim, param_init=_NORM_INIT
+                    normalized_shape=dim,
+                    param_init=_NORM_INIT,
+                    sharding_config=norm_sharding,
                 ),
-                ffn_norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+                ffn_norm=RMSNorm.Config(
+                    normalized_shape=dim,
+                    param_init=_NORM_INIT,
+                    sharding_config=norm_sharding,
+                ),
                 attention=make_gqa_config(
                     dim=dim,
                     n_heads=n_heads,
@@ -92,12 +107,14 @@ def _build_llama3_layers(
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
                     rope=rope,
+                    enable_sp=enable_sp,
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
-                    w1_param_init=_LINEAR_INIT,
-                    w2w3_param_init=_depth_init(layer_id),
+                    w13_param_init=_LINEAR_INIT,
+                    w2_param_init=_depth_init(layer_id),
+                    enable_sp=enable_sp,
                 ),
             )
         )
@@ -108,6 +125,7 @@ def _debugmodel(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
     n_heads: int = 16,
 ) -> Llama3Model.Config:
     dim = 256
@@ -117,11 +135,25 @@ def _debugmodel(
         dim=dim,
         vocab_size=2048,
         tok_embeddings=Embedding.Config(
-            num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=2048,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         lm_head=Linear.Config(
-            in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
+            in_features=dim,
+            out_features=2048,
+            param_init=_output_linear_init(dim),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
@@ -135,6 +167,7 @@ def _debugmodel(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
@@ -143,6 +176,7 @@ def _1b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Llama3Model.Config:
     dim = 2048
     n_heads = 32
@@ -158,12 +192,22 @@ def _1b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
@@ -180,6 +224,7 @@ def _1b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
@@ -188,6 +233,7 @@ def _3b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Llama3Model.Config:
     dim = 3072
     n_heads = 24
@@ -203,12 +249,22 @@ def _3b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
@@ -225,6 +281,7 @@ def _3b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
@@ -233,6 +290,7 @@ def _8b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Llama3Model.Config:
     dim = 4096
     n_heads = 32
@@ -244,13 +302,25 @@ def _8b(
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
@@ -267,6 +337,7 @@ def _8b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
@@ -275,6 +346,7 @@ def _70b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Llama3Model.Config:
     dim = 8192
     n_heads = 64
@@ -286,13 +358,25 @@ def _70b(
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
@@ -309,6 +393,7 @@ def _70b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
@@ -317,6 +402,7 @@ def _405b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Llama3Model.Config:
     dim = 16384
     n_heads = 128
@@ -328,13 +414,25 @@ def _405b(
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
@@ -351,6 +449,7 @@ def _405b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
@@ -371,8 +470,9 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig,
     seq_len: int | None = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Llama3Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
@@ -385,6 +485,7 @@ def build_model_config(
     config = get_config(
         attn_backend=attn_backend,
         seq_len=context_len,
+        parallelism=parallelism,
     )
     if converters is not None:
         validate_converter_compatibility(converters)

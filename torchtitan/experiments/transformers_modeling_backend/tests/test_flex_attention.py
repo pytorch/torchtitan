@@ -8,7 +8,7 @@
 
 When samples are packed into one sequence, attention must not cross document
 boundaries. Flex attention with a document BlockMask expresses that. This
-verifies that the document mask the backend builds (``get_attention_masks``)
+verifies that the document mask the backend builds (``get_attention_metadata``)
 actually blocks cross-document attention through the backend's flex function
 (``_flex_attention_torchtitan``): perturbing an earlier document's keys/values
 must leave a later document's output bit-identical.
@@ -43,7 +43,7 @@ class TestFlexCrossDocumentLeakage(unittest.TestCase):
 
         # Packed positions: two documents, position resets to 0 at the boundary.
         positions = torch.tensor(list(range(len_a)) + list(range(len_b)), device=device)
-        # The same document-causal BlockMask the model builds in get_attention_masks.
+        # The same document-causal BlockMask the model builds in get_attention_metadata.
         mask_mod = and_masks(
             get_causal_mask_mod(),
             get_document_mask_mod(positions),

@@ -6,6 +6,7 @@
 
 """DeepSeek V3 GraphTrainer configurations used by tests."""
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     MXFP8GroupedLinearConverter,
@@ -21,20 +22,31 @@ from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
 )
 
-from torchtitan_recipes.tests.models.deepseek_v3 import (
-    deepseek_v3_debugmodel,
+from torchtitan_recipes.graph_trainer.deepseek_v3 import _dist_moe_graph_config
+from torchtitan_recipes.models.deepseek_v3 import (
     deepseek_v3_mxfp8_linear_converter_config,
 )
 
+from torchtitan_recipes.tests.models.deepseek_v3 import (
+    deepseek_v3_16b_dist_moe_bf16,
+    deepseek_v3_16b_dist_moe_mxfp8,
+    deepseek_v3_debugmodel,
+    deepseek_v3_debugmodel_dist_moe_bf16,
+    deepseek_v3_debugmodel_dist_moe_mxfp8,
+)
 
-def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
+
+def graph_trainer_deepseek_v3_debugmodel(
+    *, parallelism: ParallelismConfig | None = None
+) -> GraphTrainer.Config:
     config = to_graph_trainer_config(
-        deepseek_v3_debugmodel(),
+        deepseek_v3_debugmodel(attn_backend="flex", parallelism=parallelism),
         GraphTrainerDeepSeekV3Model.Config,
     )
     config.compile = GraphTrainerCompileConfig()
@@ -48,14 +60,12 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
         "debugmodel",
         seq_len=base.training.max_context_length,
         converters=[
-            deepseek_v3_mxfp8_linear_converter_config(
-                model_compile_enabled=True,
-            ),
+            deepseek_v3_mxfp8_linear_converter_config(),
             MXFP8GroupedLinearConverter.Config(
-                model_compile_enabled=True,
                 pad_multiple=128,
             ),
         ],
+        parallelism=base.parallelism,
     )
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig()
@@ -63,21 +73,65 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
 
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(
-        deepseek_v3_debugmodel(), GraphTrainerDeepSeekV3Model.Config
+    base = deepseek_v3_debugmodel(
+        attn_backend="flex", parallelism=ParallelismConfig(expert_parallel_degree=2)
     )
-    config.compile = GraphTrainerCompileConfig()
-    config.parallelism.expert_parallel_degree = 2
-    config.model = build_model_config(
+    base.model = build_model_config(
         "debugmodel",
-        seq_len=config.training.max_context_length,
+        attn_backend="flex",
+        seq_len=base.training.max_context_length,
+        parallelism=base.parallelism,
     )
+    config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
+    config.compile = GraphTrainerCompileConfig()
+    # HybridEP's non-blocking dispatch has no CPU sync, so CUDA graphs stay on.
+    config.training.disable_cuda_graphs = False
     return apply_transforms(
         config,
         [
             TokenDispatcherTransform(
                 dispatcher=HybridEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
                 kwargs={"non_blocking_capacity_factor": 1.0},
             )
         ],
     )
+
+
+def graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> GraphTrainer.Config:
+    """Build the debug BF16 Dist-MoE GraphTrainer test recipe."""
+    return _dist_moe_graph_config(
+        deepseek_v3_debugmodel_dist_moe_bf16(seq_len=seq_len, parallelism=parallelism)
+    )
+
+
+def graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> GraphTrainer.Config:
+    """Build the debug MXFP8 Dist-MoE GraphTrainer test recipe."""
+    return _dist_moe_graph_config(
+        deepseek_v3_debugmodel_dist_moe_mxfp8(seq_len=seq_len, parallelism=parallelism)
+    )
+
+
+def graph_trainer_deepseek_v3_16b_dist_moe_bf16() -> GraphTrainer.Config:
+    """Build the 16B BF16 Dist-MoE GraphTrainer test recipe."""
+    return _dist_moe_graph_config(deepseek_v3_16b_dist_moe_bf16(seq_len=4096))
+
+
+def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8() -> GraphTrainer.Config:
+    """Build the 16B MXFP8 Dist-MoE GraphTrainer test recipe."""
+    return _dist_moe_graph_config(deepseek_v3_16b_dist_moe_mxfp8(seq_len=4096))

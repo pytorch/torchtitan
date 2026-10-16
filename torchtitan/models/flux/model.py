@@ -1,0 +1,458 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Shape suffixes: T = packed tokens.
+
+from dataclasses import dataclass, field
+from typing import Any, cast, Self
+
+import spmd_types as spmd
+import torch
+import torch_remat as remat
+from torch import nn, Tensor
+
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import context_parallel
+from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.spmd_types import (
+    annotate_replicated_parameters,
+    spmd_mesh_size,
+)
+from torchtitan.models.base import BaseModel
+from torchtitan.models.base.module import Module, ModuleList
+from torchtitan.models.common.attention import (
+    VarlenAttentionMetadata,
+    VarlenInnerAttention,
+)
+from torchtitan.models.common.flops import quadratic_attention_flops_per_token
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.flux.autoencoder import AutoEncoder
+from torchtitan.models.flux.hf_embedder import FluxEmbedder
+
+from torchtitan.models.flux.layers import (
+    DoubleStreamBlock,
+    EmbedND,
+    LastLayer,
+    local_split_text_image,
+    MLPEmbedder,
+    SingleStreamBlock,
+    timestep_embedding,
+)
+from torchtitan.models.flux.sharding import (
+    annotate_flux_forward_inputs,
+    flux_input_sharding,
+)
+from torchtitan.models.flux.utils import (
+    create_position_encoding_for_latents,
+    pack_latents,
+    preprocess_data,
+)
+
+from .state_dict_adapter import FluxStateDictAdapter
+
+
+@spmd.local_map(
+    in_types=(
+        spmd.PartitionSpec("dp", "cp", None),
+        spmd.PartitionSpec("dp", "cp", None),
+    ),
+    out_types=spmd.PartitionSpec("dp", "cp", None),
+)
+def local_concat_text_image(text: Tensor, image: Tensor) -> Tensor:
+    return torch.cat((text, image), dim=1)
+
+
+def _get_attention_metadata(
+    attention_config: VarlenInnerAttention.Config,
+    batch_size: int,
+    seq_len: int,
+    *,
+    device: torch.device,
+) -> VarlenAttentionMetadata:
+    """Treat each sample as one sequence, with local Q and CP-gathered K/V."""
+    positions_T = torch.arange(seq_len, device=device, dtype=torch.int32).repeat(
+        batch_size
+    )
+    metadata = attention_config.build_attention_metadata(
+        positions_T,
+        max_num_documents=batch_size,
+        max_context_length=seq_len,
+    )
+    cp_size = spmd_mesh_size(MeshAxisName.CP)
+    return metadata._replace(
+        cu_seq_k=metadata.cu_seq_k * cp_size,
+        max_k=metadata.max_k * cp_size,
+    )
+
+
+class FluxModel(BaseModel):
+    state_dict_adapter_cls = FluxStateDictAdapter
+    supports_pipeline_parallel = False
+
+    """
+    Transformer model for flow matching on sequences.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseModel.Config):
+        img_in: Linear.Config
+        txt_in: Linear.Config
+        local_compile_regions: list[str] = field(default_factory=lambda: ["loss"])
+        in_channels: int = 64
+        out_channels: int = 64
+        vec_in_dim: int = 768
+        context_in_dim: int = 512
+        hidden_size: int = 3072
+        mlp_ratio: float = 4.0
+        num_heads: int = 24
+        depth: int = 19
+        depth_single_blocks: int = 38
+        axes_dim: tuple = (16, 56, 56)
+        theta: int = 10_000
+        qkv_bias: bool = True
+        autoencoder: AutoEncoder.Config = field(default_factory=AutoEncoder.Config)
+
+        # Text encoder configs, set by the model flavor. The trainer can
+        # override version and random_init when it builds the encoders.
+        clip_encoder: FluxEmbedder.Config
+        t5_encoder: FluxEmbedder.Config
+
+        # Sub-component configs (all required -- set by the model flavor)
+        pe_config: EmbedND.Config
+        time_in_config: MLPEmbedder.Config
+        vector_in_config: MLPEmbedder.Config
+        final_layer_config: LastLayer.Config
+        double_blocks: list[DoubleStreamBlock.Config]
+        single_blocks: list[SingleStreamBlock.Config]
+
+        def get_nparams_and_flops(
+            self, model: nn.Module, seq_len: int
+        ) -> tuple[int, int]:
+            nparams = sum(p.numel() for p in model.parameters())
+
+            # Base: 6 FLOPs per parameter per token (fwd + bwd for linear
+            # layers). This assumes every token passes through every parameter.
+            num_flops_per_token = 6 * nparams
+
+            # Correction 1: DoubleStreamBlocks have symmetric img/txt streams;
+            # each token only passes through one side. Subtract one side's
+            # per-token linear params per block (excluding modulation, which
+            # is per-sample and handled separately below).
+            #
+            # Per-side per-token weight params:
+            #   attn.qkv:  h * 3h       = 3h²
+            #   attn.proj: h * h         =  h²
+            #   mlp:       2 * h * h*r   = 2rh²
+            #   Total: h² * (4 + 2r)
+            db_h = self.double_blocks[0].hidden_size
+            db_r = self.double_blocks[0].mlp_ratio
+            nparams_db_one_side_per_token = int(db_h * db_h * (4 + 2 * db_r))
+            num_flops_per_token -= 6 * nparams_db_one_side_per_token * self.depth
+
+            # Correction 2: Modulation layers operate on vec (per-sample
+            # conditioning from CLIP + timestep), not per-token. The 6*nparams
+            # base counts them as per-token; replace with amortized per-token
+            # cost (once per sample / seq_len tokens).
+            #
+            # Per-sample modulation weight params:
+            #   DoubleStreamBlock: img_mod(6h²) + txt_mod(6h²) = 12h² per block
+            #   SingleStreamBlock: modulation(3h²) per block
+            #   LastLayer: adaLN_modulation(2h²)
+            sb_h = self.single_blocks[0].hidden_size
+            fl_h = self.final_layer_config.hidden_size
+            nparams_mod_per_sample = (
+                12 * db_h * db_h * self.depth
+                + 3 * sb_h * sb_h * self.depth_single_blocks
+                + 2 * fl_h * fl_h
+            )
+            num_flops_per_token -= 6 * nparams_mod_per_sample * (seq_len - 1) // seq_len
+
+            # Add non-parameterized self-attention FLOPs (QK^T and attn*V)
+            # on the same convention as the other models: the factor of 6
+            # covers forward + backward and multiply-adds, and the two
+            # contractions are carried by (qk_head_dim + v_head_dim).
+            db_heads = self.double_blocks[0].num_heads
+            sb_heads = self.single_blocks[0].num_heads
+            db_head_dim = db_h // db_heads
+            sb_head_dim = sb_h // sb_heads
+            num_flops_per_token += (
+                quadratic_attention_flops_per_token(
+                    num_heads=sb_heads,
+                    qk_head_dim=sb_head_dim,
+                    v_head_dim=sb_head_dim,
+                    seq_len=seq_len,
+                )
+                * self.depth_single_blocks
+                + quadratic_attention_flops_per_token(
+                    num_heads=db_heads,
+                    qk_head_dim=db_head_dim,
+                    v_head_dim=db_head_dim,
+                    seq_len=seq_len,
+                )
+                * self.depth
+            )
+
+            return nparams, num_flops_per_token
+
+    def __init__(self, config: Config):
+        super().__init__()
+
+        self.config = config
+        self.in_channels = config.in_channels
+        self.out_channels = config.out_channels
+        if config.hidden_size % config.num_heads != 0:
+            raise ValueError(
+                f"Hidden size {config.hidden_size} must be divisible by num_heads {config.num_heads}"
+            )
+        pe_dim = config.hidden_size // config.num_heads
+        if sum(config.axes_dim) != pe_dim:
+            raise ValueError(
+                f"Got {config.axes_dim} but expected positional dim {pe_dim}"
+            )
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_heads
+        self.pe_embedder = config.pe_config.build()
+        self.img_in = config.img_in.build()
+        self.time_in = config.time_in_config.build()
+        self.vector_in = config.vector_in_config.build()
+        self.txt_in = config.txt_in.build()
+
+        self.double_blocks = ModuleList([cfg.build() for cfg in config.double_blocks])
+
+        self.single_blocks = ModuleList([cfg.build() for cfg in config.single_blocks])
+
+        self.final_layer = config.final_layer_config.build()
+
+    def parallelize(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        local_compile_regions: list[str],
+        activation_remat: ActivationRematConfig | None,
+        dump_folder: str,
+    ) -> Self:
+        """Apply Flux's AC-before-SPMD parallelization lifecycle."""
+        # Bind local implementations early; torch.compile traces on first use.
+        apply_local_compile(local_compile_regions)
+        with parallelism_context.activate_spmd():
+            if activation_remat is not None:
+                # Flux saves no regions under any policy: each block is
+                # recomputed in full. Configuring the block still qualifies
+                # its region names, which must be unique within a checkpoint.
+                for blocks_name, blocks in (
+                    ("double_blocks", self.double_blocks),
+                    ("single_blocks", self.single_blocks),
+                ):
+                    for layer_id, block in blocks.named_children():
+                        assert isinstance(block, Module)
+                        block.configure_remat_regions([])
+                        block.forward = remat.checkpoint(
+                            region_name=f"{blocks_name}.{layer_id}",
+                            preserve_rng_state=False,
+                        )(block.forward)
+
+            self._parallelize(parallelism_context)
+            annotate_replicated_parameters(self, parallelism_context)
+
+            self._apply_fsdp(
+                parallelism_context=parallelism_context,
+                training=training,
+                parallelism=parallelism,
+            )
+        return self
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torch.distributed.fsdp import (
+            CPUOffloadPolicy,
+            fully_shard,
+            MixedPrecisionPolicy,
+        )
+
+        from torchtitan.distributed.fsdp import (
+            disable_fsdp_gradient_division,
+            enable_fsdp_symm_mem,
+            resolve_fsdp_mesh,
+        )
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        fsdp_config: dict[str, Any] = {
+            "mesh": dp_mesh,
+            "mp_policy": MixedPrecisionPolicy(
+                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            ),
+        }
+        if dp_mesh_dims is not None:
+            fsdp_config["dp_mesh_dims"] = dp_mesh_dims
+        if training.enable_cpu_offload:
+            fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+        for module in (self.img_in, self.time_in, self.vector_in, self.txt_in):
+            fully_shard(module, **fsdp_config)
+        for block in (*self.double_blocks, *self.single_blocks):
+            fully_shard(block, **fsdp_config)
+        fully_shard(self.final_layer, **fsdp_config, reshard_after_forward=False)
+        fully_shard(self, **fsdp_config)
+        enable_fsdp_symm_mem(self, parallelism.fsdp_symm_mem_scope)
+        disable_fsdp_gradient_division(self)
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, Any],
+        *,
+        parallelism_context: ParallelismContext,
+        parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Encode a raw image-text batch and prepare flow-matching inputs."""
+        del max_num_documents, max_context_length
+        autoencoder = cast(AutoEncoder | None, kwargs["autoencoder"])
+        clip_encoder = cast(FluxEmbedder, kwargs["clip_encoder"])
+        t5_encoder = cast(FluxEmbedder, kwargs["t5_encoder"])
+        dtype = cast(torch.dtype, kwargs["dtype"])
+        input_dict["image"] = input_dict.pop("labels")
+        input_dict = preprocess_data(
+            device=input_dict["image"].device,
+            dtype=dtype,
+            autoencoder=autoencoder,
+            clip_encoder=clip_encoder,
+            t5_encoder=t5_encoder,
+            batch=input_dict,
+        )
+
+        image_encodings = input_dict["img_encodings"]
+        clip_encodings = input_dict["clip_encodings"]
+        t5_encodings = input_dict["t5_encodings"]
+        batch_size = image_encodings.shape[0]
+
+        with torch.no_grad(), torch.device(image_encodings.device):
+            noise = torch.randn_like(image_encodings)
+            timesteps = torch.rand((batch_size,))
+            sigmas = timesteps.view(-1, 1, 1, 1)
+            latents = (1 - sigmas) * image_encodings + sigmas * noise
+
+            _, _, latent_height, latent_width = latents.shape
+            position_dim = 3
+            latent_pos_enc = create_position_encoding_for_latents(
+                batch_size, latent_height, latent_width, position_dim
+            )
+            text_pos_enc = torch.zeros(batch_size, t5_encodings.shape[1], position_dim)
+            latents = pack_latents(latents)
+            target = pack_latents(noise - image_encodings)
+
+        if parallelism_context.cp_enabled:
+            cp_inputs = {
+                "img": latents,
+                "img_ids": latent_pos_enc,
+                "txt": t5_encodings,
+                "txt_ids": text_pos_enc,
+                "target": target,
+            }
+            input_sharding = flux_input_sharding()
+            load_balancer_config = parallelism.context_parallel_load_balancer
+            load_balancer = (
+                load_balancer_config.build(
+                    seq_len=context_parallel.get_cp_input_seq_len(
+                        cp_inputs, input_shardings=input_sharding
+                    ),
+                    attention_metadata=None,
+                )
+                if load_balancer_config is not None
+                else None
+            )
+            permutation = (
+                load_balancer.generate_permutation()
+                if load_balancer is not None
+                else None
+            )
+            cp_inputs = context_parallel.shard_tensors(
+                cp_inputs,
+                input_shardings=input_sharding,
+                permutation=permutation,
+            )
+            latents = cp_inputs["img"]
+            latent_pos_enc = cp_inputs["img_ids"]
+            t5_encodings = cp_inputs["txt"]
+            text_pos_enc = cp_inputs["txt_ids"]
+            target = cp_inputs["target"]
+
+        return (
+            latents,
+            target,
+            {
+                "img_ids": latent_pos_enc,
+                "txt": t5_encodings,
+                "txt_ids": text_pos_enc,
+                "y": clip_encodings,
+                "timesteps": timesteps,
+                "loss_target": target,
+            },
+        )
+
+    def forward(
+        self,
+        img: Tensor,
+        img_ids: Tensor,
+        txt: Tensor,
+        txt_ids: Tensor,
+        timesteps: Tensor,
+        y: Tensor,
+        loss_target: Tensor | None = None,
+    ) -> Tensor:
+        annotate_flux_forward_inputs(
+            latents=img,
+            latent_pos_enc=img_ids,
+            t5_encodings=txt,
+            text_pos_enc=txt_ids,
+            target=loss_target,
+            clip_encodings=y,
+            timesteps=timesteps,
+        )
+
+        if img.ndim != 3 or txt.ndim != 3:
+            raise ValueError("Input img and txt tensors must have 3 dimensions.")
+        if img.shape[0] != txt.shape[0]:
+            raise ValueError(
+                "Input img and txt tensors must have matching batch sizes."
+            )
+
+        batch_size, text_seq_len = txt.shape[:2]
+        attention_metadata = _get_attention_metadata(
+            self.config.double_blocks[0].inner_attention,
+            batch_size,
+            img.shape[1] + text_seq_len,
+            device=img.device,
+        )
+        img = self.img_in(img)
+        vec = self.time_in(timestep_embedding(timesteps, 256))
+        vec = vec + self.vector_in(y)
+        txt = self.txt_in(txt)
+        ids = local_concat_text_image(txt_ids, img_ids)
+        pe = self.pe_embedder(ids)
+
+        for block in self.double_blocks:
+            img, txt = block(img, txt, vec, pe, attention_metadata=attention_metadata)
+
+        img = local_concat_text_image(txt, img)
+        for block in self.single_blocks:
+            img = block(img, vec, pe, attention_metadata=attention_metadata)
+        _, img = local_split_text_image(img, text_seq_len)
+
+        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
+        return img

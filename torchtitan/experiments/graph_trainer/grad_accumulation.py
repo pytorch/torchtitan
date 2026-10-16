@@ -13,10 +13,8 @@ from typing import Any
 import torch
 import torch.fx as fx
 
-from torchtitan.experiments.graph_trainer.graph_pp.utils import (
-    graph_outputs,
-    trace_graph_pp_graph,
-)
+from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
+from torchtitan.experiments.graph_trainer.graph_pp.utils import graph_outputs
 
 _GRAD_ACCUMULATOR_INPUT_META = "grad_accumulator_input"
 
@@ -175,10 +173,7 @@ def insert_graph_gradient_accumulation(
 
     The example uses ``param_grad_output_start=1``.
     """
-    trace_graph_pp_graph(
-        "graph_pp_before_insert_graph_gradient_accumulation",
-        gm,
-    )
+    tlparse_log_graph_pass(gm, graph_name="before_insert_graph_gradient_accumulation")
     outputs = graph_outputs(gm.graph)
     if param_grad_output_start < 0:
         raise ValueError(
@@ -265,10 +260,7 @@ def insert_graph_gradient_accumulation(
     )
     gm.graph.lint()
     gm.recompile()
-    trace_graph_pp_graph(
-        "graph_pp_after_insert_graph_gradient_accumulation",
-        gm,
-    )
+    tlparse_log_graph_pass(gm, graph_name="after_insert_graph_gradient_accumulation")
     return accumulator_values
 
 
@@ -299,9 +291,8 @@ def insert_graph_gradient_accumulation_from_outputs(
 
     The example uses ``param_grad_output_start=1`` and returns ``(0,)``.
     """
-    trace_graph_pp_graph(
-        "graph_pp_before_insert_graph_gradient_accumulation_from_outputs",
-        gm,
+    tlparse_log_graph_pass(
+        gm, graph_name="before_insert_graph_gradient_accumulation_from_outputs"
     )
     outputs = graph_outputs(gm.graph)
     param_grad_output_end = param_grad_output_start + num_param_grads
@@ -314,9 +305,8 @@ def insert_graph_gradient_accumulation_from_outputs(
         accumulators=accumulator_indices,
         device=device,
     )
-    trace_graph_pp_graph(
-        "graph_pp_after_insert_graph_gradient_accumulation_from_outputs",
-        gm,
+    tlparse_log_graph_pass(
+        gm, graph_name="after_insert_graph_gradient_accumulation_from_outputs"
     )
     return accumulator_indices
 
@@ -347,9 +337,9 @@ def insert_graph_gradient_accumulation_before_reduction(
             (x, accumulator) ->
                 (loss, reduce_grad(accumulator.add_(raw_grad(x))))
     """
-    trace_graph_pp_graph(
-        "graph_pp_before_insert_graph_gradient_accumulation_before_reduction",
+    tlparse_log_graph_pass(
         gm,
+        graph_name="before_insert_graph_gradient_accumulation_before_reduction",
     )
     if len(param_grad_output_names) != len(accumulators):
         raise ValueError(
@@ -413,9 +403,9 @@ def insert_graph_gradient_accumulation_before_reduction(
 
     gm.graph.lint()
     gm.recompile()
-    trace_graph_pp_graph(
-        "graph_pp_after_insert_graph_gradient_accumulation_before_reduction",
+    tlparse_log_graph_pass(
         gm,
+        graph_name="after_insert_graph_gradient_accumulation_before_reduction",
     )
     return tuple(graph_input_accumulators)
 

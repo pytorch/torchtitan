@@ -1,5 +1,7 @@
 # This is a CODEOWNERS file.
 # Each line is a file pattern followed by one or more owners.
+# The last matching pattern takes precedence. Keep recipes, tests and scripts
+# owned by the same people as the torchtitan/ code they exercise.
 
 
 # These owners will be the default owners for everything in
@@ -8,11 +10,24 @@
 * @tianyu-l @fegin @wwwjn @wconstab
 
 
+# RL
 /torchtitan/rl/ @felipemello1 @wwwjn @pzhan9 @tianyu-l
+/torchtitan_recipes/rl/ @felipemello1 @wwwjn @pzhan9 @tianyu-l
+/torchtitan_recipes/tests/rl/ @felipemello1 @wwwjn @pzhan9 @tianyu-l
+/tests/rl/ @felipemello1 @wwwjn @pzhan9 @tianyu-l
+/tests/integration_tests/rl.py @felipemello1 @wwwjn @pzhan9 @tianyu-l
+/scripts/rl/ @felipemello1 @wwwjn @pzhan9 @tianyu-l
+/scripts/install_rl_env.sh @felipemello1 @wwwjn @pzhan9 @tianyu-l
 
 
-# Exclude the experiments directory by adding a pattern without owners
+# Exclude the experiments, and the recipes that belong to them, by adding
+# patterns without owners
 /torchtitan/experiments/
+/torchtitan_recipes/torchft/
+/torchtitan_recipes/tests/torchft/
+/torchtitan_recipes/tests/transformers_modeling_backend.py
 
 
 /torchtitan/experiments/graph_trainer/ @SherlockNoMad @aditvenk @sanketpurandare @IvanKobzarev @tianyu-l
+/torchtitan_recipes/graph_trainer/ @SherlockNoMad @aditvenk @sanketpurandare @IvanKobzarev @tianyu-l
+/torchtitan_recipes/tests/graph_trainer/ @SherlockNoMad @aditvenk @sanketpurandare @IvanKobzarev @tianyu-l

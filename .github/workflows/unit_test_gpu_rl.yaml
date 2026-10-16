@@ -51,23 +51,8 @@ jobs:
 
         python -m pip install uv
 
-        # Batch-invariant ops back the batch-invariant GDN cases.
-        uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
-
-        # Install matching torch, torchvision, and vLLM CUDA nightlies here.
-        uv pip install --upgrade torch torchvision vllm xformers --pre \
-          --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
-          --index-strategy unsafe-best-match \
-          --constraint .ci/docker/requirements.txt
-        python -c '
-        from importlib.metadata import version
-        wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
-        print(wheels)
-        assert all(".dev" in wheel and "+cu130" in wheel for wheel in wheels.values()), wheels
-        '
-
-        # TorchStore is not on PyPI; do not let its dependencies change torch.
-        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+        # Monarch and the shared RL deps are in the image.
+        bash scripts/install_rl_env.sh --skip-base --flash-attn none
 
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
         # Full-engine GDN eager/FULL parity needs a local Qwen3.5-0.8B checkpoint.
@@ -106,27 +91,9 @@ jobs:
 
         python -m pip install uv
 
-        # Batch-invariant ops back the bitwise parity tests.
-        uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
-
-        # Install matching torch, torchvision, and vLLM CUDA nightlies here.
-        uv pip install --upgrade torch torchvision vllm xformers --pre \
-          --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
-          --index-strategy unsafe-best-match \
-          --constraint .ci/docker/requirements.txt
-        python -c '
-        from importlib.metadata import version
-        wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
-        print(wheels)
-        assert all(".dev" in wheel and "+cu130" in wheel for wheel in wheels.values()), wheels
-        '
-
-        # TorchStore is not on PyPI; do not let its dependencies change torch.
-        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
-
-        # vLLM samples with FlashInfer, which JIT-compiles CUDA kernels; the image
-        # only has the CUDA runtime, not nvcc.
-        uv pip install nvidia-cuda-nvcc
+        # Monarch and the shared RL deps are in the image. vLLM samples with
+        # FlashInfer, which JIT-compiles CUDA kernels; the image has no nvcc.
+        bash scripts/install_rl_env.sh --skip-base --flash-attn none --nvcc
 
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")

@@ -139,7 +139,7 @@ these model policies.
 
 #### Usage
 
-Quantization is applied at config time in your `build_model_config()` function via the `quantization` parameter. Each converter walks the model config tree and swaps config types so that quantized modules are built directly.
+Quantization is applied at config time in your `build_model_config()` function via the `converters` parameter. Each converter walks the model config tree and swaps config types so that quantized modules are built directly.
 
 To enable MXFP8 training for linear layers, configure it in your recipe function:
 
@@ -149,12 +149,12 @@ from torchtitan.config.transform import MXFP8LinearConverter
 # In your build_model_config call:
 model_spec = build_model_config(
     "flux-schnell",
-    quantization=[
+    parallelism=parallelism,
+    converters=[
         MXFP8LinearConverter.Config(
             fqns=["double_blocks", "single_blocks"],
             # Add audited single-consumer inputs here. Flux uses BF16 by default.
             linears_saving_inputs_for_backward_in_mxfp8=[],
-            model_compile_enabled=True,
         ),
     ],
 )
@@ -177,10 +177,10 @@ from torchtitan.config.transform import MXFP8GroupedLinearConverter
 
 model_spec = build_model_config(
     "debugmodel",
-    quantization=[
+    parallelism=parallelism,
+    converters=[
         MXFP8GroupedLinearConverter.Config(
             recipe_name="mxfp8_rceil",
-            model_compile_enabled=True,
         ),
     ],
 )
@@ -193,14 +193,12 @@ model_spec = build_model_config(
       MXFP8LinearConverter,
   )
 
-  quantization=[
+  converters=[
       MXFP8LinearConverter.Config(
           fqns=["double_blocks", "single_blocks"],
-          model_compile_enabled=True,
       ),
       MXFP8GroupedLinearConverter.Config(
           recipe_name="mxfp8_rceil",
-          model_compile_enabled=True,
       ),
   ]
   ```
@@ -208,7 +206,6 @@ model_spec = build_model_config(
 **Configuration Options:**
 
 * `recipe_name="mxfp8_rceil"`: MXFP8 dynamic quantization with RCEIL rounding mode for scale calculation.
-* `model_compile_enabled`: set to `True` when `torch.compile` is enabled for the model.
 
 **Important Notes:**
 
@@ -236,20 +233,16 @@ from torchtitan.config.transform import (
 # In your build_model_config call:
 model_spec = build_model_config(
     "671B",
-    quantization=[
+    parallelism=parallelism,
+    converters=[
         MXFP8LinearConverter.Config(
             fqns=["double_blocks", "single_blocks"],
-            model_compile_enabled=True,
         ),
         MXFP8GroupedLinearConverter.Config(
             recipe_name="mxfp8_rceil",
-            model_compile_enabled=True,
         ),
     ],
 )
-
-# In your Trainer.Config:
-compile=LocalCompileConfig(),
 ```
 
 ### Performance

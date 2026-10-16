@@ -5,19 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
-import gc
 import logging
 import os
 import subprocess
-import time
 from collections.abc import Generator
-from dataclasses import dataclass
 from types import ModuleType
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
-
-from torchtitan.observability import structured_logger as sl
 
 
 logger = logging.getLogger(__name__)
@@ -109,44 +104,6 @@ def get_local_device() -> torch.device:
             "per process so device_count() returns 1."
         )
     return torch.device(device_type, device_index)
-
-
-# used to avoid stragglers in garbage collection
-class GarbageCollection:
-    def __init__(self, gc_freq: int = 1000, debug: bool = False):
-        assert gc_freq > 0, "gc_freq must be a positive integer"
-        self.gc_freq = gc_freq
-        self.debug = debug
-        gc.disable()
-        self.collect("Initial GC collection")
-        if debug:
-            from torch.utils.viz._cycles import warn_tensor_cycles
-
-            if torch.distributed.get_rank() == 0:
-                warn_tensor_cycles()
-
-    @sl.log_trace_span("gc_collect")
-    def run(self, step_count: int) -> bool:
-        """Run a GC cycle if this step should collect. Returns True when a
-        collection actually ran, False otherwise."""
-        if self.debug:
-            self.collect(
-                "Force GC to perform collection to obtain debug information",
-                generation=2,
-            )
-            sl.add_step_tag("gc")
-            return True
-        if step_count > 1 and step_count % self.gc_freq == 0:
-            self.collect("Performing periodic GC collection")
-            sl.add_step_tag("gc")
-            return True
-        return False
-
-    @staticmethod
-    def collect(reason: str, generation: int = 1):
-        begin = time.monotonic()
-        gc.collect(generation)
-        logger.info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H20, H100, H200, B200 GPU,
@@ -273,41 +230,6 @@ def get_peak_flops(device_name: str) -> float:
     else:  # for other GPU types, assume A100
         logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
         return 312e12
-
-
-@dataclass(frozen=True)
-class Color:
-    black = "\033[30m"
-    red = "\033[31m"
-    green = "\033[32m"
-    yellow = "\033[33m"
-    blue = "\033[34m"
-    magenta = "\033[35m"
-    cyan = "\033[36m"
-    white = "\033[37m"
-    reset = "\033[39m"
-    orange = "\033[38;2;180;60;0m"
-    turquoise = "\033[38;2;54;234;195m"
-
-
-@dataclass(frozen=True)
-class NoColor:
-    black = ""
-    red = ""
-    green = ""
-    yellow = ""
-    blue = ""
-    magenta = ""
-    cyan = ""
-    white = ""
-    reset = ""
-    orange = ""
-    turquoise = ""
-
-
-assert set(NoColor.__dataclass_fields__.keys()) == set(
-    Color.__dataclass_fields__.keys()
-), "NoColor must have the same fields as Color."
 
 
 @contextlib.contextmanager

@@ -9,7 +9,7 @@ import logging
 import math
 import os
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -19,6 +19,7 @@ from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
+    BACKWARD_WEIGHT,
     get_schedule_class,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
@@ -30,11 +31,10 @@ from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.module import ModuleDict, ModuleList
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import ModuleDict, ModuleList
 
 # These are the public entrypoints for model-specific PP setup. Helpers in this
 # module are implementation details and stay private.
@@ -78,8 +78,8 @@ def pipeline_llm(
     parallelism_context: ParallelismContext,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: LocalCompileConfig,
-    ac_config: ActivationCheckpointingConfig,
+    local_compile_regions: list[str],
+    activation_remat: ActivationRematConfig | None,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
@@ -144,8 +144,8 @@ def pipeline_llm(
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            compile_config=compile_config,
-            ac_config=ac_config,
+            local_compile_regions=local_compile_regions,
+            activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
         model_parts[i] = m
@@ -159,6 +159,8 @@ def pipeline_llm(
         stages=stages,
         loss_fn=loss_fn,
     )
+    if _splits_backward(pp_schedule):
+        _disable_inplace_wgrad_accum(model_parts)
 
     # This is used in the train loop to determine whether to pass in the input_ids and labels
     has_first_stage = False
@@ -170,6 +172,47 @@ def pipeline_llm(
             has_last_stage = True
 
     return pp_schedule, model_parts, has_first_stage, has_last_stage
+
+
+def _splits_backward(schedule: _PipelineSchedule) -> bool:
+    """Whether ``schedule`` runs separate input- and weight-gradient passes.
+
+    Zero-bubble schedules (ZBVZeroBubble, DualPipeV, InterleavedZeroBubble, or a
+    custom one with W actions) do; 1F1B, Interleaved1F1B and GPipe run one full
+    backward per microbatch.
+    """
+    pipeline_order = getattr(schedule, "pipeline_order", None) or {}
+    return any(
+        action is not None and action.computation_type == BACKWARD_WEIGHT
+        for actions in pipeline_order.values()
+        for action in actions
+    )
+
+
+def _disable_inplace_wgrad_accum(model_parts: Sequence[nn.Module]) -> None:
+    """Turn off in-place WGRAD accumulation for a schedule that splits backward.
+
+    A split backward runs each microbatch's backward twice, an input-gradient
+    pass and a weight-gradient pass, both under autograd.grad(), where the
+    parameters' AccumulateGrad never runs. In-place accumulation adds into
+    ``weight.grad``, clears it and returns the buffer for AccumulateGrad to
+    reattach; in the input pass autograd.grad() discards that buffer, losing
+    the earlier microbatches' gradients. Full-backward schedules (1F1B,
+    Interleaved1F1B, GPipe) keep it: their microbatches add into the running
+    gradient while gradient sync is disabled.
+    """
+    num_disabled = 0
+    for model_part in model_parts:
+        for module in model_part.modules():
+            if getattr(module, "inplace_wgrad_accum", False):
+                # pyrefly: ignore [bad-argument-type]
+                module.inplace_wgrad_accum = False
+                num_disabled += 1
+    if num_disabled:
+        logger.info(
+            "The pipeline schedule splits backward into input and weight passes, "
+            f"so in-place WGRAD accumulation is off for {num_disabled} modules."
+        )
 
 
 def get_module_fqns_per_model_part(
@@ -391,9 +434,14 @@ def _build_pipeline_schedule(
                 parallelism.pp_max_unsharded_active_stages or len(stages)
             ),
             "unshard_lookahead": parallelism.pp_num_unshard_lookahead_factor,
+            # Graph PP owns gradient reduction through custom schedule actions.
+            "defer_reduce_grad_wait": backward_requires_autograd,
+            "max_outstanding_sends": (
+                parallelism.pipeline_parallel_max_outstanding_sends
+            ),
         }
-        schedule = schedule_class(
-            stages,  # pyrefly: ignore [bad-argument-type]
+        schedule = cast(Any, schedule_class)(
+            stages,
             n_microbatches=num_microbatches,
             loss_fn=_scalar_loss_fn,
             scale_grads=False,
@@ -406,7 +454,7 @@ def _build_pipeline_schedule(
                 "Per-rank pp_num_unshard_lookahead_factor is supported only "
                 "by multi-stage pipeline schedules"
             )
-        schedule = schedule_class(
+        schedule = cast(Any, schedule_class)(
             stages[0],
             n_microbatches=num_microbatches,
             loss_fn=_scalar_loss_fn,
@@ -426,7 +474,6 @@ def _build_pipeline_schedule(
             "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
             "and _PipelineScheduleRuntime support csv schedules"
         )
-        # pyrefly: ignore [missing-attribute]
         schedule._load_csv(pp_schedule_csv)
 
     return schedule

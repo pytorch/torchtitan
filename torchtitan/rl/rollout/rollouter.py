@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+import numpy as np
 from monarch.actor import ProcMesh, this_host
 
 from torchtitan.components.renderer import RendererConfig
@@ -18,24 +21,27 @@ from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.environment import MessageEnv, TokenEnv
+from torchtitan.rl.rollout.data import RLDataLoader, RLDataset
+from torchtitan.rl.rollout.message_env import MessageEnv
+from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
+from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import (
     GenerateFn,
+    ReleaseSessionFn,
     Rollout,
     RolloutGroup,
     RolloutStatus,
     RolloutTurn,
+    RolloutTurnID,
 )
-from torchtitan.rl.rubric import Rubric, RubricOutput
-from torchtitan.rl.types import RolloutTurnID
 
 if TYPE_CHECKING:
     from renderers import Renderer
 
-    from torchtitan.rl.distributed.actors.rollout_worker import RolloutWorkerActor
+    from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 
     # Type-only: importing the generator module here would pull in vLLM at import time.
-    from torchtitan.rl.generator import SamplingConfig
+    from torchtitan.rl.generator.generator import SamplingConfig
 
 
 logger = logging.getLogger(__name__)
@@ -53,10 +59,10 @@ class Rollouter(Configurable):
     drives its own calls, so the generator runs a whole group's calls together in one continuous
     batch.
 
-        sample = rollouter.get_training_sample()        # one sample from the dataset
+        index, sample = rollouter.get_training_sample()
         group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
-            generate_fn=generate_fn, sample=sample,
-            group_id=group_index,  # assigned by the data input loop (a monotonic int)
+            generate_fn=generate_fn, release_session_fn=release_session_fn,
+            sample=sample, group_id=index,
             group_size=N, sampling=sampling)
 
     `MessageEnv` works in messages; `TokenEnv` (what `RolloutWorker.make_env_group` returns)
@@ -64,8 +70,10 @@ class Rollouter(Configurable):
 
     Example:
         rollouter = Rollouter.Config(
-            train_dataset=MyDataset.Config(seed=42),
-            validation_dataset=MyDataset.Config(seed=99),
+            training_dataloader=IterableRLDataLoader.Config(
+                dataset=MyDataset.Config()
+            ),
+            validation_dataset=MyDataset.Config(),
             worker=RolloutWorker.Config(
                 rubric=Rubric.Config(
                     reward_fns=[RewardCorrect.Config(), RewardFormat.Config(weight=0.3)]
@@ -76,8 +84,7 @@ class Rollouter(Configurable):
 
     Customization:
         Rollouter supports customization at several levels:
-          - Sample source: override `Config`'s dataset fields, and/or the
-            `get_training_sample` / `get_validation_sample` methods.
+          - Sample source: provide source configs for training and validation.
           - Group execution, coarse: override `run_group_rollouts` for your own
             orchestration. `RolloutWorker` then becomes optional -- but override
             `setup_async` too, or the worker pool is still spawned unused.
@@ -88,11 +95,11 @@ class Rollouter(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        train_dataset: Configurable.Config
-        """Dataset iterator for training (`next()` yields one env input)."""
+        training_dataloader: RLDataLoader.Config
+        """Builds a checkpointable iterator of identified training inputs."""
 
-        validation_dataset: Configurable.Config
-        """Dataset iterator for validation."""
+        validation_dataset: RLDataset.Config
+        """Builds an iterable validation dataset."""
 
         worker: RolloutWorker.Config
         """How a rollout group is built, driven, scored and advantaged. Selects the
@@ -119,20 +126,32 @@ class Rollouter(Configurable):
 
     def __init__(self, config: Config) -> None:
         self._config = config
-        self._train_dataset = config.train_dataset.build()
-        self._validation_dataset = config.validation_dataset.build()
+        training_dataloader = config.training_dataloader.build()
+        if not isinstance(training_dataloader, RLDataLoader):
+            raise ValueError("training_dataloader must build an RLDataLoader")
+        self._training_dataloader = iter(training_dataloader)
 
         self._worker_actors: RolloutWorkerActor | None = None
         self._worker_mesh: ProcMesh | None = None
 
-    # TODO: revisit this abstraction: should it return a sample or a dataset or an iterator?
-    def get_training_sample(self) -> object:
-        """Get one training sample (the env input) from the training dataset."""
-        return next(self._train_dataset)
+    def get_training_sample(self) -> tuple[int, object]:
+        """Return the next globally identified input from the training loader."""
+        return next(self._training_dataloader)
 
-    def get_validation_sample(self) -> object:
-        """Get one validation sample (the env input) from the validation dataset."""
-        return next(self._validation_dataset)
+    def acknowledge_training_sample_ids(self, sample_ids: Iterable[int]) -> None:
+        """Mark training samples as safe to omit from the next checkpoint."""
+        self._training_dataloader.acknowledge(sample_ids)
+
+    def get_validation_samples(self, steps: int) -> list[object]:
+        """Materialize one fresh validation pass, optionally bounded by steps."""
+        validation_data = self._config.validation_dataset.build()
+        try:
+            iterator = iter(validation_data)
+        except TypeError as error:
+            raise ValueError("validation_dataset must build an iterable") from error
+        if steps == -1:
+            return list(iterator)
+        return list(itertools.islice(iterator, steps))
 
     async def setup_async(
         self,
@@ -143,7 +162,7 @@ class Rollouter(Configurable):
     ) -> None:
         """Spawn and initialize the owned worker proc mesh and actor pool."""
         # Import lazily to avoid a circular dependency through Rollouter.Config.
-        from torchtitan.rl.distributed.actors.rollout_worker import RolloutWorkerActor
+        from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 
         if self._worker_mesh is not None or self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
@@ -180,6 +199,7 @@ class Rollouter(Configurable):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
@@ -193,6 +213,8 @@ class Rollouter(Configurable):
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
+            release_session_fn: Async callable each rollout calls after its last turn, to
+                release its routing session.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -208,11 +230,20 @@ class Rollouter(Configurable):
         # send the message to its `run_group` endpoint.
         return await self._worker_actors.run_group.choose(
             generate_fn=generate_fn,
+            release_session_fn=release_session_fn,
             sample=sample,
             group_id=group_id,
             group_size=group_size,
             sampling=sampling,
         )
+
+    def state_dict(self) -> dict[str, object]:
+        """Return the checkpoint state of the training input iterator."""
+        return self._training_dataloader.state_dict()
+
+    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+        """Restore the training iterator, including unacknowledged inputs."""
+        self._training_dataloader.load_state_dict(state_dict)
 
 
 class RolloutWorker(Configurable):
@@ -262,7 +293,7 @@ class RolloutWorker(Configurable):
         """Construct `group_size` single-use envs from one dataset sample.
 
         Args:
-            sample: the dataset sample (the env input) from `Rollouter.get_training_sample` / `Rollouter.get_validation_sample`.
+            sample: The source sample used to build the environment.
             group_size: number of sibling envs for this prompt group.
 
         Returns:
@@ -300,6 +331,7 @@ class RolloutWorker(Configurable):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
@@ -315,6 +347,8 @@ class RolloutWorker(Configurable):
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
+            release_session_fn: Async callable each rollout calls after its last turn, to
+                release its routing session.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -337,6 +371,7 @@ class RolloutWorker(Configurable):
                 *(
                     self._run_single_rollout(
                         generate_fn=generate_fn,
+                        release_session_fn=release_session_fn,
                         env=env,
                         # Offset the base seed per sample so a group's n=1
                         # requests are diverse yet reproducible run-to-run.
@@ -372,6 +407,7 @@ class RolloutWorker(Configurable):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         env: TokenEnv,
         sampling: SamplingConfig,
         group_id: int,
@@ -385,6 +421,8 @@ class RolloutWorker(Configurable):
         Args:
             generate_fn: Async callable that runs one generation; keeps the worker
                 decoupled from the generator actor.
+            release_session_fn: Async callable this rollout calls once after its last turn,
+                with its `routing_session_id`.
             env: The env for this rollout; `run_group` closes it.
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
@@ -394,6 +432,10 @@ class RolloutWorker(Configurable):
         Returns:
             One unscored `Rollout`; `run_group` fills its reward later.
         """
+        # Per-sample sticky key: a sample's turns reuse one generator's prefix cache.
+        routing_session_id = RolloutTurnID(
+            group_id=group_id, rollout_id=rollout_id, turn_id=0
+        ).to_string(include_turn=False)
         turns: list[RolloutTurn] = []
         status = RolloutStatus.ERROR
         try:
@@ -409,22 +451,27 @@ class RolloutWorker(Configurable):
                 completion = await generate_fn(
                     prompt_token_ids=env_step.next_prompt_token_ids,
                     request_id=turn_rollout_id.to_string(),
-                    # Per-sample sticky key: a sample's turns reuse one generator's prefix cache.
-                    routing_session_id=turn_rollout_id.to_string(include_turn=False),
+                    group_id=group_id,
+                    routing_session_id=routing_session_id,
                     sampling_config=sampling,
                 )
 
                 # env call
                 next_env_step = await env.step(completion)
 
-                # full snapshot of this turn from a token and message perspective
+                # this turn from a token and message perspective
                 turns.append(
                     RolloutTurn(
                         rollout_id=turn_rollout_id,
-                        prompt_token_ids=env_step.next_prompt_token_ids or [],
+                        prompt_prefix_len=env_step.next_prompt_prefix_len,
+                        prompt_delta_token_ids=env_step.next_prompt_delta_token_ids,
                         prompt_messages=env_step.next_prompt_messages or [],
-                        completion_token_ids=completion.token_ids,
-                        completion_logprobs=completion.token_logprobs,
+                        completion_token_ids=np.asarray(
+                            completion.token_ids, dtype=np.int32
+                        ),
+                        completion_logprobs=np.asarray(
+                            completion.token_logprobs, dtype=np.float32
+                        ),
                         completion_message=next_env_step.completion_message,
                         env_messages=next_env_step.env_messages,
                         env_rewards=next_env_step.env_rewards,
@@ -447,6 +494,11 @@ class RolloutWorker(Configurable):
             )
             status = RolloutStatus.ERROR
 
+        try:
+            await release_session_fn(routing_session_id=routing_session_id)
+        except Exception:
+            # Not fatal: `max_sessions` evicts an unreleased session.
+            logger.exception("releasing routing session %s failed", routing_session_id)
         return Rollout(
             group_id=group_id,
             rollout_id=rollout_id,

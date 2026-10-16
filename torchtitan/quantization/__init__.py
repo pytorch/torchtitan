@@ -6,13 +6,11 @@
 
 """Quantized module and tensor building blocks."""
 
-from .float8 import Float8Linear
 from .mxfp8 import MXFP8Linear
 from .nvfp4 import NVFP4Linear
 
 
 __all__ = [
-    "Float8Linear",
     "MXFP8Linear",
     "NVFP4Linear",
 ]

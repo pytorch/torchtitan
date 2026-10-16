@@ -21,14 +21,18 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.autograd.function import once_differentiable
-from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from torchao.prototype.mx_formats.kernels import (
     mxfp8_quantize_cuda,
     triton_mx_block_rearrange,
 )
 
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear.inplace_wgrad_accum import (
+    running_grad,
+    uses_inplace_wgrad_accum,
+)
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (
@@ -80,7 +84,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         weight_scale_dgrad_swizzled: torch.Tensor,
         bias_N: torch.Tensor | None,
         input_activation_format_for_backward: InputActivationFormatForBackward,
-        accumulate_into_weight_grad: bool,
+        inplace_wgrad_accum: bool,
     ) -> torch.Tensor:
         # ``weight`` is the module parameter itself, ``[N, K]`` or stacked
         # ``[num_linears, N, K]``, rather than a flattened view of it. WGRAD is
@@ -210,16 +214,16 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         # operands, so record the shape.
         ctx.weight_shape = weight.shape
         # Produce WGRAD directly in the parameter's gradient dtype so
-        # AccumulateGrad needs no cast. FSDP will set the unsharded parameter's
-        # grad_dtype to the reduce dtype.
-        # TODO(anijain2305): drop the dtype fallback once FSDP always sets
-        # grad_dtype on the unsharded parameter
-        # (https://github.com/pytorch/pytorch/pull/194434).
+        # AccumulateGrad needs no cast. FSDP sets the unsharded parameter's
+        # grad_dtype to the reduce dtype, but clears it to None from
+        # pre-backward until post-backward to defer the upcast to its
+        # reduce-scatter copy-in. An activation checkpoint recompute runs this
+        # forward in that window, so fall back to the compute dtype.
         ctx.wgrad_dtype = weight.grad_dtype or weight.dtype
         # Kept on ctx rather than saved: backward needs this exact parameter
         # object, and saved-tensor hooks may unpack a different one. A leaf
         # parameter does not reference its graph, so this forms no cycle.
-        ctx.weight_param = weight if accumulate_into_weight_grad else None
+        ctx.weight_param = weight if inplace_wgrad_accum else None
 
         return output_MN[:num_rows].reshape(*input_shape[:-1], local_out_features)
 
@@ -314,10 +318,10 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
                 )
                 weight_param = ctx.weight_param
-                running_grad = None if weight_param is None else weight_param.grad
-                if weight_param is None or running_grad is None:
+                grad = running_grad(weight_param)
+                if weight_param is None or grad is None:
                     # First contribution since the gradient was last consumed,
-                    # or a traced execution. Nothing to accumulate into.
+                    # or inplace_wgrad_accum is off. Nothing to accumulate into.
                     grad_weight_NK = F.scaled_mm(
                         grad_output_col_MN.t(),
                         x_qdata_col_MK,
@@ -334,15 +338,15 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     # reattaches it instead of adding it to itself. While
                     # grad_dtype differs from FSDP's reduce dtype, FSDP moves
                     # the gradient into its own accumulator after every
-                    # microbatch, so running_grad stays None here.
+                    # microbatch, so running_grad returns None here.
                     F.scaled_addmm_(
-                        running_grad.view(-1, running_grad.shape[-1]),
+                        grad.view(-1, grad.shape[-1]),
                         grad_output_col_MN.t(),
                         x_qdata_col_MK,
                         **wgrad_scale_kwargs,
                     )
                     weight_param.grad = None
-                    grad_weight = running_grad
+                    grad_weight = grad
 
         return (
             grad_input,
@@ -414,18 +418,32 @@ class MXFP8Linear(Linear):
             requires_grad=self.weight.requires_grad,
         )
 
+    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
+        # spmd_types returns a plain tensor when TP shards the weight. Restore
+        # the FSDP extension wrapper before fully_shard() consumes it.
+        super()._parallelize(parallelism_context)
+        if isinstance(self.weight, _LinearShardedTensorWithMXFP8Compute):
+            return
+        distributed_weight = self.weight
+        wrapped_weight = nn.Parameter(
+            _LinearShardedTensorWithMXFP8Compute(distributed_weight.data),
+            requires_grad=distributed_weight.requires_grad,
+        )
+        spmd.assert_type_like(wrapped_weight, distributed_weight)
+        self.weight = wrapped_weight
+
     def _linear(
         self,
         input: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        # The autograd function takes the parameter itself rather than
-        # ``weight``, its flattened view, so a stacked parameter's gradient
-        # reaches AccumulateGrad without the view's backward casting it. Always
-        # a plain tensor: spmd_types carries TP and EP as annotations instead
-        # of wrapping the weight as a model-parallel DTensor.
-        physical_weight = self.weight
+        # ``weight`` is the parameter itself rather than a flattened view, so a
+        # stacked parameter's gradient reaches AccumulateGrad without a view's
+        # backward casting it. Always a plain tensor: spmd_types carries TP and
+        # EP as annotations instead of wrapping the weight as a model-parallel
+        # DTensor.
+        physical_weight = weight
         local_out_features = physical_weight.shape[-2]
         if local_out_features % _MXFP8_BLOCK_SIZE:
             raise ValueError(
@@ -466,16 +484,8 @@ class MXFP8Linear(Linear):
             # the weight changes each optimizer step; inference does not.
             # TODO(anijain2305): key the operands on the parameter's
             # version counter so a frozen weight is quantized once.
-        # Backward folds later WGRADs into the leaf parameter's running .grad.
-        # Dynamo sets is_compiling; GraphTrainer's make_fx tracer does not, so
-        # ask the proxy mode as well. A traced backward cannot represent this
-        # read-and-clear of parameter.grad, so it uses an ordinary WGRAD.
         # TODO(graph_trainer): add a GraphTrainer graph pass that rewrites the
         # WGRAD scaled_mm plus gradient accumulation into scaled_addmm_.
-        # SimpleFSDP hands forward a parametrization output rather than the
-        # leaf, whose .grad autograd never populates.
-        is_tracing = torch.compiler.is_compiling() or get_proxy_mode() is not None
-        accumulate_into_weight_grad = not is_tracing and physical_weight.is_leaf
         output = _MXFP8LinearFunction.apply(
             input,
             physical_weight,
@@ -483,8 +493,8 @@ class MXFP8Linear(Linear):
             operands.weight_scale_fprop_swizzled,
             operands.weight_qdata_dgrad_NK,
             operands.weight_scale_dgrad_swizzled,
-            bias,
+            None if bias is None else bias.flatten(),
             self.input_activation_format_for_backward,
-            accumulate_into_weight_grad,
+            uses_inplace_wgrad_accum(self.inplace_wgrad_accum, physical_weight, self),
         )
         return output

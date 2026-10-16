@@ -1,0 +1,83 @@
+name: GraphTrainer B200 Integration Tests
+
+on:
+  push:
+    tags:
+      - ciflow/b200/*
+  schedule:
+    - cron: '30 0 * * *'
+
+concurrency:
+  group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-test:
+    if: github.repository_owner == 'pytorch'
+    runs-on: linux.dgx.b200.8
+    timeout-minutes: 60
+    container:
+      image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04
+      options: --gpus all
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Run GraphTrainer B200 integration tests
+        run: |
+          set -eux
+
+          bash .ci/docker/common/install_base.sh
+
+          uv venv --python 3.12
+          source .venv/bin/activate
+
+          DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+          echo "CUDA driver version: ${DRIVER_VERSION}"
+
+          uv pip install --pre torch torchvision \
+            --index-url https://download.pytorch.org/whl/nightly/cu130
+          uv pip install -r requirements.txt "pytest==7.3.2" "expecttest>=0.2.0"
+          uv pip install -r .ci/docker/requirements-vlm.txt
+
+          USE_CPP=0 uv pip install --pre --upgrade torchao \
+            --index-url https://download.pytorch.org/whl/nightly/cu130
+          uv pip install "flash-attn-4[cu13]>=4.0.0b31"
+          uv pip install \
+            "git+https://github.com/meta-pytorch/dist_moe.git@main"
+
+          mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+          CUDA_HOME=/usr/local/cuda TORCH_SHOW_CPP_STACKTRACES=1 \
+            python -m torchtitan.experiments.graph_trainer.tests.integration_tests \
+            "$RUNNER_TEMP/artifacts-to-be-uploaded/graph_trainer_b200" \
+            --test_suite graph_trainer_b200 \
+            --gpu_arch_type cuda \
+            --ngpu 8
+
+          NCCL_NVLS_ENABLE=0 pytest \
+            torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestDistMoePipelineNumerics \
+            -v
+
+          rm -rf "$RUNNER_TEMP/artifacts-to-be-uploaded/graph_trainer_b200"/*/checkpoint
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: graph-trainer-b200-outputs
+          path: ${{ runner.temp }}/artifacts-to-be-uploaded

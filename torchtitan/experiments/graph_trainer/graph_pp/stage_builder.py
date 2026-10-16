@@ -53,6 +53,15 @@ class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
     modules: _StageGraphModules
     meta: _StageGraphMeta
     compiled: bool
+    full_bw_grad_accumulator_indices: tuple[int, ...]
+    full_bw_initial_grad_accumulators: tuple[torch.Tensor, ...]
+
+    def _grad_accumulator_args(
+        self,
+        grad_accumulators: list[Any] | None,
+        indices: tuple[int, ...],
+        initial_grad_accumulators: tuple[torch.Tensor, ...],
+    ) -> list[Any]: ...
 
     def _forward_args(
         self,
@@ -63,12 +72,12 @@ class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
         *,
         unsharded_param_values: list[Any],
         buffer_values: list[Any],
+        activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
     ) -> list[Any]: ...
 
     def _backward_args(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -98,7 +107,6 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
     def forward_backward(
         self,
         *,
-        backward_stage_output: tuple[Any, ...],
         backward_saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         forward_args: tuple[Any, ...],
@@ -107,21 +115,29 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
         forward_loss_kwargs: dict[str, Any],
         forward_unsharded_param_values: list[Any],
         forward_buffer_values: list[Any],
+        backward_grad_accumulators: list[Any] | None = None,
+        forward_activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
     ) -> tuple[list[Any], list[Any], Any, tuple[Any, ...]]:
         """Run one multiplexed backward/forward graph.
 
         Calling convention:
-            ``(*backward_inputs, *forward_inputs)``
+            ``(*backward_inputs, *grad_accumulators, *forward_inputs)``
             ``-> (*param_grads, *input_grads, *user_outputs,``
             ``    *saved_for_backward, *side_effect_outputs)``
         """
 
         bw_args = self.bw_graphs._backward_args(
-            backward_stage_output,
             backward_saved_values_for_backward,
             output_grads_from_next,
             runtime_validate=runtime_validate,
+        )
+        bw_args.extend(
+            self.bw_graphs._grad_accumulator_args(
+                backward_grad_accumulators,
+                self.bw_graphs.full_bw_grad_accumulator_indices,
+                self.bw_graphs.full_bw_initial_grad_accumulators,
+            )
         )
         fw_args = self.fw_graphs._forward_args(
             forward_args,
@@ -130,6 +146,7 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
             forward_loss_kwargs,
             unsharded_param_values=forward_unsharded_param_values,
             buffer_values=forward_buffer_values,
+            activation_slot_id_1=forward_activation_slot_id_1,
             runtime_validate=runtime_validate,
         )
         multiplex_args: list[Any] = []
@@ -200,7 +217,6 @@ def _build_graph_pp_overlap_graphs(
     schedule: _PipelineScheduleRuntime,
     *,
     compile_config: GraphTrainerCompileConfig,
-    annotate_graph: Callable[..., None],
     compile_graph_module: Callable[..., fx.GraphModule],
     execute_graph_module: Callable[[fx.GraphModule, list[Any]], tuple[Any, ...]],
 ) -> dict[tuple[int, int], OverlapStageGraphs]:
@@ -229,12 +245,6 @@ def _build_graph_pp_overlap_graphs(
         multiplexed_graph = multiplex_fw_bw_graph(
             fw_graphs.modules.fw,
             bw_graphs.modules.full_bw,
-        )
-        annotate_graph(
-            multiplexed_graph,
-            stage_index=fw_stage_idx,
-            callable_name="multiplex",
-            action_name="OVERLAP_F_B",
         )
         compiled_graph = compile_graph_module(
             multiplexed_graph,

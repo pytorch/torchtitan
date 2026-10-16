@@ -48,7 +48,7 @@ from torchtitan.components.data import (
     IndexedJsonlSource,
     SingleDatasetConfig,
 )
-from torchtitan.hf_datasets.text_datasets import TextProcessor
+from torchtitan.components.data.text_datasets import TextProcessor
 
 
 def article_text(row):
@@ -134,7 +134,7 @@ Replace the source path, or construct the source directly:
 from dataclasses import replace
 
 from torchtitan.components.data import HuggingFaceStreamingSource
-from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.components.data.text_datasets import DATASETS
 
 c4 = DATASETS["c4"]
 c4 = replace(c4, source=replace(c4.source, path="/datasets/c4"))
@@ -182,13 +182,7 @@ class PretokenizedMemmapSource(Configurable, RandomAccessDataSource):
         tokens_path: str
         document_offsets_path: str
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ):
-        del dataset_iteration_policy
+    def __init__(self, config: Config):
         self.tokens = np.memmap(config.tokens_path, dtype=np.uint32, mode="r")
         self.offsets = np.load(config.document_offsets_path)
 
@@ -243,7 +237,7 @@ from torchtitan.components.data import (
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
 )
-from torchtitan.hf_datasets.text_datasets import ChatProcessor
+from torchtitan.components.data.text_datasets import ChatProcessor
 
 
 def gsm8k_messages(row):
@@ -368,6 +362,8 @@ pretraining_corpus_ds = DatasetConcatConfig(
 
 Every `books_ds` row now appears three times in the combined finite index space. With `shuffle=True`, TorchTitan shuffles that combined index space before DP sharding.
 
+Each child is built with seed `seed + index`, the same as mixed children, so repeated copies make independent draws in random processors (for example augmentation or random cropping). Inserting or reordering a child therefore changes the draws of every later child.
+
 Use mixing instead when the desired behavior is relative source-selection frequency rather than exact finite duplication:
 
 ```python
@@ -394,14 +390,14 @@ from torchtitan.components.data import (
     HuggingFaceStreamingSource,
     SingleDatasetConfig,
 )
-from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import (
+from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.mm_datasets import (
     MMSamplePackingConfig,
-    MultiModalProcessor,
+    VisionProcessor,
     _process_cc12_wd_sample,
 )
 
-mm_processor = MultiModalProcessor.Config(
+mm_processor = VisionProcessor.Config(
     sample_processor=_process_cc12_wd_sample,
 )
 

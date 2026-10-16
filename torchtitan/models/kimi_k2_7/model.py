@@ -19,19 +19,14 @@ from torch import nn
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
     spmd_mesh_size,
 )
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    FlexInnerAttention,
-    VarlenInnerAttention,
-)
+from torchtitan.models.common.attention import AttentionMetadataMap
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -95,15 +90,6 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
                 modules_excluded_from_active_params=(kimi_model.vision_encoder,),
             )
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_kimi_k2_5_sharding_config
-
-            set_kimi_k2_5_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
     def __init__(self, config: Config):
         tp = spmd_mesh_size("tp")
         if (
@@ -126,10 +112,9 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: LocalCompileConfig,
-        ac_config: ActivationCheckpointingConfig | None,
+        local_compile_regions: list[str],
+        activation_remat: ActivationRematConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> KimiK25Model:
         if parallelism_context.cp_enabled:
             raise NotImplementedError(
@@ -141,10 +126,9 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            compile_config=compile_config,
-            ac_config=ac_config,
+            local_compile_regions=local_compile_regions,
+            activation_remat=activation_remat,
             dump_folder=dump_folder,
-            skip_dp=skip_dp,
         )
 
     def preprocess_inputs(
@@ -155,6 +139,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap, and return the batch."""
@@ -162,16 +147,12 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
-            inner = getattr(self.config.first_attention, "inner_attention", None)
-            if isinstance(
-                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
-            ):
-                input_dict["attention_masks"] = self.get_attention_masks(
-                    positions=positions,
-                    padding_mask=padding_mask,
-                    max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
-                )
+            input_dict["attention_metadata"] = self._get_attention_metadata(
+                positions=positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
 
         input_shardings = {
             **decoder_input_sharding(),
@@ -190,6 +171,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
+        input_dict["aux_loss_denominators"] = global_routing_token_counts
         return inputs, labels, input_dict
 
     def _prepare_multimodal_embeds(
@@ -273,9 +255,10 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ):
         """Forward pass for Kimi K2.5.
 
@@ -291,7 +274,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             grid_thw_videos: (num_videos, 3) patch counts per video.
             special_tokens: tokenizer-resolved ``image_id``/``video_id``;
                 required for image/video batches, None for text-only.
-            attention_masks: Decoder attention masks.
+            attention_metadata: Decoder attention masks.
             positions: Per-token position IDs for packed sequences.
 
         Returns:
@@ -315,8 +298,23 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             # resumes as global batch sharding after the multimodal region.
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
+        with spmd.no_typecheck():
+            aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
         for layer in self.layers.values():
-            x = layer(x, attention_masks, positions, padding_mask=padding_mask)
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(type(layer.attention.inner_attention))
+            )
+            x = layer(
+                x,
+                layer_attention_metadata,
+                positions,
+                padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
+            )
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

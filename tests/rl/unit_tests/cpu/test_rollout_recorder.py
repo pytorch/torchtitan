@@ -4,20 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for `torchtitan.rl.observability.rollout_recorder`."""
+"""Unit tests for `torchtitan.rl.rollout.recorder`."""
 
 from __future__ import annotations
 
 import dataclasses
 import json
 
-from torchtitan.rl.observability.rollout_recorder import (
+import numpy as np
+import pytest
+
+from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
+
+from torchtitan.rl.rollout.recorder import (
     KeepExtremeRewardsFilter,
     RolloutSampleRecorder,
 )
-
-from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
-from torchtitan.rl.types import RolloutTurnID
+from torchtitan.rl.rollout.types import RolloutTurnID
 
 
 def _recorder(tmp_path, **config_kwargs) -> RolloutSampleRecorder:
@@ -27,9 +30,10 @@ def _recorder(tmp_path, **config_kwargs) -> RolloutSampleRecorder:
 def _turn(*, completion_logprobs: list[float], policy_version: int = 1) -> RolloutTurn:
     return RolloutTurn(
         rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
-        prompt_token_ids=[1, 2, 3],
-        completion_token_ids=[4, 5],
-        completion_logprobs=completion_logprobs,
+        prompt_prefix_len=0,
+        prompt_delta_token_ids=np.array([1, 2, 3], dtype=np.int32),
+        completion_token_ids=np.array([4, 5], dtype=np.int32),
+        completion_logprobs=np.array(completion_logprobs, dtype=np.float32),
         min_policy_version=policy_version,
         prompt_messages=[{"role": "user", "content": "sort: b a c"}],
         completion_message={"role": "assistant", "content": "a b c"},
@@ -86,6 +90,20 @@ def test_default_filter_logs_only_highest_and_lowest_per_group(tmp_path) -> None
     assert all("step" not in record for record in records)  # training omits step
 
 
+def test_keep_errors_records_every_failure_with_its_logs(tmp_path) -> None:
+    group = _group(0, rewards=[0.1, 0.9, 0.5, 0.2])
+    group.rollouts[0].status = RolloutStatus.ERROR  # also the lowest: recorded once
+    group.rollouts[2].status = RolloutStatus.ERROR
+    group.rollouts[2].logs = {"error": "agent timeout"}
+    recorder = _recorder(
+        tmp_path, filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
+    )
+    recorder.record(is_validation=False, rollout_groups=[group])
+    records = _read_lines(tmp_path / "rollout_samples.jsonl")
+    assert sorted(r["reward"] for r in records) == [0.1, 0.5, 0.9]
+    assert [r["logs"] for r in records] == [{}, {}, {"error": "agent timeout"}]
+
+
 def test_logs_all_groups_no_cap(tmp_path) -> None:
     recorder = _recorder(tmp_path)
     recorder.record(
@@ -119,7 +137,7 @@ def test_record_dumps_the_rollout_minus_token_arrays(tmp_path) -> None:
     assert turn["completion_message"] == {"role": "assistant", "content": "a b c"}
     assert turn["env_messages"] == [{"role": "user", "content": "ok"}]
     # token-id / logprob arrays are large, so they are dropped unless opted in.
-    assert "prompt_token_ids" not in turn
+    assert "prompt_delta_token_ids" not in turn
     assert "completion_token_ids" not in turn
     assert "completion_logprobs" not in turn
 
@@ -128,7 +146,8 @@ def test_log_tensors_and_logprobs_opt_in(tmp_path) -> None:
     recorder = _recorder(tmp_path, log_tensors=True, log_logprobs=True)
     recorder.record(is_validation=False, rollout_groups=[_group(0, rewards=[1.0])])
     (turn,) = _read_lines(tmp_path / "rollout_samples.jsonl")[0]["turns"]
-    assert turn["prompt_token_ids"] == [1, 2, 3]
+    assert turn["prompt_prefix_len"] == 0
+    assert turn["prompt_delta_token_ids"] == [1, 2, 3]
     assert turn["completion_token_ids"] == [4, 5]
     assert turn["completion_logprobs"] == [-0.5, -1.5]
 
@@ -193,7 +212,8 @@ def test_turn_metrics_are_excluded_not_serialized(tmp_path) -> None:
 def test_none_policy_version_and_completion_message(tmp_path) -> None:
     turn = RolloutTurn(
         rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
-        prompt_token_ids=[1, 2],
+        prompt_prefix_len=0,
+        prompt_delta_token_ids=[1, 2],
         completion_token_ids=[],
         completion_logprobs=[],
         min_policy_version=None,
@@ -225,3 +245,14 @@ def test_encode_turn_covers_all_rollout_turn_fields(tmp_path) -> None:
         ), f"RolloutTurn.{field.name} is not encoded by _encode_turn"
 
     assert "turn_id" in encoded  # rollout_id -> turn_id
+
+
+def test_filter_k_zero_keeps_nothing() -> None:
+    # ranked[-0:] is the whole list, so k=0 used to record every rollout.
+    group = _group(0, rewards=[0.1, 0.5, 0.9])
+    assert KeepExtremeRewardsFilter.Config(k=0).build()([group]) == []
+
+
+def test_filter_rejects_negative_k() -> None:
+    with pytest.raises(ValueError, match="k must be non-negative"):
+        KeepExtremeRewardsFilter.Config(k=-1)

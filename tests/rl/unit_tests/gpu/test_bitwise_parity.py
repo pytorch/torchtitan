@@ -50,30 +50,20 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.tensor import distribute_tensor, DTensor
-from torch.nn.attention.flex_attention import and_masks
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
-from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
+from torchtitan.config import apply_overrides, CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
-from torchtitan.distributed.spmd_types import (
-    dtensor_to_plain_tensor_state_dict,
-    plain_tensor_to_dtensor_state_dict,
-    spmd_mesh_group,
-)
-from torchtitan.distributed.utils import (
+from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.models.common.attention import (
-    create_attention_mask,
-    FlexInnerAttention,
-    get_causal_mask_mod,
-    get_document_mask_mod,
-)
+from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.controller import Controller
-from torchtitan.rl.model.vllm_registry import (
+from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
@@ -81,10 +71,13 @@ from torchtitan.rl.model.vllm_registry import (
 )
 from torchtitan.tools import utils
 from torchtitan_recipes.rl.alphabet_sort import (
-    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
     rl_grpo_qwen3_5_9b_varlen_batch_invariant,
+)
+from torchtitan_recipes.tests.rl.alphabet_sort import (
+    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
+    rl_grpo_kimi_k3_debug_varlen_batch_invariant,
     rl_grpo_qwen3_5_debug_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
@@ -112,15 +105,13 @@ def build_trainer_model(
 
     Mirrors Trainer._build_model() without the Monarch actor framework.
     """
-    assert config.model is not None
-    model_config = copy.deepcopy(config.model)
+    model_config = copy.deepcopy(config.trainer.model)
     hf_assets_path = config.hf_assets_path
 
     device = utils.get_local_device()
     utils.device_module.set_device(device)
 
     parallelism = config.trainer.parallelism
-    model_config.set_sharding_(parallelism)
     parallelism_context = ParallelismContext(
         dp_shard=parallelism.data_parallel_shard_degree,
         dp_replicate=parallelism.data_parallel_replicate_degree,
@@ -151,8 +142,8 @@ def build_trainer_model(
         parallelism_context=parallelism_context,
         training=trainer_config.training,
         parallelism=parallelism,
-        compile_config=config.compile,
-        ac_config=trainer_config.activation_checkpoint,
+        local_compile_regions=model_config.local_compile_regions,
+        activation_remat=trainer_config.activation_remat,
         dump_folder=config.dump_folder,
     )
     with parallelism_context.activate_spmd():
@@ -204,8 +195,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
-    assert config.model is not None
-    attention_backend = config.model.first_full_attention_backend
+    attention_backend = gen_config.model.first_full_attention.inner_attention
     use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same
@@ -220,7 +210,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
             set_batch_invariance(True)
             # The v2 logprob Triton kernel bypasses the aten overrides. Apply the
             # same generator-side patch the production VLLMGenerator does.
-            from torchtitan.rl.model.batch_invariance import (
+            from torchtitan.rl.generator.vllm.batch_invariance import (
                 force_logprobs_fn_for_batch_invariance,
             )
 
@@ -254,7 +244,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     if not has_cuda_capability(9, 0) and not use_flex:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
-    engine_kwargs["max_model_len"] = config.model.max_context_length
+    engine_kwargs["max_model_len"] = gen_config.model.max_context_length
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
     # (the active-buffer capacity num_group_workers, or the validation pass).
     async_loop = config.async_loop
@@ -262,7 +252,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     num_group_workers = async_loop.max_active_rollout_groups
     rollout_concurrency = max(
         num_group_workers * async_loop.num_samples_per_prompt,
-        async_loop.validation.num_samples,
+        async_loop.validation.steps,
     )
     max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
     engine_kwargs["max_num_seqs"] = max_num_seqs
@@ -284,14 +274,9 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     """Copy the trainer model's weights into the vLLM model in-process."""
 
     wrapper = engine.model_executor.driver_worker.get_model()
-    vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
-    vllm_sd = vllm_model.state_dict()
-    vllm_sd = plain_tensor_to_dtensor_state_dict(
-        vllm_sd,
-        state_dict_layouts=wrapper.get_state_dict_layouts(),
-        parallelism_context=wrapper.parallelism_context,
-    )
+    # As a model state dict load: fill the pinned CPU copy, then load it with load_state_dict.
+    vllm_sd = wrapper._prefetched_model_state_dict
 
     missing = []
     for name, vparam in vllm_sd.items():
@@ -308,9 +293,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             else:
                 vparam.copy_(full)
 
-    vllm_model.load_state_dict(
-        dtensor_to_plain_tensor_state_dict(vllm_sd), strict=False
-    )
+    wrapper.load_state_dict(vllm_sd)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -331,8 +314,8 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
 
     Mirrors the trainer's flex attention path: pack documents into a single
     row, pad each document to block-aligned boundaries in batch-invariant
-    mode, create a BlockMask via ``get_document_mask_mod`` +
-    ``get_causal_mask_mod``, and extract per-document logprobs.
+    mode, build backend-specific attention metadata, and extract per-document
+    logprobs.
     """
     inner_attn = model.config.layers[0].attention.inner_attention
     assert isinstance(inner_attn, FlexInnerAttention.Config)
@@ -358,19 +341,11 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     packed_ids = torch.cat(parts)
     positions = torch.cat(pos_parts)
 
-    mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
+    attention_metadata = model._get_attention_metadata(positions)
 
-    attention_masks = create_attention_mask(
-        and_masks(*mask_mods),
-        1,
-        None,
-        positions.shape[0],
-        positions.shape[0],
-        BLOCK_SIZE=block_size,
-        separate_full_blocks=not batch_invariant,
+    logits = model(
+        packed_ids, attention_metadata=attention_metadata, positions=positions
     )
-
-    logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
 
     # Build pre-shifted labels matching the trainer convention:
     # labels[i] = packed_ids[i+1] for valid positions, IGNORE_INDEX otherwise.
@@ -405,9 +380,11 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
     # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
     # which can break torch.compile with symbolic shapes.
     # Hybrid models may require different metadata for each attention type.
-    attention_masks = model.get_attention_masks(positions)
+    attention_metadata = model._get_attention_metadata(positions)
 
-    logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
+    logits = model(
+        packed_ids, attention_metadata=attention_metadata, positions=positions
+    )
 
     # Build pre-shifted labels matching the trainer convention:
     # labels[i] = packed_ids[i+1] within each segment, IGNORE_INDEX otherwise.
@@ -668,12 +645,12 @@ class BitwiseParityTestBase(unittest.TestCase):
                 initial_load_path=config.hf_assets_path,
             )
 
+        if config.override.imports:
+            apply_overrides(config.override, config)
         register_to_vllm(
-            config.model,
+            config.generator.model,
             parallelism=config.generator.parallelism,
-            local_compile_config=config.compile,
             checkpointer_config=generator_checkpointer,
-            override=config.generator.override,
         )
 
         # Test runs trainer and generator in the same process, so limit
@@ -681,6 +658,18 @@ class BitwiseParityTestBase(unittest.TestCase):
         config.generator.gpu_memory_limit = 0.5
 
         cls.model, cls.device, cls.parallelism_context = build_trainer_model(config)
+
+        # Workaround: Clear the DTensor sharding-propagation caches here since
+        # this test puts both the trainer and the generator in the same process
+        # and builds equal but separate meshes for them. Without this workaround,
+        # the generator's FSDP params pick up the trainer's mesh objects and
+        # fail fully_shard's mesh identity check. This error happens only in
+        # this specific test setup, no production impact.
+        #
+        # TODO: Revisit DTensor sharding-propagation cache semantics on pytorch side
+        torch._C._clear_DTensor_sharding_propagator_cache()
+        DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding.cache_clear()
+
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
@@ -824,6 +813,41 @@ class BitwiseParityTestBase(unittest.TestCase):
                     "2ndPrefill",
                 )
 
+    def _check_vllm_prefill_and_decode_batch_invariance(self):
+        """Check that vLLM prefill and decode do not depend on batch composition."""
+        single_prompt = self.prompt_ids[:1]
+
+        single_prefill_lps = vllm_prefill(self.engine, single_prompt)
+        batched_prefill_lps = vllm_prefill(self.engine, self.prompt_ids)
+
+        single_gen_ids, single_decode_lps = vllm_generate(
+            self.engine, single_prompt, self.MAX_GEN_TOKENS
+        )
+        batched_gen_ids, batched_decode_lps = vllm_generate(
+            self.engine, self.prompt_ids, self.MAX_GEN_TOKENS
+        )
+
+        if dist.get_rank() == 0:
+            self._assert_logprobs_equal(
+                "seq 0: vLLM prefill(bsz=1) vs prefill(bsz=3)",
+                single_prefill_lps[0],
+                batched_prefill_lps[0],
+                "bsz=1",
+                "bsz=3",
+            )
+            self.assertEqual(
+                single_gen_ids[0],
+                batched_gen_ids[0],
+                "seq 0: greedy decode token IDs differ by batch composition",
+            )
+            self._assert_logprobs_equal(
+                "seq 0: vLLM decode(bsz=1) vs decode(bsz=3)",
+                single_decode_lps[0],
+                batched_decode_lps[0],
+                "bsz=1",
+                "bsz=3",
+            )
+
 
 class TestBitwiseParityVarlen(BitwiseParityTestBase):
     """Bitwise parity tests using varlen attention."""
@@ -877,38 +901,53 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
 
     def test_vllm_prefill_and_decode_batch_invariance(self):
         """vLLM prefill and decode must not depend on batch composition."""
-        single_prompt = self.prompt_ids[:1]
+        self._check_vllm_prefill_and_decode_batch_invariance()
 
-        single_prefill_lps = vllm_prefill(self.engine, single_prompt)
-        batched_prefill_lps = vllm_prefill(self.engine, self.prompt_ids)
 
-        single_gen_ids, single_decode_lps = vllm_generate(
-            self.engine, single_prompt, self.MAX_GEN_TOKENS
-        )
-        batched_gen_ids, batched_decode_lps = vllm_generate(
-            self.engine, self.prompt_ids, self.MAX_GEN_TOKENS
-        )
+@unittest.skipUnless(
+    torch.cuda.is_available()
+    and torch.version.hip is None
+    and torch.cuda.get_device_capability() >= (9, 0),
+    "Batch-invariant Attention Gym KDA uses fixed-tile TMA kernels (SM90+)",
+)
+class KimiK3BitwiseParityTestBase(BitwiseParityTestBase):
+    """Run Kimi K3 parity checks with the trainer in training mode."""
 
-        if dist.get_rank() == 0:
-            self._assert_logprobs_equal(
-                "seq 0: vLLM prefill(bsz=1) vs prefill(bsz=3)",
-                single_prefill_lps[0],
-                batched_prefill_lps[0],
-                "bsz=1",
-                "bsz=3",
-            )
-            self.assertEqual(
-                single_gen_ids[0],
-                batched_gen_ids[0],
-                "seq 0: greedy decode token IDs differ by batch composition",
-            )
-            self._assert_logprobs_equal(
-                "seq 0: vLLM decode(bsz=1) vs decode(bsz=3)",
-                single_decode_lps[0],
-                batched_decode_lps[0],
-                "bsz=1",
-                "bsz=3",
-            )
+    __test__ = False
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.model.train()
+
+
+def _kimi_k3_debug_bitwise_config() -> Controller.Config:
+    """Build a one-GPU random-weight Kimi K3 parity configuration."""
+    config = rl_grpo_kimi_k3_debug_varlen_batch_invariant()
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=1,
+        ),
+    )
+    return config
+
+
+class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
+    """Kimi K3 KDA/MLA parity with random weights and matched TP=1."""
+
+    __test__ = True
+    config_fn = staticmethod(_kimi_k3_debug_bitwise_config)
+    attn_backend = "varlen"
+    sync_weights_from_trainer = True
+    BATCH_SIZE = 3
+    PROMPT_LENGTH = 64
+    MAX_GEN_TOKENS = 128
+
+    def test_vllm_prefill_and_decode_batch_invariance(self):
+        """vLLM prefill and decode must not depend on batch composition."""
+        self._check_vllm_prefill_and_decode_batch_invariance()
 
 
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):

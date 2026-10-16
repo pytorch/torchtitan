@@ -7,6 +7,7 @@
 """DeepSeek V3 model configurations used by tests."""
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -18,54 +19,51 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    Float8GroupedLinearConverter,
-    Float8LinearConverter,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
+    NVFP4GroupedLinearConverter,
+    NVFP4LinearConverter,
     TokenDispatcherTransform,
 )
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 
 from torchtitan.models.deepseek_v3 import build_model_config
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
 
-def deepseek_v3_mxfp8_linear_converter_config(
-    *, model_compile_enabled: bool = False
-) -> MXFP8LinearConverter.Config:
-    """Build the dense MXFP8 policy shared by eager and GraphTrainer configs.
-
-    The KV up projection and FFN down projections have single-consumer inputs
-    that are not saved elsewhere for backward, so their columnwise MXFP8
-    representations replace BF16 storage. Shared-input and attention output
-    projections use the conservative BF16 save format. This selection is based
-    on activation ownership, not the activation-checkpointing policy.
-    Checkpointing changes when the selected representation is recreated and how
-    long it remains live.
-    """
-    return MXFP8LinearConverter.Config(
-        model_compile_enabled=model_compile_enabled,
-        fqns=["attention", "shared_experts", "feed_forward"],
-        linears_saving_inputs_for_backward_in_mxfp8=[
-            "attention.wkv_b",
-            "feed_forward.w2",
-            "shared_experts.w2",
-        ],
-    )
+from torchtitan_recipes.models.deepseek_v3 import (
+    _dist_moe_runtime_config,
+    _require_dist_moe,
+    deepseek_v3_mxfp8_linear_converter_config,
+)
 
 
 def deepseek_v3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
+    )
+    num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
+    # The stock all-to-all EP dispatcher syncs with the CPU.
+    disable_cuda_graphs = parallelism.expert_parallel_degree > 1
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -76,6 +74,11 @@ def deepseek_v3_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=(
+                c4_document_capacity(num_tokens_per_microbatch_per_dp_rank)
+                if attn_backend == "varlen" and not disable_cuda_graphs
+                else None
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         optim=Optim.Config(
@@ -90,23 +93,35 @@ def deepseek_v3_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            disable_cuda_graphs=disable_cuda_graphs,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
 def deepseek_v3_debugmodel_mtp(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
-    config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model = build_model_config("debugmodel", seq_len=seq_len, num_mtp_layers=1)
+    num_mtp_layers = 1
+    config = deepseek_v3_debugmodel(
+        seq_len=seq_len, attn_backend=attn_backend, parallelism=parallelism
+    )
+    config.model = build_model_config(
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        num_mtp_layers=num_mtp_layers,
+        parallelism=config.parallelism,
+    )
+    config.dataloader.num_mtp_layers = num_mtp_layers
     config.loss = ChunkedLossWrapper.Config(
         loss_fn=MTPLoss.Config(
             global_vocab_size=decoder_vocab_size(config.model),
@@ -128,6 +143,7 @@ def deepseek_v3_debugmodel_mxfp8(
     config.model = build_model_config(
         "debugmodel",
         seq_len=seq_len,
+        parallelism=config.parallelism,
         converters=[
             deepseek_v3_mxfp8_linear_converter_config(),
             MXFP8GroupedLinearConverter.Config(
@@ -138,40 +154,46 @@ def deepseek_v3_debugmodel_mxfp8(
     return config
 
 
-def deepseek_v3_debugmodel_float8_grouped(
-    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> Trainer.Config:
-    config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[Float8GroupedLinearConverter.Config()],
-    )
-    return config
-
-
 def deepseek_v3_debugmodel_hybridep(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
+    config = deepseek_v3_debugmodel(
+        seq_len=seq_len, parallelism=ParallelismConfig(expert_parallel_degree=2)
     )
-    config.parallelism.expert_parallel_degree = 2
+    # HybridEP's non-blocking dispatch has no CPU sync, so CUDA graphs stay on.
+    config.training.disable_cuda_graphs = False
+    config.dataloader.max_num_documents = c4_document_capacity(
+        config.training.num_tokens_per_microbatch_per_dp_rank
+    )
     return apply_transforms(
         config,
         [
             TokenDispatcherTransform(
                 dispatcher=HybridEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
                 kwargs={"non_blocking_capacity_factor": 1.0},
             )
         ],
     )
 
 
-def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("16B", seq_len=seq_len, attn_backend="flex")
+def deepseek_v3_16b(
+    seq_len: int | None = None, *, parallelism: ParallelismConfig | None = None
+) -> Trainer.Config:
+    if parallelism is None:
+        parallelism = ParallelismConfig(
+            pipeline_parallel_schedule="Interleaved1F1B",
+            expert_parallel_degree=8,
+        )
+    model_config = build_model_config("16B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = 4 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -181,6 +203,9 @@ def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -194,17 +219,14 @@ def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            pipeline_parallel_schedule="Interleaved1F1B",
-            expert_parallel_degree=8,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -213,7 +235,7 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
     config.model = build_model_config(
         "16B",
         seq_len=seq_len,
-        attn_backend="flex",
+        parallelism=config.parallelism,
     )
     config.training.disable_cuda_graphs = False
     return apply_transforms(
@@ -221,18 +243,179 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
         [
             TokenDispatcherTransform(
                 dispatcher=HybridEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
                 kwargs={"non_blocking_capacity_factor": 1.0},
             )
         ],
     )
 
 
+def deepseek_v3_debugmodel_dist_moe_bf16(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    scratch_capacity_factor: float = 1.0,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Build the debug BF16 Dist-MoE test recipe."""
+    _require_dist_moe()
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+
+    config = deepseek_v3_debugmodel(seq_len=seq_len, parallelism=parallelism)
+    # Dist-MoE dispatch is CUDA-graph capturable, so CUDA graphs stay on.
+    config.training.disable_cuda_graphs = False
+    config.model = build_model_config(
+        "debugmodel",
+        seq_len=seq_len,
+        parallelism=config.parallelism,
+    )
+    config.dataloader.max_num_documents = 512
+    config.training.mixed_precision_reduce = "bfloat16"
+    config.dist_moe_runtime = _dist_moe_runtime_config(
+        scratch_capacity_factor=scratch_capacity_factor
+    )
+    return apply_transforms(config, [DistMoeTransform()])
+
+
+def deepseek_v3_debugmodel_dist_moe_mxfp8(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    scratch_capacity_factor: float = 1.0,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Build the debug MXFP8 Dist-MoE test recipe."""
+    dist_moe = _require_dist_moe()
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+
+    config = deepseek_v3_debugmodel(seq_len=seq_len, parallelism=parallelism)
+    # Dist-MoE dispatch is CUDA-graph capturable, so CUDA graphs stay on.
+    config.training.disable_cuda_graphs = False
+    config.model = build_model_config(
+        "debugmodel",
+        seq_len=seq_len,
+        parallelism=config.parallelism,
+        converters=[
+            deepseek_v3_mxfp8_linear_converter_config(include_lm_head=True),
+        ],
+    )
+    config.dataloader.max_num_documents = 512
+    config.training.mixed_precision_reduce = "bfloat16"
+    config.dist_moe_runtime = _dist_moe_runtime_config(
+        scratch_capacity_factor=scratch_capacity_factor
+    )
+    return apply_transforms(
+        config,
+        [
+            DistMoeTransform(
+                expert_precision="mxfp8",
+                block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
+            )
+        ],
+    )
+
+
+def dist_moe_fsdp2_ep2_parallelism() -> ParallelismConfig:
+    """Parallelism of the two-GPU Dist-MoE integration tests."""
+    return ParallelismConfig(data_parallel_shard_degree=2, expert_parallel_degree=2)
+
+
+def configure_dist_moe_fsdp2_ep2(config: Trainer.Config) -> Trainer.Config:
+    """Apply the common two-GPU Dist-MoE integration-test settings.
+
+    ``config`` must be built with ``dist_moe_fsdp2_ep2_parallelism()``.
+    """
+    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+
+    runtime_config = config.dist_moe_runtime
+    assert isinstance(runtime_config, DistMoeRuntime.Config)
+    runtime_config.scratch_capacity_factor = 2.0
+    config.training.num_tokens_per_microbatch_per_dp_rank = 128
+    config.training.max_context_length = 128
+    config.training.steps = 4
+    config.checkpointer = None
+    return config
+
+
+def deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Config:
+    """Exercise BF16 Dist-MoE in-place WGrad accumulation with FSDP and EP."""
+    return configure_dist_moe_fsdp2_ep2(
+        deepseek_v3_debugmodel_dist_moe_bf16(
+            seq_len=128, parallelism=dist_moe_fsdp2_ep2_parallelism()
+        )
+    )
+
+
+def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
+    """Exercise MXFP8 Dist-MoE in-place WGrad accumulation with FSDP and EP."""
+    return configure_dist_moe_fsdp2_ep2(
+        deepseek_v3_debugmodel_dist_moe_mxfp8(
+            seq_len=128, parallelism=dist_moe_fsdp2_ep2_parallelism()
+        )
+    )
+
+
+def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
+    """Build the 16B BF16 Dist-MoE test recipe."""
+    _require_dist_moe()
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+
+    config = deepseek_v3_16b(seq_len=seq_len)
+    config.model = build_model_config(
+        "16B",
+        seq_len=seq_len,
+        parallelism=config.parallelism,
+    )
+    config.dataloader.max_num_documents = 512
+    config.training.mixed_precision_reduce = "bfloat16"
+    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    return apply_transforms(config, [DistMoeTransform()])
+
+
+def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config:
+    """Build the 16B MXFP8 Dist-MoE test recipe."""
+    dist_moe = _require_dist_moe()
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+
+    config = deepseek_v3_16b(seq_len=seq_len)
+    config.model = build_model_config(
+        "16B",
+        seq_len=seq_len,
+        parallelism=config.parallelism,
+        converters=[
+            deepseek_v3_mxfp8_linear_converter_config(include_lm_head=True),
+        ],
+    )
+    config.dataloader.max_num_documents = 512
+    config.training.mixed_precision_reduce = "bfloat16"
+    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    return apply_transforms(
+        config,
+        [
+            DistMoeTransform(
+                expert_precision="mxfp8",
+                block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
+            )
+        ],
+    )
+
+
 def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
+    parallelism = ParallelismConfig(
+        pipeline_parallel_schedule="Interleaved1F1B",
+        expert_parallel_degree=2,
+    )
     model_config = build_model_config(
         "671B",
         seq_len=seq_len,
-        attn_backend="flex",
+        parallelism=parallelism,
     )
+    num_tokens_per_microbatch_per_dp_rank = 4 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -242,6 +425,9 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -256,35 +442,93 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=10000,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            pipeline_parallel_schedule="Interleaved1F1B",
-            expert_parallel_degree=2,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
-def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
-    config = deepseek_v3_671b(seq_len=seq_len)
-    # Quantize the dense Linear layers and the MoE expert grouped GEMMs to
-    # float8 (fp8). This requires torchao and is only supported on NVIDIA SM89+
-    # or AMD MI300+; on other backends (e.g. Intel XPU) the converter raises at
-    # build time, so use the plain deepseek_v3_671b config there.
+def deepseek_v3_debugmodel_nvfp4_ffn_mxfp8_attn(
+    bf16_tail_fraction: float = 0.0,
+    *,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
+    model_config = config.model
+    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
     config.model = build_model_config(
-        "671B",
+        "debugmodel",
         seq_len=seq_len,
-        attn_backend="flex",
+        parallelism=config.parallelism,
         converters=[
-            Float8LinearConverter.Config(
-                filter_fqns=["lm_head", "router.gate"],
+            NVFP4LinearConverter.Config(
+                fqns=[
+                    f"{layer}{submodule}"
+                    for layer in layer_fqns
+                    for submodule in nvfp4_ffn_submodules(model_config.layers)
+                ],
             ),
-            Float8GroupedLinearConverter.Config(),
+            NVFP4GroupedLinearConverter.Config(
+                fqns=layer_fqns,
+            ),
+            MXFP8LinearConverter.Config(
+                fqns=["attention.wq", "attention.wo"],
+            ),
         ],
     )
+    config.model.local_compile_regions = ["loss"]
+    return config
+
+
+def deepseek_v3_16b_nvfp4_ffn_mxfp8_attn(
+    bf16_tail_fraction: float = 0.0, *, seq_len: int | None = None
+) -> Trainer.Config:
+    config = deepseek_v3_16b(seq_len=seq_len)
+    config.optim.lr_scheduler.warmup_steps = 200
+    config.training.disable_cuda_graphs = False
+    model_config = config.model
+    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
+    config.model = build_model_config(
+        "16B",
+        seq_len=seq_len,
+        parallelism=config.parallelism,
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=[
+                    f"{layer}{submodule}"
+                    for layer in layer_fqns
+                    for submodule in nvfp4_ffn_submodules(model_config.layers)
+                ],
+            ),
+            NVFP4GroupedLinearConverter.Config(
+                fqns=layer_fqns,
+            ),
+            MXFP8LinearConverter.Config(
+                fqns=["attention.wq", "attention.wo"],
+            ),
+        ],
+    )
+    config = apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
+                kwargs={"non_blocking_capacity_factor": 0.1875, "pad_multiple": 128},
+            )
+        ],
+    )
+    config.model.local_compile_regions = ["loss"]
     return config

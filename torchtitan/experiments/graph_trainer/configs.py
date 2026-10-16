@@ -8,17 +8,20 @@ from dataclasses import dataclass, field, fields
 from typing import Literal
 
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
-from torchtitan.protocols.model import BaseModel
+from torchtitan.experiments.graph_trainer.common_utils import (
+    disable_inplace_wgrad_accum,
+)
+from torchtitan.models.base.model import BaseModel
 from torchtitan.trainer import Trainer
 
 EpOverlapChunkDim = Literal["batch", "seq"]
 
 TRANSFORMER_BLOCK_FQN = "layers.*"
-MOE_BLOCK_FQN = "layers.*.moe"
+MOE_BLOCK_FQN = "layers.*.feed_forward"
 SUPPORTED_EP_OVERLAP_MODULE_FQNS = frozenset({TRANSFORMER_BLOCK_FQN, MOE_BLOCK_FQN})
 
 
@@ -38,10 +41,135 @@ class EpOverlapConfig:
     """Single module FQN pattern chunked for EP overlap.
 
     v1 supports all transformer blocks (``layers.*``) or all MoE blocks
-    (``layers.*.moe``). Selected module forwards are wrapped with eager chunking
+    (``layers.*.feed_forward``). Selected module forwards are wrapped with eager chunking
     before tracing, and the overlap scheduler consumes the resulting chunk
     metadata.
     """
+
+
+@dataclass(kw_only=True, slots=True)
+class SPMDGradientAccumulationConfig:
+    """Settings for SPMD with gradient accumulation.
+
+    SPMD with gradient accumulation runs more than one microbatch per step
+    without pipeline parallelism. The ``fsdp_*`` fields additionally require
+    FSDP. Otherwise these settings are ignored with a warning: SPMD without
+    gradient accumulation keeps FSDP collectives inside
+    ``FULL_FORWARD_BACKWARD``, and PP always runs them as explicit
+    ``UNSHARD`` and ``REDUCE_GRAD`` schedule actions.
+    """
+
+    fsdp_param_unshard_mode: Literal[
+        "every_microbatch", "first_microbatch"
+    ] = "first_microbatch"
+    """Choose where FSDP parameter all-gathers run.
+
+    - ``every_microbatch``
+        - All-gathers inside each joint microbatch graph, so unsharded
+          parameters can be freed after their last use for lower peak memory
+    - ``first_microbatch``
+        - All-gathers inside the first ``FORWARD_BACKWARD_FIRST_WITH_UNSHARD``
+          graph; later microbatches reuse the unsharded parameters
+
+    ``first_microbatch`` keeps parameters unsharded until the end of the step,
+    which implies ``parallelism.fsdp_reshard_after_forward`` = ``never`` for
+    the compiled graphs.
+    """
+
+    fsdp_grad_reduce_mode: Literal[
+        "every_microbatch", "last_microbatch"
+    ] = "last_microbatch"
+    """Choose where FSDP gradient reduction runs.
+
+    - ``every_microbatch``
+        - Reduce-scatters inside each joint microbatch graph, so unsharded
+          gradients can be freed immediately for lower peak memory
+    - ``last_microbatch``
+        - Reduction inside the last ``FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD``
+          graph after accumulating all microbatches
+
+    ``first_microbatch`` unsharding cannot be combined with
+    ``every_microbatch`` reduction, and ``every_microbatch`` unsharding cannot
+    be combined with ``last_microbatch`` reduction.
+    """
+
+    fuse_wgrad_accumulation: Literal["auto", "disabled", "enabled"] = "auto"
+    """Control fusion of WGrad producers with gradient accumulation.
+
+    - ``auto``
+        - Fuse supported WGrad producers when
+          ``compile.numerics_changing_optim`` is set; otherwise keep explicit
+          accumulation
+    - ``disabled``
+        - Keep explicit accumulation
+    - ``enabled``
+        - Fuse supported WGrad producers
+
+    With SPMD FSDP, fusion requires ``fsdp_grad_reduce_mode`` = ``last_microbatch``.
+    """
+
+
+@dataclass(kw_only=True, slots=True)
+class PagedStashConfig:
+    page_size: int = 64
+    """Tokens per paged-stash page. Smaller pages waste less on stashes that do
+    not fill a page, at the cost of a longer page record per activation."""
+
+    buffer_size_factor_cuda: float = 1.10
+    """Headroom multiplier on the CUDA paged-stash buffers, over the pages the
+    measured step and the pipeline schedule say are needed. Matches Megatron's
+    moe_paged_stash_buffer_size_factor_cuda."""
+
+    buffer_size_factor_cpu: float = 0.0
+    """Headroom multiplier for an optional pinned-host spill buffer, using the
+    same page basis as the CUDA factor. 0 disables host spilling, so a full
+    CUDA stash goes straight to overflow. Matches Megatron's
+    moe_paged_stash_buffer_size_factor_cpu."""
+
+    prefetch_n_layers: int = 1
+    """Issue a backward's paged-stash reloads this many paged-layer schedule
+    entries early -- at the end of the forward or backward that precedes it on
+    the rank, even in another pipeline action -- so the page reads overlap with
+    compute. 1 matches Megatron; 0 reloads an activation when backward first
+    reads it."""
+
+    skip_immediate_backward: bool = True
+    """Keep an activation resident instead of stashing it when the pipeline
+    schedule runs that microbatch's backward next, so the stash would be written
+    and read straight back with no bubble to hide it in. Applies to the last
+    paged layer, the only one whose backward can be the next scheduled compute.
+    Matches Megatron's ``remove_paged_tensor_from_stash``."""
+
+    overflow_check: Literal["deferred", "blocking"] = "deferred"
+    """How a paged-stash overflow is detected and acted on. Overflow means
+    backward read activations that were never written back, so the step's
+    gradients are invalid.
+        deferred: copy each rank's flag into pinned host memory
+            asynchronously each step and read an earlier step's copy once it
+            has landed, so no step syncs. Overflow is fatal and rank-local: a
+            rank raises when it reads its own overflow, typically two steps
+            later. Until then every rank skips its optimizer steps on device,
+            as AMP skips a step with an inf, so the parameters, optimizer
+            state and MoE expert biases -- and any checkpoint saved meanwhile
+            -- stay as they were before the overflow; the step count, learning
+            rate schedule and data position still advance. The flag is sticky,
+            so an overflow cannot be lost however far the CPU runs ahead, and a
+            blocking read at shutdown covers the final steps. Needs an
+            optimizer that can skip a step on device: fused Adam or AdamW
+            (``fused=True``, their default). Other optimizers are only
+            supported in blocking mode for now.
+        blocking: Megatron's behavior. Read the all-reduced flag with .item()
+            at every step boundary, rerun an overflowing step with paging
+            disabled, and page again from the next step with buffers of the
+            same size. Under CUDA graphs the rerun drops the captured graphs
+            and runs eagerly, and the next step captures them again. Never
+            applies an invalid step, recovers in process and works with any
+            optimizer, but costs one device sync per step."""
+
+    module_fqn: str = "layers.*.feed_forward.routed_experts"
+    """Module FQN pattern of the modules annotated as the paged-stash region.
+    The annotation covers everything traced inside their forward, so the
+    default covers the whole routed-expert subtree including inner_experts."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -62,110 +190,45 @@ class GraphTrainerCompileConfig:
     canonical graph structure.
     """
 
-    fsdp_param_unshard_mode: Literal[
-        "auto",
-        "every_microbatch",
-        "only_in_first_microbatch",
-        "extracted_in_schedule_stage",
-    ] = "auto"
-    """Choose where FSDP parameter all-gathers run.
-
-    - ``auto``
-        - PP=1 without gradient accumulation: all-gathers inside
-          ``FULL_FORWARD_BACKWARD``
-        - PP=1 with gradient accumulation: all-gathers inside the first
-          ``FORWARD_BACKWARD_FIRST_WITH_UNSHARD``
-        - PP>1: explicit ``UNSHARD``
-    - ``every_microbatch``
-        - PP=1: all-gathers inside each joint microbatch graph
-        - PP>1: error
-        - Keep all-gathers inside each joint graph to be able to
-          immediately deallocate them after their last use and get lower peak
-          memory
-    - ``only_in_first_microbatch``
-        - PP=1 with gradient accumulation: all-gathers inside the first
-          ``FORWARD_BACKWARD_FIRST_WITH_UNSHARD`` and parameters retained
-          across microbatches
-        - PP>1: error
-        - Requires gradient accumulation and
-          ``fsdp_reshard_after_forward=never``
-    - ``extracted_in_schedule_stage``
-        - PP=1 and PP>1: explicit ``UNSHARD``
-        - Commonly used for gradient accumulation and PP to run ``UNSHARD``
-          once at the first microbatch. This is achieved by extracting
-          ``UNSHARD`` (all-gathers) into a schedule stage and running it once
-          in GraphRuntime
-    """
-
-    fsdp_gradient_sync_mode: Literal[
-        "auto",
-        "every_microbatch",
-        "only_in_last_microbatch",
-        "deferred_as_schedule_stage",
-    ] = "auto"
-    """Choose where FSDP gradient reduction runs.
-
-    - ``auto``
-        - PP=1 without gradient accumulation: reduction inside
-          ``FULL_FORWARD_BACKWARD``
-        - PP=1 with gradient accumulation: reduction inside the last
-          ``FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD``
-        - PP>1: explicit ``REDUCE_GRAD``
-    - ``every_microbatch``
-        - PP=1: gradient reduction inside each joint microbatch graph
-        - PP>1: error
-        - Keep reduce-scatters inside each joint graph to be able to
-          immediately deallocate them after their last use and get lower peak
-          memory
-    - ``only_in_last_microbatch``
-        - PP=1 with gradient accumulation: reduction inside the last
-          ``FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD`` after accumulating all
-          microbatches
-        - PP>1: error
-        - Requires gradient accumulation
-    - ``deferred_as_schedule_stage``
-        - PP=1 and PP>1: explicit ``REDUCE_GRAD``
-        - Commonly used for gradient accumulation and PP to run
-          ``REDUCE_GRAD`` once at the last microbatch. This is achieved by
-          extracting ``REDUCE_GRAD`` (reduce-scatters) into a schedule stage
-          and running it once in GraphRuntime
-    """
-
-    gradient_accum_in_wgrad_fusion: Literal["auto", "disabled", "enabled"] = "auto"
-    """Control fusion of WGrad producers with gradient accumulation.
-
-    - ``auto``
-        - Gradient accumulation with ``numerics_changing_optim``: fuse supported
-          WGrad producers
-        - Otherwise: explicit accumulation
-    - ``disabled``
-        - Keep explicit accumulation
-    - ``enabled``
-        - PP=1: fuse supported WGrad producers during gradient accumulation
-        - PP>1: error
-    """
+    spmd_gradient_accumulation: SPMDGradientAccumulationConfig = field(
+        default_factory=SPMDGradientAccumulationConfig
+    )
+    """Settings for SPMD with gradient accumulation."""
 
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
     studies. A pass is skipped if its name exactly matches any entry.
-    Example: ``["custom_codegen_pass", "cuda_graph_pass"]``."""
+    Example: ``["custom_codegen_pass"]``."""
 
     memory_policy: Literal[
-        "none", "default", "full", "eager", "min_cut", "sac_and_offload"
+        "none",
+        "default",
+        "full",
+        "eager",
+        "min_cut",
+        "sac_and_offload",
+        "sac_and_paged_stash",
     ] = "default"
     """
-    Memory optimization policy for activation management (SAC, offload).
+    Memory optimization policy for activation management (SAC, offload, stash).
         none: save forward activations without rematerialization.
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
         full: full recompute, saving layer outputs and operations selected by
             full_recompute_save_ops. With no selectors, this mirrors eager's
-            full AC (checkpoint_wrapper with no context_fn).
+            the former eager full-AC implementation.
         eager: SAC alternating mm ops between save/recompute, matching the
-            eager AC policy in torchtitan.distributed.activation_checkpoint.
+            former eager SAC policy.
         min_cut: choose saved activations with the min-cut partitioner.
         sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
+        sac_and_paged_stash: SAC + MoE paged stashing -- apply default SAC
+            first, then let the paged stash decide the region annotated by
+            paged_stash.module_fqn: it pages every capacity-padded activation
+            there that backward reads into fixed-size pages so only the live
+            rows stay resident. Requires a token dispatcher with a static
+            capacity factor (e.g. HybridEP with non_blocking_capacity_factor
+            set). Tuned by the paged_stash settings.
     """
 
     full_recompute_save_ops: str = ""
@@ -173,12 +236,12 @@ class GraphTrainerCompileConfig:
 
     Each selector has the form ``MODULE_FQN_PATTERN::OP``. Separate multiple
     selectors with ``|`` and quote the full argument in the shell. For example:
-    ``layers.*.moe.router.gate::aten.mm.dtype | layers.*.attention.wkv_a::aten.mm.default``.
+    ``layers.*.feed_forward.router.gate::aten.mm.dtype | layers.*.attention.wkv_a::aten.mm.default``.
     """
 
     pass_pipeline: str = "default"
-    """Pass pipeline selection. Controls which graph pass pipeline, post-init
-    hooks, and pre-train-step hooks are activated."""
+    """Pass pipeline selection. Selects a graph pass pipeline registered in
+    ``PASS_PIPELINE_REGISTRY``."""
 
     inductor_compilation: Literal["regional", "full"] = "regional"
     """
@@ -205,6 +268,10 @@ class GraphTrainerCompileConfig:
     cpu_offload_budget_gb: float = 100.0
     """Maximum CPU memory budget (in GB per rank) for offloaded activations.
     Tensors are selected largest-first until the budget is exhausted."""
+
+    paged_stash: PagedStashConfig = field(default_factory=PagedStashConfig)
+    """Settings for MoE paged stashing, which
+    ``memory_policy = "sac_and_paged_stash"`` enables."""
 
     enable_fsdp_ag_rs_overlap: bool = False
     """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
@@ -253,12 +320,12 @@ def validate_ep_overlap_config(
     if module_fqn not in SUPPORTED_EP_OVERLAP_MODULE_FQNS:
         raise ValueError(
             "compile.ep_overlap.module_fqn must be either 'layers.*' "
-            "or 'layers.*.moe' for ep_overlap"
+            "or 'layers.*.feed_forward' for ep_overlap"
         )
     if chunk_dim == "seq" and module_fqn != MOE_BLOCK_FQN:
         raise ValueError(
             "compile.ep_overlap.chunk_dim='seq' is only supported with "
-            "compile.ep_overlap.module_fqn='layers.*.moe'"
+            "compile.ep_overlap.module_fqn='layers.*.feed_forward'"
         )
 
     return chunk_dim, module_fqn
@@ -271,8 +338,9 @@ def to_graph_trainer_config(
     """Convert a base Trainer.Config to a GraphTrainer.Config.
 
     Copies all fields from the base config and converts its model config to the
-    GraphTrainer model config class. The compile field is removed and left as
-    the GraphTrainer.Config default; callers should explicitly set it.
+    GraphTrainer model config class, without local compile regions or in-place
+    WGRAD accumulation because GraphTrainer traces the whole step. The ``compile`` field keeps the
+    GraphTrainer.Config default; callers should explicitly set it.
     """
     from .trainer import GraphTrainer
 
@@ -283,15 +351,17 @@ def to_graph_trainer_config(
             for f in fields(base_config.model)
         }
     )
+    # GraphTrainer compiles the whole step (config.compile), so it drops the model's local compile regions.
+    graph_model.local_compile_regions = []
+    disable_inplace_wgrad_accum(graph_model)
     d["model"] = graph_model
-    d.pop("compile")
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any
     # enabled AC policy with the default selective one so callers don't need
     # per-config fixups.
-    ac = d.get("activation_checkpoint")
+    ac = d.get("activation_remat")
     if ac is not None:
-        d["activation_checkpoint"] = SelectiveAC.Config()
+        d["activation_remat"] = DefaultActivationRematConfig()
 
     # graph_trainer's tracer requires explicit autograd outputs for lm_head
     # params instead of relying on .grad side effects from chunk_loss.backward().

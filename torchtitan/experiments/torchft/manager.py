@@ -12,7 +12,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import cast, TYPE_CHECKING
+from typing import cast, Literal, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -48,15 +48,25 @@ class TorchFTManager(Configurable):
         Note that this is still an experimental feature.
         """
 
-        process_group: str = "gloo"
+        process_group: Literal["gloo", "nccl", "mccl"] = "gloo"
         """
-        The process group to use for fault tolerance. Currently, only "gloo" and "nccl" are supported.
+        The process group to use for fault tolerance. Currently, only "gloo", "nccl" and "mccl" are supported.
         """
 
         process_group_timeout_ms: int = 10000
         """
         The process group will abort if operations don't succeed within this duration.
         Note: This currently only works with gloo process group.
+        """
+
+        timeout_ms: int = 60000
+        """
+        Timeout for torchft manager operations, including process group
+        reconfiguration. Keep it below comm.train_timeout_seconds: a rank blocked
+        in reconfiguration stops issuing its intra-replica collectives, so its
+        peers' watchdog aborts the replica if this timeout is longer. It also
+        bounds checkpoint transfer during recovery, so leave room for that.
+        TORCHFT_TIMEOUT_SEC overrides it.
         """
 
         replica_id: int = 0
@@ -133,6 +143,7 @@ class TorchFTManager(Configurable):
             state_dict=None,
             use_async_quorum=config.use_async_quorum and self.use_async_quorum,
             replica_id=f"torchtitan_ft_{config.replica_id}",
+            timeout=timedelta(milliseconds=config.timeout_ms),
         )
         self.group_size = config.group_size
         self.replica_id = config.replica_id

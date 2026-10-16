@@ -21,6 +21,7 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import Configurable
+from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 
 
 # Page-locked microbatches let the trainer issue an async host-to-device copy; a copy
@@ -57,6 +58,7 @@ class TextCollator(Collator):
         del config
         self._num_tokens_per_microbatch = context.num_tokens_per_microbatch
         self._max_context_length = context.max_context_length
+        self._num_mtp_layers = context.num_mtp_layers
 
     def __call__(self, rows: Sequence[TextSequence]) -> TokenizedTrainingMicrobatch:
         num_tokens = sum(len(row.input_ids) for row in rows)
@@ -107,10 +109,20 @@ class TextCollator(Collator):
             torch.arange(pad_len, out=positions[num_tokens:])
             positions[num_tokens:].remainder_(self._max_context_length)
 
+        target_mask = labels != IGNORE_INDEX
+        loss_token_counts, routing_token_counts = get_mtp_token_counts(
+            target_mask=target_mask,
+            positions=positions,
+            padding_mask=padding_mask,
+            num_mtp_layers=self._num_mtp_layers,
+        )
+        if self._num_mtp_layers == 0:
+            loss_token_counts = loss_token_counts[0]
         return TokenizedTrainingMicrobatch(
             input=input_ids,
             labels=labels,
             positions=positions,
             padding_mask=padding_mask,
-            num_valid_tokens=int((labels != IGNORE_INDEX).sum()),
+            loss_token_counts=loss_token_counts,
+            routing_token_counts=routing_token_counts,
         )

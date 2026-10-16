@@ -22,6 +22,13 @@ logger = logging.getLogger(__name__)
 
 _SESSION_ID_HEADER = "X-Session-ID"
 
+GROUP_ID_SAMPLING_PARAM = "torchtitan_group_id"
+"""Sampling parameter carrying a request's rollout group id.
+
+Verifiers forwards extra sampling fields verbatim in ``sampling_params``, so the
+rollouter tags every request of a group with its id.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class VerifiersGenerationMetadata:
@@ -39,7 +46,7 @@ class VerifiersGenerationMetadata:
     """Newest policy version used to generate the completion."""
 
     metrics: list[m.Metric]
-    """Metrics from every generation in the rollout."""
+    """Metrics from every generation in the rollout, merged with `m.fold`."""
 
 
 class GenerationServer(Configurable):
@@ -61,7 +68,8 @@ class GenerationServer(Configurable):
         """Listening port; zero requests an ephemeral port."""
 
         max_rollout_tokens: int
-        """Inclusive upper bound for the rendered prompt length.
+        """Context length; set it to the generator's ``max_model_len``.
+        Prompts of this many tokens or more get a 400.
 
         The server advertises this value as ``max_model_len`` through
         ``GET /v1/models`` so Verifiers can reject longer prompts before
@@ -171,7 +179,24 @@ class GenerationServer(Configurable):
             prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
-            sampling = _parse_sampling_config(body.get("sampling_params"))
+            # vLLM needs room for one output token. Verifiers reads this wording as an
+            # overlong prompt and ends the rollout as context_length.
+            if len(prompt_token_ids) >= self.max_rollout_tokens:
+                raise ValueError(
+                    f"This model's maximum context length is {self.max_rollout_tokens} "
+                    f"tokens, and the prompt has {len(prompt_token_ids)} tokens, "
+                    "leaving no room for an output token"
+                )
+            sampling_params = body.get("sampling_params")
+            if not isinstance(sampling_params, dict):
+                raise ValueError("sampling_params must be an object")
+            sampling_params = dict(sampling_params)
+            group_id = sampling_params.pop(GROUP_ID_SAMPLING_PARAM, None)
+            if isinstance(group_id, bool) or not isinstance(group_id, int):
+                raise ValueError(
+                    f"sampling_params.{GROUP_ID_SAMPLING_PARAM} must be an integer"
+                )
+            sampling = _parse_sampling_config(sampling_params)
             if body.get("features") is not None:
                 raise ValueError("multimodal features are not supported")
         except (TypeError, ValueError) as error:
@@ -184,6 +209,7 @@ class GenerationServer(Configurable):
             completion = await self.generate_fn(
                 prompt_token_ids,
                 request_id=request_id,
+                group_id=group_id,
                 routing_session_id=session_id,
                 sampling_config=sampling,
             )
@@ -224,8 +250,10 @@ class GenerationServer(Configurable):
                 if previous is None
                 else max(previous.max_policy_version, completion.max_policy_version)
             ),
-            metrics=(
-                list(completion.metrics)
+            # Fold so a long rollout holds one set of generator records, not one per
+            # generation: every full GC walks them.
+            metrics=m.fold(
+                completion.metrics
                 if previous is None
                 else [*previous.metrics, *completion.metrics]
             ),
@@ -271,7 +299,7 @@ def _validate_token_ids(value: object, *, field_name: str) -> list[int]:
 
 def _parse_sampling_config(value: object):
     """Convert Verifiers' vLLM sampling payload to TorchTitan config."""
-    from torchtitan.rl.generator import SamplingConfig
+    from torchtitan.rl.generator.generator import SamplingConfig
 
     if not isinstance(value, dict):
         raise ValueError("sampling_params must be an object")
@@ -291,16 +319,16 @@ def _parse_sampling_config(value: object):
     if unsupported:
         raise ValueError(f"unsupported sampling parameters: {sorted(unsupported)}")
 
-    stop_token_ids = value.get("stop_token_ids")
-    if stop_token_ids is not None:
-        stop_token_ids = _validate_token_ids(
-            stop_token_ids,
-            field_name="stop_token_ids",
-        )
+    # The generator stops only on these ids; the renderer client always sends them.
+    stop_token_ids = _validate_token_ids(
+        value.get("stop_token_ids"),
+        field_name="stop_token_ids",
+    )
+    defaults = SamplingConfig()
     return SamplingConfig(
-        temperature=float(value.get("temperature", 0.8)),
-        top_p=float(value.get("top_p", 0.95)),
-        max_tokens=int(value.get("max_tokens", 100)),
+        temperature=float(value.get("temperature", defaults.temperature)),
+        top_p=float(value.get("top_p", defaults.top_p)),
+        max_tokens=int(value.get("max_tokens", defaults.max_tokens)),
         seed=value.get("seed"),
         stop_token_ids=stop_token_ids,
     )

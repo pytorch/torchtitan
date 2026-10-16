@@ -6,6 +6,7 @@
 
 """Qwen3.6 model flavors."""
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
@@ -39,8 +40,9 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig,
     seq_len: int | None = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Qwen35Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
@@ -53,10 +55,10 @@ def build_model_config(
     config = get_config(
         attn_backend=attn_backend,
         seq_len=context_len,
+        parallelism=parallelism,
     )
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter_config in converters:
             config = converter_config.build().convert(config)
-
     return config

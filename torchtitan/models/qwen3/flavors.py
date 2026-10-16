@@ -12,10 +12,12 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
+from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RoPE, Softmax
 from torchtitan.models.common.config_utils import (
     get_attention_config,
@@ -24,6 +26,12 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+)
+from torchtitan.models.common.decoder_sharding import (
+    lm_head_sharding_config,
+    norm_sharding_config,
+    pre_lm_head_norm_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.param_init import skip_param_init
@@ -76,8 +84,15 @@ def _moe_experts_init(n_layers: int) -> dict[str, Callable]:
     }
 
 
-def _qwen3_norm(dim: int) -> RMSNorm.Config:
-    return RMSNorm.Config(normalized_shape=dim, eps=_EPS, param_init=_NORM_INIT)
+def _qwen3_norm(
+    dim: int, *, sharding_config: ShardingConfig | None = None
+) -> RMSNorm.Config:
+    return RMSNorm.Config(
+        normalized_shape=dim,
+        eps=_EPS,
+        param_init=_NORM_INIT,
+        sharding_config=sharding_config,
+    )
 
 
 def _build_qwen3_layers(
@@ -90,15 +105,17 @@ def _build_qwen3_layers(
     hidden_dim: int,
     attn_backend: str,
     rope: RoPE.Config,
+    enable_sp: bool,
 ) -> list[Qwen3TransformerBlock.Config]:
-    """Build per-layer configs for dense Qwen3 models."""
+    """Build sharded per-layer configs for dense Qwen3 models."""
     inner_attention = get_attention_config(attn_backend)
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     layers = []
     for _ in range(n_layers):
         layers.append(
             Qwen3TransformerBlock.Config(
-                attention_norm=_qwen3_norm(dim),
-                ffn_norm=_qwen3_norm(dim),
+                attention_norm=_qwen3_norm(dim, sharding_config=norm_sharding),
+                ffn_norm=_qwen3_norm(dim, sharding_config=norm_sharding),
                 attention=make_gqa_config(
                     dim=dim,
                     n_heads=n_heads,
@@ -109,12 +126,14 @@ def _build_qwen3_layers(
                     inner_attention=inner_attention,
                     rope=rope,
                     qk_norm=_qwen3_norm(head_dim),
+                    enable_sp=enable_sp,
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
-                    w1_param_init=_LINEAR_INIT,
-                    w2w3_param_init=_LINEAR_INIT,
+                    w13_param_init=_LINEAR_INIT,
+                    w2_param_init=_LINEAR_INIT,
+                    enable_sp=enable_sp,
                 ),
             )
         )
@@ -133,17 +152,20 @@ def _build_qwen3_moe_layers(
     top_k: int,
     attn_backend: str,
     rope: RoPE.Config,
+    enable_sp: bool,
+    enable_ep: bool,
 ) -> list[Qwen3TransformerBlock.Config]:
-    """Build per-layer configs for MoE Qwen3 models."""
+    """Build sharded per-layer configs for MoE Qwen3 models."""
     inner_attention = get_attention_config(attn_backend)
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     output_init = _residual_output_init(n_layers)
     experts_init = _moe_experts_init(n_layers)
     layers = []
     for _ in range(n_layers):
         layers.append(
             Qwen3TransformerBlock.Config(
-                attention_norm=_qwen3_norm(dim),
-                ffn_norm=_qwen3_norm(dim),
+                attention_norm=_qwen3_norm(dim, sharding_config=norm_sharding),
+                ffn_norm=_qwen3_norm(dim, sharding_config=norm_sharding),
                 attention=make_gqa_config(
                     dim=dim,
                     n_heads=n_heads,
@@ -154,8 +176,9 @@ def _build_qwen3_moe_layers(
                     inner_attention=inner_attention,
                     rope=rope,
                     qk_norm=_qwen3_norm(head_dim),
+                    enable_sp=enable_sp,
                 ),
-                moe=make_moe_config(
+                feed_forward=make_moe_config(
                     num_experts=num_experts,
                     router=make_router_config(
                         dim=dim,
@@ -171,14 +194,20 @@ def _build_qwen3_moe_layers(
                         num_experts=num_experts,
                         top_k=top_k,
                         param_init=experts_init,
+                        enable_ep=enable_ep,
                     ),
+                    aux_loss_coeff=1e-3,
+                    aux_loss_type="batch_wise",
+                    enable_sp=enable_sp,
                 ),
             )
         )
     return layers
 
 
-def _debugmodel(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
+def _debugmodel(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen3Model.Config:
     dim = 256
     head_dim = 128
     n_layers = 8
@@ -187,17 +216,26 @@ def _debugmodel(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        norm=_qwen3_norm(dim),
+        norm=_qwen3_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -212,11 +250,14 @@ def _debugmodel(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
                 max_context_length=seq_len,
                 theta=1000000.0,
             ),
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
 
-def _0_6b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
+def _0_6b(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen3Model.Config:
     dim = 1024
     head_dim = 128
     n_layers = 28
@@ -225,17 +266,26 @@ def _0_6b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        norm=_qwen3_norm(dim),
+        norm=_qwen3_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -250,11 +300,14 @@ def _0_6b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
                 max_context_length=seq_len,
                 theta=1000000.0,
             ),
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
 
-def _1_7b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
+def _1_7b(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen3Model.Config:
     dim = 2048
     head_dim = 128
     n_layers = 28
@@ -263,17 +316,26 @@ def _1_7b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        norm=_qwen3_norm(dim),
+        norm=_qwen3_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -288,11 +350,14 @@ def _1_7b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
                 max_context_length=seq_len,
                 theta=1000000.0,
             ),
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
 
-def _4b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
+def _4b(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen3Model.Config:
     dim = 2560
     head_dim = 128
     n_layers = 36
@@ -301,17 +366,26 @@ def _4b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        norm=_qwen3_norm(dim),
+        norm=_qwen3_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -326,11 +400,14 @@ def _4b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
                 max_context_length=seq_len,
                 theta=1000000.0,
             ),
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
 
-def _8b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
+def _8b(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen3Model.Config:
     dim = 4096
     head_dim = 128
     n_layers = 36
@@ -339,14 +416,25 @@ def _8b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        norm=_qwen3_norm(dim),
+        norm=_qwen3_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -361,11 +449,14 @@ def _8b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
                 max_context_length=seq_len,
                 theta=1000000.0,
             ),
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
 
-def _14b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
+def _14b(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
     n_layers = 40
@@ -374,14 +465,25 @@ def _14b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        norm=_qwen3_norm(dim),
+        norm=_qwen3_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -396,11 +498,14 @@ def _14b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
                 max_context_length=seq_len,
                 theta=1000000.0,
             ),
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
 
-def _32b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
+def _32b(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
     n_layers = 64
@@ -409,14 +514,25 @@ def _32b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        norm=_qwen3_norm(dim),
+        norm=_qwen3_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_layers(
             n_layers=n_layers,
@@ -431,6 +547,7 @@ def _32b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
                 max_context_length=seq_len,
                 theta=1000000.0,
             ),
+            enable_sp=parallelism.enable_sequence_parallel,
         ),
     )
 
@@ -442,6 +559,7 @@ def _debugmodel_moe(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Qwen3Model.Config:
     dim = 256
     head_dim = 128
@@ -451,14 +569,25 @@ def _debugmodel_moe(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        norm=_qwen3_norm(dim),
+        norm=_qwen3_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_moe_layers(
             n_layers=n_layers,
@@ -475,6 +604,8 @@ def _debugmodel_moe(
                 max_context_length=seq_len,
                 theta=1000000.0,
             ),
+            enable_sp=parallelism.enable_sequence_parallel,
+            enable_ep=parallelism.expert_parallel_degree > 1,
         ),
     )
 
@@ -483,6 +614,7 @@ def _30b_a3b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Qwen3Model.Config:
     dim = 2048
     head_dim = 128
@@ -492,14 +624,25 @@ def _30b_a3b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        norm=_qwen3_norm(dim),
+        norm=_qwen3_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_moe_layers(
             n_layers=n_layers,
@@ -516,6 +659,8 @@ def _30b_a3b(
                 max_context_length=seq_len,
                 theta=1000000.0,
             ),
+            enable_sp=parallelism.enable_sequence_parallel,
+            enable_ep=parallelism.expert_parallel_degree > 1,
         ),
     )
 
@@ -524,6 +669,7 @@ def _235b_a22b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Qwen3Model.Config:
     dim = 4096
     head_dim = 128
@@ -533,14 +679,25 @@ def _235b_a22b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        norm=_qwen3_norm(dim),
+        norm=_qwen3_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_LINEAR_INIT,
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=_build_qwen3_moe_layers(
             n_layers=n_layers,
@@ -557,6 +714,8 @@ def _235b_a22b(
                 max_context_length=seq_len,
                 theta=5000000.0,
             ),
+            enable_sp=parallelism.enable_sequence_parallel,
+            enable_ep=parallelism.expert_parallel_degree > 1,
         ),
     )
 
@@ -578,8 +737,9 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig,
     seq_len: int | None = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Qwen3Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
@@ -592,6 +752,7 @@ def build_model_config(
     config = get_config(
         attn_backend=attn_backend,
         seq_len=context_len,
+        parallelism=parallelism,
     )
     if converters is not None:
         validate_converter_compatibility(converters)

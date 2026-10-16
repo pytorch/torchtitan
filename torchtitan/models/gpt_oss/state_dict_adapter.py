@@ -12,17 +12,19 @@ from typing import Any, TYPE_CHECKING
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
+from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
+
 from torchtitan.models.common.rope import CosSinRoPE
-from torchtitan.models.utils import MoEStateDictAdapter
 
 if TYPE_CHECKING:
     from .model import GptOssModel
 
 
 class GptOssStateDictAdapter(MoEStateDictAdapter):
-    _EXPERT_BIAS_KEY = "layers.{}.moe.expert_bias_E"
-    _W13_WEIGHT_KEY = "layers.{}.moe.routed_experts.w13.weight"
-    _W13_BIAS_KEY = "layers.{}.moe.routed_experts.w13.bias"
+    _EXPERT_BIAS_KEY = "layers.{}.feed_forward.expert_bias_E"
+    _W13_WEIGHT_KEY = "layers.{}.feed_forward.routed_experts.w13.weight"
+    _W13_BIAS_KEY = "layers.{}.feed_forward.routed_experts.w13.bias"
 
     def __init__(self, model_config: GptOssModel.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
@@ -50,16 +52,20 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             # MoE
             "model.layers.{}.mlp.experts.gate_up_proj_blocks": self._W13_WEIGHT_KEY,
             "model.layers.{}.mlp.experts.gate_up_proj_bias": self._W13_BIAS_KEY,
-            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.moe.routed_experts.w2.weight",
-            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.moe.routed_experts.w2.bias",
-            "model.layers.{}.mlp.router.weight": "layers.{}.moe.router.gate.weight",
-            "model.layers.{}.mlp.router.bias": "layers.{}.moe.router.gate.bias",
+            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.feed_forward.routed_experts.w2.weight",
+            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.feed_forward.routed_experts.w2.bias",
+            "model.layers.{}.mlp.router.weight": "layers.{}.feed_forward.router.gate.weight",
+            "model.layers.{}.mlp.router.bias": "layers.{}.feed_forward.router.gate.bias",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
         }
 
     def get_hf_storage_reader(
-        self, path: str, from_quantized: bool = False
+        self,
+        path: str,
+        from_quantized: bool = False,
+        *,
+        thread_count: int | None = None,
     ) -> HuggingFaceStorageReader:
         """
         Override default get_hf_storage_reader function to return QuantizedHFStorageReader.
@@ -74,12 +80,13 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             # If loading checkpoints without quantization, use HuggingFaceStorageReader instead
             return QuantizedHuggingFaceStorageReader(
                 path=path,
-                thread_count=4,
+                thread_count=4 if thread_count is None else thread_count,
             )
-        else:
-            return HuggingFaceStorageReader(path)
+        return super().get_hf_storage_reader(path, thread_count=thread_count)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """
         Convert from a tt model state dict to a hf format state dict.
 
@@ -120,7 +127,9 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """
         Convert from hf format state dict to tt model state dict.
         """
@@ -158,8 +167,11 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         # a target-state template; direct offline conversion uses a CPU tensor.
         for layer_num in layer_nums:
             # pyrefly: ignore [missing-attribute]
-            moe_config = self.model_config.layers[layer_num].moe
-            if moe_config is None or moe_config.load_balance_coeff is None:
+            moe_config = self.model_config.layers[layer_num].feed_forward
+            if (
+                not isinstance(moe_config, MoE.Config)
+                or moe_config.load_balance_coeff is None
+            ):
                 continue
             tt_key = self._EXPERT_BIAS_KEY.format(layer_num)
             template = self._expert_bias_templates.get(tt_key)

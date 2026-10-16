@@ -19,12 +19,41 @@ from torchtitan.distributed.fsdp import (
     resolve_fsdp_mesh,
 )
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
-from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
-from torchtitan.models.flux.model.autoencoder import load_ae
-from torchtitan.models.flux.model.model import FluxModel
+from torchtitan.models.flux.autoencoder import load_ae
+from torchtitan.models.flux.model import FluxModel
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
-from torchtitan.models.flux.validate import FluxValidator
+from torchtitan.models.flux.validator import FluxValidator, SamplingConfig
 from torchtitan.trainer import Trainer
+
+
+@dataclass(kw_only=True, slots=True)
+class FluxEncoderConfig:
+    """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
+
+    t5_encoder: str = ""
+    """Override for the T5 text encoder version/path. Empty uses the flavor default."""
+    clip_encoder: str = ""
+    """Override for the CLIP encoder version/path. Empty uses the flavor default."""
+    autoencoder_path: str = "assets/hf/FLUX.1-dev/ae.safetensors"
+    """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
+    random_init: bool = False
+    """If True, initialize encoders with random weights instead of loading pretrained weights (for testing only)."""
+
+
+@dataclass(kw_only=True, slots=True)
+class Inference:
+    """Inference configuration"""
+
+    save_img_folder: str = "inference_results"
+    """Path to save the inference results"""
+    prompts_path: str = "./torchtitan/models/flux/inference/prompts.txt"
+    """Path to file with newline separated prompts to generate images for"""
+    local_batch_size: int = 2
+    """Batch size for inference"""
+    img_size: int = 256
+    """Image size for inference"""
+    sampling: SamplingConfig = field(default_factory=SamplingConfig)
+    """Sampling configuration for image generation"""
 
 
 class FluxTrainer(Trainer):

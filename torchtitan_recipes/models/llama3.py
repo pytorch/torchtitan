@@ -7,31 +7,28 @@
 """Verified Llama 3 model recipes."""
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optim import (
-    AdamW,
-    LRSchedulersContainer,
-    Optim,
-    OptimizersContainer,
-)
+from torchtitan.components.optim import AdamW, Optim, OptimizersContainer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import Float8LinearConverter, MXFP8LinearConverter
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.config.transform import MXFP8LinearConverter
+from torchtitan.distributed.activation_remat import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
 
-def llama3_mxfp8_linear_converter_config(
-    *, model_compile_enabled: bool = False
-) -> MXFP8LinearConverter.Config:
+
+def llama3_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
     """Build the MXFP8 policy shared by eager and GraphTrainer recipes."""
     return MXFP8LinearConverter.Config(
-        model_compile_enabled=model_compile_enabled,
         linears_saving_inputs_for_backward_in_mxfp8=[
             "attention.qkv_linear.wqkv",
             "feed_forward.w2",
@@ -40,7 +37,9 @@ def llama3_mxfp8_linear_converter_config(
 
 
 def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("8B", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config("8B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -51,27 +50,33 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
         profiler=Profiler.Config(enable_profiling=True, profile_freq=100),
         metrics=MetricsProcessor.Config(enable_tensorboard=True),
         model=model_config,
+        parallelism=parallelism,
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
         validator=None,
     )
 
 
 def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("70B", seq_len=seq_len)
+    parallelism = ParallelismConfig(tensor_parallel_degree=8)
+    model_config = build_model_config("70B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -88,56 +93,18 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        parallelism=ParallelismConfig(tensor_parallel_degree=8),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
-        validator=None,
-    )
-
-
-def llama3_405b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config(
-        "405B",
-        seq_len=seq_len,
-        converters=[
-            Float8LinearConverter.Config(
-                filter_fqns=["lm_head"],
-            ),
-        ],
-    )
-    return Trainer.Config(
-        loss=ChunkedLossWrapper.Config(
-            loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_config),
-            ),
-        ),
-        hf_assets_path="./assets/hf/Llama-3.1-405B",
-        profiler=Profiler.Config(enable_profiling=True, profile_freq=100),
-        metrics=MetricsProcessor.Config(enable_tensorboard=True),
-        model=model_config,
-        optim=Optim.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=8e-5)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
-        ),
-        training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
-            steps=3000,
-        ),
-        dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
-        ),
-        parallelism=ParallelismConfig(tensor_parallel_degree=8),
-        checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
         validator=None,
     )

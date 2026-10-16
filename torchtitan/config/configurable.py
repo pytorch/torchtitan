@@ -87,6 +87,9 @@ class Configurable:
             The *fqn* mirrors the module FQN that ``build()`` would produce
             (e.g. ``"layers.0.feed_forward.w1"``).
 
+            TODO: This is not actually true, for example for vision encoders
+            building the layers at build time from a single config.
+
             *parent* and *field_name* allow replacing the config in the tree.
             They are ``None`` for the root config::
 

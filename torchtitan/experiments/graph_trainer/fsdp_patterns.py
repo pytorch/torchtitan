@@ -26,6 +26,10 @@ import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
 
+from torchtitan.experiments.graph_trainer.mutation_utils import (
+    base_tensor_for_mutation_target,
+    mutation_deps,
+)
 from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_META
 
 
@@ -66,7 +70,8 @@ def is_reduce_grad_collective(node: fx.Node) -> bool:
     return is_reduce_scatter_tensor(node) or is_all_reduce(node)
 
 
-def _fsdp_param_fqns(node: fx.Node) -> tuple[str, ...]:
+def fsdp_param_fqns(node: fx.Node) -> tuple[str, ...]:
+    """Return the SimpleFSDP parameter provenance attached to a graph node."""
     return node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META, ())
 
 
@@ -76,7 +81,7 @@ def _find_last_all_gather_in_chain(start_node: fx.Node) -> fx.Node | None:
     last_all_gather = None
     while True:
         if is_all_gather_into_tensor(node):
-            if not _fsdp_param_fqns(node):
+            if not fsdp_param_fqns(node):
                 break
             last_all_gather = node
         if len(node.users) != 1:
@@ -103,14 +108,14 @@ def _find_last_user_in_wait_chain(wait_node: fx.Node) -> fx.Node:
     Trace-time parameter metadata defines the region. The split/getitem/cat
     fanout is included when all of its nodes carry the same provenance.
     """
-    param_fqns = _fsdp_param_fqns(wait_node)
+    param_fqns = fsdp_param_fqns(wait_node)
     node = wait_node
     while True:
         users = tuple(
             user
             for user in node.users
             if not user.meta.get("autograd_backward", False)
-            and _fsdp_param_fqns(user) == param_fqns
+            and fsdp_param_fqns(user) == param_fqns
         )
 
         if len(users) != 1:
@@ -130,7 +135,7 @@ def _find_last_user_in_wait_chain(wait_node: fx.Node) -> fx.Node:
                 if all(user == potential_cat for user in getitem_users) and (
                     potential_cat.op == "call_function"
                     and potential_cat.target == torch.ops.aten.cat.default
-                    and _fsdp_param_fqns(potential_cat) == param_fqns
+                    and fsdp_param_fqns(potential_cat) == param_fqns
                 ):
                     node = potential_cat
                     continue
@@ -163,13 +168,13 @@ def _unshard_output_from_all_gather(last_all_gather: fx.Node) -> fx.Node:
             f"got {wait_node.name}"
         )
 
-    all_gather_fqns = _fsdp_param_fqns(last_all_gather)
+    all_gather_fqns = fsdp_param_fqns(last_all_gather)
     if not all_gather_fqns:
         raise ValueError(
             f"FSDP all-gather node {last_all_gather.name} does not carry "
             "parameter provenance"
         )
-    wait_fqns = _fsdp_param_fqns(wait_node)
+    wait_fqns = fsdp_param_fqns(wait_node)
     if all_gather_fqns != wait_fqns:
         raise ValueError(
             "FSDP trace metadata does not match between all-gather "
@@ -179,7 +184,7 @@ def _unshard_output_from_all_gather(last_all_gather: fx.Node) -> fx.Node:
 
     wait_chain_user = _find_last_user_in_wait_chain(wait_node)
     output = _find_last_non_view_node_in_chain(wait_chain_user)
-    if _fsdp_param_fqns(output) != all_gather_fqns:
+    if fsdp_param_fqns(output) != all_gather_fqns:
         raise ValueError(
             f"FSDP unshard output {output.name} does not carry parameter "
             f"metadata {all_gather_fqns}"
@@ -202,8 +207,17 @@ def _find_fsdp_unshard_outputs(
             continue
         last_all_gather = _find_last_all_gather_in_chain(user)
         if last_all_gather is None:
-            continue
-        output = _unshard_output_from_all_gather(last_all_gather)
+            if user.meta.get("autograd_backward", False) or not fsdp_param_fqns(user):
+                continue
+            # FSDP1 will not have all-gather, but we want to extract cast and quantization
+            # chains to do them once during unshard.
+            output = _find_last_non_view_node_in_chain(
+                _find_last_user_in_wait_chain(user)
+            )
+            if output is param_placeholder:
+                continue
+        else:
+            output = _unshard_output_from_all_gather(last_all_gather)
         if output not in seen:
             seen.add(output)
             outputs.append(output)
@@ -251,37 +265,6 @@ def annotate_fsdp_unshard_outputs(gm: fx.GraphModule) -> None:
                 consumer.meta[_FSDP_UNSHARD_CONSUMER_INPUT_PATHS] = consumer_inputs
 
 
-def _base_tensor(node: fx.Node) -> fx.Node:
-    while (
-        node.op == "call_function"
-        and hasattr(node.target, "is_view")
-        and node.target.is_view
-        and node.args
-        and isinstance(node.args[0], fx.Node)
-    ):
-        node = node.args[0]
-    return node
-
-
-def _mutation_writers_by_base(graph: fx.Graph) -> dict[fx.Node, list[fx.Node]]:
-    writers: dict[fx.Node, list[fx.Node]] = {}
-    for node in graph.nodes:
-        schema = getattr(node.target, "_schema", None)
-        if node.op != "call_function" or schema is None:
-            continue
-        inputs = {
-            argument.name: value for argument, value in zip(schema.arguments, node.args)
-        }
-        inputs.update(node.kwargs)
-        for argument in schema.arguments:
-            if argument.alias_info is None or not argument.alias_info.is_write:
-                continue
-            for target in pytree.tree_leaves(inputs.get(argument.name, ())):
-                if isinstance(target, fx.Node):
-                    writers.setdefault(_base_tensor(target), []).append(node)
-    return writers
-
-
 def _depends_on(
     node: fx.Node,
     ancestor: fx.Node,
@@ -300,7 +283,9 @@ def _depends_on(
         pending.extend(candidate.all_input_nodes)
         pending.extend(
             writer
-            for writer in mutation_writers.get(_base_tensor(candidate), ())
+            for writer in mutation_writers.get(
+                base_tensor_for_mutation_target(candidate), ()
+            )
             if node_order[writer] < node_order[node]
         )
     return False
@@ -331,7 +316,7 @@ def find_fsdp_unshard_outputs_by_param(
     if not annotated_params:
         return outputs_by_param
 
-    mutation_writers = _mutation_writers_by_base(graph)
+    mutation_writers = mutation_deps(graph)
     node_order = {node: index for index, node in enumerate(graph.nodes)}
     marked_outputs: dict[str, list[fx.Node]] = {name: [] for name in annotated_params}
     consumer_paths: dict[str, list[tuple[fx.Node, pytree.KeyPath]]] = {
@@ -442,14 +427,10 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
           -> wait -> grad
 
     GraphPP extracts at the input to the earliest grad-sync collective in that
-    suffix. The cast remains in the compute graph so microbatch accumulation
-    happens in FSDP's reduce dtype, and ``reduce_grad`` contains only the
-    scheduled collective epilogue. Values that are not FX nodes, such as
-    ``None`` parameter-grad slots, are not collective outputs and are preserved
-    by the caller.
-
-    TODO(sanketpurandare): requires upstream change: FSDP trace/passes should
-    annotate reduce-grad collective regions for downstream graph extraction.
+    suffix. For an annotated SimpleFSDP layout, it extracts at the layout input
+    instead. The cast remains in the compute graph so microbatch accumulation
+    happens in FSDP's reduce dtype. Values that are not FX nodes, such as
+    ``None`` parameter-grad slots, are preserved by the caller.
     """
     if not isinstance(param_grad_output, fx.Node):
         return None
@@ -464,4 +445,76 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
         node = input_node
         if is_reduce_grad_collective(previous_node):
             reduce_grad_input = node
-    return reduce_grad_input
+    # The collective scan identifies ``packed_grad`` in code shaped like:
+    #
+    #   cast_grad = grad.to(reduce_dtype)
+    #   chunks = torch.split(cast_grad, ...)
+    #   padded = torch.nn.functional.pad(chunks[-1], ...)
+    #   packed_grad = torch.cat((*chunks[:-1], padded))
+    #   reduced_grad = reduce_scatter_tensor(packed_grad, ...)
+    #
+    # reduce_grad_input is packed_grad.
+    # None means the scan found no reduce-gradient collective.
+    if reduce_grad_input is None:
+        return None
+    # For an annotated layout, look back to cast_grad:
+    #
+    #   # Repeated schedule action
+    #   cast_grad = grad.to(reduce_dtype)
+    #   grad_accumulator.add_(cast_grad)
+    #
+    #   # Final reduce_grad
+    #   chunks = torch.split(grad_accumulator, ...)
+    #   padded = torch.nn.functional.pad(chunks[-1], ...)
+    #   packed_grad = torch.cat((*chunks[:-1], padded))
+    #   reduced_grad = reduce_scatter_tensor(packed_grad, ...)
+    return _find_grad_compute_boundary(reduce_grad_input)
+
+
+def _find_grad_compute_boundary(collective_input: fx.Node) -> fx.Node:
+    """Find the value to accumulate before the SimpleFSDP layout.
+
+    For example, given::
+
+        cast_grad = grad.to(reduce_dtype)
+        chunks = torch.split(cast_grad, ...)
+        padded = torch.nn.functional.pad(chunks[-1], ...)
+        collective_input = torch.cat((*chunks[:-1], padded))
+
+    return ``cast_grad``.
+    Without the cast, return ``grad``.
+    """
+    param_fqns = fsdp_param_fqns(collective_input)
+    if not param_fqns:
+        return collective_input
+
+    layout_nodes: set[fx.Node] = set()
+    pending = [collective_input]
+    while pending:
+        node = pending.pop()
+        if node in layout_nodes or fsdp_param_fqns(node) != param_fqns:
+            continue
+        layout_nodes.add(node)
+        pending.extend(node.all_input_nodes)
+
+    boundary_nodes = {
+        input_node
+        for node in layout_nodes
+        for input_node in node.all_input_nodes
+        if input_node not in layout_nodes
+        and isinstance(input_node.meta.get("val"), torch.Tensor)
+    }
+    if len(boundary_nodes) != 1:
+        raise ValueError(
+            "Expected one tensor input to the FSDP reduce-grad layout for "
+            f"{param_fqns}, found {len(boundary_nodes)}"
+        )
+    (boundary,) = boundary_nodes
+
+    layout_users = [user for user in boundary.users if user in layout_nodes]
+    if (
+        len(layout_users) == 1
+        and layout_users[0].target is torch.ops.aten._to_copy.default
+    ):
+        return layout_users[0]
+    return boundary

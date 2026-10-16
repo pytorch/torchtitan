@@ -6,7 +6,7 @@ This directory contains the implementation of the [FLUX](https://github.com/blac
 ## Prerequisites
 Install the required dependencies:
 ```bash
-pip install -r requirements-flux.txt
+pip install -r .ci/docker/requirements-flux.txt
 ```
 
 ## Usage
@@ -27,6 +27,15 @@ If you want to train with other configs, run the following command:
 MODULE=torchtitan_recipes.models.flux CONFIG=flux_schnell ./run_train.sh
 ```
 
+To generate images from a trained checkpoint, launch the inference entrypoint
+with the same launcher. Prompts are read from `config.inference.prompts_path`
+(default: [`inference/prompts.txt`](inference/prompts.txt)):
+```bash
+ENTRYPOINT=torchtitan.models.flux.inference.infer \
+MODULE=torchtitan_recipes.tests.models.flux CONFIG=flux_debugmodel_inference \
+./run_train.sh
+```
+
 
 ## Supported Features
 - Parallelism: The model supports FSDP, HSDP, CP for training on multiple GPUs.
@@ -42,7 +51,7 @@ MODULE=torchtitan_recipes.models.flux CONFIG=flux_schnell ./run_train.sh
 The loss function can be compiled independently with:
 
 ```python
-config.compile = LocalCompileConfig(regions=["loss"])
+config.model.local_compile_regions = ["loss"]
 ```
 
 The model itself is not compiled by the standard Trainer.
@@ -69,15 +78,22 @@ MODULE=torchtitan_recipes.models.flux CONFIG=flux_dev_mxfp8 ./run_train.sh
 
 ### Custom Configuration
 
-To create a custom MXFP8 config, define a new function in `recipe module`:
+To create a custom MXFP8 config, define a new function in a recipe module.
+`build_model_config` applies `converters` and returns the model config assigned
+to `config.model`:
 
 ```python
 from torchtitan.config.transform import MXFP8LinearConverter
+from torchtitan.models.flux import build_model_config
+from torchtitan.models.flux.trainer import FluxTrainer
+from torchtitan_recipes.models.flux import flux_dev, flux_schnell
 
 
 def my_custom_mxfp8() -> FluxTrainer.Config:
     config = flux_schnell()  # or flux_dev()
-    config.model_converters = ModelConvertersContainer.Config(
+    config.model = build_model_config(
+        "flux-schnell",  # or "flux-dev" with flux_dev()
+        parallelism=config.parallelism,
         converters=[
             MXFP8LinearConverter.Config(
                 fqns=[

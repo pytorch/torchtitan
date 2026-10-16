@@ -112,7 +112,7 @@ def download_hf_assets(
 
         def should_download(patterns: list[str], filename: str) -> bool:
             """Check if a file matches a pattern to be downloaded."""
-            basename = os.path.basename(filename)
+            basename = os.path.basename(filename).lower()
             for pattern in patterns:
                 pattern_lower = pattern.lower()
 
