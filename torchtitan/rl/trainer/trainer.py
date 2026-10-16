@@ -195,8 +195,7 @@ class Trainer(Configurable):
             return
 
         # Capture the dependency when weights become final: staging must wait
-        # for optimizer updates, but not for next-step forward/backward kernels
-        # that may be queued before the concurrent push starts.
+        # for the optimizer updates.
         self._staging_model_state_dict_stream.wait_stream(
             self._staging_device_module.current_stream(self.engine.device)
         )
@@ -416,16 +415,14 @@ class Trainer(Configurable):
     async def push_model_state_dict(self) -> None:
         """Publish a CPU snapshot of model weights for generators to pull.
 
-        The controller overlaps this push with the next forward/backward (see
-        `Controller._trainer_loop`), which is safe because:
-        - The staging stream waits for the last optimizer step before copying, and
-          forward/backward does not mutate persistent model state.
+        Ordering (see `Controller._trainer_loop`):
+        - The staging stream waits for the last optimizer step before copying.
         - The CUDA-event wait and the TorchStore put run together in an
-          `asyncio.to_thread` worker, so they progress while a synchronous
-          forward/backward blocks this actor's event loop.
-        - The controller awaits this push before the next optimizer step mutates
-          the model, and awaits the generators' pull of it before the next push
-          reuses the staging buffers and TorchStore key.
+          `asyncio.to_thread` worker, so they don't block this actor's event loop.
+        - The controller awaits this push before the next forward/backward, which
+          blocks this actor's event loop and would delay the push's reply.
+        - The controller awaits the generators' pull of this push before the next
+          push reuses the staging buffers and TorchStore key.
         """
 
         model_state_dict = self.model.state_dict()
@@ -434,8 +431,7 @@ class Trainer(Configurable):
         # performs the cast; buffers keep their registered dtype.
         # TODO(async-rl): add a TorchStore-owned staging API so the trainer can
         # copy directly into the StorageVolume, eliminating the duplicate CPU
-        # snapshot while preserving this overlap and making buffer lifetime
-        # explicit.
+        # snapshot and making buffer lifetime explicit.
         staging_complete = await self._stage_model_state_dict(model_state_dict)
         await asyncio.to_thread(
             self._wait_for_staging_and_put_model_state_dict,

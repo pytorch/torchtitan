@@ -6,9 +6,9 @@
 
 """Unit tests for `Controller._trainer_loop`'s model state dict push and pull.
 
-The push and pull of each step's policy overlap the next step's forward/backward.
-These tests run the loop with fake actors (no GPU / Monarch / TorchStore) and check
-the ordering that makes the overlap safe.
+Each step's push finishes before the next step's forward/backward, and its pull
+overlaps that forward/backward. These tests run the loop with fake actors (no GPU /
+Monarch / TorchStore) and check that ordering.
 """
 
 import asyncio
@@ -151,14 +151,13 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
     assert events == [
         "fwd_bwd 1",
         "optim 1",
-        # Step 1's push -> pull -> release starts in the background. The per-DP-rank
-        # forward_backward calls run as tasks, so with these instant fakes it finishes first ...
+        # Step 2 awaits step 1's push before fwd_bwd. With these instant fakes, the
+        # background pull and release also finish before it.
         "push start",
         "push end",
         "pull 1",
         "release 5 trained",
         "fwd_bwd 2",
-        # ... and lands before step 2's optimizer step.
         "optim 2",
         "push start",
         "push end",
@@ -167,7 +166,7 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
     ]
 
 
-def test_optimizer_step_waits_for_the_previous_push() -> None:
+def test_forward_backward_waits_for_the_previous_push() -> None:
     async def slow_push():
         for _ in range(5):
             await asyncio.sleep(0)
@@ -175,9 +174,8 @@ def test_optimizer_step_waits_for_the_previous_push() -> None:
     events: list[str] = []
     _run(_controller(events, on_push=slow_push), num_training_steps=2)
 
-    # Forward/backward 2 overlaps push 1; optimizer step 2 waits for it to finish.
-    assert events.index("fwd_bwd 2") < events.index("push end")
-    assert events.index("push end") < events.index("optim 2")
+    # Forward/backward 2 blocks the trainer's event loop, so push 1 must finish first.
+    assert events.index("push end") < events.index("fwd_bwd 2")
 
 
 def test_next_push_waits_for_the_previous_pull() -> None:
