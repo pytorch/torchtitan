@@ -495,8 +495,6 @@ class AcceleratorGraphWrapper:
         return self._output
 
     def teardown(self) -> None:
-        if self._graph is not None:
-            self._graph.reset()
         self._graph = None
         self._args = None
         self._output = None
