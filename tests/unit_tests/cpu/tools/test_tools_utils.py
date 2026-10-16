@@ -104,6 +104,6 @@ def test_event_loop_thread_does_not_block_process_exit() -> None:
     code = (
         "import threading\n"
         "from torchtitan.tools.utils import EventLoopThread\n"
-        "EventLoopThread(name='stuck').call(threading.Event().wait)\n"
+        "EventLoopThread(name='stuck').submit(threading.Event().wait)\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True, timeout=120)

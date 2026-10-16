@@ -274,28 +274,28 @@ class EventLoopThread:
 
     Example:
         thread = EventLoopThread(name="trainer_compute")
-        thread.call(torch.cuda.set_device, 1).result()  # from sync code: block until done
-        out = await asyncio.wrap_future(thread.call(fn, x))  # from a coroutine: await it
+        thread.submit(torch.cuda.set_device, 1).result()  # from sync code: block until done
+        out = await asyncio.wrap_future(thread.submit(fn, x))  # from a coroutine: await it
     """
 
     def __init__(self, name: str) -> None:
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop.run_forever, name=name, daemon=True).start()
 
-    def call(
+    def submit(
         self, fn: Callable[..., _T], /, *args: Any, **kwargs: Any
     ) -> concurrent.futures.Future[_T]:
         """Queue `fn(*args, **kwargs)` on the thread and return its future."""
-        result: concurrent.futures.Future[_T] = concurrent.futures.Future()
+        future: concurrent.futures.Future[_T] = concurrent.futures.Future()
 
         def run() -> None:
             # Skip `fn` if the caller cancelled the future before it started.
-            if result.set_running_or_notify_cancel():
+            if future.set_running_or_notify_cancel():
                 try:
-                    result.set_result(fn(*args, **kwargs))
+                    future.set_result(fn(*args, **kwargs))
                 except BaseException as exc:
-                    result.set_exception(exc)
+                    future.set_exception(exc)
 
         # `call_soon_threadsafe` runs `run` in a copy of the caller's contextvars.
         self._loop.call_soon_threadsafe(run)
-        return result
+        return future

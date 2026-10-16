@@ -593,11 +593,11 @@ def _blocking_engine_forward_backward(**kwargs) -> ForwardBackwardResult:
     _CALL_ORDER.append("forward_backward")
     _FORWARD_BACKWARD_STARTED.set()
     _FORWARD_BACKWARD_MAY_RETURN.wait()  # like the real engine, never yields to the event loop
-    return ForwardBackwardResult(loss=torch.tensor(0.0), loss_metrics=[{}])
+    return ForwardBackwardResult(loss=torch.tensor(0.0), loss_metrics=[])
 
 
-class _BlockingTrainer(Trainer):
-    """The real push and `forward_backward`, over an engine that blocks until the push replies."""
+class _BlockingTrainerActor(Actor, _TrainerActorEndpoints, Trainer):
+    """The real push and `forward_backward` endpoints, over an engine that blocks until the push replies."""
 
     def __init__(self) -> None:
         self._compute_thread = EventLoopThread(name="trainer_compute")
@@ -605,8 +605,6 @@ class _BlockingTrainer(Trainer):
         self.engine = SimpleNamespace(
             num_completed_steps=0, forward_backward=_blocking_engine_forward_backward
         )
-        self.dp_rank = 0
-        self._reduce_forward_backward_metrics = lambda **kwargs: {}
         self.model = SimpleNamespace(state_dict=_model_state_dict)
         self._staging_state_dict = {"weight": torch.zeros(2)}
         self._staging_model_state_dict_stream = None
@@ -614,10 +612,6 @@ class _BlockingTrainer(Trainer):
     def _wait_for_staging_and_put_model_state_dict(self, staging_complete) -> None:
         # Like a real step, the put is still running when forward_backward starts.
         assert _FORWARD_BACKWARD_STARTED.wait(10)
-
-
-class _BlockingTrainerActor(Actor, _TrainerActorEndpoints, _BlockingTrainer):
-    pass
 
 
 def test_trainer_actor_push_replies_during_forward_backward() -> None:
@@ -633,7 +627,7 @@ def test_trainer_actor_push_replies_during_forward_backward() -> None:
             trainer.forward_backward.call([], torch.zeros(1), torch.zeros(1))
         )
         try:
-            # The push replies from the event loop, so only if forward_backward leaves it free.
+            # The push can reply only if forward_backward leaves the event loop free.
             await asyncio.wait_for(push, timeout=10)
         finally:
             _FORWARD_BACKWARD_MAY_RETURN.set()

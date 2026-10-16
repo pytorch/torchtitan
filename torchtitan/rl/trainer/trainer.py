@@ -56,7 +56,7 @@ def _on_compute_thread(fn: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(fn)
     async def wrapper(self: "Trainer", *args, **kwargs) -> Any:
         return await asyncio.wrap_future(
-            self._compute_thread.call(fn, self, *args, **kwargs)
+            self._compute_thread.submit(fn, self, *args, **kwargs)
         )
 
     return wrapper
@@ -174,17 +174,17 @@ class Trainer(Configurable):
         # forward_backward runs on this thread, so the event loop can reply to the weight push meanwhile.
         self._compute_thread = utils.EventLoopThread(name="trainer_compute")
         # The current CUDA device is per thread, and a new thread starts on device 0.
-        self._compute_thread.call(
-            self._staging_device_module.set_device, engine.device
+        self._compute_thread.submit(
+            utils.device_module.set_device, engine.device
         ).result()
-        # So is multithreaded autograd. init_distributed turned it off on this thread, so
-        # the backward's recompute runs on the calling thread and finds its thread-local mesh.
-        self._compute_thread.call(
+        # Autograd multithreading is per thread too. init_distributed turned it off so the
+        # backward's recompute runs on the calling thread, where the thread-local mesh is.
+        self._compute_thread.submit(
             torch.autograd.set_multithreading_enabled,
             torch.autograd.is_multithreading_enabled(),
         ).result()
         # The profiler records CPU ops only on the thread that starts and steps it.
-        self._compute_thread.call(engine.start_profiler).result()
+        self._compute_thread.submit(engine.start_profiler).result()
         engine.device_memory_monitor.reset_peak_stats()
 
         # Data parallelism: mesh is available after model construction builds it.
@@ -229,7 +229,7 @@ class Trainer(Configurable):
         shutdown and hang at process exit.
         """
         # On the compute thread: the profiler stops on the thread that started it.
-        self._compute_thread.call(self.engine.close).result()
+        await asyncio.wrap_future(self._compute_thread.submit(self.engine.close))
         logger.debug("Trainer close requested; ProcMesh.stop owns PG teardown.")
 
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
@@ -399,7 +399,7 @@ class Trainer(Configurable):
         engine.save_checkpoint(last_step=last_step)
         # On the compute thread, so the trace has forward_backward's CPU ops but not this method's.
         # TODO: torch's experimental `profile_all_threads` profiler option would record both.
-        self._compute_thread.call(engine.step_profiler).result()
+        self._compute_thread.submit(engine.step_profiler).result()
         device_mem_stats = engine.device_memory_monitor.get_peak_stats()
         engine.device_memory_monitor.reset_peak_stats()
 
@@ -451,8 +451,8 @@ class Trainer(Configurable):
           reuses the staging buffers and TorchStore key.
         """
 
-        # Staging never yields to the event loop, so it ends before the forward_backward sent after
-        # this push starts. Its state_dict() would otherwise free the unsharded params FSDP is using.
+        # state_dict() frees FSDP's unsharded params, so it must not overlap forward_backward. It doesn't:
+        # the controller sends forward_backward after this push, and staging never yields the event loop.
         model_state_dict = self.model.state_dict()
         # Today we copy the model into reusable pinned CPU buffers before calling
         # TorchStore. Parameter destinations use the generator dtype, so copy_()
