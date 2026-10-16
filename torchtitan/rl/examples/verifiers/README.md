@@ -83,4 +83,4 @@ python -m torchtitan.rl.train \
 
 See [DAPO Math](./dapo_math) for a complete single-turn example and
 [Terminal-Bench](./terminal_bench) for a multi-turn agent example. This
-integration pins Verifiers 0.3.1 and uses its `verifiers.v1` API.
+integration pins Verifiers 0.4.0 and uses its `verifiers.v1` API.

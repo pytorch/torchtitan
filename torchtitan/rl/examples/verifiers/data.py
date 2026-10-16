@@ -85,7 +85,7 @@ class VerifiersTaskDataset(RLDataset):
         verifiers_taskset = (
             verifiers_taskset
             if config.num_tasks is None
-            else verifiers_taskset.head(config.num_tasks)
+            else verifiers_taskset.take(config.num_tasks)
         )
         if config.shuffle:
             verifiers_taskset = verifiers_taskset.shuffle(config.seed)
