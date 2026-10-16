@@ -26,7 +26,7 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.attention.cp_attention import UlyssesCPInnerAttention
+from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
@@ -255,7 +255,7 @@ class GptOssModel(Decoder):
         dump_folder: str,
     ) -> GptOssModel:
         if parallelism_context.cp_enabled and any(
-            isinstance(layer.attention.inner_attention, UlyssesCPInnerAttention.Config)
+            isinstance(layer.attention.inner_attention, UlyssesInnerAttention.Config)
             for layer in self.config.layers
         ):
             raise NotImplementedError(

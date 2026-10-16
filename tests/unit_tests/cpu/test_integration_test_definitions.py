@@ -13,9 +13,7 @@ import pytest
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan.models.common.attention.cp_attention import (
-    UlyssesCPVarlenInnerAttention,
-)
+from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 from tests.integration_tests import (
@@ -167,9 +165,7 @@ def test_varlen_cp_combinations_require_real_collectives(
     assert not config.training.disable_cuda_graphs
     assert config.dataloader.max_num_documents is not None
     assert all(
-        isinstance(
-            layer.attention.inner_attention, UlyssesCPVarlenInnerAttention.Config
-        )
+        isinstance(layer.attention.inner_attention, UlyssesVarlenInnerAttention.Config)
         for layer in config.model.layers
     )
     config.__post_init__()
