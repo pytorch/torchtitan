@@ -1180,6 +1180,7 @@ class VLLMGenerator(Configurable):
 
         logger.info("Generator initialized with vLLM engine")
 
+    # TODO: run the engine thread on `torchtitan.tools.utils.EventLoopThread`, as the trainer does.
     def _call_on_engine_thread(self, fn: Callable[[], _T]) -> _T:
         """Call `fn` on the engine thread, in the caller's contextvars, and block until it returns.
         For setup in `__init__`, before the engine loop starts."""

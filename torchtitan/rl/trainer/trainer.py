@@ -5,11 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
-import concurrent.futures
 import functools
 import logging
 import os
-import threading
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -58,7 +56,7 @@ def _on_compute_thread(fn: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(fn)
     async def wrapper(self: "Trainer", *args, **kwargs) -> Any:
         return await asyncio.wrap_future(
-            self._call_on_compute_thread(fn, self, *args, **kwargs)
+            self._compute_thread.call(fn, self, *args, **kwargs)
         )
 
     return wrapper
@@ -173,19 +171,20 @@ class Trainer(Configurable):
                 "Configure checkpointer to load from a checkpoint."
             )
 
-        self._start_compute_thread()
+        # forward_backward runs on this thread, so the event loop can reply to the weight push meanwhile.
+        self._compute_thread = utils.EventLoopThread(name="trainer_compute")
         # The current CUDA device is per thread, and a new thread starts on device 0.
-        self._call_on_compute_thread(
+        self._compute_thread.call(
             self._staging_device_module.set_device, engine.device
         ).result()
         # So is multithreaded autograd. init_distributed turned it off on this thread, so
         # the backward's recompute runs on the calling thread and finds its thread-local mesh.
-        self._call_on_compute_thread(
+        self._compute_thread.call(
             torch.autograd.set_multithreading_enabled,
             torch.autograd.is_multithreading_enabled(),
         ).result()
-        # The profiler records CPU ops only on the thread that starts it.
-        self._call_on_compute_thread(engine.start_profiler).result()
+        # The profiler records CPU ops only on the thread that starts and steps it.
+        self._compute_thread.call(engine.start_profiler).result()
         engine.device_memory_monitor.reset_peak_stats()
 
         # Data parallelism: mesh is available after model construction builds it.
@@ -221,10 +220,7 @@ class Trainer(Configurable):
             self._staging_device_module.current_stream(self.engine.device)
         )
 
-    # On the compute thread: the profiler stops on the thread that started it, and close
-    # waits for the compute queued before it.
-    @_on_compute_thread
-    def close(self) -> None:
+    async def close(self) -> None:
         """Close actor-local resources before the process mesh stops.
 
         The trainer does not own the distributed process group lifecycle here:
@@ -232,7 +228,8 @@ class Trainer(Configurable):
         the final teardown. Destroying it from this endpoint can race with mesh
         shutdown and hang at process exit.
         """
-        self.engine.close()
+        # On the compute thread: the profiler stops on the thread that started it.
+        self._compute_thread.call(self.engine.close).result()
         logger.debug("Trainer close requested; ProcMesh.stop owns PG teardown.")
 
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
@@ -272,37 +269,6 @@ class Trainer(Configurable):
             }
         )
         return out
-
-    def _start_compute_thread(self) -> None:
-        """Start the daemon thread that runs the `@_on_compute_thread` methods, in call order.
-
-        - Off the event loop: the weight push replies during forward_backward.
-        - One thread: every rank issues its collectives in the same order.
-        - Daemon: a rank stuck in a collective doesn't block exit.
-        """
-        self._compute_loop = asyncio.new_event_loop()
-        threading.Thread(
-            target=self._compute_loop.run_forever, name="trainer_compute", daemon=True
-        ).start()
-
-    # TODO: share one helper with `VLLMGenerator._call_on_engine_thread`.
-    def _call_on_compute_thread(
-        self, fn: Callable[..., Any], /, *args, **kwargs
-    ) -> concurrent.futures.Future:
-        """Queue `fn` on the compute thread, in the caller's contextvars."""
-        result: concurrent.futures.Future = concurrent.futures.Future()
-
-        def call() -> None:
-            # Skip `fn` if the awaiting caller was cancelled before it started.
-            if result.set_running_or_notify_cancel():
-                try:
-                    result.set_result(fn(*args, **kwargs))
-                except BaseException as exc:
-                    result.set_exception(exc)
-
-        # `call_soon_threadsafe` runs `call` in a copy of the caller's contextvars.
-        self._compute_loop.call_soon_threadsafe(call)
-        return result
 
     @sl.log_trace_span("forward_backward")
     @_on_compute_thread
@@ -403,8 +369,7 @@ class Trainer(Configurable):
         return metrics
 
     @sl.log_trace_span("optim_step")
-    @_on_compute_thread
-    def optim_step(
+    async def optim_step(
         self, *, controller_state: dict[str, Any], last_step: bool = False
     ) -> OptimizerStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
@@ -432,7 +397,9 @@ class Trainer(Configurable):
         )
 
         engine.save_checkpoint(last_step=last_step)
-        engine.step_profiler()
+        # On the compute thread, so the trace has forward_backward's CPU ops but not this method's.
+        # TODO: torch's experimental `profile_all_threads` profiler option would record both.
+        self._compute_thread.call(engine.step_profiler).result()
         device_mem_stats = engine.device_memory_monitor.get_peak_stats()
         engine.device_memory_monitor.reset_peak_stats()
 
@@ -476,13 +443,17 @@ class Trainer(Configurable):
         `Controller._trainer_loop`), which is safe because:
         - The staging stream waits for the last optimizer step before copying, and
           forward/backward does not mutate persistent model state.
-        - forward/backward runs on the compute thread, queued after this push's
-          staging, so this actor's event loop stays free to finish the put and reply.
+        - The CUDA-event wait and the TorchStore put run together in an
+          `asyncio.to_thread` worker, and forward/backward runs on the compute
+          thread, so this actor's event loop is free to reply when the put ends.
         - The controller awaits this push before the next optimizer step mutates
           the model, and awaits the generators' pull of it before the next push
           reuses the staging buffers and TorchStore key.
         """
 
+        # Staging never yields to the event loop, so it ends before the forward_backward sent after
+        # this push starts. Its state_dict() would otherwise free the unsharded params FSDP is using.
+        model_state_dict = self.model.state_dict()
         # Today we copy the model into reusable pinned CPU buffers before calling
         # TorchStore. Parameter destinations use the generator dtype, so copy_()
         # performs the cast; buffers keep their registered dtype.
@@ -490,19 +461,17 @@ class Trainer(Configurable):
         # copy directly into the StorageVolume, eliminating the duplicate CPU
         # snapshot while preserving this overlap and making buffer lifetime
         # explicit.
-        staging_complete = await self._stage_model_state_dict()
+        staging_complete = await self._stage_model_state_dict(model_state_dict)
         await asyncio.to_thread(
             self._wait_for_staging_and_put_model_state_dict,
             staging_complete,
         )
 
     @sl.log_trace_span("stage_model_state_dict")
-    @_on_compute_thread
-    def _stage_model_state_dict(self) -> torch.Event | None:
+    async def _stage_model_state_dict(
+        self, model_state_dict: dict[str, torch.Tensor]
+    ) -> torch.Event | None:
         """Enqueue model-state copies into pinned CPU buffers."""
-        # On the compute thread: FSDP's state_dict() hook reshards, which would free the
-        # unsharded params a running forward/backward uses.
-        model_state_dict = self.model.state_dict()
         stream = self._staging_model_state_dict_stream
         stream_context = (
             self._staging_device_module.stream(stream)

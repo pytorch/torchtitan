@@ -4,18 +4,24 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import asyncio
+import concurrent.futures
 import contextlib
 import logging
 import os
 import subprocess
-from collections.abc import Generator
+import threading
+from collections.abc import Callable, Generator
 from types import ModuleType
+from typing import Any, TypeVar
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
 
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 def round_up(value: int, multiple: int) -> int:
@@ -257,3 +263,39 @@ def set_default_dtype(dtype: torch.dtype) -> Generator[None, None, None]:
         yield
     finally:
         torch.set_default_dtype(old_dtype)
+
+
+class EventLoopThread:
+    """A daemon thread that runs the calls queued on it one at a time, in order.
+
+    - Each call runs in a copy of the caller's contextvars, as with `asyncio.to_thread`.
+    - Daemon, unlike a `ThreadPoolExecutor` worker: a call that never returns, e.g. a
+      stuck collective, doesn't block process exit.
+
+    Example:
+        thread = EventLoopThread(name="trainer_compute")
+        thread.call(torch.cuda.set_device, 1).result()  # from sync code: block until done
+        out = await asyncio.wrap_future(thread.call(fn, x))  # from a coroutine: await it
+    """
+
+    def __init__(self, name: str) -> None:
+        self._loop = asyncio.new_event_loop()
+        threading.Thread(target=self._loop.run_forever, name=name, daemon=True).start()
+
+    def call(
+        self, fn: Callable[..., _T], /, *args: Any, **kwargs: Any
+    ) -> concurrent.futures.Future[_T]:
+        """Queue `fn(*args, **kwargs)` on the thread and return its future."""
+        result: concurrent.futures.Future[_T] = concurrent.futures.Future()
+
+        def run() -> None:
+            # Skip `fn` if the caller cancelled the future before it started.
+            if result.set_running_or_notify_cancel():
+                try:
+                    result.set_result(fn(*args, **kwargs))
+                except BaseException as exc:
+                    result.set_exception(exc)
+
+        # `call_soon_threadsafe` runs `run` in a copy of the caller's contextvars.
+        self._loop.call_soon_threadsafe(run)
+        return result
