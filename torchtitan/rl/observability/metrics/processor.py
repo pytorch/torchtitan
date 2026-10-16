@@ -61,8 +61,8 @@ class MetricsProcessor(Configurable):
 
         console_log_keys_train: list[str] | None = field(
             default_factory=lambda: [
-                # --- the perf/ panel: the 13 metrics that diagnose any bottleneck at a glance ---
-                # 8 trainer keys (everything under perf/); 5 generator keys below.
+                # --- the perf/ panel: the 16 metrics that diagnose any bottleneck at a glance ---
+                # 11 trainer keys (everything under perf/); 5 generator keys below.
                 "perf/",
                 "generator/inflight_requests_at_completion/max",
                 "generator/inter_token_latency_ms/mean",

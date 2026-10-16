@@ -87,18 +87,21 @@ def compute_perf_ratio_metrics(
 ) -> list[m.Metric]:
     """Return trainer throughput and each loop phase's share of `timing/step/total`.
 
-    Example: num_global_valid_tokens=100, timing/step/total = 10 s:
+    Example: num_global_valid_tokens=100, timing/step/total = 20 s:
 
         timing/step/<phase>                        seconds   perf/trainer/step_time_ratio/<phase>
-        wait_for_training_batch                    2         0.2
-        forward_backward                           4         0.4
-        blocking_trainer_push_model_state_dict     1         0.1
-        optimizer                                  1         0.1
-        blocking_generator_pull_model_state_dict   1         0.1
-        (in no phase)                              1         unaccounted: 0.1
+        metrics_log (the previous step's)          1         0.05
+        sync_log_step                              1         0.05
+        wait_for_training_batch                    4         0.2
+        forward_backward                           8         0.4
+        blocking_trainer_push_model_state_dict     1         0.05
+        optimizer                                  1         0.05
+        save_checkpoint                            2         0.1
+        blocking_generator_pull_model_state_dict   1         0.05
+        (in no phase)                              1         unaccounted: 0.05
 
-        tokens_per_second_full_step         = 100 / 10 = 10
-        tokens_per_second_forward_backward  = 100 / 4  = 25
+        tokens_per_second_full_step         = 100 / 20 = 5
+        tokens_per_second_forward_backward  = 100 / 8  = 12.5
 
     A phase not recorded this step gets no ratio, and `unaccounted` is skipped.
     """
@@ -135,10 +138,13 @@ def compute_perf_ratio_metrics(
     phase_seconds = {
         phase: seconds.get(f"timing/step/{phase}")
         for phase in (
+            "metrics_log",
+            "sync_log_step",
             "wait_for_training_batch",
             "forward_backward",
             "blocking_trainer_push_model_state_dict",
             "optimizer",
+            "save_checkpoint",
             "blocking_generator_pull_model_state_dict",
         )
     }
