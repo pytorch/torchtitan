@@ -30,9 +30,55 @@ from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
 from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
+from torchtitan.models.muse_glimmer import (
+    build_model_config as build_muse_glimmer_model_config,
+)
+from torchtitan.models.muse_glimmer.state_dict_adapter import (
+    MuseGlimmerStateDictAdapter,
+)
 from torchtitan.models.qwen3 import MODEL_FLAVORS as QWEN3_MODEL_FLAVORS
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
+
+
+class MuseGlimmerVisionStateDictAdapterTest(unittest.TestCase):
+    def test_hf_native_roundtrip_and_strict_load(self) -> None:
+        config = build_muse_glimmer_model_config(
+            "debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()
+        )
+        model = config.build()
+        model.init_states()
+        state = model.state_dict()
+        for key, tensor in state.items():
+            if key.startswith("vision_encoder.layers.") and key.endswith(
+                ("wq.bias", "wk.bias")
+            ):
+                tensor.copy_(torch.arange(tensor.numel(), dtype=tensor.dtype))
+        adapter = MuseGlimmerStateDictAdapter(config, hf_assets_path=None)
+        hf = adapter.to_hf(state)
+        assert config.vision_encoder is not None
+        heads = config.vision_encoder.num_heads
+        for projection, native in (("q", "wq"), ("k", "wk")):
+            for parameter in ("weight", "bias"):
+                value = state[f"vision_encoder.layers.0.attn.{native}.{parameter}"]
+                expected = (
+                    value.reshape(heads, -1, 2, *value.shape[1:])
+                    .transpose(1, 2)
+                    .reshape_as(value)
+                )
+                torch.testing.assert_close(
+                    hf[
+                        f"model.vision_tower.layers.0.attn.{projection}_proj.{parameter}"
+                    ],
+                    expected,
+                    rtol=0,
+                    atol=0,
+                )
+        restored = adapter.from_hf(hf)
+        self.assertEqual(restored.keys(), state.keys())
+        for key, tensor in state.items():
+            torch.testing.assert_close(restored[key], tensor, rtol=0, atol=0, msg=key)
+        config.build().load_state_dict(restored, strict=True)
 
 
 class HuggingFaceStorageReaderTest(unittest.TestCase):
