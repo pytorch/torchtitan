@@ -16,6 +16,18 @@ from torchtitan.models.muse_glimmer import build_model_config
 
 
 class TestMuseGlimmerConditionalVision(unittest.TestCase):
+    def test_direct_forward_rejects_temporal_image_grid(self):
+        model = build_model_config(
+            "debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()
+        ).build()
+        model.init_states()
+        assert model.vision_encoder is not None
+        pixels = torch.randn(8, model.vision_encoder.conv1_linear.in_features)
+        with self.assertRaises((AssertionError, ValueError)):
+            model(torch.zeros(4, dtype=torch.long), pixel_values=pixels,
+                  grid_thw=torch.tensor([[2, 2, 2]]),
+                  vision_bank_indices_T=torch.zeros(4, dtype=torch.long))
+
     def test_built_config_shards_owned_vision_modules(self):
         config = build_model_config(
             "debugmodel_mm",
