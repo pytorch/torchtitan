@@ -511,7 +511,7 @@ def _build_v4_layers(
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     hc_pre_sharding = hc_pre_sharding_config(enable_sp=enable_sp)
 
-    layers = []
+    layers: list[DeepSeekV4TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         actual_layer_id = layer_offset + layer_id
         cr = compress_ratios[layer_id] if layer_id < len(compress_ratios) else 1

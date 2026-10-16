@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Generic
 
 import spmd_types as spmd
 import torch
@@ -30,7 +30,7 @@ from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import Decoder, LayerConfigT, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
@@ -198,8 +198,8 @@ class MTPDecoder(Decoder):
     mtp_layers: ModuleList[MTPTransformerBlock] | None
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
-        mtp_layers: list = field(default_factory=list)
+    class Config(Decoder.Config[LayerConfigT], Generic[LayerConfigT]):
+        mtp_layers: list[MTPTransformerBlock.Config] = field(default_factory=list)
 
     def __init__(self, config: Config):
         super().__init__(config)

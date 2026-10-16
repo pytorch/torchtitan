@@ -35,7 +35,18 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         hf_assets_path: str | None,
     ):
         super().__init__(model_config, hf_assets_path)
-        self.from_hf_map = {
+        self.from_hf_map = self._build_from_hf_map(model_config)
+
+    def _build_from_hf_map(
+        self,
+        model_config: DeepSeekV3Model.Config,
+    ) -> dict[str, str]:
+        """Return the Hugging Face name to torchtitan name map.
+
+        Subclasses with a different checkpoint layout override this so they
+        do not run the V3 MLA query-projection branch.
+        """
+        from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention Module
             "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": "layers.{}.attention.wkv_a.weight",
@@ -68,8 +79,8 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         }
 
         # Adjustments for from_hf_map based on model architecture
-        if model_config.layers[0].attention.q_lora_rank != 0:
-            self.from_hf_map.update(
+        if getattr(model_config.layers[0].attention, "q_lora_rank", 0) != 0:
+            from_hf_map.update(
                 {
                     "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
                     "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
@@ -77,11 +88,12 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 }
             )
         else:
-            self.from_hf_map.update(
+            from_hf_map.update(
                 {
                     "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
                 }
             )
+        return from_hf_map
 
     def _map_from_hf_layer_key(
         self,

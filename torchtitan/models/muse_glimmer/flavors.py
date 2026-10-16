@@ -253,7 +253,7 @@ def _build_muse_glimmer_layers(
     hidden_dim = int(_FFN_DIM_MULTIPLIER * dim)
     # All four norms operate on the residual activation.
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
-    layers = []
+    layers: list[MuseGlimmerTransformerBlock.Config] = []
     for layer_id in range(n_layers):
         layers.append(
             MuseGlimmerTransformerBlock.Config(

@@ -596,7 +596,7 @@ def _kimi_k3_config(
             ),
         )
 
-    layers = []
+    layers: list[KimiK3TransformerBlock.Config] = []
     for layer_idx in range(num_layers):
         is_full_attention = layer_idx in full_attention_layers
         layers.append(

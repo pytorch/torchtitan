@@ -473,7 +473,7 @@ def _build_qwen35_layers(
     has_vision_encoder: bool,
 ) -> list[Qwen35TransformerBlock.Config]:
     """Build sharded per-layer configs for dense Qwen3.5 models."""
-    layers = []
+    layers: list[Qwen35TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
 
@@ -551,7 +551,7 @@ def _build_qwen35_moe_layers(
     has_vision_encoder: bool,
 ) -> list[Qwen35TransformerBlock.Config]:
     """Build sharded per-layer configs for MoE Qwen3.5 models with shared expert."""
-    layers = []
+    layers: list[Qwen35TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
 
