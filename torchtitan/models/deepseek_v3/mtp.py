@@ -187,6 +187,99 @@ class MTPTransformerBlock(TransformerBlock):
         )
 
 
+def preprocess_mtp_inputs(
+    model: Decoder,
+    input_dict: dict[str, Any],
+    *,
+    num_mtp_layers: int,
+    parallelism_context: ParallelismContext,
+    parallelism: ParallelismConfig,
+    max_num_documents: int | None = None,
+    max_context_length: int | None = None,
+    global_routing_token_counts: torch.Tensor | None = None,
+) -> tuple[
+    torch.Tensor | tuple[torch.Tensor, ...],
+    torch.Tensor | tuple[torch.Tensor, ...],
+    dict[str, Any],
+]:
+    """Prepare aligned per-depth pairs before applying CP sharding and annotations.
+
+    Shared by the decoders that own MTP layers. With ``num_mtp_layers=0`` the
+    model has no MTP and gets one token tensor and one labels tensor.
+    """
+    tokens = input_dict["input"]
+    labels = input_dict["labels"]
+    positions = input_dict.get("positions")
+    padding_mask = input_dict.get("padding_mask")
+    if num_mtp_layers > 0 and positions is None:
+        raise ValueError("MTP input preprocessing requires positions.")
+
+    depths = range(1, num_mtp_layers + 1)
+    input_shardings = decoder_input_sharding()
+    for depth in depths:
+        mtp_input_tokens, mtp_input_valid_mask = roll_mtp_sequence(
+            tokens,
+            shift=depth,
+            positions=positions,
+            padding_mask=padding_mask,
+            fill_value=0,
+            return_valid_mask=True,
+        )
+        mtp_labels = roll_mtp_sequence(
+            labels,
+            shift=depth,
+            positions=positions,
+            padding_mask=padding_mask,
+            fill_value=IGNORE_INDEX,
+            return_valid_mask=False,
+        )
+        input_dict[f"mtp_input_tokens_{depth}"] = mtp_input_tokens
+        input_dict[f"mtp_labels_{depth}"] = mtp_labels
+        input_dict[f"mtp_input_valid_mask_{depth}"] = mtp_input_valid_mask
+        input_shardings[f"mtp_input_tokens_{depth}"] = input_shardings["input"]
+        input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
+        input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
+
+    if positions is not None:
+        attention_metadata = model._get_attention_metadata(
+            positions=positions,
+            padding_mask=padding_mask,
+            max_num_documents=max_num_documents,
+            max_context_length=max_context_length,
+        )
+        input_dict["attention_metadata"] = attention_metadata
+
+    if parallelism_context.cp_enabled:
+        input_dict = model._cp_shard(
+            input_dict,
+            input_shardings=input_shardings,
+            parallelism_context=parallelism_context,
+            parallelism=parallelism,
+        )
+    input_dict = annotate_input_spmd_types(
+        parallelism_context, input_dict, input_shardings
+    )
+
+    main_tokens = input_dict.pop("input")
+    main_labels = input_dict.pop("labels")
+    input_dict["aux_loss_denominators"] = global_routing_token_counts
+    if num_mtp_layers == 0:
+        return main_tokens, main_labels, input_dict
+
+    input_tokens = (
+        main_tokens,
+        *(input_dict.pop(f"mtp_input_tokens_{depth}") for depth in depths),
+    )
+    loss_labels = (
+        main_labels,
+        *(input_dict.pop(f"mtp_labels_{depth}") for depth in depths),
+    )
+    input_dict["mtp_input_valid_masks"] = tuple(
+        input_dict.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
+    )
+    return input_tokens, loss_labels, input_dict
+
+
 class MTPDecoder(Decoder):
     """Decoder variant that owns MTP layers.
 
@@ -262,81 +355,16 @@ class MTPDecoder(Decoder):
     ]:
         """Prepare aligned pairs before applying CP sharding and annotations."""
         del kwargs
-        tokens = input_dict["input"]
-        labels = input_dict["labels"]
-        positions = input_dict.get("positions")
-        padding_mask = input_dict.get("padding_mask")
-        if self.mtp_layers is not None and positions is None:
-            raise ValueError("MTP input preprocessing requires positions.")
-
-        depths = (
-            range(1, len(self.mtp_layers) + 1)
-            if self.mtp_layers is not None
-            else range(0)
+        return preprocess_mtp_inputs(
+            self,
+            input_dict,
+            num_mtp_layers=0 if self.mtp_layers is None else len(self.mtp_layers),
+            parallelism_context=parallelism_context,
+            parallelism=parallelism,
+            max_num_documents=max_num_documents,
+            max_context_length=max_context_length,
+            global_routing_token_counts=global_routing_token_counts,
         )
-        input_shardings = decoder_input_sharding()
-        for depth in depths:
-            mtp_input_tokens, mtp_input_valid_mask = roll_mtp_sequence(
-                tokens,
-                shift=depth,
-                positions=positions,
-                padding_mask=padding_mask,
-                fill_value=0,
-                return_valid_mask=True,
-            )
-            mtp_labels = roll_mtp_sequence(
-                labels,
-                shift=depth,
-                positions=positions,
-                padding_mask=padding_mask,
-                fill_value=IGNORE_INDEX,
-                return_valid_mask=False,
-            )
-            input_dict[f"mtp_input_tokens_{depth}"] = mtp_input_tokens
-            input_dict[f"mtp_labels_{depth}"] = mtp_labels
-            input_dict[f"mtp_input_valid_mask_{depth}"] = mtp_input_valid_mask
-            input_shardings[f"mtp_input_tokens_{depth}"] = input_shardings["input"]
-            input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
-            input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
-
-        if positions is not None:
-            attention_metadata = self._get_attention_metadata(
-                positions=positions,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
-            )
-            input_dict["attention_metadata"] = attention_metadata
-
-        if parallelism_context.cp_enabled:
-            input_dict = self._cp_shard(
-                input_dict,
-                input_shardings=input_shardings,
-                parallelism_context=parallelism_context,
-                parallelism=parallelism,
-            )
-        input_dict = annotate_input_spmd_types(
-            parallelism_context, input_dict, input_shardings
-        )
-
-        main_tokens = input_dict.pop("input")
-        main_labels = input_dict.pop("labels")
-        input_dict["aux_loss_denominators"] = global_routing_token_counts
-        if self.mtp_layers is None:
-            return main_tokens, main_labels, input_dict
-
-        input_tokens = (
-            main_tokens,
-            *(input_dict.pop(f"mtp_input_tokens_{depth}") for depth in depths),
-        )
-        loss_labels = (
-            main_labels,
-            *(input_dict.pop(f"mtp_labels_{depth}") for depth in depths),
-        )
-        input_dict["mtp_input_valid_masks"] = tuple(
-            input_dict.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
-        )
-        return input_tokens, loss_labels, input_dict
 
     def forward(
         self,

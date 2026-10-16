@@ -115,7 +115,7 @@ def _preprocess(model, input_dict, **kwargs):
             **no_annotation,
         ),
         patch(
-            "torchtitan.models.deepseek_v4.model.annotate_input_spmd_types",
+            "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
             **no_annotation,
         ),
     ):
@@ -129,37 +129,46 @@ def _preprocess(model, input_dict, **kwargs):
         )
 
 
-class TestDeepSeekV4MTPLabels(unittest.TestCase):
+class TestDeepSeekV4MTPInputs(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.dict(AuxLoss._group_counts, clear=True))
         self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
 
-    def test_preprocess_inputs_returns_one_label_per_depth(self):
+    def test_preprocess_inputs_prepares_each_depth(self):
         with torch.device("meta"):
             model = deepseek_v4_mtp_debugmodel(seq_len=128).model.build()
         # Two packed documents (70 and 50 tokens) and 8 padding tokens.
         positions = torch.cat([torch.arange(70), torch.arange(50), torch.arange(8)])
         padding_mask = torch.arange(128) >= 120
+        tokens = torch.arange(128) + 1000
         labels = torch.arange(128)
-        _, loss_labels, _ = _preprocess(
+        inputs, loss_labels, kwargs = _preprocess(
             model,
             {
-                "input": torch.zeros(128, dtype=torch.long),
+                "input": tokens,
                 "labels": labels,
                 "positions": positions,
                 "padding_mask": padding_mask,
             },
         )
 
-        self.assertIsInstance(loss_labels, tuple)
+        # Depth 1 is shifted by one inside each document: nothing crosses a
+        # document boundary, enters the padding, or runs past the end.
+        valid = torch.zeros(128, dtype=torch.bool)
+        valid[:69] = True
+        valid[70:119] = True
+        self.assertEqual(len(inputs), 2)
+        self.assertTrue(torch.equal(inputs[0], tokens))
+        self.assertTrue(torch.equal(inputs[1], torch.where(valid, tokens.roll(-1), 0)))
+        self.assertEqual(len(kwargs["mtp_input_valid_masks"]), 1)
+        self.assertTrue(torch.equal(kwargs["mtp_input_valid_masks"][0], valid))
         self.assertEqual(len(loss_labels), 2)
         self.assertTrue(torch.equal(loss_labels[0], labels))
-        # Shifted by one inside each document; no label across a document
-        # boundary, into the padding, or past the end.
-        expected = torch.full((128,), IGNORE_INDEX)
-        expected[:69] = labels[1:70]
-        expected[70:119] = labels[71:120]
-        self.assertTrue(torch.equal(loss_labels[1], expected))
+        self.assertTrue(
+            torch.equal(
+                loss_labels[1], torch.where(valid, labels.roll(-1), IGNORE_INDEX)
+            )
+        )
 
     def test_mtp_debugmodel_loss_runs(self):
         torch.manual_seed(0)
@@ -184,13 +193,13 @@ class TestDeepSeekV4MTPLabels(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
 
 
-class TestDeepSeekV4MTPLabelLayout(unittest.TestCase):
+class TestDeepSeekV4MTPInputLayout(unittest.TestCase):
     def setUp(self):
         dist.init_process_group("gloo", rank=0, world_size=1, store=dist.HashStore())
         self.addCleanup(dist.destroy_process_group)
 
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
-    def test_shifted_labels_have_the_labels_layout(self):
+    def test_mtp_inputs_have_the_main_layouts(self):
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
@@ -204,7 +213,7 @@ class TestDeepSeekV4MTPLabelLayout(unittest.TestCase):
         parallelism_context.build_mesh()
         with torch.device("meta"):
             model = deepseek_v4_mtp_debugmodel(seq_len=16).model.build()
-        _, loss_labels, _ = model.preprocess_inputs(
+        inputs, loss_labels, kwargs = model.preprocess_inputs(
             {
                 "input": torch.zeros(16, dtype=torch.long),
                 "labels": torch.arange(16),
@@ -215,11 +224,17 @@ class TestDeepSeekV4MTPLabelLayout(unittest.TestCase):
             parallelism=SimpleNamespace(),
         )
 
-        # An unannotated tensor also reads as the empty local type on one rank.
-        self.assertTrue(spmd.has_local_type(loss_labels[1]))
-        self.assertEqual(
-            spmd.get_local_type(loss_labels[1]), spmd.get_local_type(loss_labels[0])
-        )
+        # On one rank an unannotated tensor also reads as the empty local type,
+        # so check that each per-depth tensor was annotated at all.
+        for depth_tensor, main_tensor in (
+            (inputs[1], inputs[0]),
+            (kwargs["mtp_input_valid_masks"][0], inputs[0]),
+            (loss_labels[1], loss_labels[0]),
+        ):
+            self.assertTrue(spmd.has_local_type(depth_tensor))
+            self.assertEqual(
+                spmd.get_local_type(depth_tensor), spmd.get_local_type(main_tensor)
+            )
 
 
 if __name__ == "__main__":
