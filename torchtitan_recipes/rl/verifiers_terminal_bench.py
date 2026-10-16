@@ -486,7 +486,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",
-                "timing/validate",
+                "timing/validation/",
             ],
         ),
         trainer=Trainer.Config(
