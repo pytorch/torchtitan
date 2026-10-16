@@ -35,8 +35,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import LinearAttentionMetadata
+from torchtitan.models.common.attention import InnerAttention, LinearAttentionMetadata
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.linear_attention import chunk_kernel_options
 from torchtitan.models.common.attn_gym import (
@@ -58,7 +57,7 @@ from torchtitan.rl.generator.vllm.linear_attention import (
 )
 
 
-class VLLMInnerGatedDeltaNet(Module, MambaBase):
+class VLLMInnerGatedDeltaNet(InnerAttention, MambaBase):
     """Paged-cache inner GDN implementation.
 
     The enclosing ``common.attention.gdn.GDN`` owns all parameters. This
@@ -69,7 +68,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         layer_idx: int
         num_k_heads: int
         num_v_heads: int

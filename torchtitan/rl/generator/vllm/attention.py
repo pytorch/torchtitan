@@ -331,6 +331,10 @@ class VLLMInnerAttention(InnerAttention):
         sliding_window_size: int | None = None
         """Causal sliding-window size (``None`` => full attention)."""
 
+        @property
+        def is_full_attention(self) -> bool:
+            return self.sliding_window_size is None
+
     def __init__(self, config: Config) -> None:
         super().__init__()
 

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from unittest import mock
 
 import pytest
@@ -24,6 +25,36 @@ from torchtitan.rl.generator.vllm.model_wrapper import (
     _replace_vllm_layer_configs,
     VLLMModelWrapper,
 )
+
+
+@pytest.mark.parametrize(
+    "build_config", [build_model_config, build_kimi_k3_config], ids=["gdn", "kda"]
+)
+def test_vllm_replacement_keeps_first_full_attention(build_config) -> None:
+    """Find the full-attention layer after the vLLM swap, past linear-attention layers."""
+    model_config = build_config(
+        "debugmodel", attn_backend="varlen", parallelism=ParallelismConfig()
+    )
+    vllm_config = _replace_vllm_layer_configs(model_config)
+
+    model_index = model_config.layers.index(
+        next(
+            layer
+            for layer in model_config.layers
+            if layer.attention is model_config.first_full_attention
+        )
+    )
+    vllm_attention = vllm_config.first_full_attention
+    assert vllm_attention is vllm_config.layers[model_index].attention
+    assert not isinstance(vllm_attention, LinearAttention.Config)
+
+
+def test_vllm_inner_attention_sliding_window_is_not_full_attention() -> None:
+    config = VLLMInnerAttention.Config(
+        hidden_size=8, num_heads=2, num_kv_heads=2, head_dim=4
+    )
+    assert config.is_full_attention
+    assert not dataclasses.replace(config, sliding_window_size=16).is_full_attention
 
 
 @pytest.mark.parametrize(
