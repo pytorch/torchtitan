@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-import os
 from typing import cast
 
 import torch
@@ -17,6 +16,30 @@ from torchtitan.trainer import Trainer
 
 
 logger = logging.getLogger(__name__)
+
+
+def _require_seed_checkpoint_launch(config: Trainer.Config) -> None:
+    """Reject a seed checkpoint that would shard initialization across ranks.
+
+    Distributed init has already chosen the process-group world size: ``NGPU``
+    in fake mode, and the launched process count under ``torchrun``. Pure fake
+    does not set ``WORLD_SIZE``.
+    """
+    if not torch.distributed.is_initialized():
+        raise ValueError(
+            "Must create a seed checkpoint on an initialized single-device "
+            "process group."
+        )
+    world_size = torch.distributed.get_world_size()
+    if world_size != 1:
+        raise ValueError(
+            "Must create a seed checkpoint using a single device, to disable "
+            f"sharding. Got world size {world_size}."
+        )
+    if config.checkpointer is None:
+        raise ValueError(
+            "Must configure checkpointer when creating a seed checkpoint."
+        )
 
 
 def main() -> None:
@@ -46,12 +69,7 @@ def main() -> None:
         trainer = config.build()
 
         if config.create_seed_checkpoint:
-            assert (
-                int(os.environ["WORLD_SIZE"]) == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding."
-            assert (
-                config.checkpointer is not None
-            ), "Must configure checkpointer when creating a seed checkpoint."
+            _require_seed_checkpoint_launch(config)
             trainer.engine.save_checkpoint(last_step=True)
             logger.info("Created seed checkpoint")
         else:
