@@ -28,7 +28,6 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
-from torchtitan.distributed.context_parallel import shard_per_token_tensors
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
@@ -635,35 +634,24 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 sl.log_trace_span("preprocess_inputs"),
                 self.parallelism_context.activate_spmd(),
             ):
-                inputs, labels, model_kwargs = self.model_parts[0].preprocess_inputs(
-                    microbatch.to_input_dict(self.device, non_blocking=True),
-                    parallelism_context=self.parallelism_context,
-                    parallelism=self.config.parallelism,
-                    max_num_documents=self.max_num_documents,
-                    max_context_length=self.config.training.max_context_length,
-                    global_routing_token_counts=global_routing_token_counts,
-                    **self.preprocess_inputs_kwargs,
+                prepared_microbatches.append(
+                    self.model_parts[0].preprocess_inputs(
+                        microbatch.to_input_dict(self.device, non_blocking=True),
+                        parallelism_context=self.parallelism_context,
+                        parallelism=self.config.parallelism,
+                        max_num_documents=self.max_num_documents,
+                        max_context_length=self.config.training.max_context_length,
+                        global_routing_token_counts=global_routing_token_counts,
+                        loss_kwargs=microbatch.to_loss_kwargs(
+                            self.device, non_blocking=True
+                        ),
+                        **self.preprocess_inputs_kwargs,
+                    )
                 )
             self.ntokens_seen += (
                 self.config.training.num_tokens_per_microbatch_per_dp_rank
                 // self.parallelism_context.cp
             )
-            loss_kwargs = microbatch.to_loss_kwargs(self.device, non_blocking=True)
-            if loss_kwargs and self.parallelism_context.cp_enabled:
-                # Per-token loss arguments follow the labels' contiguous CP shards,
-                # which a load-balancing permutation would reorder.
-                if self.config.parallelism.context_parallel_load_balancer is not None:
-                    raise ValueError(
-                        "Per-token loss arguments under context parallelism require "
-                        "parallelism.context_parallel_load_balancer=None."
-                    )
-                cp_mesh = self.parallelism_context.get_mesh("cp")
-                loss_kwargs = shard_per_token_tensors(
-                    loss_kwargs,
-                    cp_rank=cp_mesh.get_local_rank(),
-                    cp_size=cp_mesh.size(),
-                )
-            prepared_microbatches.append((inputs, labels, model_kwargs, loss_kwargs))
 
         if not self.parallelism_context.pp_enabled:
             assert len(prepared_microbatches) == 1
