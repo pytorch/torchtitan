@@ -9,9 +9,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-from torch.nn.attention.flex_attention import create_block_mask
+from torch.nn.attention.flex_attention import and_masks, create_block_mask
 
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    get_causal_mask_mod,
+    get_document_mask_mod,
+    SlidingWindowFlexInnerAttention,
+)
 
 
 class TestFlexInnerAttentionLayouts(unittest.TestCase):
@@ -76,6 +81,86 @@ class TestFlexInnerAttentionLayouts(unittest.TestCase):
             )
 
         torch.testing.assert_close(out_THV, q_THK)
+
+
+# Six packed documents in one 16-token sequence. Positions reset to 0 at each
+# document start.
+PACKED_POSITIONS = torch.tensor(
+    [0, 1, 2, 0, 1, 0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 1], dtype=torch.int32
+)
+# One document per sequence: block_causal and causal must agree here.
+SINGLE_DOC_POSITIONS = torch.arange(16, dtype=torch.int32)
+SEQ_LEN = 16
+MASK_BLOCK_SIZE = 4
+
+
+def _dense(mask_mods, seq_len: int) -> torch.Tensor:
+    """Materialize composed mask_mods into a [seq_len, seq_len] bool matrix."""
+    composed = and_masks(*mask_mods)
+    b = h = torch.tensor(0)
+    return torch.tensor(
+        [
+            [
+                bool(composed(b, h, torch.tensor(q), torch.tensor(kv)))
+                for kv in range(seq_len)
+            ]
+            for q in range(seq_len)
+        ]
+    )
+
+
+def _mods(positions: torch.Tensor, mask_type: str) -> list:
+    return FlexInnerAttention.Config(mask_type=mask_type)._causal_mask_mods(positions)
+
+
+class TestFlexMaskType(unittest.TestCase):
+    def test_mask_mods_match_mask_type(self) -> None:
+        for positions in (PACKED_POSITIONS, SINGLE_DOC_POSITIONS):
+            causal = _dense([get_causal_mask_mod()], SEQ_LEN)
+            same_doc = _dense([get_document_mask_mod(positions)], SEQ_LEN)
+            for mask_type, expected in (
+                ("block_causal", causal & same_doc),
+                ("causal", causal),
+            ):
+                with self.subTest(
+                    single_doc=positions is SINGLE_DOC_POSITIONS, mask_type=mask_type
+                ):
+                    torch.testing.assert_close(
+                        _dense(_mods(positions, mask_type), SEQ_LEN), expected
+                    )
+
+    def test_block_causal_blocks_more_than_causal(self) -> None:
+        causal = _dense(_mods(PACKED_POSITIONS, "causal"), SEQ_LEN)
+        block_causal = _dense(_mods(PACKED_POSITIONS, "block_causal"), SEQ_LEN)
+        # block_causal never allows what causal blocks, and allows strictly less.
+        self.assertTrue(bool((block_causal <= causal).all()))
+        self.assertLess(int(block_causal.sum()), int(causal.sum()))
+
+    def test_unknown_mask_type_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            _mods(PACKED_POSITIONS, "casual")
+
+    def test_configs_default_to_block_causal_and_honor_mask_type(self) -> None:
+        for name, make in (
+            ("flex", lambda **kw: FlexInnerAttention.Config(**kw)),
+            (
+                "sliding_window",
+                lambda **kw: SlidingWindowFlexInnerAttention.Config(
+                    window_size=8, **kw
+                ),
+            ),
+        ):
+            with self.subTest(config=name):
+                self.assertEqual(make().mask_type, "block_causal")
+                block_causal = make(
+                    block_size=MASK_BLOCK_SIZE
+                ).build_attention_metadata(PACKED_POSITIONS)
+                causal = make(
+                    block_size=MASK_BLOCK_SIZE, mask_type="causal"
+                ).build_attention_metadata(PACKED_POSITIONS)
+                self.assertFalse(
+                    bool(torch.equal(block_causal.to_dense(), causal.to_dense()))
+                )
 
 
 if __name__ == "__main__":
