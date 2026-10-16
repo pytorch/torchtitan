@@ -263,7 +263,7 @@ class DeepSeekV3Model(MTPDecoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(MTPDecoder.Config):
+    class Config(MTPDecoder.Config[DeepSeekV3TransformerBlock.Config]):
         dim: int = 2048
         vocab_size: int = 102400
         local_compile_regions: list[str] = field(

@@ -81,7 +81,7 @@ class Llama3Model(Decoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[Llama3TransformerBlock.Config]):
         dim: int = 4096
         vocab_size: int = 128256
         local_compile_regions: list[str] = field(

@@ -29,7 +29,6 @@ from torchtitan.models.common import (  # noqa: F401
     RowParallelLinear,
     SiLU,
     Softmax,
-    TransformerBlock,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.attention.gdn import GDN, GDNKernel, InnerGDN
@@ -472,9 +471,9 @@ def _build_qwen35_layers(
     attn_backend: str,
     enable_sp: bool,
     has_vision_encoder: bool,
-) -> list[TransformerBlock.Config]:
+) -> list[Qwen35TransformerBlock.Config]:
     """Build sharded per-layer configs for dense Qwen3.5 models."""
-    layers: list[TransformerBlock.Config] = []
+    layers: list[Qwen35TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
 
@@ -550,9 +549,9 @@ def _build_qwen35_moe_layers(
     enable_sp: bool,
     enable_ep: bool,
     has_vision_encoder: bool,
-) -> list[TransformerBlock.Config]:
+) -> list[Qwen35TransformerBlock.Config]:
     """Build sharded per-layer configs for MoE Qwen3.5 models with shared expert."""
-    layers: list[TransformerBlock.Config] = []
+    layers: list[Qwen35TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
 

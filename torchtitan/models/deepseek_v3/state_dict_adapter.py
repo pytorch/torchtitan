@@ -78,13 +78,8 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             "lm_head.weight": "lm_head.weight",
         }
 
-        # Adjustments for from_hf_map based on model architecture.
-        # Imported here: model.py imports this adapter before the class exists.
-        from .model import DeepSeekMLAAttention
-
-        attention = model_config.layers[0].attention
-        assert isinstance(attention, DeepSeekMLAAttention.Config)
-        if attention.q_lora_rank != 0:
+        # Adjustments for from_hf_map based on model architecture
+        if getattr(model_config.layers[0].attention, "q_lora_rank", 0) != 0:
             from_hf_map.update(
                 {
                     "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",

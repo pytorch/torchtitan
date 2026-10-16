@@ -100,7 +100,7 @@ class Qwen3Model(Decoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[Qwen3TransformerBlock.Config]):
         dim: int = 1024
         vocab_size: int = 151936
         local_compile_regions: list[str] = field(

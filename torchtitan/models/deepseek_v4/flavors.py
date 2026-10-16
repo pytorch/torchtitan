@@ -10,7 +10,6 @@ import copy
 import dataclasses
 from collections.abc import Callable
 from functools import partial
-from typing import cast
 
 import spmd_types as spmd
 import torch.nn as nn
@@ -32,7 +31,6 @@ from torchtitan.models.common import (
     RoPE,
     RowParallelLinear,
     SqrtSoftplus,
-    TransformerBlock,
 )
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
@@ -505,7 +503,7 @@ def _build_v4_layers(
     dense_layers: set[int] | None = None,
     enable_sp: bool,
     enable_ep: bool,
-) -> list[TransformerBlock.Config]:
+) -> list[DeepSeekV4TransformerBlock.Config]:
     if dense_layers is None:
         dense_layers = set()
     if dense_hidden_dim is None:
@@ -513,7 +511,7 @@ def _build_v4_layers(
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     hc_pre_sharding = hc_pre_sharding_config(enable_sp=enable_sp)
 
-    layers: list[TransformerBlock.Config] = []
+    layers: list[DeepSeekV4TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         actual_layer_id = layer_offset + layer_id
         cr = compress_ratios[layer_id] if layer_id < len(compress_ratios) else 1
@@ -853,7 +851,7 @@ def _debugmodel(
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
             _build_mtp_layers(
-                cast(DeepSeekV4TransformerBlock.Config, layers[-1]),
+                layers[-1],
                 dim=dim,
                 num_mtp_layers=n_mtp_layers,
                 n_main_layers=n_layers,
@@ -999,7 +997,7 @@ def _deepseek_v4_flash(
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
             _build_mtp_layers(
-                cast(DeepSeekV4TransformerBlock.Config, layers[-1]),
+                layers[-1],
                 dim=dim,
                 num_mtp_layers=n_mtp_layers,
                 n_main_layers=n_layers,
@@ -1145,7 +1143,7 @@ def _deepseek_v4_pro(
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
             _build_mtp_layers(
-                cast(DeepSeekV4TransformerBlock.Config, layers[-1]),
+                layers[-1],
                 dim=dim,
                 num_mtp_layers=n_mtp_layers,
                 n_main_layers=n_layers,

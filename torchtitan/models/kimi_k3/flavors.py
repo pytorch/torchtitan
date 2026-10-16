@@ -30,7 +30,6 @@ from torchtitan.models.common import (
     RowParallelLinear,
     Sigmoid,
     SiTUGLU,
-    TransformerBlock,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
@@ -597,7 +596,7 @@ def _kimi_k3_config(
             ),
         )
 
-    layers: list[TransformerBlock.Config] = []
+    layers: list[KimiK3TransformerBlock.Config] = []
     for layer_idx in range(num_layers):
         is_full_attention = layer_idx in full_attention_layers
         layers.append(

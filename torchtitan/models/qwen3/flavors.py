@@ -113,7 +113,7 @@ def _build_qwen3_layers(
     attn_backend: str,
     rope: RoPE.Config,
     enable_sp: bool,
-) -> list[TransformerBlock.Config]:
+) -> list[Qwen3TransformerBlock.Config]:
     """Build sharded per-layer configs for dense Qwen3 models."""
     inner_attention = get_attention_config(attn_backend)
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
@@ -161,7 +161,7 @@ def _build_qwen3_moe_layers(
     rope: RoPE.Config,
     enable_sp: bool,
     enable_ep: bool,
-) -> list[TransformerBlock.Config]:
+) -> list[Qwen3TransformerBlock.Config]:
     """Build sharded per-layer configs for MoE Qwen3 models."""
     inner_attention = get_attention_config(attn_backend)
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)

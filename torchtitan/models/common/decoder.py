@@ -6,7 +6,7 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 import spmd_types as spmd
 import torch
@@ -33,9 +33,11 @@ from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.observability.logging import warn_once
 
-__all__ = ["Decoder", "TransformerBlock"]
+__all__ = ["Decoder", "LayerConfigT", "TransformerBlock"]
 
 logger = logging.getLogger(__name__)
+
+LayerConfigT = TypeVar("LayerConfigT", bound="TransformerBlock.Config")
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
@@ -75,14 +77,14 @@ class Decoder(BaseModel):
     layers: ModuleDict[TransformerBlock]
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseModel.Config):
+    class Config(BaseModel.Config, Generic[LayerConfigT]):
         max_context_length: int
         dim: int
         vocab_size: int
         lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
-        layers: list[TransformerBlock.Config]
+        layers: list[LayerConfigT]
         # Tie ``tok_embeddings`` and ``lm_head`` to share one weight. Models
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.

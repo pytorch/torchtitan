@@ -285,7 +285,7 @@ class MuseGlimmerModel(MultimodalModel):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[MuseGlimmerTransformerBlock.Config]):
         dim: int = 6656
         vocab_size: int = 202048
         local_compile_regions: list[str] = field(

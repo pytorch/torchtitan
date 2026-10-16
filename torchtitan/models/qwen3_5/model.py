@@ -332,7 +332,7 @@ class Qwen35Model(MultimodalModel):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[Qwen35TransformerBlock.Config]):
         vision_encoder: Qwen35VisionEncoder.Config | None = None
         local_compile_regions: list[str] = field(
             default_factory=lambda: [

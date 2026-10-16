@@ -170,7 +170,7 @@ class DeepSeekV4Model(Decoder):
         )
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[DeepSeekV4TransformerBlock.Config]):
         dim: int
         vocab_size: int
         local_compile_regions: list[str] = field(
