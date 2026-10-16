@@ -140,9 +140,9 @@ def _make_compressor_config(
         head_dim=head_dim,
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
-        # The compressor runs these under fp32 autocast, which the in-place
-        # WGRAD accumulation path does not support.
-        wkv=Linear.Config(
+        # Weight grads go through autograd: in-place WGRAD accumulation is not
+        # validated for these replicated projections.
+        wkv=HiMidLoLinear.Config(
             in_features=dim,
             out_features=coff * head_dim,
             bias=False,
@@ -150,7 +150,7 @@ def _make_compressor_config(
             inplace_wgrad_accum=False,
             sharding_config=replicated_state_sharding_config("weight"),
         ),
-        wgate=Linear.Config(
+        wgate=HiMidLoLinear.Config(
             in_features=dim,
             out_features=coff * head_dim,
             bias=False,
