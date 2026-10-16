@@ -1129,19 +1129,19 @@ class Controller(Configurable):
         """Run num_training_steps optimizer steps: train one packed batch, push the trainer's model
         state dict, then pull it into the generators, log metrics.
 
-        The push and pull of policy N overlap forward/backward N+1:
+        The push of policy N overlaps the wait for batch N+1; the pull overlaps forward/backward N+1:
 
-            Trainer:    forward/backward N
-            Controller: await push N-1     (optimizer N must not mutate weights push N-1 stages)
             Trainer:    optimizer N -> policy N
             Controller: await pull N-1     (push N must not overwrite the TorchStore key mid-pull)
             Controller: start push N -> pull N -> release groups, in the background
                           |-> Trainer: stage policy N, TorchStore put_state_dict
                           |-> Generators: prefetch policy N into pinned CPU memory, then load it
                           |-> Group buffer: admit the next rollout groups
-            Trainer:    forward/backward N+1 (does not mutate persistent model state)
+            Controller: wait for batch N+1
+            Controller: await push N       (push N's reply would wait behind forward/backward N+1)
+            Trainer:    forward/backward N+1
 
-        See `Trainer.push_model_state_dict` for why staging can overlap forward/backward, and
+        See `Trainer.push_model_state_dict` for why the push finishes before forward/backward, and
         `VLLMGenerator.load_model_state_dict` for how a generator applies the load between steps.
 
         Impact on off-policiness: no sample is born stale, because the buffer admits new rollout
@@ -1190,6 +1190,16 @@ class Controller(Configurable):
                     max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
                 )
 
+                # Await the push before forward/backward: forward/backward blocks the trainer's event
+                # loop, so the push could reply only after it, and the pull would start late.
+                with (
+                    sl.log_trace_span("blocking_trainer_push_model_state_dict"),
+                    step_timer.record(
+                        "timing/step/blocking_trainer_push_model_state_dict"
+                    ),
+                ):
+                    push_s = await push_task if push_task is not None else 0.0
+
                 # TODO(async): can't stream microbatches (interleave pack->train) -- the loss is normalized by
                 #   global counts over ALL microbatches, needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optimizer.
@@ -1223,15 +1233,6 @@ class Controller(Configurable):
                         logger.error("Loss is NaN/Inf; training diverged")
                         break
 
-                # Await the trainer model state dict push before the optimizer mutates the weights.
-                with (
-                    sl.log_trace_span("blocking_trainer_push_model_state_dict"),
-                    step_timer.record(
-                        "timing/step/blocking_trainer_push_model_state_dict"
-                    ),
-                ):
-                    push_s = await push_task if push_task is not None else 0.0
-
                 with (
                     sl.log_trace_span("optim_step"),
                     step_timer.record("timing/step/optimizer"),
@@ -1262,7 +1263,7 @@ class Controller(Configurable):
                 ):
                     pull_s = await pull_task if pull_task is not None else 0.0
 
-                # Overlap this step's push -> pull -> group release with the next step's fwd/bwd.
+                # Overlap this step's push with the next batch wait, and its pull with the next fwd/bwd.
                 push_task = asyncio.create_task(self._push_model_state_dict())
                 pull_task = asyncio.create_task(
                     self._pull_model_state_dict_and_release_groups(
