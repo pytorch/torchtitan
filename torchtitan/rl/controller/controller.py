@@ -161,9 +161,10 @@ class ValidationConfig:
 
     overlap_training: bool = False
     """False: training waits for each pass, so all its rollouts sample one policy.
-    True: the pre-training and periodic passes run beside training on the same generators, at the
-    lowest vLLM priority, so a rollout's later tokens can sample a newer policy
-    (`validation/max_policy_version`). A failed pass logs `validation/pass_errors`; training continues.
+    True: the pre-training and periodic passes run beside training on the same generators:
+    - at the lowest vLLM priority, so on busy generators a pass takes longer;
+    - a rollout's later tokens can sample a newer policy (`validation/max_policy_version`);
+    - a failed pass logs `validation/pass_failures`; training continues.
     Keep False for a clean pre-training score."""
 
     def __post_init__(self) -> None:
@@ -1049,8 +1050,8 @@ class Controller(Configurable):
             )
 
         final_pass_step = num_training_steps
-        # Await, not cancel, a pass still running: the generators would keep serving its requests,
-        # and the final pass reuses their request ids.
+        # Wait for a pass still running instead of cancelling it: its result gets logged, and the
+        # generators would keep serving its requests anyway. A failed pass doesn't raise here.
         if self._validation_task is not None:
             logger.info(
                 f"Training done; waiting for {self._validation_task.get_name()} before the final pass"
@@ -1085,6 +1086,8 @@ class Controller(Configurable):
 
         The caller makes sure the generators hold at least policy `step` and no pass is running.
         """
+        # TODO: this pass's rollouts compete with training rollouts for env-server sandboxes, which
+        # have no request priority; the generators already serve training first (`vllm_priority`).
         logger.info(f"Starting validation at step {step}, beside training")
         self._validation_task = asyncio.create_task(
             self.validate(step=step, overlapped=True),
@@ -1094,7 +1097,7 @@ class Controller(Configurable):
 
     def _log_finished_validation(self, *, step: int) -> None:
         """If the pass started by `_start_validation` has ended, log it at `step`. A failed pass logs
-        its error and `validation/pass_errors`; training continues.
+        its error and `validation/pass_failures` instead of raising.
 
         Logged at the step it ends, not the one it started at: metric backends need steps that never go back.
         """
@@ -1105,9 +1108,10 @@ class Controller(Configurable):
         error = task.exception()
         if error is not None:
             logger.error(
-                f"{task.get_name()} failed; training continues", exc_info=error
+                f"{task.get_name()} failed; logging validation/pass_failures at step {step}",
+                exc_info=error,
             )
-            metrics = [m.Metric("validation/pass_errors", m.Sum(1))]
+            metrics = [m.Metric("validation/pass_failures", m.Sum(1.0))]
         else:
             logger.info(f"{task.get_name()} ended; logging it at step {step}")
             metrics = task.result()
