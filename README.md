@@ -109,7 +109,7 @@ and [`torchtitan_recipes`](torchtitan_recipes/README.md) for the verified recipe
 | [Kimi K2.7](torchtitan/models/kimi_k2_7) | Moonlight-16B-A3B, Kimi-VL-A3B, K2.5 | Text, vision | | |
 | [Kimi K3](torchtitan/models/kimi_k3) | K3 | Text, vision | | Soon |
 | [Muse Glimmer](torchtitan/models/muse_glimmer) | 30B | Text, vision | `muse_glimmer_30b` | ✅ |
-| [Muse-Spark-Open](torchtitan/models/muse_spark) | 816B-A42B | Text, vision, audio | [LoRA SFT](torchtitan_recipes/models/muse_spark.py), [DAPO](torchtitan_recipes/rl/dapo_math.py) | ✅ text |
+| [Muse-Spark-Open](torchtitan/models/muse_spark) | 816B-A42B | Text, vision, audio | `muse_spark_816b_a42b` | ✅ text |
 | [FLUX](torchtitan/models/flux) | dev, schnell | Text-to-image | `flux_dev`, `flux_schnell` | |
 
 Every model has debug configurations exercised in CI. Verified recipes have
