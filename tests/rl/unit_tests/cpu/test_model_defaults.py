@@ -67,6 +67,7 @@ def test_rl_recipes_get_model_defaults(module_name: str) -> None:
             if name not in _OPTIONAL_PACKAGE_RECIPES:
                 raise
             continue
+        assert config.trainer.training.cuda_graph_per_accumulation_group, name
         for model in (config.trainer.model, config.generator.model):
             is_fp32_head = isinstance(model.lm_head, HiMidLoLinear.Config)
             assert is_fp32_head == (name not in _BF16_HEAD_RECIPES), name

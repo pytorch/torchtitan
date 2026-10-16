@@ -244,6 +244,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
+                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
                 max_context_length=max_context_length,
                 dtype="float32",
@@ -387,6 +388,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
+                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
                 max_context_length=max_context_length,
                 dtype="float32",
