@@ -56,3 +56,24 @@ def test_attention_region_matches_eager(region):
     # Compiled pointwise math contracts into FMAs: allow ~1 bf16 ulp.
     for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
         torch.testing.assert_close(actual_tensor, expected_tensor, atol=2e-2, rtol=2e-2)
+
+
+def test_rmsnorm_region_matches_eager():
+    # The residual stream is fp32 and the norm weight bf16, as under FSDP mixed precision.
+    norm = build_model_config("debugmodel").layers[0].attention_norm.build().cuda()
+    norm = norm.to(torch.bfloat16)
+    stream_TD = torch.randn(64, norm.normalized_shape[0], device="cuda")
+
+    def norm_and_weight_grad(regions):
+        apply_local_compile(regions)
+        norm.weight.grad = None
+        return [*_run(norm, (stream_TD,)), norm.weight.grad]
+
+    try:
+        expected = norm_and_weight_grad([])
+        actual = norm_and_weight_grad(["muse_spark_rmsnorm"])
+    finally:
+        apply_local_compile([])
+
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_tensor, expected_tensor, atol=2e-2, rtol=2e-2)
