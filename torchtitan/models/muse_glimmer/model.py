@@ -69,9 +69,9 @@ class RMSGainCenterNorm(RMSNorm):
         super().__init__(config)
         self.gain_center = config.gain_center
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         w: torch.Tensor = self.weight + self.gain_center
-        return F.rms_norm(x, self.normalized_shape, w, self.eps)
+        return F.rms_norm(input, self.normalized_shape, w, self.eps)
 
 
 class Attention(GQAttention):

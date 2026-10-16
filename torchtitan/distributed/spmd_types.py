@@ -399,12 +399,20 @@ def spmd_redistribute_per_axis(
     mesh: DeviceMesh | None,
     src: spmd.SpmdType,
     dst: spmd.SpmdType,
+    *,
+    async_op: bool,
 ) -> torch.Tensor:
     """Redistribute a local tensor along axes whose SPMD type changes.
 
     Iterates over *dst_types* and issues a per-axis ``spmd.redistribute``
     for each axis where src and dst differ. Each call is a single collective
     (all-reduce, reduce-scatter, or all-gather) on that axis's process group.
+
+    ``async_op`` is required so callers choose explicitly. With
+    ``async_op=True`` the forward collectives return without waiting; the
+    first op that consumes the result waits on it (a stream wait), so the
+    collective can overlap with compute issued in between. Backward
+    collectives still wait.
 
     TODO(pianpwk): Move into ``spmd_types`` as a version that takes
     per-axis types + ``PartitionSpec``, so the library handles multi-axis
@@ -431,6 +439,7 @@ def spmd_redistribute_per_axis(
             mesh.get_group(axis),
             src=src_t,
             dst=dst_t,
+            async_op=async_op,
             backward_options={"op_dtype": x.dtype},
         )
     return x

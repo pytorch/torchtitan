@@ -278,7 +278,9 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             return SimpleNamespace(
                 compile=GraphTrainerCompileConfig(inductor_compilation="regional"),
                 loss=CrossEntropyLoss.Config(),
-                model=SimpleNamespace(layers=[0, 1]),
+                model=SimpleNamespace(
+                    layers=[SimpleNamespace(feed_forward=None) for _ in range(2)]
+                ),
                 parallelism=SimpleNamespace(),
                 training=SimpleNamespace(disable_cuda_graphs=disable_cuda_graphs),
             )
