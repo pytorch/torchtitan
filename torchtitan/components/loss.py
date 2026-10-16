@@ -644,7 +644,7 @@ class ChunkedLossWrapper(BaseLoss):
                     GradAccumulator(
                         hidden_state,
                         num_chunks=num_chunks,
-                        dtype=torch.float32,
+                        dtype=hidden_state.dtype,
                     )
                     for hidden_state in pred
                 )
@@ -733,10 +733,7 @@ class ChunkedLossWrapper(BaseLoss):
                 return total_loss, metrics
 
             accumulated_grads = tuple(
-                grad_accumulator.buffer.to(hidden_state.dtype)
-                for hidden_state, grad_accumulator in zip(
-                    pred, grad_accumulators, strict=True
-                )
+                grad_accumulator.buffer for grad_accumulator in grad_accumulators
             )
 
         with spmd.no_typecheck():
