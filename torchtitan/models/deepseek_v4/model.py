@@ -5,22 +5,25 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
-from typing import cast, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
 
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.base.module import ModuleList
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
@@ -272,6 +275,45 @@ class DeepSeekV4Model(Decoder):
             self.mtp_layers = ModuleList(
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
+
+    def preprocess_inputs(
+        self, input_dict: dict[str, Any], **kwargs: Any
+    ) -> tuple[
+        torch.Tensor | tuple[torch.Tensor, ...],
+        torch.Tensor | tuple[torch.Tensor, ...],
+        dict[str, Any],
+    ]:
+        """Return one labels tensor per depth for ``MTPLoss`` when MTP is enabled.
+
+        ``mtp_forward`` shifts the MTP input tokens itself; the labels are shifted
+        here the same way and get the main labels' SPMD layout, as in
+        ``MTPDecoder.preprocess_inputs``. Context parallelism is not supported
+        (see ``__init__``), so each rank holds whole sequences.
+        """
+        depths = range(1, len(self.mtp_layers) + 1)
+        if not depths:
+            return super().preprocess_inputs(input_dict, **kwargs)
+        positions = input_dict.get("positions")
+        if positions is None:
+            raise ValueError("MTP input preprocessing requires positions.")
+        mtp_labels = {
+            f"mtp_labels_{depth}": roll_mtp_sequence(
+                input_dict["labels"],
+                shift=depth,
+                fill_value=IGNORE_INDEX,
+                positions=positions,
+                padding_mask=input_dict.get("padding_mask"),
+            )
+            for depth in depths
+        }
+        tokens, labels, extra_kwargs = super().preprocess_inputs(input_dict, **kwargs)
+        mtp_labels = annotate_input_spmd_types(
+            kwargs["parallelism_context"],
+            mtp_labels,
+            dict.fromkeys(mtp_labels, decoder_input_sharding()["labels"]),
+        )
+        loss_labels = (cast(torch.Tensor, labels), *mtp_labels.values())
+        return tokens, loss_labels, extra_kwargs
 
     def forward(
         self,
