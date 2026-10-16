@@ -105,7 +105,9 @@ class DistMoeTransform(ModelConfigTransform):
         bf16_grouped_gemm_preset: Optional expert override for the annex BF16
             FPROP/DGRAD grouped-GEMM schedule. ``None`` uses production defaults.
         block_scaled_config: MXFP8 kernel policy. ``None`` selects the annex
-            defaults when ``expert_precision`` is ``"mxfp8"``.
+            defaults when ``expert_precision`` is ``"mxfp8"``. With
+            ``pipeline="mega"``, the generator also fuses SwiGLU into the W13
+            GEMM (see ``MXFP8DistMoeRoutedExperts.enable_inference``).
     """
 
     expert_precision: Literal["bf16", "mxfp8"] = "bf16"

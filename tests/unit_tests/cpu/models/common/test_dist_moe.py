@@ -638,6 +638,27 @@ def test_mxfp8_transform_is_independent_and_uses_prepared_weights() -> None:
     assert list(module.state_dict()) == ["w13.weight", "w2.weight"]
 
 
+@pytest.mark.parametrize("pipeline", ["staged", "mega"])
+def test_mxfp8_enable_inference_only_switches_mega_weights(pipeline: str) -> None:
+    """Only the Mega pipeline prepares fused-SwiGLU inference weights."""
+    module = (
+        DistMoeTransform(
+            expert_precision="mxfp8",
+            block_scaled_config=dist_moe.BlockScaledConfig(pipeline=pipeline),
+        )
+        .transform(_stock_config())
+        .build()
+    )
+    assert not module.inference
+
+    module.enable_inference()
+
+    expected = pipeline == "mega"
+    assert module.inference is expected
+    assert module.w13.weight.inference is expected
+    assert module.w2.weight.inference is expected
+
+
 @pytest.mark.parametrize(
     "other_transform",
     [
