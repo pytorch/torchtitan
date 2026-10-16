@@ -18,10 +18,13 @@ from typing import Any, cast, NamedTuple
 from renderers import Message, Renderer, ToolSpec
 from renderers.base import (
     attribute_text_segments,
+    extract_message_tool_names,
     ParsedResponse,
     ParsedToolCall,
+    reject_assistant_in_extension,
     RenderedTokens,
     ToolCallParseStatus,
+    trim_to_turn_close,
 )
 from renderers.parsing import _build_param_type_index, _coerce_arg_value
 
@@ -681,9 +684,100 @@ class MuseSparkRenderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
-    ) -> None:
-        """Have TokenEnv re-render the full history for the next turn."""
-        return None
+    ) -> RenderedTokens | None:
+        """Extend the previous turn's exact tokens with new tool or user messages.
+
+        A full re-render replaces the sampled completion with its parsed, canonical
+        form: stripped whitespace, merged reasoning channels, re-serialized tool
+        arguments. When the completion was not canonical, the next prompt then stops
+        extending it, and training starts a new sample that repeats the history.
+        Keeping the sampled tokens verbatim avoids that. The new messages render as in
+        ``render``, piece by piece, followed by the generation prompt.
+
+        Returns None, so the caller re-renders, when there is no previous turn, the
+        completion did not close its turn with <|eot|>, or the tool results do not
+        match the completion's tool calls one to one. Muse Spark tool calls carry no
+        ids, so tool results are matched to the calls in order, and a result's own
+        ``name``, when given, must agree.
+        """
+        if (
+            not previous_prompt_ids
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+        previous_ids = trim_to_turn_close(
+            previous_prompt_ids, previous_completion_ids, {EOT_ID}
+        )
+        if previous_ids is None:
+            return None
+
+        tool_results = [m for m in new_messages if m.get("role") == "tool"]
+        tool_names: list[str] = []
+        if tool_results:
+            calls = self.parse_response(previous_completion_ids, tools=tools).tool_calls
+            if len(calls) != len(tool_results):
+                return None
+            for message, call in zip(tool_results, calls):
+                if call.name is None or message.get("name") not in (None, call.name):
+                    return None
+                tool_names.append(call.name)
+
+        pieces: list[_Piece] = []
+
+        def block(
+            header: str,
+            body: str,
+            end: str,
+            *,
+            message_index: int,
+            sampled: bool,
+            assistant_output: bool = False,
+        ) -> None:
+            del sampled, assistant_output
+            for text, token_id, is_content in (
+                (START_STR, START_ID, False),
+                (header, None, False),
+                (MESSAGE_STR, MESSAGE_ID, False),
+                (body, None, True),
+                (end, EOT_ID if end == EOT_STR else EOM_ID, False),
+            ):
+                if text:
+                    pieces.append(
+                        _Piece(text, token_id, False, message_index, is_content, 0)
+                    )
+
+        names = iter(tool_names)
+        for index, message in enumerate(cast(list[dict[str, Any]], new_messages)):
+            role = message.get("role")
+            if role == "tool":
+                self._build_tool_message(
+                    {**message, "name": next(names)}, [], index, block
+                )
+            elif role in {"system", "developer", "user"}:
+                self._build_plain_message(role, message, index, block)
+            else:
+                return None
+        pieces.append(_Piece(START_STR, START_ID, False, -1, False, 0))
+        pieces.append(_Piece("assistant", None, False, -1, False, 0))
+
+        token_ids = list(previous_ids)
+        message_indices = [-1] * len(previous_ids)
+        is_content = [False] * len(previous_ids)
+        for piece in pieces:
+            encoded, _ = self._encode(piece)
+            token_ids.extend(encoded)
+            message_indices.extend([piece.message_index] * len(encoded))
+            is_content.extend([piece.is_content] * len(encoded))
+        return RenderedTokens(
+            token_ids=token_ids,
+            message_indices=message_indices,
+            sampled_mask=[False] * len(token_ids),
+            is_content=is_content,
+            message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
+            multi_modal_data=None,
+        )
 
     def parse_response(
         self,
