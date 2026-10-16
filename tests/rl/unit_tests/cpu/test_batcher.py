@@ -235,3 +235,23 @@ def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
     temperature = microbatch.loss_kwargs()["temperature"]
     assert temperature.dtype == torch.float32
     assert temperature.tolist() == [0.5] * 8
+
+
+def test_microbatch_counts_real_tokens_and_squared_document_lengths() -> None:
+    batcher = Batcher.Config(per_sample_pad_multiple=4).build(
+        num_tokens_per_microbatch_per_dp_rank=8,
+        max_context_length=8,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+        temperature=1.0,
+    )
+    # Lengths 3 and 2, each padded to 4: the padding counts as neither.
+    microbatch = batcher._pack_training_samples(_make_samples([3, 2]))
+    # A DP rank can get a bin that is all padding.
+    padding_only = batcher._pack_training_samples([])
+
+    assert microbatch.num_real_tokens == 3 + 2
+    assert microbatch.sum_squared_document_lengths == 3**2 + 2**2
+    assert padding_only.num_real_tokens == 0
+    assert padding_only.sum_squared_document_lengths == 0

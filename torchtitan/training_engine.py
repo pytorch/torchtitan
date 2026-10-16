@@ -236,6 +236,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     sdc_replayer: SDCReplayer | None
     model_param_count: int
     num_flops_per_token: int
+    num_flops_per_token_at_one_token: int
     has_quantization: bool
     loss: torch.Tensor
     loss_metrics: dict[str, torch.Tensor]
@@ -360,6 +361,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         ) = self.model_config.get_nparams_and_flops(
             model, self.config.training.max_context_length
         )
+        # Per-token FLOPs when attending to 1 token. With `num_flops_per_token`, a straight line
+        # gives the per-token FLOPs at any attended length (exact for full attention).
+        (
+            _,
+            self.num_flops_per_token_at_one_token,
+        ) = self.model_config.get_nparams_and_flops(model, 1)
         config = self.config
         if self.parallelism_context.pp_enabled:
             (
