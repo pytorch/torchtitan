@@ -329,3 +329,43 @@ def test_dense_sp_state_compiles_with_checkpoint() -> None:
         sparse_mesh=None,
         dense_sp_enabled=False,
     )
+
+
+@pytest.mark.parametrize("norm_type", [2.0, float("inf")])
+def test_clip_grad_norm_combines_gradients_on_different_meshes(
+    tmp_path, norm_type: float
+) -> None:
+    import torch.distributed as dist
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.tensor import distribute_tensor, Replicate
+
+    dist.init_process_group(
+        "gloo", init_method=f"file://{tmp_path}/rendezvous", rank=0, world_size=1
+    )
+    try:
+        # Mimic a decoder on a flattened FSDP mesh, an encoder on the unflattened
+        # storage mesh, and EP experts on the sparse mesh.
+        meshes = [
+            init_device_mesh("cpu", (1, 1), mesh_dim_names=("dp_shard_cp", "tp")),
+            init_device_mesh("cpu", (1, 1, 1), mesh_dim_names=("dp_shard", "cp", "tp")),
+            init_device_mesh("cpu", (1, 1), mesh_dim_names=("edp_shard", "ep")),
+        ]
+        grads = [torch.randn(4, 3) for _ in meshes]
+        params = []
+        for mesh, grad in zip(meshes, grads, strict=True):
+            placements = [Replicate()] * mesh.ndim
+            param = distribute_tensor(torch.zeros(4, 3), mesh, placements)
+            param.grad = distribute_tensor(grad.clone(), mesh, placements)
+            params.append(param)
+
+        total_norm = dist_utils.clip_grad_norm_(params, 1.0, norm_type)
+
+        expected_norm = torch.nn.utils.get_total_norm(grads, norm_type)
+        torch.testing.assert_close(total_norm, expected_norm)
+        clip_coef = torch.clamp(1.0 / (expected_norm + 1e-6), max=1.0)
+        for param, grad in zip(params, grads, strict=True):
+            torch.testing.assert_close(
+                cast(DTensor, param.grad).to_local(), grad * clip_coef
+            )
+    finally:
+        dist.destroy_process_group()

@@ -77,11 +77,18 @@ class BaseStateDictAdapter(ABC):
         pass
 
     @abstractmethod
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """Convert from native model state dict to HuggingFace format.
 
         Args:
             state_dict: The native model state dict
+            to_quantized_layout: Use the key names of a quantized HF checkpoint,
+                for an HF load with ``from_quantized``. Only the names change:
+                the values keep their dequantized shapes and are not quantized.
+                Adapters whose quantized and unquantized checkpoints share
+                names can ignore this.
 
         Returns:
             The converted HuggingFace format state dict
@@ -89,11 +96,19 @@ class BaseStateDictAdapter(ABC):
         pass
 
     @abstractmethod
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """Obtain native model state dict from HuggingFace format.
 
         Args:
             hf_state_dict: The HuggingFace format state dict
+            is_quantized_layout: Whether ``hf_state_dict`` uses the key names of
+                a quantized HF checkpoint. Only the names differ: the storage
+                reader has already dequantized the values. In an HF load,
+                ``hf_state_dict`` is the dict ``to_hf`` returned, so this must
+                match the ``to_quantized_layout`` value ``to_hf`` was called
+                with.
 
         Returns:
             The converted native model state dict
@@ -308,11 +323,14 @@ class StateDictAdapter(BaseStateDictAdapter):
                 tensors for HF schemas that store experts independently.
         """
         from torchtitan.models.common.attention import QKVLinear
-        from torchtitan.models.common.feed_forward import FeedForward
+        from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
+        from torchtitan.models.common.feed_forward import DenseFeedForward
         from torchtitan.models.common.moe import RoutedExperts
 
         result = dict(state_dict)
-        for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
+        for fqn, _config, _parent, _ in self.model_config.traverse(
+            DenseFeedForward.Config
+        ):
             prefix = f"{fqn}." if fqn else ""
             for name in ("weight", "bias"):
                 self._split_stacked_linear(
@@ -335,9 +353,11 @@ class StateDictAdapter(BaseStateDictAdapter):
             )
 
         if split_routed_experts:
-            for fqn, _config, _parent, _ in self.model_config.traverse(
-                RoutedExperts.Config
-            ):
+            expert_configs = [
+                *self.model_config.traverse(RoutedExperts.Config),
+                *self.model_config.traverse(DistMoeRoutedExperts.Config),
+            ]
+            for fqn, _config, _parent, _ in expert_configs:
                 prefix = f"{fqn}." if fqn else ""
                 self._split_stacked_linear(
                     result,
@@ -365,11 +385,14 @@ class StateDictAdapter(BaseStateDictAdapter):
                 HF schemas that store experts independently.
         """
         from torchtitan.models.common.attention import QKVLinear
-        from torchtitan.models.common.feed_forward import FeedForward
+        from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
+        from torchtitan.models.common.feed_forward import DenseFeedForward
         from torchtitan.models.common.moe import RoutedExperts
 
         result = dict(state_dict)
-        for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
+        for fqn, _config, _parent, _ in self.model_config.traverse(
+            DenseFeedForward.Config
+        ):
             prefix = f"{fqn}." if fqn else ""
             for name in ("weight", "bias"):
                 self._stack_logical_linears(
@@ -392,9 +415,11 @@ class StateDictAdapter(BaseStateDictAdapter):
             )
 
         if fuse_routed_experts:
-            for fqn, _config, _parent, _ in self.model_config.traverse(
-                RoutedExperts.Config
-            ):
+            expert_configs = [
+                *self.model_config.traverse(RoutedExperts.Config),
+                *self.model_config.traverse(DistMoeRoutedExperts.Config),
+            ]
+            for fqn, _config, _parent, _ in expert_configs:
                 prefix = f"{fqn}." if fqn else ""
                 self._stack_logical_linears(
                     result,

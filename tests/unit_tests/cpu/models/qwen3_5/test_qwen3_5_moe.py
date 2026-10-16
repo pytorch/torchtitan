@@ -86,11 +86,11 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
                     return_value=tp_group,
                 ),
                 patch(
-                    "torchtitan.models.common.linear.spmd_dense_sp_enabled",
+                    "torchtitan.models.common.linear.linear.spmd_dense_sp_enabled",
                     return_value=sp_enabled,
                 ),
                 patch(
-                    "torchtitan.models.common.linear.spmd_mesh_group",
+                    "torchtitan.models.common.linear.linear.spmd_mesh_group",
                     return_value=tp_group,
                 ),
                 patch(

@@ -10,8 +10,9 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.deepseek_v4 import build_model_config
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
-from torchtitan.models.deepseek_v4.sharding import set_deepseek_v4_sharding_config
 from torchtitan_recipes.tests.models.deepseek_v4 import (
     deepseek_v4_debugmodel,
     deepseek_v4_mtp_debugmodel,
@@ -33,8 +34,13 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         self.assertEqual(len(model_config.mtp_layers), 1)
 
     def test_mtp_metadata_remains_replicated_at_block_boundary(self):
-        config = deepseek_v4_mtp_debugmodel().model
-        set_deepseek_v4_sharding_config(config, enable_sp=True, enable_ep=True)
+        config = build_model_config(
+            "debugmodel",
+            n_mtp_layers=1,
+            parallelism=ParallelismConfig(
+                enable_sequence_parallel=True, expert_parallel_degree=2
+            ),
+        )
 
         assert config.mtp_layers is not None
         mtp_config = config.mtp_layers[0].sharding_config

@@ -13,19 +13,21 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+import numpy as np
 from monarch.actor import ProcMesh, this_host
 
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
-from torchtitan.rl.components.data import RLDataLoader, RLDataset
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
+from torchtitan.rl.rollout.data import RLDataLoader, RLDataset
 from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import (
     GenerateFn,
+    ReleaseSessionFn,
     Rollout,
     RolloutGroup,
     RolloutStatus,
@@ -36,12 +38,10 @@ from torchtitan.rl.rollout.types import (
 if TYPE_CHECKING:
     from renderers import Renderer
 
-    from torchtitan.rl.distributed.monarch_actors.rollout_worker import (
-        RolloutWorkerActor,
-    )
+    from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 
     # Type-only: importing the generator module here would pull in vLLM at import time.
-    from torchtitan.rl.generator import SamplingConfig
+    from torchtitan.rl.generator.generator import SamplingConfig
 
 
 logger = logging.getLogger(__name__)
@@ -61,8 +61,8 @@ class Rollouter(Configurable):
 
         index, sample = rollouter.get_training_sample()
         group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
-            generate_fn=generate_fn, sample=sample,
-            group_id=index,
+            generate_fn=generate_fn, release_session_fn=release_session_fn,
+            sample=sample, group_id=index,
             group_size=N, sampling=sampling)
 
     `MessageEnv` works in messages; `TokenEnv` (what `RolloutWorker.make_env_group` returns)
@@ -162,9 +162,7 @@ class Rollouter(Configurable):
     ) -> None:
         """Spawn and initialize the owned worker proc mesh and actor pool."""
         # Import lazily to avoid a circular dependency through Rollouter.Config.
-        from torchtitan.rl.distributed.monarch_actors.rollout_worker import (
-            RolloutWorkerActor,
-        )
+        from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 
         if self._worker_mesh is not None or self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
@@ -201,6 +199,7 @@ class Rollouter(Configurable):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
@@ -214,6 +213,8 @@ class Rollouter(Configurable):
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
+            release_session_fn: Async callable each rollout calls after its last turn, to
+                release its routing session.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -229,6 +230,7 @@ class Rollouter(Configurable):
         # send the message to its `run_group` endpoint.
         return await self._worker_actors.run_group.choose(
             generate_fn=generate_fn,
+            release_session_fn=release_session_fn,
             sample=sample,
             group_id=group_id,
             group_size=group_size,
@@ -329,6 +331,7 @@ class RolloutWorker(Configurable):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
@@ -344,6 +347,8 @@ class RolloutWorker(Configurable):
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
+            release_session_fn: Async callable each rollout calls after its last turn, to
+                release its routing session.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -366,6 +371,7 @@ class RolloutWorker(Configurable):
                 *(
                     self._run_single_rollout(
                         generate_fn=generate_fn,
+                        release_session_fn=release_session_fn,
                         env=env,
                         # Offset the base seed per sample so a group's n=1
                         # requests are diverse yet reproducible run-to-run.
@@ -401,6 +407,7 @@ class RolloutWorker(Configurable):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         env: TokenEnv,
         sampling: SamplingConfig,
         group_id: int,
@@ -414,6 +421,8 @@ class RolloutWorker(Configurable):
         Args:
             generate_fn: Async callable that runs one generation; keeps the worker
                 decoupled from the generator actor.
+            release_session_fn: Async callable this rollout calls once after its last turn,
+                with its `routing_session_id`.
             env: The env for this rollout; `run_group` closes it.
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
@@ -423,6 +432,10 @@ class RolloutWorker(Configurable):
         Returns:
             One unscored `Rollout`; `run_group` fills its reward later.
         """
+        # Per-sample sticky key: a sample's turns reuse one generator's prefix cache.
+        routing_session_id = RolloutTurnID(
+            group_id=group_id, rollout_id=rollout_id, turn_id=0
+        ).to_string(include_turn=False)
         turns: list[RolloutTurn] = []
         status = RolloutStatus.ERROR
         try:
@@ -439,22 +452,26 @@ class RolloutWorker(Configurable):
                     prompt_token_ids=env_step.next_prompt_token_ids,
                     request_id=turn_rollout_id.to_string(),
                     group_id=group_id,
-                    # Per-sample sticky key: a sample's turns reuse one generator's prefix cache.
-                    routing_session_id=turn_rollout_id.to_string(include_turn=False),
+                    routing_session_id=routing_session_id,
                     sampling_config=sampling,
                 )
 
                 # env call
                 next_env_step = await env.step(completion)
 
-                # full snapshot of this turn from a token and message perspective
+                # this turn from a token and message perspective
                 turns.append(
                     RolloutTurn(
                         rollout_id=turn_rollout_id,
-                        prompt_token_ids=env_step.next_prompt_token_ids or [],
+                        prompt_prefix_len=env_step.next_prompt_prefix_len,
+                        prompt_delta_token_ids=env_step.next_prompt_delta_token_ids,
                         prompt_messages=env_step.next_prompt_messages or [],
-                        completion_token_ids=completion.token_ids,
-                        completion_logprobs=completion.token_logprobs,
+                        completion_token_ids=np.asarray(
+                            completion.token_ids, dtype=np.int32
+                        ),
+                        completion_logprobs=np.asarray(
+                            completion.token_logprobs, dtype=np.float32
+                        ),
                         completion_message=next_env_step.completion_message,
                         env_messages=next_env_step.env_messages,
                         env_rewards=next_env_step.env_rewards,
@@ -477,6 +494,11 @@ class RolloutWorker(Configurable):
             )
             status = RolloutStatus.ERROR
 
+        try:
+            await release_session_fn(routing_session_id=routing_session_id)
+        except Exception:
+            # Not fatal: `max_sessions` evicts an unreleased session.
+            logger.exception("releasing routing session %s failed", routing_session_id)
         return Rollout(
             group_id=group_id,
             rollout_id=rollout_id,

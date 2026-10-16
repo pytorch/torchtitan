@@ -23,7 +23,7 @@ from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhauste
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validator import BaseValidator, Validator
-from torchtitan.config import apply_overrides, Configurable
+from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
@@ -72,6 +72,10 @@ class Trainer(Configurable):
         create_seed_checkpoint: bool = False
         """Initialize and save an unsharded model-only checkpoint, then exit."""
 
+        override: OverrideConfig = field(default_factory=OverrideConfig)
+        """Registered overrides applied to this config tree when the trainer is
+        constructed."""
+
         def __post_init__(self):
             TrainingEngine.Config.__post_init__(self)
             if self.debug.batch_invariant:
@@ -97,7 +101,7 @@ class Trainer(Configurable):
                     parallelism=self.parallelism,
                     training=self.training,
                     debug=self.debug,
-                    activation_checkpoint=self.activation_checkpoint,
+                    activation_remat=self.activation_remat,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
 
@@ -149,9 +153,7 @@ class Trainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        model_config = copy.deepcopy(config.model)
-        model_config.set_sharding_(config.parallelism)
-        config.model = model_config
+        config.model = copy.deepcopy(config.model)
         if config.override.imports:
             apply_overrides(config.override, config)
         model_config = config.model
@@ -160,7 +162,7 @@ class Trainer(Configurable):
             parallelism=config.parallelism,
             training=config.training,
             debug=config.debug,
-            activation_checkpoint=config.activation_checkpoint,
+            activation_remat=config.activation_remat,
             max_num_documents=config.dataloader.max_num_documents,
         )
 

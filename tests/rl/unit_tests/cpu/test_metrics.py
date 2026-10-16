@@ -13,11 +13,15 @@ import math
 import os
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from torchtitan.observability.metrics import BaseLogger, TensorBoardLogger, WandBLogger
+from torchtitan.rl.controller.metrics import compute_rollout_metrics
 
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
+from torchtitan.rl.rollout.types import RolloutTurnID
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +361,64 @@ class TestAggregator:
         assert "len/_mean" in agg
         assert agg["len/mean"] == 2.0
         assert agg["len/_mean"] == 2.0
+
+
+class TestFold:
+    def test_aggregates_like_unfolded(self) -> None:
+        records = [
+            m.Metric("ttft", m.Mean(2.0)),
+            m.Metric("ttft", m.Max(2.0)),
+            m.Metric("ttft", m.Mean(4.0)),
+            m.Metric("ttft", m.Max(4.0)),
+            m.Metric("ttft", m.Max.from_list([])),  # NaN, ignored by the reduction
+            m.Metric("tokens", m.Sum(3.0)),
+            m.Metric("tokens", m.Sum(5.0)),
+            m.Metric("latency", m.Min(0.5)),
+            m.Metric("latency", m.Min(0.2)),
+            m.Metric("reward", m.SummaryStats.from_list([1.0, 0.0])),
+            m.Metric("loss", m.NoReduce(1.5)),
+        ]
+        folded = m.fold(records)
+        assert len(folded) == 6
+        assert m.MetricsProcessor._aggregate_metrics(
+            folded
+        ) == m.MetricsProcessor._aggregate_metrics(records)
+
+    def test_compute_rollout_metrics_folds_generator_metrics(self) -> None:
+        def turn(turn_id: int, ttft_ms: float) -> RolloutTurn:
+            return RolloutTurn(
+                rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=turn_id),
+                prompt_prefix_len=0,
+                prompt_delta_token_ids=np.array([1], dtype=np.int32),
+                completion_token_ids=np.array([2], dtype=np.int32),
+                completion_logprobs=np.array([-0.1], dtype=np.float32),
+                metrics=[
+                    m.Metric("generator/ttft_ms", m.Mean(ttft_ms)),
+                    m.Metric("generator/ttft_ms", m.Max(ttft_ms)),
+                ],
+            )
+
+        rollouts = [
+            Rollout(
+                group_id=0,
+                rollout_id=rollout_id,
+                status=RolloutStatus.COMPLETED,
+                turns=[turn(0, 1.0 + rollout_id), turn(1, 3.0 + rollout_id)],
+                reward=1.0,
+            )
+            for rollout_id in range(2)
+        ]
+        generator_metrics = [
+            metric
+            for metric in compute_rollout_metrics("rollout", rollouts)
+            if metric.key.startswith("generator/")
+        ]
+        # 2 rollouts x 2 turns x (Mean, Max) folded into one Mean and one Max
+        assert len(generator_metrics) == 2
+        assert m.MetricsProcessor._aggregate_metrics(generator_metrics) == {
+            "generator/ttft_ms/mean": 2.5,
+            "generator/ttft_ms/max": 4.0,
+        }
 
 
 # ---------------------------------------------------------------------------

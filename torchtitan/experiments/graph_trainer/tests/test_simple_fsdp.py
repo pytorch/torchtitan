@@ -15,8 +15,9 @@ import torch.nn as nn
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.moe import MoE
 
 
 class _RoutedExperts(nn.Module):
@@ -31,11 +32,12 @@ def _transformer_block(*, with_moe: bool) -> TransformerBlock:
     block = TransformerBlock.__new__(TransformerBlock)
     nn.Module.__init__(block)
     if with_moe:
-        moe = nn.Module()
+        moe = MoE.__new__(MoE)
+        nn.Module.__init__(moe)
         moe.routed_experts = _RoutedExperts()
-        block.moe = moe
+        block.feed_forward = moe
     else:
-        block.moe = None
+        block.feed_forward = nn.Linear(8, 8)
     return block
 
 
@@ -103,7 +105,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         )
 
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
-    def test_preserves_inner_attention_metadata_key(self):
+    def test_preserves_parameterless_inner_attention_type(self):
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
@@ -118,9 +120,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
         )
-        inner_attention = ScaledDotProductInnerAttention(
-            ScaledDotProductInnerAttention.Config()
-        )
+        inner_attention = VarlenInnerAttention(VarlenInnerAttention.Config())
 
         model = apply_simple_fsdp(
             inner_attention,
@@ -128,7 +128,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             training=training,
         )
 
-        self.assertIs(model.attention_metadata_key, ScaledDotProductInnerAttention)
+        self.assertIs(type(model), VarlenInnerAttention)
 
 
 class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
@@ -163,9 +163,9 @@ class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
         for with_auxiliary_moe, num_expert_calls in ((False, 1), (True, 2)):
             with self.subTest(with_auxiliary_moe=with_auxiliary_moe):
                 model = _decoder(with_auxiliary_moe=with_auxiliary_moe)
-                main_routed_experts = model.layers["0"].moe.routed_experts
+                main_routed_experts = model.layers["0"].feed_forward.routed_experts
                 auxiliary_routed_experts = (
-                    model.auxiliary_blocks[0].moe.routed_experts
+                    model.auxiliary_blocks[0].feed_forward.routed_experts
                     if with_auxiliary_moe
                     else None
                 )

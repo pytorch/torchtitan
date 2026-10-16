@@ -31,7 +31,6 @@ import torch
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
-
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.components.optim.utils import (
@@ -39,6 +38,8 @@ from torchtitan.components.optim.utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 
@@ -56,7 +57,7 @@ _LAYER0_ANCHORS = (
     # single packed ``wqkv`` parameter.
     "layers.0.attention.qkv_linear.wqkv.weight",
     "layers.0.attention.wo.weight",
-    # FeedForward stores gate/up in one physical w13 parameter.
+    # DenseFeedForward stores gate/up in one physical w13 parameter.
     "layers.0.feed_forward.w13.weight",
     "layers.0.feed_forward.w2.weight",
     "layers.0.attention_norm.weight",
@@ -66,7 +67,9 @@ _LAYER0_ANCHORS = (
 
 def _build_debugmodel() -> Llama3Model:
     build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-    config = build_config(attn_backend="flex", seq_len=max_context_length)
+    config = build_config(
+        attn_backend="flex", seq_len=max_context_length, parallelism=ParallelismConfig()
+    )
     model = Llama3Model(config)
     model.init_states()
     return model
