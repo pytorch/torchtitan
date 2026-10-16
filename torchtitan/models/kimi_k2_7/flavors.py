@@ -255,7 +255,9 @@ def _vision_encoder_config(
     )
 
 
-def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexInnerAttention.Config:
+def _qk_clip_attention_config(
+    attn_backend: str,
+) -> QKClipFlexInnerAttention.Config:
     if attn_backend != "flex":
         raise ValueError("Kimi QK clipping requires the FlexInnerAttention backend.")
     return QKClipFlexInnerAttention.Config()
