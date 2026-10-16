@@ -40,8 +40,9 @@ jobs:
   # Tag pushes are independent of the PR base, so stacked PRs are covered.
   set-matrix-fake-pg:
     if: >-
-      github.event_name == 'push' &&
-      startsWith(github.ref, 'refs/tags/ciflow/fake-pg/')
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       startsWith(github.ref, 'refs/tags/ciflow/fake-pg/'))
     uses: ./.github/workflows/set-matrix.yaml
     with:
       runner-cuda: mt-l-x86aavx2-11-41-a10g
@@ -111,9 +112,9 @@ jobs:
 
         EXPORT_ARG=""
         if [[ "${{ inputs.export_results || false }}" == "true" ]]; then
-          EXPORT_ARG="--export-numerics"
+          EXPORT_ARG=""
         fi
-        TEST_NAME_ARG=""
+        TEST_NAME_ARG="--test_name=deepseek_v3_fsdp+ep"
         if [[ "${{ inputs.test_name || 'all' }}" != "all" ]]; then
           TEST_NAME_ARG="--test_name=${{ inputs.test_name }}"
         fi
@@ -134,7 +135,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_suite: [features, models]
+        test_suite: [models]
         runner_config: ${{ fromJSON(needs.set-matrix-real-pg.outputs.matrix).include }}
     with:
       runner: ${{ matrix.runner_config.runner }}

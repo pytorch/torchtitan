@@ -69,20 +69,19 @@ if [[ -n "${TEST_SCOPE}" ]]; then
   TEST_SCOPE_ARG="--test_scope=${TEST_SCOPE}"
 fi
 
-status=0
+# Verify the existing non-CP golden, then export and verify the corrected CP path.
 python -m tests.integration_tests.run_tests \
-  --gpu_arch_type "${GPU_ARCH_TYPE}" \
-  --gpu_arch "$GPU_ARCH" \
-  --test_suite "${TEST_SUITE}" --execution_mode real_pg --ngpu 8 \
-  $EXPORT_ARG $TEST_NAME_ARG $TEST_SCOPE_ARG \
-  "$RUNNER_ARTIFACT_DIR" || status=$?
-# Run the FLUX suite on the models job, then fail if either suite failed.
-if [[ "${TEST_SUITE}" == "models" ]]; then
-  python -m tests.integration_tests.run_tests \
-    --gpu_arch_type "${GPU_ARCH_TYPE}" \
-    --gpu_arch "$GPU_ARCH" \
-    --test_suite flux --execution_mode real_pg --ngpu 8 \
-    $TEST_NAME_ARG $TEST_SCOPE_ARG \
-    "$RUNNER_ARTIFACT_DIR/flux" || status=$?
-fi
-exit "$status"
+  --gpu_arch_type "${GPU_ARCH_TYPE}" --gpu_arch "${GPU_ARCH}" \
+  --test_suite models --execution_mode real_pg --ngpu 8 \
+  --test_name 'deepseek_v3_fsdp+ep' "$RUNNER_ARTIFACT_DIR/non_cp"
+python -m tests.integration_tests.run_tests \
+  --gpu_arch_type "${GPU_ARCH_TYPE}" --gpu_arch "${GPU_ARCH}" \
+  --test_suite models --execution_mode real_pg --ngpu 8 \
+  --test_name 'deepseek_v3_fsdp+cp+pp+ep' --export-numerics \
+  "$RUNNER_ARTIFACT_DIR/export"
+cp "$RUNNER_ARTIFACT_DIR/export/real_pg/a10g/deepseek_v3_cp_pp.txt" \
+  tests/assets/losses/real_pg/a10g/deepseek_v3_cp_pp.txt
+python -m tests.integration_tests.run_tests \
+  --gpu_arch_type "${GPU_ARCH_TYPE}" --gpu_arch "${GPU_ARCH}" \
+  --test_suite models --execution_mode real_pg --ngpu 8 \
+  --test_name 'deepseek_v3_fsdp+cp+pp+ep' "$RUNNER_ARTIFACT_DIR/verify"

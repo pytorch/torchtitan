@@ -82,6 +82,7 @@ class DeepSeekMLAAttention(Attention):
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3034078575
         self.wkv_a = config.wkv_a.build()
         self.kv_norm = config.kv_norm.build()
+        self.inner_attention = config.inner_attention.build()
         self.wo = config.wo.build()
         self.softmax_scale = self.qk_head_dim**-0.5
 
@@ -89,7 +90,6 @@ class DeepSeekMLAAttention(Attention):
             mscale = 0.1 * config.mscale * math.log(config.rope.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
 
     def forward(

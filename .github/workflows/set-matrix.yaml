@@ -73,7 +73,7 @@ jobs:
             "gpu-arch-version": "13.2",
             "docker-image": "torchtitan-ubuntu-22.04-clang12",
             "index-url": "https://download.pytorch.org/whl/nightly/cu132",
-            "torch-version": ""
+            "torch-version": "2.16.0.dev20261015+cu132"
           }
           EOF
           )"
