@@ -15,11 +15,11 @@ import torch
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
-from torchtitan.distributed.cuda_graph import (
-    cuda_graph_teardown,
-    cuda_graphs_supported,
-    NUM_CUDA_GRAPH_WARMUP_STEPS,
-    wrap_fwd_bwd_with_cuda_graph,
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_teardown,
+    accelerator_graphs_supported,
+    NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+    wrap_fwd_bwd_with_accelerator_graph,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
@@ -194,15 +194,18 @@ class GraphTrainingEngine(TrainingEngine):
                 defer_fsdp_gradient_reduction=False,
             )
 
-        if not self.config.training.disable_cuda_graphs and cuda_graphs_supported():
-            self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
+        if (
+            not self.config.training.disable_cuda_graphs
+            and accelerator_graphs_supported()
+        ):
+            self._run_forward_backward = wrap_fwd_bwd_with_accelerator_graph(
                 self._run_forward_backward,
                 parameters=(
                     parameter
                     for model_part in self.model_parts
                     for parameter in model_part.parameters()
                 ),
-                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
             )
 
         maybe_apply_numa_binding(self.device.index, self.device.type)
@@ -350,7 +353,7 @@ class GraphTrainingEngine(TrainingEngine):
 
         super().close()
 
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
 
         # Free the stash buffers, now that no CUDA graph points into them, and
         # leave any later trainer in this process a fresh manager.

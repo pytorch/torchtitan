@@ -23,18 +23,18 @@ from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import CommConfig, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_teardown,
+    accelerator_graphs_supported,
+    NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+    wrap_fwd_bwd_with_accelerator_graph,
+    wrap_with_accelerator_graph,
+)
 from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
     DefaultActivationRematConfig,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
-from torchtitan.distributed.cuda_graph import (
-    cuda_graph_teardown,
-    cuda_graphs_supported,
-    NUM_CUDA_GRAPH_WARMUP_STEPS,
-    wrap_fwd_bwd_with_cuda_graph,
-    wrap_with_cuda_graph,
-)
 from torchtitan.models.base import BaseModel
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
@@ -210,7 +210,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     )
                 if (
                     not self.training.disable_cuda_graphs
-                    and cuda_graphs_supported()
+                    and accelerator_graphs_supported()
                     and self.sdc_replayer.num_replays > 1
                 ):
                     raise ValueError(
@@ -502,7 +502,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             ),
         )
         self._run_forward_backward = eager_forward_backward_fn
-        if self.config.training.disable_cuda_graphs or not cuda_graphs_supported():
+        if (
+            self.config.training.disable_cuda_graphs
+            or not accelerator_graphs_supported()
+        ):
             self._run_forward_backward = partial(
                 eager_forward_backward_fn,
                 preprocess_microbatch_groups_lazily=(
@@ -512,9 +515,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             return
 
         if self.config.training.cuda_graph_per_accumulation_group:
-            graph_group_runner = wrap_with_cuda_graph(
+            graph_group_runner = wrap_with_accelerator_graph(
                 eager_forward_backward_fn,
-                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
             )
 
             # TODO: Use multiple CUDA graphs to support variable group counts
@@ -546,14 +549,14 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self._run_forward_backward = run_forward_backward_groups
             return
 
-        self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
+        self._run_forward_backward = wrap_fwd_bwd_with_accelerator_graph(
             eager_forward_backward_fn,
             parameters=(
                 parameter
                 for model_part in self.model_parts
                 for parameter in model_part.parameters()
             ),
-            num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+            num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
         )
 
     @sl.log_trace_span("forward_backward")
@@ -864,7 +867,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         """Release CUDA graph and checkpoint resources owned by the trainer."""
         self.close_profiler()
         if not self.config.training.disable_cuda_graphs:
-            cuda_graph_teardown()
+            accelerator_graph_teardown()
         if self._dist_moe_runtime is not None:
             self._dist_moe_runtime.close()
             self._dist_moe_runtime = None

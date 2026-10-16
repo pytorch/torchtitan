@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from torchtitan.components.optim import Optim
+from torchtitan.tools.utils import device_type
 
 
 @dataclass
@@ -34,7 +35,7 @@ def test_optim_config_rejects_negative_max_norm() -> None:
 def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
     model = MagicMock(spec=torch.nn.Module)
     parameter = MagicMock(spec=torch.nn.Parameter)
-    parameter.device = torch.device("cuda" if enable_cuda_graph else "cpu")
+    parameter.device = torch.device(device_type if enable_cuda_graph else "cpu")
     model.parameters.return_value = [parameter]
     optimizers = MagicMock()
     lr_schedulers = MagicMock()
@@ -53,10 +54,10 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
     wrapped_update = MagicMock()
 
     with patch(
-        "torchtitan.components.optim.optim.wrap_with_cuda_graph",
+        "torchtitan.components.optim.optim.wrap_with_accelerator_graph",
         return_value=wrapped_update,
     ) as wrap, patch(
-        "torchtitan.components.optim.optim.cuda_graphs_supported",
+        "torchtitan.components.optim.optim.accelerator_graphs_supported",
         return_value=enable_cuda_graph,
     ):
         optim = Optim(
@@ -108,9 +109,9 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
     )
 
     with patch(
-        "torchtitan.components.optim.optim.cuda_graphs_supported",
+        "torchtitan.components.optim.optim.accelerator_graphs_supported",
         return_value=runtime_supported,
-    ), patch("torchtitan.components.optim.optim.wrap_with_cuda_graph") as wrap:
+    ), patch("torchtitan.components.optim.optim.wrap_with_accelerator_graph") as wrap:
         optim = Optim(
             config,
             model_parts=[model],
@@ -125,7 +126,7 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
     )
     wrap.assert_not_called()
     assert optim._run_update == optim._update
-    assert "Optim CUDA graph is disabled" in caplog.text
+    assert "Optim graph capture is disabled" in caplog.text
 
 
 @pytest.mark.parametrize("cuda_initialized", [False, True])
