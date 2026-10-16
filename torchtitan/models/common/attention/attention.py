@@ -12,6 +12,7 @@
 #       the variable name xq/xk/xv disambiguates),
 #   K = query/key head dimension, V = value head dimension.
 
+import logging
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -49,6 +50,8 @@ from torchtitan.tools.utils import round_up
 
 if TYPE_CHECKING:
     from . import AttentionMetadata
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "Attention",
@@ -530,6 +533,13 @@ class FlexInnerAttention(InnerAttention):
             self._compiled_flex_attn_override = self._get_compiled_flex_attn(
                 config.compile_backend, config.compile_options
             )
+            if torch.are_deterministic_algorithms_enabled():
+                # set_determinism only replaces the shared default callable.
+                logger.warning(
+                    "FlexInnerAttention compile_backend/compile_options override "
+                    "bypasses the deterministic-mode FlexAttention callable; "
+                    "results may not be deterministic."
+                )
 
     @classmethod
     def _get_compiled_flex_attn(

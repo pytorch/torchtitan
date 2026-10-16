@@ -15,7 +15,7 @@ from torch.nn.attention.flex_attention import create_block_mask
 
 from torchtitan.config.transform.base import convert_config_type
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.cp_attention import (
+from torchtitan.models.common.attention.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
 )
@@ -117,7 +117,9 @@ class TestFlexInnerAttentionCompilation(unittest.TestCase):
         q_THK = torch.randn(4, 2, 8, requires_grad=True)
         mask = self._mask(4)
         with (
-            patch("torchtitan.models.common.attention.flex_attention", kernel),
+            patch(
+                "torchtitan.models.common.attention.attention.flex_attention", kernel
+            ),
             patch("torch.compile", wraps=torch.compile) as compile_fn,
             patch.object(
                 FlexInnerAttention,
@@ -140,7 +142,7 @@ class TestFlexInnerAttentionCompilation(unittest.TestCase):
             # Mutating the recipe after construction must not change cached options.
             options["nested"]["levels"].append(3)
             for instance in (attention, other_attention):
-                out_THV = instance(q_THK, q_THK, q_THK, attention_masks=mask)
+                out_THV = instance(q_THK, q_THK, q_THK, attention_metadata=mask)
                 torch.testing.assert_close(out_THV, q_THK * 3, rtol=0, atol=0)
             out_THV.sum().backward()
 
@@ -249,7 +251,7 @@ class TestFlexInnerAttentionCompilation(unittest.TestCase):
         # Keep replacements of the default callable visible to existing instances.
         with patch.object(FlexInnerAttention, "_compiled_flex_attn", replacement):
             for instance in (attention, inherited_attention):
-                out_THV = instance(q_THK, q_THK, q_THK, attention_masks=mask)
+                out_THV = instance(q_THK, q_THK, q_THK, attention_metadata=mask)
                 torch.testing.assert_close(out_THV, q_THK + 1)
 
 
