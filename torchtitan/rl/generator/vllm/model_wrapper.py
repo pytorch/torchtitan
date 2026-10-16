@@ -38,6 +38,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import TrainingConfig
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import set_local_compile_backend
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
@@ -338,6 +339,7 @@ class VLLMModelWrapper(Module):
         training_parallelism = parallelism.to_training()
         model_config = copy.deepcopy(model_config)
         self.config = _replace_vllm_layer_configs(model_config)
+        set_local_compile_backend(self.config.local_compile_backend)
 
         # Build ParallelismContext from the translated ParallelismConfig so TP/EP
         # sharding sees the same mesh shape as vLLM. The DP axis is represented

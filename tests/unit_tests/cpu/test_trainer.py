@@ -776,6 +776,16 @@ def test_graph_training_engine_rejects_local_compile_regions() -> None:
     init.assert_not_called()
 
 
+def test_parallelize_compile_kwargs_include_regions_only() -> None:
+    engine = SimpleNamespace(
+        model_config=SimpleNamespace(local_compile_regions=["loss"])
+    )
+
+    assert TrainingEngine._parallelize_compile_kwargs(engine) == {
+        "local_compile_regions": ["loss"],
+    }
+
+
 def test_optim_update_clips_before_parameter_update() -> None:
     events = []
     optimizers = MagicMock()
@@ -1112,20 +1122,27 @@ def test_seed_checkpoint_initialize_skips_forward_backward():
             ),
             _dist_moe_runtime=None,
             state_dict_adapter=None,
+            model_config=SimpleNamespace(local_compile_backend="custom_device_backend"),
         ),
     )
-    TrainingEngine.initialize(
-        engine,
-        hf_assets_path="",
-        create_seed_checkpoint=True,
-    )
+    with patch(
+        "torchtitan.training_engine.set_local_compile_backend",
+        side_effect=lambda backend: events.append(("backend", backend)),
+    ) as set_backend:
+        TrainingEngine.initialize(
+            engine,
+            hf_assets_path="",
+            create_seed_checkpoint=True,
+        )
 
     assert events == [
+        ("backend", "custom_device_backend"),
         "model",
         "model_memory",
         "optim",
         "checkpointer",
     ]
+    set_backend.assert_called_once_with("custom_device_backend")
     assert engine.model_device_mem_stats is model_mem_stats
     engine._initialize_model.assert_called_once_with(
         hf_assets_path="",

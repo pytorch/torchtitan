@@ -39,6 +39,7 @@ from torch.nn.attention.varlen import (
 )
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import compiled
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
@@ -503,10 +504,9 @@ class FlexInnerAttention(InnerAttention):
         "triton.cudagraphs": False,
     }
 
-    # pyrefly: ignore[no-matching-overload]
-    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
+    _compiled_flex_attn: ClassVar[Callable] = compiled(
         flex_attention,
-        options=inductor_configs,
+        inductor_options=inductor_configs,
     )
 
     def __init__(self, config: Config) -> None:
@@ -842,7 +842,7 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     return sliding_window_mod
 
 
-_compiled_create_block_mask = torch.compile(create_block_mask)
+_compiled_create_block_mask = compiled(create_block_mask)
 
 
 def create_attention_mask(*args, **kwargs):
