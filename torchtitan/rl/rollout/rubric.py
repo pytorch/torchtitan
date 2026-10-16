@@ -75,7 +75,8 @@ class Rubric(Configurable):
     scoring (pairwise comparison, diversity, rank normalization).
 
     Setting `truncation_reward` / `error_reward` short-circuits the reward fns for
-    rollouts whose status is truncated / errored.
+    rollouts whose status is truncated / errored. `truncation_penalty` instead keeps the
+    reward fns' partial credit on a truncated rollout and adds the penalty to it.
 
     Example:
         rubric = Rubric.Config(
@@ -93,11 +94,24 @@ class Rubric(Configurable):
         """Reward for a truncated rollout. If set, the reward fns are SKIPPED and this fixed
         reward is used. If None, the reward fns run on the truncated rollout."""
 
+        truncation_penalty: float | None = None
+        """Added once to the weighted score of a rollout truncated by max turns, max output
+        tokens or context length, e.g. -0.2: it keeps its partial credit but scores below the
+        same rollout finished. Needs `truncation_reward=None`."""
+
         error_reward: float | None = None
         """Reward for a errored rollout. If set, the reward fns are SKIPPED and this fixed
         reward is used. If None, the reward fns run on the errored rollout."""
 
     def __init__(self, config: Config) -> None:
+        if (
+            config.truncation_reward is not None
+            and config.truncation_penalty is not None
+        ):
+            raise ValueError(
+                "set truncation_reward (a fixed score) or truncation_penalty (added to the "
+                "reward fns' score), not both"
+            )
         self._config = config
         self._reward_fns = [rwd_cfg.build() for rwd_cfg in config.reward_fns]
 
@@ -151,6 +165,10 @@ class Rubric(Configurable):
         for fn, r in zip(self._reward_fns, per_fn_rewards, strict=True):
             reward_breakdown[type(fn).__name__] = r
             total_reward += (fn.weight / self._weight_sum) * r
+
+        if cfg.truncation_penalty is not None and rollout.status.is_truncated():
+            reward_breakdown["truncation_penalty"] = cfg.truncation_penalty
+            total_reward += cfg.truncation_penalty
 
         return RubricOutput(reward=total_reward, reward_breakdown=reward_breakdown)
 
