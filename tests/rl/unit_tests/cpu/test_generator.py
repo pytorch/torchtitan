@@ -585,6 +585,22 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load():
         )
 
 
+def test_cpu_kv_offload_rejects_data_parallel():
+    with pytest.raises(ValueError, match="needs parallelism.data_parallel_degree=1"):
+        VLLMGenerator.Config(
+            model=_MODEL_CONFIG,
+            # Full EP, so the config passes the EP checks and reaches the offload check.
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=2,
+                expert_parallel_degree=4,
+            ),
+            session_kv_holder=VLLMSessionKVHolder.Config(
+                cpu_kv_offload=CPUKVOffload.Config(size_gib=16)
+            ),
+        )
+
+
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 

@@ -908,6 +908,19 @@ class VLLMGenerator(Configurable):
                 )
 
             if (
+                self.session_kv_holder is not None
+                and self.session_kv_holder.cpu_kv_offload is not None
+                and p.data_parallel_degree > 1
+            ):
+                # TODO: one engine_id per generator, e.g. f"torchtitan-{MASTER_ADDR}-{MASTER_PORT}", would let
+                # its DP ranks on one host share one region (vLLM already splits it into DP x TP slots) and allow
+                # DP > 1. Not done: it relies on vLLM's private slot layout (slot = device_index % world_size).
+                raise ValueError(
+                    "session_kv_holder.cpu_kv_offload needs parallelism.data_parallel_degree=1, got "
+                    f"{p.data_parallel_degree}: vLLM pins size_gib once per DP rank"
+                )
+
+            if (
                 self.debug.batch_invariant
                 and not self.reset_kv_cache_on_model_state_dict_load
             ):

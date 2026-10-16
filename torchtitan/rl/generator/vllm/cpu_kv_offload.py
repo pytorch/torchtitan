@@ -26,7 +26,7 @@ class CPUKVOffload(Configurable):
 
     On top of vLLM's own offload, for the generator's in-process engine:
     - completions are stored too: the next turn's prompt holds this turn's completion;
-    - with TP > 1 or DP > 1, each scheduler waits for its own TP ranks' transfers (`attach`);
+    - with TP > 1, each scheduler waits for its own TP ranks' transfers (`attach`);
     - ended sessions' CPU chunks are evicted first (`evict_first`, called by `VLLMSessionKVHolder`).
 
     Example:
@@ -41,7 +41,7 @@ class CPUKVOffload(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         size_gib: float
-        """Host RAM (GiB) per generator, split across its DP x TP ranks. vLLM pins it in
+        """Host RAM (GiB) per generator, split across its TP ranks. vLLM pins it in
         ``/dev/shm``, so the generators on one host must fit there together. Generator procs need
         ``expandable_segments:False`` and ``PYTHONHASHSEED=0`` (``train.py`` sets both)."""
 
@@ -72,7 +72,7 @@ class CPUKVOffload(Configurable):
         }
 
     def attach(self, engine: Any) -> None:
-        """Keep vLLM's CPU LRU for `evict_first`, and make the offload work with TP > 1 or DP > 1.
+        """Keep vLLM's CPU LRU for `evict_first`, and make the offload work with TP > 1.
 
         vLLM marks a CPU transfer done once every worker of its scheduler finished it, and only its
         multiprocess executor merges their results. Under external_launcher, each rank runs its own
