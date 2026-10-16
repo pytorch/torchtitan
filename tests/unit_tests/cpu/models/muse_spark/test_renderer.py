@@ -204,3 +204,136 @@ def test_tool_example_stays_text(renderer, tokenizer, recipient):
     assert (
         response.reasoning_content if recipient == "self" else response.content
     ) == body
+
+
+def _tool_call(call_id, name, arguments):
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+
+
+def _sampled_turn(renderer, history, assistant):
+    prompt = renderer.render_ids(history, add_generation_prompt=True)
+    with_assistant = renderer.render_ids([*history, assistant])
+    assert with_assistant[: len(prompt)] == prompt
+    return prompt, with_assistant[len(prompt) :]
+
+
+def test_bridge_matches_full_render_for_canonical_completion(renderer):
+    history = [{"role": "user", "content": "List the files."}]
+    assistant = {
+        "role": "assistant",
+        "content": None,
+        "reasoning_content": "I should run ls.",
+        "tool_calls": [_tool_call("c1", "bash", {"command": "ls"})],
+    }
+    tool = {"role": "tool", "tool_call_id": "c1", "content": "a.py"}
+    prompt, completion = _sampled_turn(renderer, history, assistant)
+
+    bridged = renderer.bridge_to_next_turn(prompt, completion, [tool])
+
+    assert bridged is not None
+    assert bridged.token_ids == renderer.render_ids(
+        [*history, assistant, tool], add_generation_prompt=True
+    )
+    assert len(bridged.message_indices) == len(bridged.token_ids)
+    assert len(bridged.is_content) == len(bridged.token_ids)
+    assert not any(bridged.sampled_mask)
+
+
+def test_bridge_matches_full_render_for_tool_results_and_user(renderer):
+    history = [{"role": "user", "content": "Inspect two files."}]
+    assistant = {
+        "role": "assistant",
+        "content": "Reading both.",
+        "tool_calls": [
+            _tool_call("c1", "read", {"path": "a.py"}),
+            _tool_call("c2", "bash", {"command": "cat b.py"}),
+        ],
+    }
+    tail = [
+        {"role": "tool", "tool_call_id": "c1", "content": "print(1)"},
+        {"role": "tool", "tool_call_id": "c2", "name": "bash", "content": "x = 2"},
+        {"role": "user", "content": "Now summarize."},
+    ]
+    prompt, completion = _sampled_turn(renderer, history, assistant)
+
+    bridged = renderer.bridge_to_next_turn(prompt, completion, tail)
+
+    assert bridged is not None
+    assert bridged.token_ids == renderer.render_ids(
+        [*history, assistant, *tail], add_generation_prompt=True
+    )
+
+
+def test_bridge_keeps_non_canonical_completion_verbatim(renderer, tokenizer):
+    history = [{"role": "user", "content": "List the files."}]
+    assistant = {
+        "role": "assistant",
+        "content": None,
+        "reasoning_content": "run ls",
+        "tool_calls": [_tool_call("c1", "bash", {"command": "ls"})],
+    }
+    tool = {"role": "tool", "tool_call_id": "c1", "content": "a.py"}
+    prompt, canonical = _sampled_turn(renderer, history, assistant)
+    # Sampled with spaces around the reasoning, which the parser strips.
+    text = tokenizer.decode(canonical, skip_special_tokens=False)
+    completion = tokenizer.encode(
+        text.replace("<|message|>run ls<|eom|>", "<|message|>  run ls  <|eom|>")
+    )
+    parsed = renderer.parse_response(completion)
+    rerendered = renderer.render_ids(
+        [
+            *history,
+            {
+                "role": "assistant",
+                "content": parsed.content or None,
+                "reasoning_content": parsed.reasoning_content,
+                "tool_calls": [
+                    _tool_call("c1", call.name, call.arguments)
+                    for call in parsed.tool_calls
+                ],
+            },
+            tool,
+        ],
+        add_generation_prompt=True,
+    )
+
+    bridged = renderer.bridge_to_next_turn(prompt, completion, [tool])
+
+    assert bridged is not None
+    sampled_turn = prompt + completion
+    assert bridged.token_ids[: len(sampled_turn)] == sampled_turn
+    # A re-render loses the sampled spaces, so the next prompt would not extend the
+    # sampled turn.
+    assert rerendered[: len(sampled_turn)] != sampled_turn
+
+
+def test_bridge_falls_back_to_re_render(renderer):
+    history = [{"role": "user", "content": "List the files."}]
+    assistant = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [_tool_call("c1", "bash", {"command": "ls"})],
+    }
+    tool = {"role": "tool", "tool_call_id": "c1", "content": "a.py"}
+    prompt, completion = _sampled_turn(renderer, history, assistant)
+
+    cases = {
+        "no previous turn": ([], completion, [tool]),
+        "truncated completion": (prompt, completion[:-1], [tool]),
+        "more tool results than calls": (
+            prompt,
+            completion,
+            [{"role": "user", "content": "?"}, tool, tool],
+        ),
+        "tool name disagrees": (prompt, completion, [{**tool, "name": "read"}]),
+        "assistant in the tail": (prompt, completion, [assistant]),
+    }
+    for case, (previous_prompt, previous_completion, tail) in cases.items():
+        assert (
+            renderer.bridge_to_next_turn(previous_prompt, previous_completion, tail)
+            is None
+        ), case
