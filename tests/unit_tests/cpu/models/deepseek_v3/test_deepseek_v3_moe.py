@@ -13,10 +13,10 @@ import torch
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.models.common.activation import Sigmoid
-
-from torchtitan.models.common.async_linear import AsyncRowParallelLinear
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
+
+from torchtitan.models.common.linear.async_linear import AsyncRowParallelLinear
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.deepseek_v3 import build_model_config
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 from torchtitan.models.deepseek_v3.mtp import MTPTransformerBlock
@@ -91,12 +91,12 @@ class TestDeepSeekV3Router(unittest.TestCase):
             "236B", seq_len=2048, parallelism=ParallelismConfig()
         )
 
-        router_config = config.layers[1].moe.router
+        router_config = config.layers[1].feed_forward.router
         self.assertIsInstance(router_config, DeepSeekV3Router.Config)
         self.assertEqual(router_config.num_expert_groups, 8)
         self.assertEqual(router_config.num_limited_groups, 3)
 
-        shared_experts = config.layers[1].moe.shared_experts
+        shared_experts = config.layers[1].feed_forward.shared_experts
         self.assertIsNotNone(shared_experts)
         assert shared_experts is not None
         self.assertIs(type(shared_experts.w13), ColumnParallelLinear.Config)

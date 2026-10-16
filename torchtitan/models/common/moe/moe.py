@@ -37,9 +37,9 @@ from torchtitan.models.common.activation import (
     UnaryActivationFn,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
 from .token_dispatcher import LocalTokenDispatcher
 
@@ -704,7 +704,7 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
             return self.inject(loss, carrier=carrier, denominator=denominator)
 
 
-class MoE(Module):
+class MoE(FeedForward):
     """Mixture of Experts layer.
 
     The forward pass proceeds as:
@@ -724,7 +724,7 @@ class MoE(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(FeedForward.Config):
         num_experts: int = 8
         routed_experts: RoutedExperts.Config
         router: TokenChoiceTopKRouter.Config
@@ -732,7 +732,7 @@ class MoE(Module):
         freeze_expert_bias: bool = False
         """Route with ``expert_bias_E`` but never update it: no balancing hook is registered.
         ``load_balance_coeff=None`` instead removes the bias from routing."""
-        shared_experts: FeedForward.Config | None = None
+        shared_experts: DenseFeedForward.Config | None = None
 
         def __post_init__(self) -> None:
             expert_counts = {
@@ -961,6 +961,7 @@ def register_moe_load_balancing_hook(
         model_parts: List of model parts that may contain MoE layers.
         parallelism_context: Parallel dimensions for distributed communication.
     """
+    from torchtitan.models.common.decoder import TransformerBlock
 
     def _iter_moe_layers(
         model_parts: list[nn.Module],
@@ -978,8 +979,10 @@ def register_moe_load_balancing_hook(
             for layers in layer_containers:
                 assert isinstance(layers, (nn.ModuleDict, nn.ModuleList))
                 for transformer_block in layers.children():
-                    if getattr(transformer_block, "moe_enabled", False):
-                        yield transformer_block, cast(_MoELike, transformer_block.moe)
+                    if isinstance(transformer_block, TransformerBlock) and isinstance(
+                        moe := transformer_block.feed_forward, MoE
+                    ):
+                        yield transformer_block, cast(_MoELike, moe)
 
     # for MoE auxiliary-loss-free load balancing
     def _update_expert_bias(

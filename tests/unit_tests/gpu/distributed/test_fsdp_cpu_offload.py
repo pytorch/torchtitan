@@ -39,10 +39,10 @@ class _VisionEncoder(nn.Module):
 class _Block(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
-        self.w = nn.Linear(dim, dim, bias=False)
+        self.feed_forward = nn.Linear(dim, dim, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w(x)
+        return self.feed_forward(x)
 
 
 class _TinyVLM(nn.Module):

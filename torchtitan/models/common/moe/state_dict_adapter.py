@@ -48,10 +48,10 @@ class MoEStateDictAdapter(StateDictAdapter):
         """Return whether ``key`` is a canonical or logical expert projection."""
         return key.endswith(
             (
-                ".moe.routed_experts.w1_EFD",
-                ".moe.routed_experts.w13.weight",
-                ".moe.routed_experts.w2.weight",
-                ".moe.routed_experts.w3_EFD",
+                ".routed_experts.w1_EFD",
+                ".routed_experts.w13.weight",
+                ".routed_experts.w2.weight",
+                ".routed_experts.w3_EFD",
             )
         )
 

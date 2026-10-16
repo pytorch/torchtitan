@@ -33,16 +33,16 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     rowwise_sharding_config,
 )
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
     RowParallelLinear,
 )
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.quantization import MXFP8Linear, NVFP4Linear
@@ -717,7 +717,7 @@ def test_mxfp8_converter_replaces_a_root_linear_config(monkeypatch):
 
     ``convert`` writes into ``parent`` for nested configs, so the root case is
     the one branch that has to return the replacement. Not covered by the FQN
-    test below, which passes a FeedForward and so always has a parent.
+    test below, which passes a DenseFeedForward and so always has a parent.
     """
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter.Config().build()
@@ -758,7 +758,7 @@ def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
         linears_saving_inputs_for_backward_in_mxfp8=["w2"],
     ).build()
     converted = converter.convert(
-        FeedForward.Config(
+        DenseFeedForward.Config(
             w13=Linear.Config(in_features=128, out_features=128, num_linears=2),
             w2=Linear.Config(in_features=128, out_features=128),
         )
@@ -775,7 +775,7 @@ def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):
     converter = MXFP8LinearConverter.Config(
         linears_saving_inputs_for_backward_in_mxfp8=["missing"],
     ).build()
-    model_config = FeedForward.Config(
+    model_config = DenseFeedForward.Config(
         w13=Linear.Config(in_features=128, out_features=128, num_linears=2),
         w2=Linear.Config(in_features=128, out_features=128),
     )
@@ -1018,10 +1018,16 @@ def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(
         isinstance(projection, NVFP4Linear.Config) for projection in linears.values()
     )
     if recipe == "deepseek_v3_16b_nvfp4_ffn_mxfp8_attn":
+        dense_ffn_prefixes = tuple(
+            f"layers.{i}.feed_forward."
+            for i, layer in enumerate(config.model.layers)
+            if isinstance(layer.feed_forward, DenseFeedForward.Config)
+        )
+        assert dense_ffn_prefixes
         assert all(
             type(projection) is type(baseline_linears[fqn])
             for fqn, projection in linears.items()
-            if ".feed_forward." in fqn
+            if fqn.startswith(dense_ffn_prefixes)
         )
 
     assert all(

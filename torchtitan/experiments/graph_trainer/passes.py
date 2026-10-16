@@ -93,6 +93,8 @@ from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
 
+from torchtitan.models.common.moe import MoE
+
 logger = logging.getLogger(__name__)
 
 
@@ -187,7 +189,7 @@ def compile_time_passes(
     moe_layer_ids = frozenset(
         i
         for i, layer_cfg in enumerate(config.model.layers)
-        if getattr(layer_cfg, "moe", None) is not None
+        if isinstance(layer_cfg.feed_forward, MoE.Config)
     )
     ep_overlap_enabled = config.compile.ep_overlap.enabled
     if parallelism_context is not None and hasattr(

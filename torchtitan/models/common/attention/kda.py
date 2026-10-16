@@ -32,10 +32,14 @@ from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
 
-from .attention import InnerAttention, local_head_split
+from .attention import (
+    create_varlen_metadata_for_document,
+    InnerAttention,
+    local_head_split,
+)
 from .linear_attention import (
-    build_linear_attention_metadata,
     chunk_kernel_options,
+    LinearAttention,
     LinearAttentionMetadata,
 )
 
@@ -158,12 +162,14 @@ class InnerKDA(InnerAttention):
             max_context_length: int | None = None,
         ) -> LinearAttentionMetadata:
             """Build packed-sequence metadata consumed by KDA."""
-            return build_linear_attention_metadata(
-                positions,
-                conv_kernel_size=self.conv_kernel_size,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
+            return LinearAttentionMetadata(
+                varlen=create_varlen_metadata_for_document(
+                    positions,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                ),
+                num_conv_history_tokens=self.conv_kernel_size - 1,
             )
 
     def __init__(self, config: Config):
@@ -301,12 +307,11 @@ class InnerKDA(InnerAttention):
         )
 
 
-class KDA(Module):
+class KDA(LinearAttention):
     """Kimi Delta Attention with checkpoint-compatible Kimi K3 parameters."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        num_heads: int
+    class Config(LinearAttention.Config):
         head_dim: int
         conv_kernel_size: int
         q_proj: Linear.Config
@@ -319,13 +324,13 @@ class KDA(Module):
         forget_b: Linear.Config
         beta: Linear.Config
         output_gate: Linear.Config
-        inner_kda: Module.Config
         output_norm: GatedRMSNorm.Config
         output_proj: Linear.Config
 
         def __post_init__(self):
-            if self.num_heads < 1:
-                raise ValueError(f"num_heads must be positive, got {self.num_heads}")
+            if self.n_heads < 1:
+                raise ValueError(f"n_heads must be positive, got {self.n_heads}")
+            LinearAttention.Config.__post_init__(self)
             if self.head_dim != 128:
                 raise ValueError(
                     "Attention Gym KDA requires head_dim=128, " f"got {self.head_dim}."
@@ -337,7 +342,7 @@ class KDA(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.num_heads = config.num_heads
+        self.n_heads = config.n_heads
         self.head_dim = config.head_dim
 
         self.q_proj = config.q_proj.build()
@@ -350,12 +355,12 @@ class KDA(Module):
         self.forget_b = config.forget_b.build()
         self.beta = config.beta.build()
         self.output_gate = config.output_gate.build()
-        self.inner_kda = config.inner_kda.build()
+        self.inner_attention = config.inner_attention.build()
         self.output_norm = config.output_norm.build()
         self.output_proj = config.output_proj.build()
 
-        self.A_log = nn.Parameter(torch.empty(config.num_heads))
-        self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
+        self.A_log = nn.Parameter(torch.empty(config.n_heads))
+        self.dt_bias = nn.Parameter(torch.empty(config.n_heads, config.head_dim))
 
     def forward(
         self,
@@ -380,7 +385,7 @@ class KDA(Module):
         )
         raw_beta_TH = self.beta(x_TD)
         out_THV = remat.region(
-            self.inner_kda,
+            self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(
