@@ -95,8 +95,10 @@ IFS=, read -r -a flash_attn_versions <<< "$flash_attn"
 for version in "${flash_attn_versions[@]}"; do
   case "$version" in
     4) uv pip install "flash-attn-4[cu13]>=4.0.0b34" ;;
+    # FA3 ships one CUDA 13.0 wheel on the torch stable ABI; every CUDA 13
+    # PyTorch index, including the nightly one used above, serves it.
     3) uv pip install flash-attn-3 \
-         --extra-index-url https://download.pytorch.org/whl/test/cu130 \
+         --extra-index-url "https://download.pytorch.org/whl/nightly/${cuda}" \
          --index-strategy unsafe-best-match ;;
     none) ;;
     *) echo "Unknown --flash-attn value: $version" >&2; exit 1 ;;

@@ -14,6 +14,7 @@ from unittest.mock import patch
 import spmd_types as spmd
 import torch
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import (
@@ -106,6 +107,55 @@ class TestPackedVarlenAttentionMetadata(unittest.TestCase):
 
 
 class TestPackedVarlenInnerAttention(unittest.TestCase):
+    def test_preserves_fp16_and_bfloat16_inputs(self):
+        attention = VarlenInnerAttention.Config().build()
+        metadata = create_varlen_metadata_for_document(torch.arange(4))
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                inputs = [torch.randn(4, 2, 8, dtype=dtype) for _ in range(3)]
+                with patch(
+                    "torchtitan.models.common.attention.attention._varlen_attn",
+                    return_value=inputs[2],
+                ) as kernel:
+                    output = attention(*inputs, attention_metadata=metadata)
+
+                for actual, expected in zip(kernel.call_args.args[:3], inputs):
+                    self.assertIs(actual, expected)
+                self.assertIs(output, inputs[2])
+
+    def test_upcast_queries_and_keys_use_value_dtype(self):
+        attention = VarlenInnerAttention.Config().build()
+        metadata = create_varlen_metadata_for_document(torch.arange(4))
+        q_THK, k_THK = [torch.randn(4, 2, 8) for _ in range(2)]
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                v_THV = torch.randn(4, 2, 8, dtype=dtype)
+                with patch(
+                    "torchtitan.models.common.attention.attention._varlen_attn",
+                    return_value=v_THV,
+                ) as kernel:
+                    output = attention(q_THK, k_THK, v_THV, attention_metadata=metadata)
+
+                actual_q, actual_k, actual_v = kernel.call_args.args[:3]
+                torch.testing.assert_close(actual_q, q_THK.to(dtype))
+                torch.testing.assert_close(actual_k, k_THK.to(dtype))
+                self.assertIs(actual_v, v_THV)
+                self.assertEqual(output.dtype, q_THK.dtype)
+
+    def test_fp32_inputs_preserve_bfloat16_fallback(self):
+        attention = VarlenInnerAttention.Config().build()
+        metadata = create_varlen_metadata_for_document(torch.arange(4))
+        inputs = [torch.randn(4, 2, 8) for _ in range(3)]
+        with patch(
+            "torchtitan.models.common.attention.attention._varlen_attn",
+            return_value=inputs[2].bfloat16(),
+        ) as kernel:
+            output = attention(*inputs, attention_metadata=metadata)
+
+        for actual, expected in zip(kernel.call_args.args[:3], inputs):
+            torch.testing.assert_close(actual, expected.bfloat16())
+        torch.testing.assert_close(output, inputs[2].bfloat16().float())
+
     def test_gqa_preserves_td_shape(self):
         torch.manual_seed(42)
         num_tokens, dim, num_heads, head_dim = 6, 8, 2, 4
@@ -143,12 +193,13 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_thk_thv_sharding_uses_varlen_argument_names(self):
-        from torchtitan.models.llama3 import MODEL_FLAVORS
-        from torchtitan.models.llama3.sharding import set_llama3_sharding_config
+        from torchtitan.models.llama3 import build_model_config
 
-        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        model_config = build_config("varlen", seq_len=max_context_length)
-        set_llama3_sharding_config(model_config, enable_sp=False)
+        model_config = build_model_config(
+            "debugmodel",
+            attn_backend="varlen",
+            parallelism=ParallelismConfig(enable_sequence_parallel=False),
+        )
 
         sharding = model_config.layers[0].attention.inner_attention.sharding_config
         assert sharding is not None
@@ -202,7 +253,10 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
         from torchtitan.models.llama3 import MODEL_FLAVORS
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        model = build_config("varlen", seq_len=max_context_length).build()
+        model = build_config(
+            "varlen", seq_len=max_context_length, parallelism=ParallelismConfig()
+        ).build()
+        model.bfloat16()
         model.init_states()
         num_tokens = 6
         tokens_T = torch.randint(0, 2048, (num_tokens,))

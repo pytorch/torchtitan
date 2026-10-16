@@ -12,7 +12,7 @@ import pytest
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.tests.models.deepseek_v3 import (
@@ -75,12 +75,39 @@ def test_per_group_cuda_graph_config_restrictions() -> None:
     )
 
 
+def test_lazy_preprocessing_config_restrictions() -> None:
+    with pytest.raises(ValueError, match="requires training.disable_cuda_graphs=True"):
+        TrainingEngine.Config(
+            training=TrainingConfig(preprocess_microbatch_groups_lazily=True)
+        )
+    with pytest.raises(ValueError, match="does not support SDC replay"):
+        TrainingEngine.Config(
+            training=TrainingConfig(
+                preprocess_microbatch_groups_lazily=True, disable_cuda_graphs=True
+            ),
+            sdc_replayer=SDCReplayer.Config(),
+        )
+
+    TrainingEngine.Config(
+        training=TrainingConfig(
+            preprocess_microbatch_groups_lazily=True, disable_cuda_graphs=True
+        )
+    )
+
+
 def test_graph_trainer_rejects_per_group_cuda_graphs() -> None:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(attn_backend="flex")
     with pytest.raises(ValueError, match="not supported with GraphTrainer"):
         GraphTrainer.Config(
             model=config.model,
             training=TrainingConfig(cuda_graph_per_accumulation_group=True),
+        )
+    with pytest.raises(ValueError, match="lazily is not supported with GraphTrainer"):
+        GraphTrainer.Config(
+            model=config.model,
+            training=TrainingConfig(
+                preprocess_microbatch_groups_lazily=True, disable_cuda_graphs=True
+            ),
         )
 
 

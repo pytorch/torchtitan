@@ -4,8 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -18,49 +19,50 @@ from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
+    Attention,
     AttentionMetadata,
     AttentionMetadataMap,
-    BaseAttention,
     InnerAttention,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.observability.logging import warn_once
 
 __all__ = ["Decoder", "TransformerBlock"]
 
+logger = logging.getLogger(__name__)
+
 
 # TODO: we can unify the TransformerBlock impl across all models when
-# there is no special logic for each model, including
-# ffn vs. moe naming and creation, etc.
+# there is no special logic for each model.
 class TransformerBlock(Module):
     """Base class for all language model transformer blocks.
 
     All language model TransformerBlocks share:
     - Attention module (from ``attention.build()``)
-    - FFN or MoE (from ``feed_forward.build()`` / ``moe.build()``)
-    - Two RMSNorms (``attention_norm``, ``ffn_norm``)
-    - Forward: ``x + attn(norm(x), ...); x + ffn(norm(x))``
+    - Dense or MoE feed-forward module (from ``feed_forward.build()``)
+    - Two normalization modules (``attention_norm``, ``ffn_norm``)
 
     Forward accepts ``aux_loss_denominator``. Dense blocks ignore it; MoE
     blocks pass it to routers configured with an auxiliary loss.
 
-    Children implement ``__init__`` and ``forward``.
+    Children implement ``__init__``, ``forward``, and residual connections.
     """
 
-    attention: BaseAttention
+    attention: Attention
+    feed_forward: FeedForward
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        attention: BaseAttention.Config  # required, no default
-        feed_forward: FeedForward.Config | None = None
-        moe: MoE.Config | None = None
-        attention_norm: RMSNorm.Config
-        ffn_norm: RMSNorm.Config
+        attention: Attention.Config  # required, no default
+        feed_forward: FeedForward.Config
+        attention_norm: Module.Config
+        ffn_norm: Module.Config
 
 
 class Decoder(BaseModel):
@@ -69,6 +71,8 @@ class Decoder(BaseModel):
     Provides shared ``__init__``, ``forward``, ``init_states``, and
     ``_get_attention_metadata`` (flex/varlen dispatch) used by most models.
     """
+
+    layers: ModuleDict[TransformerBlock]
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
@@ -88,44 +92,25 @@ class Decoder(BaseModel):
         enable_weight_tying: bool = False
 
         @property
-        def first_base_attention(self) -> BaseAttention.Config | None:
-            """First ``BaseAttention`` config, else ``None``.
-
-            Hybrid models do not carry a ``BaseAttention`` config on every
-            layer, so callers needing its metadata look up the first such layer
-            rather than assuming ``layers[0]``.
-            """
+        def first_full_attention(self) -> Attention.Config | None:
+            """First full-attention config, including causal attention, else None."""
             return next(
                 (
                     layer.attention
                     for layer in self.layers
-                    if layer.attention is not None
+                    if layer.attention.inner_attention.is_full_attention
                 ),
                 None,
             )
 
         @property
-        def base_attention_backends(self) -> tuple[Module.Config, ...]:
-            """Inner backend configs for all ``BaseAttention`` layers."""
-            return tuple(
-                layer.attention.inner_attention
-                for layer in self.layers
-                if layer.attention is not None
-            )
-
-        @property
-        def first_base_attention_backend(self) -> Module.Config | None:
-            """Inner backend config of the first ``BaseAttention`` layer."""
-            return next(iter(self.base_attention_backends), None)
-
-        @property
-        def first_feed_forward(self) -> FeedForward.Config | None:
+        def first_feed_forward(self) -> DenseFeedForward.Config | None:
             """First dense feed-forward config, else None."""
             return next(
                 (
                     layer.feed_forward
                     for layer in self.layers
-                    if layer.feed_forward is not None
+                    if isinstance(layer.feed_forward, DenseFeedForward.Config)
                 ),
                 None,
             )
@@ -134,7 +119,7 @@ class Decoder(BaseModel):
         def first_moe(self) -> MoE.Config | None:
             """First mixture-of-experts config, else None."""
             return next(
-                (layer.moe for layer in self.layers if layer.moe is not None),
+                (config for _, config, _, _ in self.traverse(MoE.Config)),
                 None,
             )
 
@@ -178,7 +163,7 @@ class Decoder(BaseModel):
         from torchtitan.distributed.spmd_types import spmd_mesh_size, spmd_sparse_mesh
 
         tp = spmd_mesh_size("tp")
-        attention = config.first_base_attention
+        attention = config.first_full_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -264,9 +249,7 @@ class Decoder(BaseModel):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             h = layer(
                 h,
@@ -294,6 +277,7 @@ class Decoder(BaseModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
@@ -328,7 +312,7 @@ class Decoder(BaseModel):
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         if next(self.config.traverse(AuxLoss.Config), None) is not None:
-            input_dict["aux_loss_denominators"] = None
+            input_dict["aux_loss_denominators"] = global_routing_token_counts
         return inputs, labels, input_dict
 
     def _cp_shard(
@@ -340,45 +324,36 @@ class Decoder(BaseModel):
     ) -> dict[str, Any]:
         """Prepare attention metadata and shard model inputs for CP."""
         from torchtitan.distributed import context_parallel
-        from torchtitan.models.common.attention.cp_attention import (
-            canonicalize_cp_inner_attention,
-            CPInnerAttention,
-        )
+        from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 
         attention_metadata = input_dict.get("attention_metadata")
         load_balancer_config = parallelism.context_parallel_load_balancer
-        selected_attention_metadata = None
-        if load_balancer_config is not None and attention_metadata is not None:
-            first_base_attention = self.config.first_base_attention
-            assert first_base_attention is not None
-            first_cp_inner_attention = first_base_attention.inner_attention._owner
-            assert first_cp_inner_attention is not None and issubclass(
-                first_cp_inner_attention, CPInnerAttention
-            )
-            # One permutation is shared across layers. Prefer full-attention
-            # metadata, falling back to the first quadratic inner attention
-            # for models containing only sliding-window attention.
-            full_cp_inner_attention = canonicalize_cp_inner_attention(
-                first_cp_inner_attention
-            )
-            selected_attention_metadata = attention_metadata.get(
-                full_cp_inner_attention
-            )
-            if selected_attention_metadata is None:
-                selected_attention_metadata = attention_metadata.get(
-                    first_cp_inner_attention
+        load_balancer = None
+        if load_balancer_config is not None:
+            # All PP stages retain the full model config and share one permutation.
+            attention = self.config.first_full_attention
+            if attention is None:
+                warn_once(
+                    logger,
+                    "Ignoring context_parallel_load_balancer because the model "
+                    "has no full attention. Using contiguous CP sharding.",
                 )
-        load_balancer = (
-            # TODO: `attention_metadata` alone cannot determine the load-balancing strategy.
-            load_balancer_config.build(
-                seq_len=context_parallel.get_cp_input_seq_len(
-                    input_dict, input_shardings=input_shardings
-                ),
-                attention_metadata=selected_attention_metadata,
-            )
-            if load_balancer_config is not None
-            else None
-        )
+            else:
+                selected_attention_metadata = None
+                if attention_metadata is not None:
+                    cp_inner_attention = attention.inner_attention._owner
+                    assert cp_inner_attention is not None and issubclass(
+                        cp_inner_attention, CPInnerAttention
+                    )
+                    selected_attention_metadata = attention_metadata.get(
+                        cp_inner_attention
+                    )
+                load_balancer = load_balancer_config.build(
+                    seq_len=context_parallel.get_cp_input_seq_len(
+                        input_dict, input_shardings=input_shardings
+                    ),
+                    attention_metadata=selected_attention_metadata,
+                )
         permutation = (
             load_balancer.generate_permutation() if load_balancer is not None else None
         )

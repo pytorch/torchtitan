@@ -16,12 +16,12 @@ from torch import nn
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
-    BaseAttention,
+    Attention,
     FlexAttentionMetadata,
+    InnerAttention,
     QKVLinear,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
@@ -33,6 +33,7 @@ from torchtitan.models.common.flops import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rope import RoPE
 
 from .state_dict_adapter import GptOssStateDictAdapter
@@ -47,20 +48,20 @@ def apply_attention_sink_rescale(
     return out * sink_scale.to(out.dtype)
 
 
-class Attention(BaseAttention):
+class GptOssAttention(Attention):
     """
     Multi-head attention (MLA) module with sink attention.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
+    class Config(Attention.Config):
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
         dim: int
         qkv_linear: QKVLinear.Config
         wo: Linear.Config  # output projection
-        inner_attention: Module.Config = dataclasses.field(
+        inner_attention: InnerAttention.Config = dataclasses.field(
             default_factory=VarlenInnerAttention.Config
         )
         sliding_window_size: int | None = None
@@ -148,14 +149,13 @@ class GptOssTransformerBlock(TransformerBlock):
 
     def __init__(self, config: Config):
         super().__init__()
-        assert isinstance(config.attention, Attention.Config)
+        assert isinstance(config.attention, GptOssAttention.Config)
         self.attention = config.attention.build()
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
 
-        assert config.moe is not None
-        self.moe = config.moe.build()
-        self.moe_enabled = True  # for composability with load balancing
+        assert isinstance(config.feed_forward, MoE.Config)
+        self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -183,7 +183,7 @@ class GptOssTransformerBlock(TransformerBlock):
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
-        moe_out = self.moe(
+        moe_out = self.feed_forward(
             self.ffn_norm(x),
             padding_mask_T=padding_mask,
             aux_loss_denominator=aux_loss_denominator,
@@ -202,9 +202,11 @@ class GptOssModel(Decoder):
     def _register_optimizer_hooks(
         cls, optimizers, model_parts, parallelism_context
     ) -> None:
+        from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
         from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+        register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
     """
     GPT-OSS Transformer model with attention and feed-forward layers.
@@ -239,15 +241,6 @@ class GptOssModel(Decoder):
                 )
             return nparams, 6 * active_nparams + attention_op_flops
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_gpt_oss_sharding_config
-
-            set_gpt_oss_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
     def __init__(self, config: Config):
         super().__init__(config)
 
@@ -258,12 +251,12 @@ class GptOssModel(Decoder):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         local_compile_regions: list[str],
-        ac_config: ActivationCheckpointingConfig | None,
+        activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> GptOssModel:
         if parallelism_context.cp_enabled and any(
-            isinstance(backend, UlyssesCPInnerAttention.Config)
-            for backend in self.config.base_attention_backends
+            isinstance(layer.attention.inner_attention, UlyssesCPInnerAttention.Config)
+            for layer in self.config.layers
         ):
             raise NotImplementedError(
                 "GPT-OSS does not support Ulysses CP because its per-head "
@@ -275,6 +268,6 @@ class GptOssModel(Decoder):
             training=training,
             parallelism=parallelism,
             local_compile_regions=local_compile_regions,
-            ac_config=ac_config,
+            activation_remat=activation_remat,
             dump_folder=dump_folder,
         )

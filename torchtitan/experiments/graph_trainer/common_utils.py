@@ -9,7 +9,6 @@ import logging
 import time
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Any, TypeAlias
 
 import torch
@@ -27,9 +26,9 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     MixedPrecisionPolicy,
 )
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
 
 
 logger = logging.getLogger(__name__)
@@ -56,29 +55,6 @@ def _get_graph_modules(
     return modules
 
 
-class GraphTrainerScaledDotProductInnerAttention(ScaledDotProductInnerAttention):
-    """Adapt flat graph-trainer attention inputs to the batched SDPA interface."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ScaledDotProductInnerAttention.Config):
-        pass
-
-    def forward(
-        self,
-        q_THK: torch.Tensor,
-        k_THK: torch.Tensor,
-        v_THV: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        out_1THV = super().forward(
-            q_THK.unsqueeze(0),
-            k_THK.unsqueeze(0),
-            v_THV.unsqueeze(0),
-            **kwargs,
-        )
-        return out_1THV.squeeze(0)
-
-
 @contextmanager
 def log_timer(label: str):
     start = time.perf_counter()
@@ -100,33 +76,8 @@ def disable_inplace_wgrad_accum(model: Module.Config) -> None:
 def build_decoder_config_for_backend(
     config_builder: Callable, attn_backend: str, **builder_kwargs
 ):
-    """Build a Decoder model config for ``attn_backend``, allowing test-only SDPA.
-
-    ``SDPA`` is not a valid production language-model backend — ``get_attention_config``
-    rejects it because the dataloaders always emit per-document positions and SDPA
-    cannot consume them (it only has a boolean ``is_causal``). The graph_trainer
-    tests, however, use SDPA to exercise *backend-agnostic* graph machinery
-    (precompile-artifact serialization, custom codegen, context parallel, bitwise
-    determinism) without FlexInnerAttention's ``BlockMask``, which is unpicklable (its
-    ``mask_mod`` closures are Python code objects), is not a tensor (so it breaks
-    pipeline-parallel split-backward, which calls ``.requires_grad`` on every stage
-    input), and overflows the fp32 Triton shared-memory limit on large head dims.
-
-    For SDPA we build the flex config (a valid backend) and swap each layer's
-    ``inner_attention`` to ``GraphTrainerScaledDotProductInnerAttention.Config()``.
-    The adapter adds a singleton batch around the flat graph-trainer inputs and
-    delegates to the common batched SDPA implementation. Production code never
-    reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
-    registry can construct an SDPA language model outside these tests.
-    """
-    if attn_backend != "sdpa":
-        config = config_builder(attn_backend=attn_backend, **builder_kwargs)
-    else:
-        config = config_builder(attn_backend="flex", **builder_kwargs)
-        for layer in config.layers:
-            layer.attention.inner_attention = (
-                GraphTrainerScaledDotProductInnerAttention.Config()
-            )
+    """Build a Decoder config with a supported backend and traceable linears."""
+    config = config_builder(attn_backend=attn_backend, **builder_kwargs)
     # GraphTrainer traces the backward.
     disable_inplace_wgrad_accum(config)
     return config
@@ -416,7 +367,7 @@ def annotate_module_fqns(model: nn.Module) -> None:
 
 def annotate_graph_trainer_model(model: Decoder) -> None:
     """Attach the annotations consumed by GraphTrainer passes."""
-    if any(getattr(layer, "moe", None) is not None for layer in model.config.layers):
+    if model.config.first_moe is not None:
         annotate_moe_ep_regions()
     annotate_module_fqns(model)
 
@@ -441,7 +392,7 @@ def annotate_moe_ep_regions() -> None:
         return
 
     from torchtitan.models.common.moe import MoE
-    from torchtitan.models.common.token_dispatcher import (
+    from torchtitan.models.common.moe.token_dispatcher import (
         AllToAllTokenDispatcher,
         LocalTokenDispatcher,
     )
@@ -552,10 +503,10 @@ def get_default_transformer_block_buckets(
                         f"layers.{layer_id}.attention_norm",
                         f"layers.{layer_id}.attention",
                         f"layers.{layer_id}.ffn_norm",
-                        f"layers.{layer_id}.moe.router",
-                        f"layers.{layer_id}.moe.shared_experts",
+                        f"layers.{layer_id}.feed_forward.router",
+                        f"layers.{layer_id}.feed_forward.shared_experts",
                     ],
-                    f"layers.{layer_id}.moe.routed_experts",
+                    f"layers.{layer_id}.feed_forward.routed_experts",
                 ]
             )
         else:
@@ -658,8 +609,8 @@ def apply_simple_fsdp(
         for transformer_block in model.modules():
             if not isinstance(transformer_block, TransformerBlock):
                 continue
-            moe = getattr(transformer_block, "moe", None)
-            if moe is None:
+            moe = transformer_block.feed_forward
+            if not isinstance(moe, MoE):
                 continue
             routed_experts = moe.routed_experts
             experts_shard_dim = 0

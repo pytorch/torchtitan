@@ -45,10 +45,10 @@ class _RecordingLayer(nn.Module):
     ``preprocess_inputs`` and ``forward`` glue.
     """
 
-    def __init__(self, sink: dict, attention_metadata_key: type[nn.Module]):
+    def __init__(self, sink: dict, attention: nn.Module):
         super().__init__()
         self._sink = sink
-        self.attention_metadata_key = attention_metadata_key
+        self.attention = attention
 
     def forward(
         self,
@@ -74,13 +74,15 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         ) = _build_config_modules()
         # varlen backend keeps mask construction to pure tensor ops (no flex
         # compile) so the pipeline runs on CPU.
-        model = build_model_config("debugmodel", attn_backend="varlen").build()
+        model = build_model_config(
+            "debugmodel", attn_backend="varlen", parallelism=ParallelismConfig()
+        ).build()
         sink: dict = {}
         for key in list(model.layers.keys()):
             layer = model.layers[key]
             model.layers[key] = _RecordingLayer(
                 sink,
-                layer.attention_metadata_key,
+                layer.attention,
             )
         parallelism_context = ParallelismContext(
             dp_replicate=1,
@@ -94,9 +96,9 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         )
         parallelism = ParallelismConfig()
         deltanet_backend = next(
-            layer.attention_metadata_key
+            type(layer.attention.inner_attention)
             for layer in model.layers.values()
-            if layer.attention_metadata_key.__name__ == "InnerGDN"
+            if type(layer.attention.inner_attention).__name__ == "InnerGDN"
         )
         return model, sink, parallelism_context, parallelism, deltanet_backend
 

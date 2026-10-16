@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from datasets import load_dataset
 
-from torchtitan.rl.components.data import RLDataset
+from torchtitan.rl.rollout.data import RLDataset
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

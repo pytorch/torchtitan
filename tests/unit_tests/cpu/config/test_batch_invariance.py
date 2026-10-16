@@ -4,12 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import BatchInvariantFlexConverter
 from torchtitan.models.llama3 import build_model_config
 
 
 def test_batch_invariant_flex_converter_pins_kernel_options():
-    model = build_model_config("debugmodel", attn_backend="flex")
+    model = build_model_config(
+        "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+    )
 
     converted = BatchInvariantFlexConverter.Config().build().convert(model)
 

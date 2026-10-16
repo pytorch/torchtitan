@@ -18,6 +18,7 @@ add more if a new callsite needs them.
 
 from dataclasses import dataclass
 
+import torch
 import torch.nn as nn
 
 from torchtitan.models.base.module import Module
@@ -132,7 +133,7 @@ class LayerNorm(nn.LayerNorm, Module):
 
 
 class RMSNorm(nn.RMSNorm, Module):
-    """Configurable nn.RMSNorm."""
+    """Configurable nn.RMSNorm with the same input name as LayerNorm."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -146,6 +147,12 @@ class RMSNorm(nn.RMSNorm, Module):
             eps=config.eps,
             elementwise_affine=config.elementwise_affine,
         )
+
+    # ShardingConfig keys use "input" for both RMSNorm and LayerNorm; some
+    # PyTorch versions name the RMSNorm argument "x".
+    # pyrefly: ignore[bad-param-name-override]
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return super().forward(input)
 
 
 __all__ = [

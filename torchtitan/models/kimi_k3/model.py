@@ -18,7 +18,7 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.configurable import Configurable
 from torchtitan.config.function import Function
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import apply_local_compile, local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
@@ -26,20 +26,20 @@ from torchtitan.distributed.spmd_types import (
     annotate_replicated_parameters,
     spmd_local_context,
 )
-from torchtitan.models.base.module import Module
-from torchtitan.models.common import FeedForward, Linear
+from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
+    Attention,
     AttentionMetadata,
     AttentionMetadataMap,
-    BaseAttention,
     FlexAttentionMetadata,
-    FlexInnerAttention,
+    InnerAttention,
     LinearAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.kda import KDA
-from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
@@ -72,7 +72,7 @@ from .vision_encoder import KimiK3VisionEncoder
 # N = attention-residual entries.
 
 
-class KimiMLAAttention(BaseAttention):
+class KimiMLAAttention(Attention):
     """Kimi K3 multi-head latent attention.
 
     Unlike DeepSeek-V3 MLA, the released K3 configuration sets
@@ -82,7 +82,7 @@ class KimiMLAAttention(BaseAttention):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
+    class Config(Attention.Config):
         dim: int
         kv_lora_rank: int
         qk_nope_head_dim: int
@@ -96,8 +96,8 @@ class KimiMLAAttention(BaseAttention):
         wkv_b: Linear.Config
         gate: Linear.Config
         wo: Linear.Config
-        inner_attention: Module.Config = field(
-            default_factory=FlexInnerAttention.Config
+        inner_attention: InnerAttention.Config = field(
+            default_factory=VarlenInnerAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -230,19 +230,13 @@ class AttentionResidual(Function[torch.Tensor]):
         return output_TD.to(values_TND.dtype)
 
 
-class KimiK3TransformerBlock(Module):
+class KimiK3TransformerBlock(TransformerBlock):
     """Hybrid KDA/MLA decoder block with Kimi attention residuals."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(TransformerBlock.Config):
         layer_id: int
         attn_res_block_size: int
-        attention: KimiMLAAttention.Config | None
-        delta_attention: KDA.Config | None
-        feed_forward: FeedForward.Config | None
-        moe: KimiLatentMoE.Config | None
-        attention_norm: RMSNorm.Config
-        ffn_norm: RMSNorm.Config
         attention_res_norm: RMSNorm.Config | None
         attention_res_proj: Linear.Config | None
         ffn_res_norm: RMSNorm.Config
@@ -251,36 +245,10 @@ class KimiK3TransformerBlock(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        if (config.attention is None) == (config.delta_attention is None):
-            raise ValueError(
-                "Exactly one of attention or delta_attention must be configured."
-            )
-        if (config.feed_forward is None) == (config.moe is None):
-            raise ValueError("Exactly one of feed_forward or moe must be configured.")
-        self.layer_id = config.layer_id
-        self.attn_res_block_size = config.attn_res_block_size
         # A block's first layer closes the previous block and joins the stack.
-        self.first_layer_in_block = self.layer_id % self.attn_res_block_size == 0
-        self.attention = (
-            config.attention.build() if config.attention is not None else None
-        )
-        self.delta_attention = (
-            config.delta_attention.build()
-            if config.delta_attention is not None
-            else None
-        )
-        self.feed_forward = (
-            config.feed_forward.build() if config.feed_forward is not None else None
-        )
-        self.moe = config.moe.build() if config.moe is not None else None
-        self.moe_enabled = self.moe is not None
-        if self.attention is not None:
-            self.attention_metadata_key = self.attention.attention_metadata_key
-        else:
-            assert self.delta_attention is not None
-            self.attention_metadata_key = (
-                self.delta_attention.inner_kda.attention_metadata_key
-            )
+        self.first_layer_in_block = config.layer_id % config.attn_res_block_size == 0
+        self.attention = config.attention.build()
+        self.feed_forward = config.feed_forward.build()
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
         self.attention_res_norm = (
@@ -326,11 +294,7 @@ class KimiK3TransformerBlock(Module):
                 self.attention_res_norm,
             )
         h_TD = self.attention_norm(h_TD)
-        if self.attention is not None:
-            h_TD = self.attention(h_TD, attention_metadata, positions)
-        else:
-            assert self.delta_attention is not None
-            h_TD = self.delta_attention(h_TD, attention_metadata, positions)
+        h_TD = self.attention(h_TD, attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(h_TD)
         prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
@@ -342,14 +306,13 @@ class KimiK3TransformerBlock(Module):
             self.ffn_res_norm,
         )
         h_TD = self.ffn_norm(h_TD)
-        if self.moe is not None:
-            h_TD = self.moe(
+        if isinstance(self.feed_forward, KimiLatentMoE):
+            h_TD = self.feed_forward(
                 h_TD,
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
         else:
-            assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
         # Trailing add, always saved: it saves nothing for backward, so replay skips
         # it and its inputs need no persisting, matching checkpoint early stop.
@@ -421,23 +384,14 @@ class KimiK3Model(MultimodalModel):
                         v_head_dim=attention.v_head_dim,
                         seq_len=seq_len,
                     )
-                elif isinstance(layer.delta_attention, KDA.Config):
-                    delta_attention = layer.delta_attention
+                elif isinstance(layer.attention, KDA.Config):
+                    delta_attention = layer.attention
                     attention_op_flops += delta_rule_flops_per_token(
-                        num_heads=delta_attention.num_heads,
+                        num_heads=delta_attention.n_heads,
                         key_head_dim=delta_attention.head_dim,
                         v_head_dim=delta_attention.head_dim,
                     )
             return nparams, 6 * active_nparams + attention_op_flops
-
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_kimi_k3_sharding_config
-
-            set_kimi_k3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
 
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size
@@ -468,7 +422,7 @@ class KimiK3Model(MultimodalModel):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         local_compile_regions: list[str],
-        ac_config: ActivationCheckpointingConfig | None,
+        activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> KimiK3Model:
         # Bind local implementations early; torch.compile traces on first use.
@@ -476,11 +430,10 @@ class KimiK3Model(MultimodalModel):
         with parallelism_context.activate_spmd():
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)
-            if ac_config is not None:
-                policy = ac_config.build(dump_folder=dump_folder)
-                policy.apply(self)
+            if activation_remat is not None:
+                activation_remat.apply(self)
                 if self.vision_encoder is not None:
-                    policy.apply(self.vision_encoder)
+                    activation_remat.apply(self.vision_encoder)
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
                 training=training,
@@ -496,6 +449,7 @@ class KimiK3Model(MultimodalModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build metadata, CP-shard inputs, and annotate K3 layouts."""
@@ -550,7 +504,7 @@ class KimiK3Model(MultimodalModel):
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
-        input_dict["aux_loss_denominators"] = None
+        input_dict["aux_loss_denominators"] = global_routing_token_counts
         return inputs, labels, input_dict
 
     def _prepare_multimodal_embeds(
@@ -665,14 +619,12 @@ class KimiK3Model(MultimodalModel):
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        for layer in self.layers.values():
-            h_TD, block_residual_TND = layer(
+        for block in self.layers.values():
+            h_TD, block_residual_TND = block(
                 h_TD,
                 block_residual_TND,
                 (
-                    attention_metadata[
-                        cast(KimiK3TransformerBlock, layer).attention_metadata_key
-                    ]
+                    attention_metadata[type(block.attention.inner_attention)]
                     if attention_metadata is not None
                     else None
                 ),
