@@ -28,5 +28,5 @@ CI publishes the RL variant to the existing CUDA ECR repository with an
 `rl-<docker-hash>` tag so it does not replace the standard CUDA image.
 The RL unit and integration test workflows install torch, torchvision, and vLLM
 together from the CUDA nightly index, then install TorchStore without dependencies.
-The optional Verifiers example is installed only by RL unit tests, constrained
-to those torch, torchvision, and vLLM nightlies.
+The optional Verifiers example is installed only by RL unit tests, with MCP 1.x
+to select a compatible nightly cohort.
