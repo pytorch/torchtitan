@@ -23,6 +23,7 @@ from torch.distributed.tensor import Shard
 from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.moe import MoE
 
 __all__ = [
     "apply_fsdp_to_decoder",
@@ -57,7 +58,6 @@ def finish_fsdp_eval(model_parts: list[nn.Module]) -> None:
 
 if TYPE_CHECKING:
     from torchtitan.models.common.decoder import Decoder
-    from torchtitan.models.common.moe import MoE
 
 
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
@@ -168,12 +168,18 @@ def disable_fsdp_gradient_division(model: nn.Module) -> None:
 
 def enable_fsdp_symm_mem(model: nn.Module, scope: FSDPSymmMemScope) -> None:
     """Enable symmetric-memory communication for the FSDP modules ``scope`` selects."""
+    from torchtitan.models.common.decoder import TransformerBlock
+
     if scope is None:
         return
     for module in model.modules():
         if not isinstance(module, FSDPModule):
             continue
-        if scope == "dense" and getattr(module, "moe_enabled", False):
+        if (
+            scope == "dense"
+            and isinstance(module, TransformerBlock)
+            and isinstance(module.feed_forward, MoE)
+        ):
             continue
         module.set_force_sum_reduction_for_comms(True)
         module.set_symm_mem_for_comm()
@@ -267,7 +273,7 @@ def apply_fsdp_to_decoder(
     Shared by all dense and MoE decoders (llama3, qwen3, deepseek_v3,
     gpt_oss, qwen3_vl, ...). The MoE handling is a strict superset of the dense
     case: a dense model leaves ``ep_degree=1`` / ``edp_mesh=None`` and has no
-    ``moe_enabled`` blocks, so every transformer block is sharded as a single
+    MoE blocks, so every transformer block is sharded as a single
     FSDP unit and the expert-parallel prefetching below is skipped.
 
     Args:
@@ -359,9 +365,7 @@ def apply_fsdp_to_decoder(
         #   shard their output features when FSDP degree > num_experts
         # Dense blocks use the default mesh with only stacked-parameter
         # placement overrides.
-        if getattr(transformer_block, "moe_enabled", False):
-            assert hasattr(transformer_block, "moe")
-            moe = cast("MoE", transformer_block.moe)
+        if isinstance(moe := transformer_block.feed_forward, MoE):
             routed_experts = moe.routed_experts
             num_experts = moe.num_experts
 

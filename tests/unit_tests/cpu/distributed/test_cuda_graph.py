@@ -12,14 +12,11 @@ import pytest
 import torch
 from torchtitan.distributed.cuda_graph import (
     _ForwardBackwardCUDAGraphWrapper,
-    _manager,
+    _run_eager_on_cuda_graph_stream,
+    cuda_graph_manager,
     cuda_graph_teardown,
     CUDAGraphWrapper,
     get_cuda_graph_annotations,
-    is_cuda_graph_capture_enabled,
-    is_cuda_graph_warmup_complete,
-    run_eager_on_cuda_graph_stream,
-    set_cuda_graph_capture_enabled,
     wrap_with_cuda_graph,
 )
 
@@ -33,8 +30,8 @@ def reset_cuda_graph_manager():
 
 def test_cuda_graph_wrapper_uses_configured_warmup_iterations() -> None:
     with (
-        patch.object(_manager, "maybe_initialize"),
-        patch.object(_manager, "register"),
+        patch.object(cuda_graph_manager, "maybe_initialize"),
+        patch.object(cuda_graph_manager, "register"),
     ):
         wrapper = CUDAGraphWrapper(
             lambda value: value,
@@ -55,46 +52,46 @@ def test_cuda_graph_wrapper_rejects_negative_warmup_iterations() -> None:
 
 
 def test_warmup_completion_tracks_all_registered_wrappers() -> None:
-    assert is_cuda_graph_warmup_complete()
-    set_cuda_graph_capture_enabled(False)
+    assert cuda_graph_manager.all_wrappers_warmed_up
+    cuda_graph_manager.capture_allowed = False
     with (
-        patch.object(_manager, "maybe_initialize"),
+        patch.object(cuda_graph_manager, "maybe_initialize"),
         patch(
-            "torchtitan.distributed.cuda_graph.run_eager_on_cuda_graph_stream",
+            "torchtitan.distributed.cuda_graph._run_eager_on_cuda_graph_stream",
             side_effect=lambda fn, *args: fn(*args),
         ),
     ):
         value = torch.tensor(1)
         train = CUDAGraphWrapper(lambda x: x, (value,), num_warmup_iterations=1)
         optimizer = CUDAGraphWrapper(lambda x: x, (value,), num_warmup_iterations=2)
-        assert not is_cuda_graph_warmup_complete()
+        assert not cuda_graph_manager.all_wrappers_warmed_up
         train(value)
         optimizer(value)
-        assert not is_cuda_graph_warmup_complete()
+        assert not cuda_graph_manager.all_wrappers_warmed_up
         optimizer(value)
-        assert is_cuda_graph_warmup_complete()
-        assert not is_cuda_graph_capture_enabled()
+        assert cuda_graph_manager.all_wrappers_warmed_up
+        assert not cuda_graph_manager.capture_allowed
 
         validation = CUDAGraphWrapper(
             lambda x: x, (value,), num_warmup_iterations=1, name="validation"
         )
-        assert not is_cuda_graph_warmup_complete()
+        assert not cuda_graph_manager.all_wrappers_warmed_up
         validation(value)
-        assert is_cuda_graph_warmup_complete()
+        assert cuda_graph_manager.all_wrappers_warmed_up
 
 
-def test_run_eager_on_cuda_graph_stream_synchronizes_streams() -> None:
+def test_eager_execution_on_cuda_graph_stream_synchronizes_streams() -> None:
     current_stream = MagicMock()
     graph_stream = MagicMock()
     fn = MagicMock(return_value="output")
 
     with (
-        patch.object(_manager, "maybe_initialize") as maybe_initialize,
-        patch.object(_manager, "_stream", graph_stream),
+        patch.object(cuda_graph_manager, "maybe_initialize") as maybe_initialize,
+        patch.object(cuda_graph_manager, "_stream", graph_stream),
         patch("torch.cuda.current_stream", return_value=current_stream),
         patch("torch.cuda.stream", return_value=nullcontext()) as use_stream,
     ):
-        output = run_eager_on_cuda_graph_stream(fn, "arg", keyword="value")
+        output = _run_eager_on_cuda_graph_stream(fn, "arg", keyword="value")
 
     assert output == "output"
     maybe_initialize.assert_called_once_with()
@@ -106,15 +103,16 @@ def test_run_eager_on_cuda_graph_stream_synchronizes_streams() -> None:
 
 def test_wrap_with_cuda_graph_captures_first_invocation() -> None:
     graph = MagicMock()
-    fn = MagicMock(side_effect=lambda value: value)
+    fn = MagicMock(side_effect=lambda value, *, scale: value * scale)
+    prepare = MagicMock()
     with (
         patch("torchtitan.distributed.cuda_graph.utils.device_type", "cuda"),
         patch("torch.cuda.is_available", return_value=True),
         patch.object(torch.version, "hip", None),
-        patch.object(_manager, "maybe_initialize"),
-        patch.object(_manager, "register"),
-        patch.object(_manager, "_graph_pool", object()),
-        patch.object(_manager, "_stream", MagicMock()),
+        patch.object(cuda_graph_manager, "maybe_initialize"),
+        patch.object(cuda_graph_manager, "register"),
+        patch.object(cuda_graph_manager, "_graph_pool", object()),
+        patch.object(cuda_graph_manager, "_stream", MagicMock()),
         patch("torch.cuda.current_stream", return_value=MagicMock()),
         patch("torch.cuda.stream", return_value=nullcontext()),
         patch("torch.cuda.CUDAGraph", return_value=graph) as graph_constructor,
@@ -124,12 +122,14 @@ def test_wrap_with_cuda_graph_captures_first_invocation() -> None:
             return_value={},
         ),
     ):
-        run = wrap_with_cuda_graph(fn)
+        run = wrap_with_cuda_graph(fn, prepare_for_capture=prepare)
         value = torch.tensor(1.0)
-        run(value)
+        run(value, scale=2)
+        prepare.assert_called_once_with(value, scale=2)
         graph_constructor.assert_called_once()
         graph.replay.assert_called_once()
-        run(value)
+        run(value, scale=2)
+        prepare.assert_called_once()
         assert fn.call_count == 1
         assert graph.replay.call_count == 2
 
@@ -140,8 +140,8 @@ def test_tensor_input_indices_control_replay_copies() -> None:
     copied_input = torch.tensor(3)
 
     with (
-        patch.object(_manager, "maybe_initialize"),
-        patch.object(_manager, "register"),
+        patch.object(cuda_graph_manager, "maybe_initialize"),
+        patch.object(cuda_graph_manager, "register"),
     ):
         wrapper = CUDAGraphWrapper(
             lambda *args: args,
@@ -172,11 +172,11 @@ def test_cuda_graph_wrapper_collects_annotations() -> None:
     stream = MagicMock()
 
     with (
-        patch.object(_manager, "maybe_initialize"),
-        patch.object(_manager, "register"),
-        patch.object(_manager, "_graph_pool", graph_pool),
-        patch.object(_manager, "_stream", stream),
-        patch.object(_manager, "all_annotations", {}),
+        patch.object(cuda_graph_manager, "maybe_initialize"),
+        patch.object(cuda_graph_manager, "register"),
+        patch.object(cuda_graph_manager, "_graph_pool", graph_pool),
+        patch.object(cuda_graph_manager, "_stream", stream),
+        patch.object(cuda_graph_manager, "all_annotations", {}),
         patch("torch.cuda.CUDAGraph", return_value=graph),
         patch("torch.cuda.graph", return_value=nullcontext()) as cuda_graph,
         patch(
@@ -207,21 +207,21 @@ def test_cuda_graph_wrapper_collects_annotations() -> None:
 def test_manager_teardown_resets_capture_state(initialized) -> None:
     wrappers = (MagicMock(), MagicMock()) if initialized else ()
     with (
-        patch.object(_manager, "_initialized", initialized),
-        patch.object(_manager, "_wrappers", list(wrappers)),
-        patch.object(_manager, "all_annotations", {1: ["capture"]}),
+        patch.object(cuda_graph_manager, "_initialized", initialized),
+        patch.object(cuda_graph_manager, "_wrappers", list(wrappers)),
+        patch.object(cuda_graph_manager, "all_annotations", {1: ["capture"]}),
     ):
-        set_cuda_graph_capture_enabled(False)
+        cuda_graph_manager.capture_allowed = False
         cuda_graph_teardown()
-        assert is_cuda_graph_capture_enabled()
-        assert not _manager._initialized
+        assert cuda_graph_manager.capture_allowed
+        assert not cuda_graph_manager._initialized
         assert not get_cuda_graph_annotations()
-        assert not _manager._wrappers
+        assert not cuda_graph_manager._wrappers
         for wrapper in wrappers:
             wrapper.teardown.assert_called_once_with()
 
 
-def test_cache_release_runs_only_before_first_capture() -> None:
+def test_preparation_and_cache_release_run_only_before_first_capture() -> None:
     events = []
 
     def capture(*args, **kwargs):
@@ -229,16 +229,16 @@ def test_cache_release_runs_only_before_first_capture() -> None:
         return nullcontext()
 
     with (
-        patch.object(_manager, "maybe_initialize"),
-        patch.object(_manager, "register"),
-        patch.object(_manager, "_graph_pool", object()),
-        patch.object(_manager, "_stream", MagicMock()),
-        patch.object(_manager, "log_memory"),
+        patch.object(cuda_graph_manager, "maybe_initialize"),
+        patch.object(cuda_graph_manager, "register"),
+        patch.object(cuda_graph_manager, "_graph_pool", object()),
+        patch.object(cuda_graph_manager, "_stream", MagicMock()),
+        patch.object(cuda_graph_manager, "log_memory"),
         patch("torch.cuda.CUDAGraph"),
         patch("torch.cuda.graph", side_effect=capture),
         patch("torch.cuda.empty_cache", side_effect=lambda: events.append("cache")),
         patch(
-            "torchtitan.distributed.cuda_graph.run_eager_on_cuda_graph_stream",
+            "torchtitan.distributed.cuda_graph._run_eager_on_cuda_graph_stream",
             side_effect=lambda fn, *args: fn(*args),
         ),
         patch(
@@ -246,15 +246,19 @@ def test_cache_release_runs_only_before_first_capture() -> None:
         ),
     ):
         wrapper = CUDAGraphWrapper(
-            lambda x: x, (torch.tensor(1),), num_warmup_iterations=2, name="eval"
+            lambda x: x,
+            (torch.tensor(1),),
+            num_warmup_iterations=2,
+            prepare_for_capture=lambda x: events.append("prepare"),
+            name="eval",
         )
         for _ in range(4):
             wrapper(torch.tensor(1))
-        assert events == ["cache", "capture"]
+        assert events == ["prepare", "cache", "capture"]
 
 
 def test_capture_gate_does_not_record_gradients() -> None:
-    set_cuda_graph_capture_enabled(False)
+    cuda_graph_manager.capture_allowed = False
     parameter = torch.nn.Parameter(torch.tensor(2.0))
 
     def body(value):
@@ -263,8 +267,8 @@ def test_capture_gate_does_not_record_gradients() -> None:
         return loss.detach()
 
     with (
-        patch.object(_manager, "maybe_initialize"),
-        patch.object(_manager, "_stream", MagicMock()),
+        patch.object(cuda_graph_manager, "maybe_initialize"),
+        patch.object(cuda_graph_manager, "_stream", MagicMock()),
         patch("torch.cuda.current_stream", return_value=MagicMock()),
         patch("torch.cuda.stream", return_value=nullcontext()),
         patch("torch.cuda.CUDAGraph") as graph,
@@ -295,10 +299,10 @@ def test_structured_wrapper_validates_and_copies_replay_inputs() -> None:
         patch("torchtitan.distributed.cuda_graph.utils.device_type", "cuda"),
         patch("torch.cuda.is_available", return_value=True),
         patch.object(torch.version, "hip", None),
-        patch.object(_manager, "maybe_initialize"),
-        patch.object(_manager, "register"),
-        patch.object(_manager, "_graph_pool", object()),
-        patch.object(_manager, "_stream", graph_stream),
+        patch.object(cuda_graph_manager, "maybe_initialize"),
+        patch.object(cuda_graph_manager, "register"),
+        patch.object(cuda_graph_manager, "_graph_pool", object()),
+        patch.object(cuda_graph_manager, "_stream", graph_stream),
         patch("torch.cuda.current_stream", return_value=current_stream),
         patch("torch.cuda.stream", return_value=nullcontext()),
         patch("torch.cuda.CUDAGraph", return_value=graph),
@@ -351,10 +355,10 @@ def test_cuda_graph_wrapper_restores_capture_allocated_gradients() -> None:
         return value
 
     with (
-        patch.object(_manager, "maybe_initialize"),
-        patch.object(_manager, "register"),
-        patch.object(_manager, "_graph_pool", object()),
-        patch.object(_manager, "_stream", MagicMock()),
+        patch.object(cuda_graph_manager, "maybe_initialize"),
+        patch.object(cuda_graph_manager, "register"),
+        patch.object(cuda_graph_manager, "_graph_pool", object()),
+        patch.object(cuda_graph_manager, "_stream", MagicMock()),
         patch("torch.cuda.CUDAGraph", return_value=graph),
         patch("torch.cuda.graph", return_value=nullcontext()),
         patch(
@@ -395,10 +399,10 @@ def test_cuda_graph_wrapper_requires_cleared_owned_gradients(
         return value
 
     with (
-        patch.object(_manager, "maybe_initialize"),
-        patch.object(_manager, "register"),
-        patch.object(_manager, "_graph_pool", object()),
-        patch.object(_manager, "_stream", MagicMock()),
+        patch.object(cuda_graph_manager, "maybe_initialize"),
+        patch.object(cuda_graph_manager, "register"),
+        patch.object(cuda_graph_manager, "_graph_pool", object()),
+        patch.object(cuda_graph_manager, "_stream", MagicMock()),
         patch("torch.cuda.CUDAGraph", return_value=graph),
         patch("torch.cuda.graph", return_value=nullcontext()),
         patch(

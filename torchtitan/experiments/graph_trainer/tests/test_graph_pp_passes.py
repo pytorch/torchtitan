@@ -91,6 +91,8 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     FSDP_PARAM_FQNS_META,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
+
+from torchtitan.models.common.moe import MoE
 from torchtitan.trainer import Trainer
 
 
@@ -165,7 +167,7 @@ def _trace_dsv3_moe_block_stage(
             debug=DebugConfig(seed=0, deterministic=True),
         )
         moe_layer_config = model_config.layers[1]
-        if moe_layer_config.moe is None:
+        if not isinstance(moe_layer_config.feed_forward, MoE.Config):
             raise AssertionError("DeepSeek V3 MoE layer must contain an MoE block")
 
         with (
@@ -187,9 +189,9 @@ def _trace_dsv3_moe_block_stage(
         model.train()
 
         block = model.layers["1"]
-        if not block.moe_enabled:
+        if not isinstance(block.feed_forward, MoE):
             raise AssertionError("DeepSeek V3 debug layer 1 must be a MoE layer")
-        attention_metadata_key = block.attention.attention_metadata_key
+        inner_attention_type = type(block.attention.inner_attention)
         if fsdp_mesh is not None:
             block = data_parallel(
                 block,
@@ -218,7 +220,7 @@ def _trace_dsv3_moe_block_stage(
         ):
             out = block(
                 x,
-                attention_metadata.get(attention_metadata_key),
+                attention_metadata.get(inner_attention_type),
                 positions,
                 aux_loss_denominator=aux_loss_denominator,
             )

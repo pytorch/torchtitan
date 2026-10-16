@@ -6,17 +6,13 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 import torch
 
 from torchtitan.components.validator import Validator
-from torchtitan.distributed.cuda_graph import (
-    cuda_graph_teardown,
-    is_cuda_graph_capture_enabled,
-    set_cuda_graph_capture_enabled,
-)
+from torchtitan.distributed.cuda_graph import cuda_graph_manager, cuda_graph_teardown
 from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.trainer import Trainer
@@ -131,11 +127,11 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
             "enabled",
             [
                 "train checkpoint wait eval:blocked",
-                "train checkpoint wait eval:blocked eval:allowed",
+                "train checkpoint wait eval:allowed",
                 "train checkpoint",
                 "train checkpoint wait eval:allowed",
             ],
-            [0, 1, 3],
+            [0, 1, 2],
             id="fresh",
         ),
         pytest.param(
@@ -145,10 +141,10 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
             "enabled",
             [
                 "train checkpoint wait eval:blocked",
-                "train checkpoint wait eval:blocked eval:allowed",
+                "train checkpoint wait eval:allowed",
                 "train checkpoint wait eval:allowed",
             ],
-            [0, 1, 3],
+            [0, 1, 2],
             id="resume",
         ),
         pytest.param(
@@ -158,7 +154,7 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
             "enabled",
             [
                 "train checkpoint wait eval:blocked",
-                "train checkpoint wait eval:blocked eval:allowed",
+                "train checkpoint wait eval:allowed",
                 "train checkpoint",
             ],
             [0, 1],
@@ -204,7 +200,7 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
 def test_trainer_keeps_scheduled_eval_during_warmup(
     loaded_step, freq, training_steps, capture_mode, expected, expected_staged
 ):
-    set_cuda_graph_capture_enabled(capture_mode != "enabled")
+    cuda_graph_manager.capture_allowed = capture_mode != "enabled"
     events = []
     step_events = []
     model = torch.nn.Module()
@@ -215,12 +211,17 @@ def test_trainer_keeps_scheduled_eval_during_warmup(
     validator.config = Validator.Config(
         enable_cuda_graphs=capture_mode != "disabled", steps=1, freq=freq
     )
+    validator._cuda_graph_enabled = capture_mode == "enabled"
+    validator._run_eval = None
+    validator.parallelism_context = SimpleNamespace(pp_enabled=False)
+    validator._evaluate_body = lambda *args: model.counter.add_(1)
 
     def validate(*args):
+        evaluate = validator._init_evaluate_fn([model])
         step_events.append(
-            "eval:allowed" if is_cuda_graph_capture_enabled() else "eval:blocked"
+            "eval:allowed" if cuda_graph_manager.capture_allowed else "eval:blocked"
         )
-        model.counter.add_(1)
+        evaluate([])
 
     def save_checkpoint(**kwargs):
         step_events.append("checkpoint")
@@ -264,11 +265,13 @@ def test_trainer_keeps_scheduled_eval_during_warmup(
     trainer.train_step = train_step
     with (
         patch(
-            "torchtitan.trainer.cuda_graphs_supported",
-            return_value=capture_mode != "unsupported",
+            "torchtitan.components.validator.wrap_with_cuda_graph",
+            side_effect=lambda fn, **kwargs: fn,
         ),
-        patch(
-            "torchtitan.trainer.is_cuda_graph_warmup_complete",
+        patch.object(
+            type(cuda_graph_manager),
+            "all_wrappers_warmed_up",
+            new_callable=PropertyMock,
             side_effect=lambda: engine.num_completed_steps - loaded_step >= 2,
         ),
         patch("torchtitan.trainer.dist_utils.set_pg_timeouts"),

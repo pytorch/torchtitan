@@ -219,10 +219,15 @@ class GraphTrainingEngine(TrainingEngine):
     def _preprocess_microbatch_groups(
         self,
         microbatch_groups: list[list[TrainingMicrobatch]],
+        *,
+        global_routing_token_counts: torch.Tensor,
     ) -> list[tuple[Any, ...]]:
         """Prepare GraphRuntime schedule inputs for AOT single-stage execution."""
         if self.parallelism_context.pp_enabled:
-            return super()._preprocess_microbatch_groups(microbatch_groups)
+            return super()._preprocess_microbatch_groups(
+                microbatch_groups,
+                global_routing_token_counts=global_routing_token_counts,
+            )
 
         preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
         for microbatch_group in microbatch_groups:
@@ -252,6 +257,7 @@ class GraphTrainingEngine(TrainingEngine):
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
+                        global_routing_token_counts=global_routing_token_counts,
                         **self.preprocess_inputs_kwargs,
                     )
                     self.ntokens_seen += (
@@ -367,6 +373,11 @@ class GraphTrainer(Trainer):
             if self.training.cuda_graph_per_accumulation_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."
+                )
+            if self.training.preprocess_microbatch_groups_lazily:
+                raise ValueError(
+                    "training.preprocess_microbatch_groups_lazily is not supported "
+                    "with GraphTrainer."
                 )
             # to_graph_trainer_config and the flavor builders turn these off;
             # this catches a transform applied afterwards that builds them with

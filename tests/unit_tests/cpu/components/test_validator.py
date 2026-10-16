@@ -83,11 +83,9 @@ def _generic_validator(loader):
     return validator
 
 
-def test_eval_wrapper_returns_each_real_run(monkeypatch):
-    from torchtitan.distributed.cuda_graph import (
-        is_cuda_graph_capture_enabled,
-        set_cuda_graph_capture_enabled,
-    )
+@pytest.mark.parametrize("num_groups", [1, 2])
+def test_eval_wrapper_returns_each_real_run(monkeypatch, num_groups):
+    from torchtitan.distributed.cuda_graph import cuda_graph_manager
 
     row = TokenizedTrainingMicrobatch(
         input=torch.ones(1, 1),
@@ -97,10 +95,11 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch):
         loss_token_counts=torch.tensor(1),
         routing_token_counts=torch.tensor([1]),
     )
-    loader = _ClosableLoader([row])
+    loader = _ClosableLoader([row] * num_groups)
     validator = _generic_validator(loader)
+    validator.config.steps = num_groups
     validator._cuda_graph_enabled = True
-    set_cuda_graph_capture_enabled(False)
+    cuda_graph_manager.capture_allowed = False
     model = _EchoModel()
     model.register_buffer("counter", torch.tensor(0))
     calls = []
@@ -119,23 +118,28 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch):
     monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
     rng_before = torch.random.get_rng_state()
     validator.validate([model], step=1)
-    assert len(calls) == 1
-    validator.metrics_processor.log_validation.assert_called_once_with(loss=1.0, step=1)
-    assert not is_cuda_graph_capture_enabled()
+    assert len(calls) == num_groups
+    validator.metrics_processor.log_validation.assert_called_once_with(
+        loss=(num_groups + 1) / 2, step=1
+    )
+    assert not cuda_graph_manager.capture_allowed
     validator.validate([model], step=2)
-    assert len(calls) == 2
-    validator.metrics_processor.log_validation.assert_called_with(loss=2.0, step=2)
+    assert len(calls) == 2 * num_groups
+    validator.metrics_processor.log_validation.assert_called_with(
+        loss=(3 * num_groups + 1) / 2, step=2
+    )
     torch.testing.assert_close(calls[-1], row.input, rtol=0, atol=0)
     assert model.training
-    assert model.counter.item() == 2
+    assert model.counter.item() == 2 * num_groups
     assert loader.closed
     assert not torch.equal(torch.random.get_rng_state(), rng_before)
     wrap.assert_called_once()
     assert wrap.call_args.kwargs == {
         "num_warmup_iterations": 1,
+        "prepare_for_capture": None,
         "name": "validation",
     }
-    set_cuda_graph_capture_enabled(True)
+    cuda_graph_manager.capture_allowed = True
 
 
 def test_validation_preprocessing_uses_validation_document_limit(monkeypatch):

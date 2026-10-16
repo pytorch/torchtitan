@@ -26,12 +26,7 @@ from torchtitan.components.validator import BaseValidator, Validator
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.cuda_graph import (
-    cuda_graphs_supported,
-    is_cuda_graph_capture_enabled,
-    is_cuda_graph_warmup_complete,
-    set_cuda_graph_capture_enabled,
-)
+from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
@@ -96,9 +91,9 @@ class Trainer(Configurable):
                 and not self.validator.enable_cuda_graphs
             ):
                 raise ValueError(
-                    "CUDA graphs with pipeline parallelism do not support "
-                    "validation because validation reinitializes the shared "
-                    "pipeline schedule. Disable validation or CUDA graphs."
+                    "Pipeline training capture requires validation capture when "
+                    "validation is configured. Set validator.enable_cuda_graphs=True "
+                    "or training.disable_cuda_graphs=True."
                 )
 
             if self.model is not None:
@@ -294,8 +289,6 @@ class Trainer(Configurable):
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
             )
-            if config.validator.enable_cuda_graphs and cuda_graphs_supported():
-                set_cuda_graph_capture_enabled(False)
 
         logger.info(
             "Trainer is initialized with "
@@ -504,31 +497,18 @@ class Trainer(Configurable):
                         last_step=(engine.num_completed_steps == config.training.steps)
                     )
 
-                    if config.validator is not None:
-                        num_validation_runs = int(
-                            self.validator.should_validate(engine.num_completed_steps)
-                        )
-                        eval_capture_pending = (
+                    if config.validator is not None and self.validator.should_validate(
+                        engine.num_completed_steps
+                    ):
+                        if (
                             config.validator.enable_cuda_graphs
-                            and cuda_graphs_supported()
-                            and not is_cuda_graph_capture_enabled()
+                            and config.checkpointer is not None
+                        ):
+                            # Eval can update buffers that checkpoint staging reads.
+                            engine.checkpointer.maybe_wait_for_staging()
+                        self.validator.validate(
+                            engine.model_parts, engine.num_completed_steps
                         )
-                        if eval_capture_pending and is_cuda_graph_warmup_complete():
-                            num_validation_runs = 2
-                        if num_validation_runs:
-                            if (
-                                config.validator.enable_cuda_graphs
-                                and config.checkpointer is not None
-                            ):
-                                # Eval can update buffers that checkpoint staging reads.
-                                engine.checkpointer.maybe_wait_for_staging()
-                            # Finish real eval warmup before allowing any capture.
-                            for run in range(num_validation_runs):
-                                if eval_capture_pending and run == 1:
-                                    set_cuda_graph_capture_enabled(True)
-                                self.validator.validate(
-                                    engine.model_parts, engine.num_completed_steps
-                                )
 
                     engine.step_profiler()
 

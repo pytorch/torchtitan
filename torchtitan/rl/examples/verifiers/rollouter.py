@@ -201,7 +201,7 @@ class VerifiersRollouter(Rollouter):
                 # The local endpoint does not authenticate. An empty environment
                 # variable name makes Verifiers send its required "EMPTY" value.
                 api_key_var="",
-                renderer=renderer_config.renderers_config,
+                renderer=renderer_config.get_renderers_config(),
                 multiplex=self._verifiers_config.renderer_multiplex,
                 renderer_model_name=hf_assets_path,
             )

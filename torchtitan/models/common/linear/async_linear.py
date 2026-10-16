@@ -18,8 +18,10 @@ import torch.distributed as dist
 import torch_remat as remat
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh
-from torchtitan.models.common.inplace_wgrad_accum import reject_inplace_wgrad_accum
 from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
+from torchtitan.models.common.linear.inplace_wgrad_accum import (
+    reject_inplace_wgrad_accum,
+)
 
 
 logger = logging.getLogger(__name__)

@@ -48,6 +48,7 @@ from torchtitan.components.data.multimodal.utils.image import (
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.kimi_k2_7 import build_model_config
 from transformers import AutoModelForCausalLM, AutoProcessor
 
@@ -165,11 +166,11 @@ def _force_hf_routing(model, expert_indices, device):
     """
     forced = 0
     for key, layer in model.layers.items():
-        if not getattr(layer, "moe_enabled", False) or int(key) not in expert_indices:
+        if not isinstance(layer.feed_forward, MoE) or int(key) not in expert_indices:
             continue
         ids = expert_indices[int(key)]
         ids = ids.view(1, ids.shape[0], ids.shape[-1]).to(device)  # (1, L, K)
-        router = layer.moe.router
+        router = layer.feed_forward.router
         orig = router.forward
 
         def forced_forward(x_BLD, expert_bias_E=None, _r=router, _o=orig, _ids=ids):

@@ -28,13 +28,14 @@ from torchtitan.components.validator import Validator
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.cuda_graph import (
-    _manager,
+    cuda_graph_manager,
     cuda_graph_teardown,
-    set_cuda_graph_capture_enabled,
     wrap_fwd_bwd_with_cuda_graph,
     wrap_with_cuda_graph,
 )
-from torchtitan.distributed.pipeline_parallel import initialize_pipeline_schedule
+from torchtitan.distributed.pipeline_parallel import (
+    prepare_pipeline_schedule_for_cuda_graph,
+)
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.muse_glimmer import build_model_config
 
@@ -115,7 +116,7 @@ def test_train_eval_optimizer_shared_pool(optimizer_graph, monkeypatch):
         model.parameters(), lr=0.01, fused=True, capturable=optimizer_graph
     )
     reference_optimizer = torch.optim.AdamW(reference.parameters(), lr=0.01, fused=True)
-    set_cuda_graph_capture_enabled(False)
+    cuda_graph_manager.capture_allowed = False
     validator = _validator()
 
     def body(inputs, target):
@@ -141,7 +142,7 @@ def test_train_eval_optimizer_shared_pool(optimizer_graph, monkeypatch):
         if boundary == "after_capture":
             captures.append((step, name))
 
-    monkeypatch.setattr(_manager, "log_memory", record_capture)
+    monkeypatch.setattr(cuda_graph_manager, "log_memory", record_capture)
     try:
         for step in range(10):
             inputs = torch.full((4, 16), (step + 1) / 100, device="cuda")
@@ -177,23 +178,20 @@ def test_train_eval_optimizer_shared_pool(optimizer_graph, monkeypatch):
                         rtol=0,
                         atol=0,
                     )
-            for run in range(2 if step == 1 else 1):
-                if step == 1 and run == 1:
-                    set_cuda_graph_capture_enabled(True)
-                with torch.no_grad():
-                    result = _validate_loss(
-                        validator, [model], [(inputs, target, {})], step=step + 1
-                    ).clone()
-                    expected_eval = (reference(inputs) - target).square().sum()
-                    torch.testing.assert_close(result, expected_eval, rtol=0, atol=0)
+            with torch.no_grad():
+                result = _validate_loss(
+                    validator, [model], [(inputs, target, {})], step=step + 1
+                ).clone()
+                expected_eval = (reference(inputs) - target).square().sum()
+                torch.testing.assert_close(result, expected_eval, rtol=0, atol=0)
             if step == 0:
                 assert validator._run_eval is not None
-                assert _manager._wrappers[-1]._graph is None
+                assert cuda_graph_manager._wrappers[-1]._graph is None
                 assert captures == []
             elif step == 1:
                 assert captures == [(1, "validation")]
             torch.testing.assert_close(actual, expected.detach(), rtol=0, atol=0)
-        assert len(_manager._wrappers) == (3 if optimizer_graph else 2)
+        assert len(cuda_graph_manager._wrappers) == (3 if optimizer_graph else 2)
         assert captures == [(1, "validation"), (2, "train")] + (
             [(2, "optimizer")] if optimizer_graph else []
         )
@@ -214,11 +212,9 @@ def test_eval_warmup_keeps_rng_and_buffer_updates():
 
     model.forward = forward
     validator = _validator()
-    set_cuda_graph_capture_enabled(False)
+    cuda_graph_manager.capture_allowed = False
     with torch.no_grad():
         for run in range(10):
-            if run == 1:
-                set_cuda_graph_capture_enabled(True)
             value = inputs * (run + 1)
             with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                 reference_counter.add_(1)
@@ -238,7 +234,7 @@ def test_eval_warmup_keeps_rng_and_buffer_updates():
 
 
 def test_per_group_graph_waits_for_eval_capture():
-    set_cuda_graph_capture_enabled(False)
+    cuda_graph_manager.capture_allowed = False
     parameter = torch.nn.Parameter(torch.ones(1024, device="cuda"))
     inputs = torch.ones_like(parameter)
 
@@ -248,23 +244,32 @@ def test_per_group_graph_waits_for_eval_capture():
         return loss.detach()
 
     train = wrap_with_cuda_graph(body, name="train", num_warmup_iterations=2)
-    evaluate = wrap_with_cuda_graph(
-        lambda value: (parameter * value).sum(), name="eval"
-    )
+    model = torch.nn.Module()
+    model.register_parameter("weight", parameter)
+    model.forward = lambda value: parameter * value
+    validator = _validator()
+    prepared = [(inputs, torch.zeros_like(inputs), {})]
     try:
         for _ in range(4):
             train(inputs)
-        assert _manager._wrappers[0]._graph is None
-        set_cuda_graph_capture_enabled(True)
+        assert cuda_graph_manager._wrappers[0]._graph is None
         with torch.no_grad():
-            evaluate(inputs)
+            _validate_loss(validator, [model], prepared, step=1)
+        for _ in range(4):
+            train(inputs)
+        assert cuda_graph_manager._wrappers[0]._graph is None
+        with torch.no_grad():
+            _validate_loss(validator, [model], prepared, step=2)
+        assert cuda_graph_manager._wrappers[-1]._graph is not None
         for count in (1, 4, 2, 5):
             parameter.grad.zero_()
             for _ in range(count):
                 train(inputs)
             torch.testing.assert_close(parameter.grad, inputs * count, rtol=0, atol=0)
             with torch.no_grad():
-                assert evaluate(inputs).item() == 1024
+                assert (
+                    _validate_loss(validator, [model], prepared, step=3).item() == 1024
+                )
     finally:
         cuda_graph_teardown()
 
@@ -343,7 +348,7 @@ def _measure_pool(mode, results):
     torch.cuda.set_device(0)
     parameter = torch.nn.Parameter(torch.ones(8 * 1024 * 1024, device="cuda"))
     inputs = torch.ones_like(parameter)
-    _manager.maybe_initialize()
+    cuda_graph_manager.maybe_initialize()
     optimizer = torch.optim.SGD([parameter], lr=0.01)
 
     def eval_body():
@@ -377,7 +382,7 @@ def _measure_pool(mode, results):
             return sum(
                 segment["total_size"]
                 for segment in torch.cuda.memory_snapshot()
-                if segment["segment_pool_id"] == _manager.graph_pool
+                if segment["segment_pool_id"] == cuda_graph_manager.graph_pool
             )
 
         size = pool_bytes()
@@ -425,7 +430,7 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
     os.environ["MASTER_PORT"] = str(port)
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=4)
-    set_cuda_graph_capture_enabled(False)
+    cuda_graph_manager.capture_allowed = False
     try:
         mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("pp", "dp"))
         pp_rank, dp_rank = rank // 2, rank % 2
@@ -498,10 +503,20 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
             )
             return torch.stack(losses).sum() if losses else inputs.new_zeros(())
 
+        def prepare_for_capture(inputs, target):
+            prepare_pipeline_schedule_for_cuda_graph(
+                schedule,
+                args=(inputs.chunk(4)[0],) if has_first_stage else (),
+                kwargs={},
+                target=target.chunk(4)[0] if has_last_stage else None,
+                loss_kwargs={},
+            )
+
         train = wrap_fwd_bwd_with_cuda_graph(
             body,
             parameters=parameters,
             num_warmup_iterations=2,
+            prepare_for_capture=prepare_for_capture,
             name="train",
         )
         update = wrap_with_cuda_graph(
@@ -518,13 +533,6 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
                 loss = loss_fn(reference(x), y)
                 loss.backward()
                 expected_losses.append(loss.detach())
-            initialize_pipeline_schedule(
-                schedule,
-                args=(inputs.chunk(4)[0],) if has_first_stage else (),
-                kwargs={},
-                target=target.chunk(4)[0] if has_last_stage else None,
-                loss_kwargs={},
-            )
             actual_loss = train(inputs, target).clone()
             if has_last_stage:
                 torch.testing.assert_close(
@@ -548,24 +556,21 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
             update()
             reference_optimizer.step()
             prepared = [(x, y, {}) for x, y in zip(inputs.chunk(4), target.chunk(4))]
-            for run in range(2 if step == 1 else 1):
-                if step == 1 and run == 1:
-                    set_cuda_graph_capture_enabled(True)
-                with torch.no_grad():
-                    actual_eval = _validate_loss(
-                        validator, models, prepared, step=step + 1
-                    ).clone()
-                    if has_last_stage:
-                        expected_eval = torch.stack(
-                            [
-                                loss_fn(reference(x), y)
-                                for x, y in zip(inputs.chunk(4), target.chunk(4))
-                            ]
-                        ).sum()
-                        torch.testing.assert_close(
-                            actual_eval, expected_eval, rtol=0, atol=0
-                        )
-            assert (_manager._wrappers[-1]._graph is not None) == (step >= 1)
+            with torch.no_grad():
+                actual_eval = _validate_loss(
+                    validator, models, prepared, step=step + 1
+                ).clone()
+                if has_last_stage:
+                    expected_eval = torch.stack(
+                        [
+                            loss_fn(reference(x), y)
+                            for x, y in zip(inputs.chunk(4), target.chunk(4))
+                        ]
+                    ).sum()
+                    torch.testing.assert_close(
+                        actual_eval, expected_eval, rtol=0, atol=0
+                    )
+            assert (cuda_graph_manager._wrappers[-1]._graph is not None) == (step >= 1)
             for stage in stages:
                 assert not stage._forward_chunk_states
         for local, model in enumerate(models):

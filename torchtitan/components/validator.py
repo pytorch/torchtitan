@@ -25,10 +25,14 @@ from torchtitan.config import Configurable
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.cuda_graph import (
+    cuda_graph_manager,
     cuda_graphs_supported,
     wrap_with_cuda_graph,
 )
 from torchtitan.distributed.fsdp import finish_fsdp_eval
+from torchtitan.distributed.pipeline_parallel import (
+    prepare_pipeline_schedule_for_cuda_graph,
+)
 from torchtitan.models.base.model import BaseModel
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import MetricsProcessor
@@ -158,11 +162,65 @@ class Validator(BaseValidator):
         self.pp_has_last_stage = pp_has_last_stage
         self._run_eval = None
         self._cuda_graph_enabled = config.enable_cuda_graphs and cuda_graphs_supported()
-        if config.enable_cuda_graphs and not self._cuda_graph_enabled:
+        if self._cuda_graph_enabled:
+            # Keep training and optimizer eager until eval captures.
+            cuda_graph_manager.capture_allowed = False
+        elif config.enable_cuda_graphs:
             logger.warning(
                 "CUDA graph capture is only supported on NVIDIA CUDA; "
                 "using eager validation."
             )
+
+    def should_validate(self, step: int) -> bool:
+        """Return whether validation is scheduled or eval capture is pending.
+
+        With eval CUDA graphs enabled, validate after each training update until
+        eval captures. These passes warm up eval and capture it before training capture.
+        """
+        return super().should_validate(step) or (
+            self._cuda_graph_enabled and not cuda_graph_manager.capture_allowed
+        )
+
+    def _init_evaluate_fn(self, model_parts):
+        evaluate = partial(self._evaluate_body, model_parts)
+        if not self._cuda_graph_enabled:
+            return evaluate
+
+        if self._run_eval is None:
+
+            def prepare_for_capture(prepared) -> None:
+                """Prepare eval PP metadata outside capture.
+
+                Training changes the schedule mode after eval warmup. Rebuilding
+                metadata can synchronize with the CPU, which capture does not allow.
+                """
+                assert self.pp_schedule is not None
+                inputs, labels, kwargs = prepared[0]
+                with self.parallelism_context.activate_spmd():
+                    prepare_pipeline_schedule_for_cuda_graph(
+                        self.pp_schedule,
+                        args=(inputs,) if self.pp_has_first_stage else (),
+                        kwargs=kwargs,
+                        target=labels if self.pp_has_last_stage else None,
+                        loss_kwargs={},
+                        for_eval=True,
+                    )
+
+            # Keep the first validation pass eager, including all its groups.
+            self._run_eval = wrap_with_cuda_graph(
+                evaluate,
+                num_warmup_iterations=1,
+                prepare_for_capture=prepare_for_capture
+                if self.parallelism_context.pp_enabled
+                else None,
+                name="validation",
+            )
+        elif (
+            not cuda_graph_manager.capture_allowed
+            and cuda_graph_manager.all_wrappers_warmed_up
+        ):
+            cuda_graph_manager.capture_allowed = True
+        return self._run_eval
 
     def _evaluate_body(self, model_parts, prepared):
         with self.parallelism_context.activate_spmd():
@@ -216,17 +274,10 @@ class Validator(BaseValidator):
             sl.add_step_tag("eval")
             self.metrics_processor.reset()
 
-            evaluate = partial(self._evaluate_body, model_parts)
-            if self._cuda_graph_enabled:
-                if self._run_eval is None:
-                    self._run_eval = wrap_with_cuda_graph(
-                        evaluate, num_warmup_iterations=1, name="validation"
-                    )
-                evaluate = self._run_eval
-
             parallelism_context = self.parallelism_context
 
             accumulated_loss: torch.Tensor | None = None
+            evaluate = None
             device_type = utils.device_type
             total_global_valid_tokens = torch.zeros(
                 (), dtype=torch.int64, device=device_type
@@ -292,6 +343,8 @@ class Validator(BaseValidator):
                                 max_context_length=self.seq_len,
                             )
                         )
+                if evaluate is None:
+                    evaluate = self._init_evaluate_fn(model_parts)
                 loss_sum = evaluate(prepared)
 
                 if accumulated_loss is None:

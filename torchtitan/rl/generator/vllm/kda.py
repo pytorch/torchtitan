@@ -21,9 +21,8 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import LinearAttentionMetadata
-from torchtitan.models.common.attention.kda import InnerKDA
+from torchtitan.models.common.attention import InnerAttention, LinearAttentionMetadata
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import chunk_kernel_options
 from torchtitan.models.common.attn_gym import (
     bound_gate,
@@ -71,7 +70,7 @@ def _replay_state_shapes(
     )
 
 
-class VLLMInnerKDA(Module, MambaBase):
+class VLLMInnerKDA(InnerAttention, MambaBase):
     """vLLM replacement for ``InnerKDA`` using paged recurrent state.
 
     vLLM owns allocation, routing, prefix copies, and the ``[slot, H, V, K]`` recurrent
@@ -79,10 +78,8 @@ class VLLMInnerKDA(Module, MambaBase):
     storage directly without changing vLLM's cache-manager contract.
     """
 
-    attention_metadata_key = InnerKDA
-
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         num_heads: int
         head_dim: int
         conv_kernel_size: int = 4
@@ -327,9 +324,9 @@ def maybe_configure_kda_hybrid_model(
     state_shape = unique_state_shape(
         "KDA",
         (
-            (kda_config.num_heads, kda_config.head_dim, kda_config.conv_kernel_size)
+            (kda_config.n_heads, kda_config.head_dim, kda_config.conv_kernel_size)
             for layer in model_config.layers
-            if (kda_config := getattr(layer, "delta_attention", None)) is not None
+            if isinstance(kda_config := layer.attention, KDA.Config)
         ),
     )
     if state_shape is None:

@@ -53,7 +53,7 @@ ep must divide (dp_shard * cp * tp)
 Equivalently `dp_shard * cp * tp == edp_shard * ep`. Dense modules (attention,
 shared experts, embeddings) stay on the dense mesh. Routed experts use the
 sparse mesh: expert weights `Shard(0)` on `ep`, leftover FSDP on `edp_shard`.
-Placements are in [MoE sharding](../models/common/MOE_SHARDING.md).
+Placements are in [MoE sharding](../models/common/moe/SHARDING.md).
 
 ## Worked example
 
