@@ -43,9 +43,8 @@ EOS_ID = 200001
 
 _DEFAULT_CUTOFF_DATE = "2026-01-04"
 _REASONING_EFFORT = {
-    "minimal": 1,
-    "low": 16,
-    "medium": 64,
+    "low": 8,
+    "medium": 32,
     "high": 256,
     "xhigh": 512,
 }
@@ -202,13 +201,21 @@ def _render_tool_definitions(tools: list[dict[str, Any]]) -> str:
     ]
     for tool in tools:
         function = _tool_function(tool)
+        # As the published template prints a function: a schema without
+        # additionalProperties gets "additionalProperties": false appended, and
+        # missing parameters become an empty object schema.
+        parameters = function.get("parameters") or {}
+        if not parameters:
+            parameters = {"type": "object", "properties": {}}
+        if isinstance(parameters, dict) and "additionalProperties" not in parameters:
+            parameters = {**parameters, "additionalProperties": False}
         parts.append(
             "\n"
             + _json(
                 {
                     "name": function["name"],
                     "description": function.get("description") or "",
-                    "parameters": function.get("parameters") or {},
+                    "parameters": parameters,
                 }
             )
         )

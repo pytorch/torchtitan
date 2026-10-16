@@ -70,7 +70,7 @@ def test_generation_prompt_and_loss_mask(renderer, tokenizer):
     rendered = renderer.render(messages)
     text = tokenizer.decode(rendered.token_ids, skip_special_tokens=False)
     assert "Current date: 2026-01-15." in text
-    assert "Reasoning strength: 64." in text
+    assert "Reasoning strength: 32." in text
     assert "assistant to=self<|message|>thinking<|eom|>" in text
     assert text.endswith("assistant to=user<|message|>answer<|eot|>")
     sampled_text = tokenizer.decode(
@@ -179,6 +179,64 @@ def test_tool_call_roundtrip_and_result_name(renderer, tokenizer):
     assert '<tool_output name="search">\nfound\n</tool_output>' in tokenizer.decode(
         result, skip_special_tokens=False
     )
+
+
+@pytest.mark.parametrize(
+    "effort, strength", [("low", 8), ("medium", 32), ("high", 256), ("xhigh", 512)]
+)
+def test_reasoning_strength_matches_published_template(tokenizer, effort, strength):
+    renderer = MuseSparkRendererConfig(
+        current_date="2026-01-15", reasoning_effort=effort
+    ).build(tokenizer=tokenizer)
+    text = tokenizer.decode(
+        renderer.render_ids([{"role": "user", "content": "hi"}]),
+        skip_special_tokens=False,
+    )
+    assert f"Reasoning strength: {strength}." in text
+
+
+def test_rejects_reasoning_effort_missing_from_published_template():
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        MuseSparkRendererConfig(reasoning_effort="minimal")
+
+
+def test_function_schemas_match_published_template(renderer, tokenizer):
+    def function(name, **fields):
+        return {"type": "function", "function": {"name": name, **fields}}
+
+    tools = [
+        function(
+            "search",
+            parameters={"type": "object", "properties": {"q": {"type": "string"}}},
+        ),
+        function(
+            "open",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": True,
+            },
+        ),
+        function("now"),
+    ]
+    text = tokenizer.decode(
+        renderer.render_ids([{"role": "user", "content": "hi"}], tools=tools),
+        skip_special_tokens=False,
+    )
+    # A schema without additionalProperties gets it appended; one that has it is
+    # kept; missing parameters become an empty object schema.
+    assert (
+        '"parameters": {"type": "object", "properties": {"q": {"type": "string"}}, '
+        '"additionalProperties": false}}'
+    ) in text
+    assert (
+        '"parameters": {"type": "object", "properties": {}, '
+        '"additionalProperties": true}}'
+    ) in text
+    assert (
+        '{"name": "now", "description": "", "parameters": {"type": "object", '
+        '"properties": {}, "additionalProperties": false}}'
+    ) in text
 
 
 @pytest.mark.parametrize(
