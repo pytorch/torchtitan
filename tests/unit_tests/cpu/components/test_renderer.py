@@ -10,11 +10,14 @@ from dataclasses import dataclass
 import pytest
 from renderers import (
     AutoRendererConfig,
+    create_renderer,
+    CustomRendererConfig,
     DefaultRendererConfig,
     OffsetTokenizer,
     Qwen3RendererConfig,
     Tokenizer,
 )
+from renderers.qwen3 import Qwen3Renderer
 from torchtitan.components.renderer import (
     from_renderers,
     RendererConfig,
@@ -26,6 +29,18 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
 
 _TOKENIZER_PATH = "tests/assets/tokenizer"
+
+
+class InTreeQwen3Renderer(Qwen3Renderer):
+    """Stands in for an in-tree renderer selected through `CustomRendererConfig`."""
+
+    config_class = Qwen3RendererConfig
+
+
+# Also used by tests/rl/unit_tests/cpu/test_verifiers.py.
+IN_TREE_RENDERER_PATH = (
+    "tests.unit_tests.cpu.components.test_renderer.InTreeQwen3Renderer"
+)
 
 
 # --- RenderersConfigAdapter ---
@@ -86,6 +101,33 @@ def test_config_to_dict_is_json() -> None:
     assert value["renderer"]["renderers_config"]["name"] == "qwen3"
     assert value["renderer"]["renderers_config"]["enable_thinking"] is False
     json.dumps(value)
+
+
+def test_custom_renderer_builds_the_same_renderer_from_its_serialized_config() -> None:
+    config = from_renderers(
+        CustomRendererConfig(import_path=IN_TREE_RENDERER_PATH, enable_thinking=False)
+    )
+    tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
+    messages = [{"role": "user", "content": "hi"}]
+
+    renderer = config.build(tokenizer=tokenizer)
+
+    assert isinstance(renderer, InTreeQwen3Renderer)
+    # A Verifiers worker receives the config as JSON and builds from that alone.
+    worker_config = CustomRendererConfig.model_validate_json(
+        json.dumps(config.to_dict()["renderers_config"])
+    )
+    worker_renderer = create_renderer(
+        RendererTokenizerWrapper(tokenizer), worker_config
+    )
+    assert isinstance(worker_renderer, InTreeQwen3Renderer)
+    assert worker_renderer.render_ids(messages, add_generation_prompt=True) == (
+        renderer.render_ids(messages, add_generation_prompt=True)
+    )
+    # The option reaches the renderer's own config: enable_thinking changes the prompt.
+    assert renderer.render_ids(messages, add_generation_prompt=True) != from_renderers(
+        CustomRendererConfig(import_path=IN_TREE_RENDERER_PATH, enable_thinking=True)
+    ).build(tokenizer=tokenizer).render_ids(messages, add_generation_prompt=True)
 
 
 # --- RendererTokenizerWrapper ---

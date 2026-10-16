@@ -56,8 +56,7 @@ class SPMDGradientAccumulationConfig:
     FSDP. Otherwise these settings are ignored with a warning: SPMD without
     gradient accumulation keeps FSDP collectives inside
     ``FULL_FORWARD_BACKWARD``, and PP always runs them as explicit
-    ``UNSHARD`` and ``REDUCE_GRAD`` schedule actions without WGrad
-    accumulation fusion.
+    ``UNSHARD`` and ``REDUCE_GRAD`` schedule actions.
     """
 
     fsdp_param_unshard_mode: Literal[
@@ -106,7 +105,7 @@ class SPMDGradientAccumulationConfig:
     - ``enabled``
         - Fuse supported WGrad producers
 
-    With FSDP, fusion requires ``fsdp_grad_reduce_mode`` = ``last_microbatch``.
+    With SPMD FSDP, fusion requires ``fsdp_grad_reduce_mode`` = ``last_microbatch``.
     """
 
 

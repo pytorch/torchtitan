@@ -28,13 +28,12 @@ renderer test asserts equality with ``apply_chat_template`` across roles, tool s
 reasoning states. Treat that test as the spec -- if the template changes upstream, it
 fails first.
 
-Implements the ``renderers.Renderer`` Protocol. Muse Glimmer is not in the library yet, so
-``MuseGlimmerRendererConfig`` is a TorchTitan ``RendererConfig`` whose ``build`` constructs
-this class directly.
+Implements the ``renderers.Renderer`` Protocol. Muse Glimmer is not in the library yet;
+TorchTitan and Verifiers both select it with ``CustomRendererConfig``. Workers import
+this class and validate its options with ``MuseGlimmerRendererConfig``.
 
 TODO: upstream this to PrimeIntellect-ai/renderers (renderer -> renderers/muse_glimmer.py,
-atem.py -> a tool parser in renderers/parsers.py), then delete both files and select it
-through ``from_renderers`` like the other renderers.
+atem.py -> a tool parser in renderers/parsers.py), then delete both files.
 """
 
 from __future__ import annotations
@@ -42,10 +41,9 @@ from __future__ import annotations
 import datetime
 import json
 import re
-from dataclasses import dataclass, replace
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
-from renderers import Renderer
+from pydantic import StrictBool
 from renderers.base import (
     extract_message_tool_names,
     ParsedResponse,
@@ -56,19 +54,15 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
-from renderers.configs import ThinkingRetention
-
-from torchtitan.components.renderer import RendererConfig, RendererTokenizerWrapper
-
-from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from renderers.configs import BaseRendererConfig
 
 from .atem import parse_atem_tool_calls, render_atem_tool_call
 
 
-@dataclass(kw_only=True, slots=True)
-class MuseGlimmerRendererConfig(RendererConfig):
+class MuseGlimmerRendererConfig(BaseRendererConfig):
     """Muse Glimmer (harmony chat format + ATEM tool calls) renderer config."""
 
+    name: Literal["muse_glimmer"] = "muse_glimmer"
     reasoning_strength: str | None = None
     """Sizes the reasoning budget, rendered as ``Reasoning strength: <value>.``
 
@@ -90,7 +84,7 @@ class MuseGlimmerRendererConfig(RendererConfig):
     to be reproducible across days.
     """
 
-    retain_reasoning_in_history: bool = True
+    retain_reasoning_in_history: StrictBool = True
     """Whether prior assistant turns keep their ``reasoning_content`` when re-rendered.
 
     A ``to=self`` channel is emitted for any assistant message carrying
@@ -103,7 +97,7 @@ class MuseGlimmerRendererConfig(RendererConfig):
     checked what the model was trained against.
     """
 
-    answer_from_reasoning_fallback: bool = False
+    answer_from_reasoning_fallback: StrictBool = False
     """When the model produces only reasoning channels -- no user-facing content and no
     tool call -- treat the last non-empty reasoning line as the answer.
 
@@ -112,33 +106,15 @@ class MuseGlimmerRendererConfig(RendererConfig):
     empty ``content`` is unscoreable and the answer is often the final reasoning line.
     """
 
-    thinking_retention: ThinkingRetention | None = None
-    """The library-wide bridge policy override (`renderers.BaseRendererConfig.thinking_retention`).
-    ``None`` keeps the template's implied policy; ``"tool_cycle"`` re-renders at a new user query."""
-
-    def __post_init__(self) -> None:
-        # A dataclass does not validate values; these knobs change bridging and reward
-        # scoring with nothing visible in the rendered prompt, so check them here.
-        for name in ("reasoning_strength", "knowledge_cutoff", "current_date"):
-            value = getattr(self, name)
-            if value is not None and not isinstance(value, str):
-                raise TypeError(
-                    f"{name} must be str | None, got {type(value).__name__}"
-                )
-        for name in ("retain_reasoning_in_history", "answer_from_reasoning_fallback"):
-            value = getattr(self, name)
-            if type(value) is not bool:
-                raise TypeError(f"{name} must be bool, got {type(value).__name__}")
-        if self.thinking_retention not in (None, "tool_cycle", "all"):
-            raise ValueError(
-                "thinking_retention must be None, 'tool_cycle' or 'all', "
-                f"got {self.thinking_retention!r}"
-            )
-
-    def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
-        # Snapshot the config, as `Configurable.Config.build` does, so later edits to the
-        # recipe object cannot desynchronize full renders from bridging.
-        return MuseGlimmerRenderer(RendererTokenizerWrapper(tokenizer), replace(self))
+    _template_fields = frozenset(
+        {
+            "reasoning_strength",
+            "knowledge_cutoff",
+            "current_date",
+            "retain_reasoning_in_history",
+        }
+    )
+    _internal_fields = frozenset({"answer_from_reasoning_fallback"})
 
 
 # Muse Glimmer special tokens. The ids are checked against the tokenizer in __init__
@@ -351,10 +327,21 @@ class _Piece(NamedTuple):
 
 
 class MuseGlimmerRenderer:
-    def __init__(self, tokenizer, config: MuseGlimmerRendererConfig | None = None):
+    config_class = MuseGlimmerRendererConfig
+
+    @property
+    def is_prefix_stable(self) -> bool:
+        # An assistant tool-call terminator can depend on the next message's role.
+        return False
+
+    def __init__(
+        self,
+        tokenizer,
+        config: MuseGlimmerRendererConfig | None = None,
+    ):
         # Match the `(tokenizer, config)` constructor used by library renderers.
         self._tok = tokenizer
-        self._config = config or MuseGlimmerRendererConfig()
+        self._config = config if config is not None else MuseGlimmerRendererConfig()
         self._bos = tokenizer.bos_token or ""
         # `thinking_retention` is the library-wide bridge knob. Muse Glimmer's published
         # chat template renders reasoning_content for every assistant turn unconditionally
@@ -715,7 +702,13 @@ class MuseGlimmerRenderer:
 
     # ------------------------------------------------------------------ parsing
 
-    def parse_response(self, token_ids, *, tools=None) -> ParsedResponse:
+    def parse_response(
+        self,
+        token_ids: list[int],
+        *,
+        tools=None,
+        prompt_ids: list[int] | None = None,
+    ) -> ParsedResponse:
         """Parse a Muse Glimmer completion into (content, reasoning_content, tool_calls).
 
         Muse Glimmer emits harmony channels `to=<recipient><|message|><body>`:
@@ -724,6 +717,9 @@ class MuseGlimmerRenderer:
           - otherwise ("user", ...)  -> final answer content
         Validated against real generations.
         """
+        # The generation prompt ends after "assistant"; the sampled tokens contain
+        # the recipient and channel body, so there is no header to recover from it.
+        del prompt_ids
         text = self._tok.decode(token_ids, skip_special_tokens=False)
 
         reasoning_parts, content_parts, tool_calls = [], [], []

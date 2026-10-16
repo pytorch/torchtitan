@@ -87,11 +87,11 @@ def gated_rms_norm_sharding_config() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
         in_src_shardings={
-            "x": head_placement,
+            "input": head_placement,
             "gate": head_placement,
         },
         in_dst_shardings={
-            "x": head_placement,
+            "input": head_placement,
             "gate": head_placement,
         },
         out_src_shardings=head_placement,
