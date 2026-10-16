@@ -535,6 +535,8 @@ class Trainer(Configurable):
     def close(self) -> None:
         if hasattr(self, "dataloader") and self.dataloader:
             self.dataloader.close()
+        if hasattr(self, "validator") and self.validator:
+            self.validator.close()
         if hasattr(self, "engine"):
             self.engine.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:

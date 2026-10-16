@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -14,7 +14,6 @@ from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLo
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.components.loss import LossFunction
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable
 from torchtitan.config.parallelism import ParallelismConfig
@@ -50,6 +49,10 @@ class BaseValidator(Configurable):
     def should_validate(self, step: int) -> bool:
         return step == 1 or step % self.config.freq == 0
 
+    def close(self) -> None:
+        """Release resources retained across validation events."""
+        pass
+
 
 class Validator(BaseValidator):
     """
@@ -68,6 +71,8 @@ class Validator(BaseValidator):
         pp_has_first_stage: Whether this rank has the first PP stage (optional)
         pp_has_last_stage: Whether this rank has the last PP stage (optional)
     """
+
+    _validation_dataloader: BaseDataLoader | None = None
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseValidator.Config):
@@ -107,7 +112,7 @@ class Validator(BaseValidator):
         dp_rank: int,
         tokenizer: BaseTokenizer,
         parallelism_context: ParallelismContext,
-        loss_fn: LossFunction,
+        loss_fn: Callable[..., tuple[torch.Tensor, dict[str, torch.Tensor]]],
         metrics_processor: MetricsProcessor,
         seq_len: int,
         num_tokens_per_microbatch: int,
@@ -122,7 +127,9 @@ class Validator(BaseValidator):
         self.parallelism_context = parallelism_context
         self.loss_fn = loss_fn
         # A bounded validation run repeats data; steps=-1 consumes one finite pass.
-        self.dl_config = replace(config.dataloader, repeat=config.steps != -1)
+        self.dl_config = replace(
+            config.dataloader, repeat=config.steps != -1, shuffle=False
+        )
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
         if config.steps == -1 and self.dp_world_size > 1:
@@ -150,10 +157,24 @@ class Validator(BaseValidator):
     ) -> None:
         sl.add_step_tag("eval")
         self.metrics_processor.reset()
-        # Set model to eval mode
-        for model in model_parts:
-            model.eval()
+        training_modes = [
+            (module, module.training)
+            for model in model_parts
+            for module in model.modules()
+        ]
+        try:
+            for model in model_parts:
+                model.eval()
+            self._validate(model_parts, step)
+        except Exception:
+            self.close()
+            raise
+        finally:
+            for module, training in training_modes:
+                module.training = training
 
+    def _validate(self, model_parts: list[BaseModel], step: int) -> None:
+        """Run validation using a source retained across validation events."""
         parallelism_context = self.parallelism_context
 
         accumulated_loss: torch.Tensor | None = None
@@ -168,15 +189,16 @@ class Validator(BaseValidator):
             else 1
         )
 
-        validation_dataloader = self.dl_config.build(
-            dp_world_size=self.dp_world_size,
-            dp_rank=self.dp_rank,
-            tokenizer=self.tokenizer,
-            max_context_length=self.seq_len,
-            num_tokens_per_microbatch=self.num_tokens_per_microbatch,
-        )
-
-        validation_iterator = iter(iterate_and_close_dataloader(validation_dataloader))
+        if self._validation_dataloader is None:
+            self._validation_dataloader = self.dl_config.build(
+                dp_world_size=self.dp_world_size,
+                dp_rank=self.dp_rank,
+                tokenizer=self.tokenizer,
+                max_context_length=self.seq_len,
+                num_tokens_per_microbatch=self.num_tokens_per_microbatch,
+            )
+        self._validation_dataloader.restart()
+        validation_iterator = iter(self._validation_dataloader)
         while True:
             # pyrefly: ignore [missing-attribute, unsupported-operation]
             if self.config.steps != -1 and num_steps >= self.config.steps:
@@ -299,9 +321,11 @@ class Validator(BaseValidator):
 
         self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
 
-        # Set model back to train mode
-        for model in model_parts:
-            model.train()
+    def close(self) -> None:
+        """Close the validation source and its prefetch workers."""
+        if self._validation_dataloader is not None:
+            self._validation_dataloader.close()
+            self._validation_dataloader = None
 
 
 def iterate_and_close_dataloader(

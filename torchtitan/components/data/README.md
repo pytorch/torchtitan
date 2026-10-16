@@ -544,3 +544,18 @@ With effective DP greater than one, `repeat=False` is rejected because ranks can
 - effective DP degree
 
 Resume requires unchanged code, config, source contents, tokenizer, and effective DP degree.
+
+## Repeated Validation
+
+The generic validator builds its loader once, disables validation shuffling,
+and calls `restart()` before every validation event. `GrainDataLoader.restart()`
+stops prefetching and restores the initial iterator state in place, retaining
+the source and any storage client. Each event therefore starts from global
+index zero. A loader without restart support reports an error instead of
+silently rebuilding its source.
+
+`Trainer.close()` closes the retained validation loader and its workers. Model
+training modes are restored even when validation raises; failures close the
+retained loader before propagating the error. A bounded validation
+run uses `repeat=True` and the same positive step count on every DP rank;
+`steps=-1` continues to require effective DP1 for finite exhaustion.
