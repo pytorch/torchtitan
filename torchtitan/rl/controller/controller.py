@@ -349,16 +349,6 @@ class Controller(Configurable):
                     "to control optimizer-step boundaries.",
                     stacklevel=2,
                 )
-            if (
-                self.async_loop.batcher.rdma_min_tensor_bytes is not None
-                and not self.trainer.training.preprocess_microbatch_groups_lazily
-            ):
-                warnings.warn(
-                    "async_loop.batcher.rdma_min_tensor_bytes is set without "
-                    "trainer.training.preprocess_microbatch_groups_lazily=True: trainer "
-                    "ranks read all microbatches before forward/backward, with no overlap.",
-                    stacklevel=2,
-                )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
                 max_context_length = self.trainer.training.max_context_length
@@ -1200,7 +1190,8 @@ class Controller(Configurable):
                     # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over TCP).
                     # Sending the MonarchRDMAMicrobatches during the previous optim_step would hide it.
                     try:
-                        # Send each DP rank only its column of the grid.
+                        # Send each DP rank only its column of the grid. By value, each rank unpickles 1/dp of the
+                        # bytes; with RDMA, only the message of handles shrinks, which matters at high DP.
                         fwd_bwd_results = await asyncio.gather(
                             *(
                                 trainer_at_dp_rank.forward_backward.call(
