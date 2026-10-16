@@ -23,6 +23,7 @@ from torchtitan_recipes.overrides.helion_rope import (
 
 # Overrides are keyed in the registry by their factory's import path.
 _HELION_COMPLEX_KEY = "torchtitan_recipes.overrides.helion_rope.helion_complex_rope"
+_DEVICE = torch.accelerator.current_accelerator()
 
 
 class _RoPEHolder(Configurable):
@@ -103,13 +104,13 @@ class TestHelionComplexRoPEOverride(unittest.TestCase):
         torch.testing.assert_close(out_k, ref_k, rtol=0, atol=0)
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+@unittest.skipUnless(torch.accelerator.is_available(), "requires an accelerator")
 class TestHelionComplexRoPEKernel(unittest.TestCase):
-    """Fused-kernel numerics vs the PyTorch RoPE modules (helion + CUDA only)."""
+    """Fused-kernel numerics vs the PyTorch RoPE modules (helion + accelerator only)."""
 
     def setUp(self):
         torch.manual_seed(42)
-        self.device = torch.device("cuda")
+        self.device = _DEVICE
         self.dim = 128
         self.seqlen = 64
         self.complex = ComplexRoPE.Config(
@@ -421,10 +422,12 @@ class TestHelionComplexRoPEKernel(unittest.TestCase):
         )[..., ::2]
         self.assertFalse(_complex_eligible(q_bad_last_dim, xk, cache_real, pos))
 
-        if torch.cuda.device_count() >= 2:
-            # All-CUDA but split across devices: caught by the same-device check,
-            # not is_cuda (the kernel can't gather across devices).
-            self.assertFalse(_complex_eligible(xq, xk, cache_real, pos.to("cuda:1")))
+        if torch.accelerator.device_count() >= 2:
+            # All on the accelerator but split across devices: caught by the
+            # same-device check (the kernel can't gather across devices).
+            self.assertFalse(
+                _complex_eligible(xq, xk, cache_real, pos.to(f"{_DEVICE.type}:1"))
+            )
 
     def test_complex_custom_op_opcheck(self):
         from torchtitan_recipes.overrides.helion_rope import _helion_complex_rope_fwd
