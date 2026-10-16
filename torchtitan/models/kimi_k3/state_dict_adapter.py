@@ -266,7 +266,12 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
 
         # The released HF model contain these unused layer-0 attn res parameters.
         # TT omits them, so synthesize deterministic, placeholders to preserve strict HF state-dict loading.
-        if getattr(self.kimi_config.layers[0], "attention_res_norm", None) is None:
+        # Imported here: model.py imports this adapter before the class exists.
+        from .model import KimiK3TransformerBlock
+
+        layer0 = self.kimi_config.layers[0]
+        assert isinstance(layer0, KimiK3TransformerBlock.Config)
+        if layer0.attention_res_norm is None:
             norm_template_key = (
                 "language_model.model.layers.1.self_attention_res_norm.weight"
             )

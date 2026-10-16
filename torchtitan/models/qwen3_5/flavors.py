@@ -9,7 +9,6 @@
 import dataclasses
 from collections.abc import Callable
 from functools import partial
-from typing import cast
 
 import spmd_types as spmd
 import torch.nn as nn
@@ -30,9 +29,9 @@ from torchtitan.models.common import (  # noqa: F401
     RowParallelLinear,
     SiLU,
     Softmax,
+    TransformerBlock,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.attention.gdn import GDN, GDNKernel, InnerGDN
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
@@ -475,7 +474,7 @@ def _build_qwen35_layers(
     has_vision_encoder: bool,
 ) -> list[TransformerBlock.Config]:
     """Build sharded per-layer configs for dense Qwen3.5 models."""
-    layers: list[Qwen35TransformerBlock.Config] = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
 
@@ -526,7 +525,7 @@ def _build_qwen35_layers(
                 ),
             )
         )
-    return cast(list[TransformerBlock.Config], layers)
+    return layers
 
 
 def _build_qwen35_moe_layers(
@@ -553,7 +552,7 @@ def _build_qwen35_moe_layers(
     has_vision_encoder: bool,
 ) -> list[TransformerBlock.Config]:
     """Build sharded per-layer configs for MoE Qwen3.5 models with shared expert."""
-    layers: list[Qwen35TransformerBlock.Config] = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
 
@@ -625,7 +624,7 @@ def _build_qwen35_moe_layers(
                 ),
             )
         )
-    return cast(list[TransformerBlock.Config], layers)
+    return layers
 
 
 def _debugmodel(

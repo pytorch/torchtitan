@@ -10,7 +10,6 @@ import dataclasses
 import math
 from collections.abc import Callable
 from functools import partial
-from typing import cast
 
 import spmd_types as spmd
 import torch.nn as nn
@@ -22,8 +21,13 @@ from torchtitan.config.transform import (
 )
 
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common import ComplexRoPE, Embedding, Linear, RowParallelLinear
-from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common import (
+    ComplexRoPE,
+    Embedding,
+    Linear,
+    RowParallelLinear,
+    TransformerBlock,
+)
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     QKVLinear,
@@ -283,7 +287,7 @@ def _build_muse_glimmer_layers(
     hidden_dim = int(_FFN_DIM_MULTIPLIER * dim)
     # All four norms operate on the residual activation.
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
-    layers: list[MuseGlimmerTransformerBlock.Config] = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         layers.append(
             MuseGlimmerTransformerBlock.Config(
@@ -326,7 +330,7 @@ def _build_muse_glimmer_layers(
                 ),
             )
         )
-    return cast(list[TransformerBlock.Config], layers)
+    return layers
 
 
 def _vision_layer_norm(dim: int) -> LayerNorm.Config:

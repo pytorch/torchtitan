@@ -85,7 +85,8 @@ class DeepSeekMLAAttention(Attention):
             self.q_norm = config.q_norm.build()
             self.wq_b = config.wq_b.build()
 
-        # MLA projection shapes live on each Linear.Config; see make_mla_attention_config().
+        # TODO(fegin): revisit
+        # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3034078575
         self.wkv_a = config.wkv_a.build()
         self.kv_norm = config.kv_norm.build()
         self.wkv_b = config.wkv_b.build()

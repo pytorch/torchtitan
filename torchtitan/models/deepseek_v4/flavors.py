@@ -32,6 +32,7 @@ from torchtitan.models.common import (
     RoPE,
     RowParallelLinear,
     SqrtSoftplus,
+    TransformerBlock,
 )
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
@@ -40,7 +41,6 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_shared_expert_ffn_config,
 )
-from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
     dense_activation_placement,
@@ -513,7 +513,7 @@ def _build_v4_layers(
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     hc_pre_sharding = hc_pre_sharding_config(enable_sp=enable_sp)
 
-    layers: list[DeepSeekV4TransformerBlock.Config] = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         actual_layer_id = layer_offset + layer_id
         cr = compress_ratios[layer_id] if layer_id < len(compress_ratios) else 1
@@ -602,7 +602,7 @@ def _build_v4_layers(
                 ),
             )
         )
-    return cast(list[TransformerBlock.Config], layers)
+    return layers
 
 
 def _make_mtp_inner_block(
