@@ -37,6 +37,7 @@ from torchtitan.components.optim import (
     Optim,
     OptimizersContainer,
 )
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
@@ -532,6 +533,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     )
     if fake_backend:
         config.hf_assets_path = "./tests/assets/tokenizer"
+        config.tokenizer = HuggingFaceTokenizer.Config()
         config.dataloader = GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
