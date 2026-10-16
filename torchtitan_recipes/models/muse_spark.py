@@ -58,10 +58,10 @@ from torchtitan.models.common.attention import (
     SlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
-    KVAllGatherCPSlidingWindowFlexInnerAttention,
-    UlyssesCPFlexInnerAttention,
-    UlyssesCPSlidingWindowFlexInnerAttention,
+    AllGatherKVFlexInnerAttention,
+    AllGatherKVSlidingWindowFlexInnerAttention,
+    UlyssesFlexInnerAttention,
+    UlyssesSlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.moe import (
@@ -102,8 +102,8 @@ _MUSE_SPARK_SCALE_LOCAL_COMPILE_REGIONS = [
 def _muse_spark_context_parallel_transform() -> ContextParallelTransform:
     return ContextParallelTransform(
         inner_attention_map={
-            FlexInnerAttention: UlyssesCPFlexInnerAttention,
-            SlidingWindowFlexInnerAttention: (UlyssesCPSlidingWindowFlexInnerAttention),
+            FlexInnerAttention: UlyssesFlexInnerAttention,
+            SlidingWindowFlexInnerAttention: (UlyssesSlidingWindowFlexInnerAttention),
         },
     )
 
@@ -111,9 +111,9 @@ def _muse_spark_context_parallel_transform() -> ContextParallelTransform:
 def _muse_spark_kv_all_gather_context_parallel_transform() -> ContextParallelTransform:
     return ContextParallelTransform(
         inner_attention_map={
-            FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+            FlexInnerAttention: AllGatherKVFlexInnerAttention,
             SlidingWindowFlexInnerAttention: (
-                KVAllGatherCPSlidingWindowFlexInnerAttention
+                AllGatherKVSlidingWindowFlexInnerAttention
             ),
         },
     )
@@ -215,8 +215,8 @@ def _use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
             (
                 FlexInnerAttention.Config,
                 SlidingWindowFlexInnerAttention.Config,
-                KVAllGatherCPFlexInnerAttention.Config,
-                KVAllGatherCPSlidingWindowFlexInnerAttention.Config,
+                AllGatherKVFlexInnerAttention.Config,
+                AllGatherKVSlidingWindowFlexInnerAttention.Config,
             ),
         ):
             raise TypeError("Muse Spark scale recipes require Flex Attention")
