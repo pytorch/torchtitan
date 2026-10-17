@@ -285,6 +285,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         device_module.set_device(self.device)
         config = self.config
         set_batch_invariance(config.debug.batch_invariant)
+        # TODO: Remove this workaround once supported PyTorch builds ship
+        # NCCL >= 2.32.3.
         dist_utils.configure_nccl_for_ulysses(
             self.model_config,
             device_type=self.device.type,
