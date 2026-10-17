@@ -86,6 +86,8 @@ class AuxLoss(Module):
     ``torch_remat``-based checkpointing never re-runs the accumulation.
     """
 
+    _dtype_pinned_buffers = frozenset({"instance_acc"})
+
     # Metric groups are populated during model build, before PP splitting, so
     # every pipeline stage participates with its own (zero) accumulators and
     # every rank holds the same count.  That count is also the divisor in
