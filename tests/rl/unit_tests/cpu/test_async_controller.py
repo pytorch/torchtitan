@@ -248,7 +248,12 @@ def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
     )
     assert batch is not None
     assert group_is_trainable
-    cells = [microbatch for ranks in batch.microbatches for microbatch in ranks]
+    cells = [
+        microbatch
+        for group in batch.microbatch_groups
+        for ranks in group
+        for microbatch in ranks
+    ]
     assert len(cells) == 4  # 2 microbatches x 2 ranks
     for cell in cells:
         assert cell.loss_mask.any()
@@ -274,8 +279,8 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
 
     assert batch is not None
     assert group_is_trainable
-    assert len(batch.microbatches) == 1
-    microbatch = batch.microbatches[0][0]
+    assert len(batch.microbatch_groups) == 1
+    microbatch = batch.microbatch_groups[0][0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 0, 1, 2, 0, 1]
     assert not microbatch.padding_mask.any()
     torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([8]))
@@ -296,7 +301,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
     )
 
     assert batch is not None
-    microbatch = batch.microbatches[0][0]
+    microbatch = batch.microbatch_groups[0][0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
     torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([3]))
     assert microbatch.padding_mask.tolist() == [
@@ -331,7 +336,7 @@ def test_batcher_balances_packing_across_dp_ranks() -> None:
     assert group_is_trainable
     assert [
         [int((~rank.padding_mask).sum().item()) for rank in microbatch]
-        for microbatch in batch.microbatches
+        for (microbatch,) in batch.microbatch_groups
     ] == [[6, 6]]
 
 
@@ -443,9 +448,10 @@ def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> No
     )
 
     assert batch is not None
-    assert len(batch.microbatches) == 3
+    assert len(batch.microbatch_groups) == 3
     assert all(
-        microbatch.padding_mask.numel() == 6 for (microbatch,) in batch.microbatches
+        microbatch.padding_mask.numel() == 6
+        for ((microbatch,),) in batch.microbatch_groups
     )
     assert _metric_value(batch, "train_batch/padding_frac") == pytest.approx(4 / 9)
 
@@ -467,9 +473,9 @@ def test_document_limit_applies_to_each_local_microbatch() -> None:
 
     assert batch is not None
     assert group_is_trainable
-    assert len(batch.microbatches) == 2
+    assert len(batch.microbatch_groups) == 2
     num_documents = []
-    for (microbatch,) in batch.microbatches:
+    for ((microbatch,),) in batch.microbatch_groups:
         real_document_starts = (microbatch.positions == 0) & ~microbatch.padding_mask
         num_documents.append(int(real_document_starts.sum().item()))
     assert sorted(num_documents) == [2, 3]
@@ -490,8 +496,8 @@ def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
     )
 
     assert batch is not None
-    assert len(batch.microbatches) == 2
-    for (microbatch,) in batch.microbatches:
+    assert len(batch.microbatch_groups) == 2
+    for ((microbatch,),) in batch.microbatch_groups:
         real_document_starts = (microbatch.positions == 0) & ~microbatch.padding_mask
         assert int(real_document_starts.sum().item()) == 1
 

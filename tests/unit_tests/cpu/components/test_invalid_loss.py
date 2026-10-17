@@ -81,7 +81,7 @@ class TestInvalidLoss(unittest.TestCase):
         loop.metrics_processor.should_log.return_value = should_log
 
         trainer._run_forward_backward = MagicMock(
-            return_value=ForwardBackwardResult(torch.tensor(loss_value), [{}])
+            return_value=ForwardBackwardResult(torch.tensor(loss_value), [[{}]])
         )
         return loop
 
