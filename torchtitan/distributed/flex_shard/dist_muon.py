@@ -18,6 +18,7 @@ from typing import Any, cast, NoReturn, overload
 import torch
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor._utils import _compute_local_shape_and_global_offset
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
 
@@ -29,6 +30,7 @@ from ._optimizer_reshard_schedule import (
     _build_bucket_plans,
     _build_dim0_shard_redistribution_plan,
     _build_owned_redistribution_plan,
+    _device_mesh_coordinate,
     _device_mesh_ranks,
     _dtensor_storage_region_for_participant,
     _dtensor_storage_regions,
@@ -1037,22 +1039,27 @@ def _compute_ready_costs(
     compute_sharding = compute_layout.compute_sharding
     costs = {}
     for participant in participants:
-        try:
-            region = _dtensor_storage_region_for_participant(param, participant)
-        except RuntimeError:
-            return {}
+        # Compute-ready storage can shard a batch repeatedly or use strided
+        # shards. DTensor resolves that geometry, unlike the transport helper
+        # which requires one contiguous region along its redistribution axis.
+        local_shape, global_offsets = _compute_local_shape_and_global_offset(
+            param.shape,
+            param.device_mesh.shape,
+            _device_mesh_coordinate(param.device_mesh, participant),
+            param.placements,
+        )
         if type(compute_sharding) is BlockShard:
             views = _matrix_batch_views_from_shape(
-                torch.Size(region.shape),
+                torch.Size(local_shape),
                 matrix_row_sizes=compute_sharding.block_sizes,
-                logical_row_start=region.offsets[0],
+                logical_row_start=global_offsets[0],
             )
             costs[participant] = sum(
                 _estimate_muon_compute_cost(view.shape, ns_steps) for view in views
             )
-        elif math.prod(region.shape):
+        elif math.prod(local_shape):
             costs[participant] = _estimate_muon_compute_cost(
-                torch.Size(region.shape), ns_steps
+                torch.Size(local_shape), ns_steps
             )
     return costs
 
@@ -1064,7 +1071,14 @@ def _assign_balanced_compute_placements(
     cumulative_loads: Sequence[int],
     ns_steps_by_group: Sequence[int],
 ) -> tuple[tuple[_ComputePlacement | None, ...], tuple[int, ...]]:
-    """Balance temporary compute within and across ordered buckets."""
+    """Balance movable compute against fixed work in one redistribution bucket.
+
+    Compute-ready tensors and shardings with at least as many units as ranks
+    keep their placement. Owned tensors and smaller shardings share one LPT
+    queue, with each parameter's units assigned to distinct participants.
+    Current-bucket work takes priority over bytes, then cumulative work in
+    earlier redistribution buckets. Entirely local buckets bypass planning.
+    """
     participants = group.participants
     num_participants = len(participants)
     position_of = {
@@ -1125,7 +1139,12 @@ def _assign_balanced_compute_placements(
             )
 
     heap = [
-        (bucket_loads[position], 0, cumulative_loads[position], position)
+        (
+            bucket_loads[position],
+            0,
+            cumulative_loads[position] + bucket_loads[position],
+            position,
+        )
         for position in range(num_participants)
     ]
     heapq.heapify(heap)
