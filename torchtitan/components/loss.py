@@ -575,12 +575,15 @@ class ChunkedLossWrapper(BaseLoss):
         with ``_skip_lm_head=True``. Tensor inputs must be paired with tensor
         labels; tuple inputs must contain one labels tensor per prediction.
 
-        When ``pred`` does not require grad (e.g. validation), runs chunked
-        forward only -- no per-chunk backward or gradient accumulation.
+        Per-chunk backward runs when the decoder outputs or loss require
+        gradients, including training the lm_head on frozen decoder outputs.
+        Under ``no_grad``, runs chunked forward only.
 
         Returns a differentiable loss and metrics. When ``.backward()`` is called
         on the loss, it triggers backward through the decoder via a custom
-        autograd Function.
+        autograd Function. With frozen decoder outputs and a trainable head,
+        head gradients are already accumulated. The returned loss is a leaf
+        whose backward accumulates only its own gradient.
         """
         from torch.distributed._composable.fsdp import FSDPModule
 
@@ -609,6 +612,7 @@ class ChunkedLossWrapper(BaseLoss):
                 "All chunked-loss predictions must agree on whether gradients "
                 "are required."
             )
+        requires_grad = requires_grad and torch.is_grad_enabled()
 
         # Chunking operates on the local tensor. Equal chunk sizes match
         # GradAccumulator's sequential slice
@@ -660,6 +664,7 @@ class ChunkedLossWrapper(BaseLoss):
                     dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
                 )
             metrics: dict[str, torch.Tensor] = {}
+            requires_backward = False
 
             fsdp_enabled = isinstance(lm_head, FSDPModule)
             # Disable FSDP reshard on lm_head to keep its weight unsharded across
@@ -715,22 +720,25 @@ class ChunkedLossWrapper(BaseLoss):
                 metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
                 total_loss = total_loss + chunk_loss.detach()
 
-                if requires_grad:
+                if requires_grad or chunk_loss.requires_grad:
+                    requires_backward = True
                     with spmd.no_typecheck():
                         chunk_loss.backward()
-                        for h_chunk, grad_accumulator in zip(
-                            h_chunks, grad_accumulators, strict=True
-                        ):
-                            assert h_chunk.grad is not None
-                            grad_accumulator.add(h_chunk.grad)
-                            h_chunk.grad = None
+                        if requires_grad:
+                            for h_chunk, grad_accumulator in zip(
+                                h_chunks, grad_accumulators, strict=True
+                            ):
+                                assert h_chunk.grad is not None
+                                grad_accumulator.add(h_chunk.grad)
+                                h_chunk.grad = None
 
             if fsdp_enabled:
                 lm_head.set_reshard_after_forward(True)
                 lm_head.set_reshard_after_backward(True)
                 lm_head.reshard()
             if not requires_grad:
-                return total_loss, metrics
+                # Scaling this leaf cannot rescale already accumulated head gradients.
+                return total_loss.requires_grad_(requires_backward), metrics
 
             accumulated_grads = tuple(
                 grad_accumulator.buffer.to(hidden_state.dtype)
