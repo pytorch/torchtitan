@@ -32,6 +32,7 @@ def download_hf_assets(
         - vocab.json - JSON vocabulary files
         - merges.txt - BPE merge rules (GPT-2, RoBERTa style)
         - special_tokens_map.json - Special token mappings
+        - chat_template.jinja - Chat template stored outside tokenizer_config.json
     - safetensors
         - *.safetensors - Modern Huggingface model weights format for fast loading
         - model.safetensors.index.json - Contains mapping from hf fqn to file name
@@ -78,6 +79,7 @@ def download_hf_assets(
             "vocab.json",
             "merges.txt",
             "special_tokens_map.json",
+            "chat_template.jinja",
         ],
         "safetensors": ["*.safetensors", "*model.safetensors.index.json"],
         "index": ["*model.safetensors.index.json"],
