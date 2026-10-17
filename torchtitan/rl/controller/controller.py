@@ -1124,7 +1124,7 @@ class Controller(Configurable):
                     step_timer.record("timing/step/forward_backward"),
                 ):
                     # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over TCP).
-                    # Sending the MonarchRDMAMicrobatches during the previous optim_step would hide it.
+                    # Sending the RDMAMicrobatches during the previous optim_step would hide it.
                     try:
                         # Send each DP rank only its column of the grid.
                         fwd_bwd_results = await asyncio.gather(
