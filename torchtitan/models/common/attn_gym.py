@@ -120,7 +120,17 @@ _EXPORTS = {
 }
 
 
+# Import errors raised from inside attn_gym, keyed by the attn_gym module that
+# raised them. The package is installed, but a kernel backend it imports at
+# module import time (cutlass, triton, ...) is not available on this platform.
+_BACKEND_ERRORS: dict[str, ModuleNotFoundError] = {}
+
+
 def _raise_missing(*args: Any, **kwargs: Any) -> NoReturn:
+    for error in _BACKEND_ERRORS.values():
+        raise ModuleNotFoundError(
+            str(error), name=error.name, path=error.path
+        ) from error
     raise ModuleNotFoundError(
         "Attention Gym kernels require attn_gym. "
         "Install it with: python -m pip install 'attn-gym[linear,cudnn]==0.0.16'.",
@@ -140,8 +150,14 @@ def _load_module(name: str) -> ModuleType | None:
     try:
         return import_module(name)
     except ModuleNotFoundError as error:
-        if error.name != "attn_gym":
+        if error.name == "attn_gym":
+            return None
+        if name.split(".")[0] != "attn_gym":
             raise
+        # attn_gym is installed but this module needs a backend that is not.
+        # Keep the models importable and report the backend when a kernel is
+        # built, the same as when attn_gym itself is missing.
+        _BACKEND_ERRORS.setdefault(name, error)
         return None
 
 
@@ -155,5 +171,5 @@ def __getattr__(name: str) -> Any:
 
 
 def require_attn_gym() -> None:
-    if _load_module("attn_gym") is None:
+    if _BACKEND_ERRORS or _load_module("attn_gym") is None:
         _raise_missing()

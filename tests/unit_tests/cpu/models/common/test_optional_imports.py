@@ -238,3 +238,83 @@ import torchtitan.models.common.lora
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("missing_backend", ["cutlass", "triton"])
+def test_common_attention_imports_with_broken_attention_gym_backend(
+    missing_backend: str,
+) -> None:
+    """An installed attn_gym whose kernel backend is missing stays importable."""
+    script = r"""
+import importlib
+import importlib.abc
+import sys
+from types import ModuleType
+
+missing_backend = sys.argv[1]
+
+# attn_gym itself imports, as it does on a platform without wheels for the
+# backend, but every attn_gym module fails on the backend import.
+package = ModuleType("attn_gym")
+package.__path__ = []
+sys.modules["attn_gym"] = package
+
+
+class BreakAttentionGymBackend(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname.startswith("attn_gym."):
+            raise ModuleNotFoundError("blocked dependency", name=missing_backend)
+        return None
+
+
+sys.meta_path.insert(0, BreakAttentionGymBackend())
+
+import torchtitan.config.transform
+import torchtitan.models.common
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.attention import (
+    cp_gdn,
+    cp_kda,
+    cp_linear_attention,
+    gdn,
+    kda,
+)
+from torchtitan.models.common.attn_gym import _MissingKernel, require_attn_gym
+from spmd_types._local_registration import _LOCAL_AUTOGRAD_FUNCTIONS
+
+assert _MissingKernel not in _LOCAL_AUTOGRAD_FUNCTIONS
+
+for kernel in (
+    kda.chunk_kda,
+    gdn.chunk_gdn,
+    cp_kda.context_parallel_kda,
+    cp_gdn.context_parallel_gdn,
+    cp_linear_attention.ContextParallelRouting.from_fragments,
+    require_attn_gym,
+    kda.KDAKernel.Config().build,
+    gdn.GDNKernel.Config().build,
+):
+    try:
+        kernel()
+    except ModuleNotFoundError as error:
+        assert error.name == missing_backend, error
+        assert str(error) == "blocked dependency", error
+    else:
+        raise AssertionError("A kernel with a missing backend ran")
+
+for model_name in (
+    "llama3", "qwen3", "deepseek_v3", "deepseek_v4", "gpt_oss",
+    "muse_glimmer", "qwen3_5", "kimi_k3",
+):
+    model = importlib.import_module(f"torchtitan.models.{model_name}")
+    model.build_model_config(
+        "debugmodel", seq_len=128, parallelism=ParallelismConfig()
+    )
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, missing_backend],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
