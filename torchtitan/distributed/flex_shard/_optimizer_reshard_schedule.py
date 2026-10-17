@@ -911,17 +911,26 @@ def _redistribution_group(mesh: DeviceMesh) -> _RedistributionGroup:
     )
 
 
-def _dtensor_storage_region_for_participant(
-    tensor: DTensor,
+def _device_mesh_coordinate(
+    mesh: DeviceMesh,
     participant: int,
-) -> _TensorRegion:
-    mesh_shape = tuple(tensor.device_mesh.shape)
-    flat_mesh_index = _device_mesh_ranks(tensor.device_mesh).index(participant)
+) -> list[int]:
+    mesh_shape = tuple(mesh.shape)
+    flat_mesh_index = _device_mesh_ranks(mesh).index(participant)
     mesh_coordinate = [0] * len(mesh_shape)
     for mesh_axis in range(len(mesh_shape) - 1, -1, -1):
         flat_mesh_index, mesh_coordinate[mesh_axis] = divmod(
             flat_mesh_index, mesh_shape[mesh_axis]
         )
+    return mesh_coordinate
+
+
+def _dtensor_storage_region_for_participant(
+    tensor: DTensor,
+    participant: int,
+) -> _TensorRegion:
+    mesh_shape = tuple(tensor.device_mesh.shape)
+    mesh_coordinate = _device_mesh_coordinate(tensor.device_mesh, participant)
 
     local_shape = list(tensor.shape)
     global_offsets = [0] * tensor.ndim
