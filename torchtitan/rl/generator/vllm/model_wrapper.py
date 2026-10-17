@@ -84,6 +84,7 @@ def _replace_vllm_layer_configs(model_config):
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
                 value_head_dim=value_head_dim,
+                scale=attention_cfg.softmax_scale,
                 sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
                 sharding_config=attention_cfg.inner_attention.sharding_config,
             )

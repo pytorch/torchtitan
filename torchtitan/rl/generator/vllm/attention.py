@@ -417,6 +417,7 @@ class VLLMInnerAttention(InnerAttention):
         v_THV: torch.Tensor,
         *,
         attention_metadata: None = None,
+        scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Run vLLM paged attention on local (non-DTensor) tensors.
@@ -425,6 +426,7 @@ class VLLMInnerAttention(InnerAttention):
             q_THK: ``(num_tokens, num_heads, query/key_head_dim)``
             k_THK: ``(num_tokens, num_kv_heads, query/key_head_dim)``
             v_THV: ``(num_tokens, num_kv_heads, value_head_dim)``
+            scale: Optional per-call scale; must match the scale set at construction.
 
         Returns:
             ``(num_tokens, num_heads, value_head_dim)``.
@@ -433,6 +435,11 @@ class VLLMInnerAttention(InnerAttention):
             raise ValueError(
                 "VLLMInnerAttention does not support attention_metadata; vLLM "
                 "manages causal masking and the KV-cache internally."
+            )
+
+        if scale is not None and scale != self.scale:
+            raise ValueError(
+                f"Model attention scale {scale} != vLLM scale {self.scale}"
             )
 
         if self.value_head_dim != self.head_dim:
