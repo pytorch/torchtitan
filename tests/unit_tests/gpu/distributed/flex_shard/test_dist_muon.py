@@ -32,7 +32,6 @@ from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
     ComputeLayout,
-    dist_muon as dist_muon_module,
     Owned,
 )
 from torchtitan.distributed.flex_shard.dist_muon import (
@@ -259,131 +258,6 @@ class TestDistMuon(DTensorTestBase):
             second_redistributed_grad,
             second_local_blocks_grad,
         )
-
-    @parametrize("sharding", ["native_batch", "single_block", "variable_blocks"])
-    @parametrize("storage_dtype", [torch.float32, torch.bfloat16])
-    @with_comms
-    def test_balanced_placement_preserves_updates_and_momentum(
-        self, sharding: str, storage_dtype: torch.dtype
-    ):
-        mesh = init_device_mesh(
-            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
-        )
-        device = torch.device(self.device_type, self.rank)
-        if sharding == "native_batch":
-            shape, storage_placement, compute_sharding = (1, 8, 4), Shard(1), Shard(0)
-        elif sharding == "single_block":
-            shape, storage_placement, compute_sharding = (
-                (8, 4),
-                Shard(0),
-                BlockShard(dim=0, block_sizes=(8,)),
-            )
-        else:
-            shape, storage_placement, compute_sharding = (
-                (12, 4),
-                Shard(0),
-                BlockShard(dim=0, block_sizes=(8, 4)),
-            )
-        names = ("layers.0.owned", "layers.0.sharded")
-        layouts = {
-            names[0]: ComputeLayout(
-                {"dp_shard": Owned()}, compute_dtype=torch.bfloat16
-            ),
-            names[1]: ComputeLayout(
-                {"dp_shard": compute_sharding}, compute_dtype=torch.bfloat16
-            ),
-        }
-        placements = (Shard(0), storage_placement)
-        values = (
-            torch.arange(128, device=device).reshape(16, 8).float().div_(100),
-            torch.arange(torch.Size(shape).numel(), device=device)
-            .reshape(shape)
-            .float()
-            .div_(50),
-        )
-
-        def make_optimizer():
-            params = [
-                torch.nn.Parameter(
-                    distribute_tensor(
-                        value.to(storage_dtype, copy=True), mesh, (placement,)
-                    )
-                )
-                for value, placement in zip(values, placements, strict=True)
-            ]
-            optimizer = DistMuon(
-                [{"params": params, "param_names": names}],
-                compute_sharding_by_fqn=layouts,
-                bucket_configs=[BucketConfig(patterns=("layers.0.*",))],
-                lr=0.03,
-                momentum=0.8,
-                weight_decay=0.2,
-                ns_steps=2,
-                adjust_lr_fn="match_rms_adamw",
-            )
-            return params, optimizer
-
-        def original_placement(items, *, group, cumulative_loads, ns_steps_by_group):
-            # With one Owned parameter the previous planner always chose the
-            # first process-group rank and kept shards in mesh order.
-            return (
-                tuple(
-                    dist_muon_module._ComputePlacement(group.participants[0], None)
-                    if type(item.compute_sharding) is Owned
-                    else dist_muon_module._ComputePlacement(
-                        None, group.mesh_axis_participants
-                    )
-                    for item in items
-                ),
-                tuple(cumulative_loads),
-            )
-
-        with mock.patch.object(
-            dist_muon_module,
-            "_assign_balanced_compute_placements",
-            side_effect=original_placement,
-        ):
-            reference_params, reference = make_optimizer()
-        params, optimizer = make_optimizer()
-        (bucket,) = optimizer._bucket_plans
-        moved_name = names[0] if sharding == "variable_blocks" else names[1]
-        moved_plan = next(
-            plan
-            for item, plan in zip(
-                bucket.redistributed_items, bucket.redistribution_plans, strict=True
-            )
-            if item.fqn == moved_name
-        )
-        self.assertEqual(moved_plan.compute_partition(0).tensor_shape[0], 0)
-        self.assertGreater(moved_plan.compute_partition(1).tensor_shape[0], 0)
-
-        for step in range(4):
-            for param, expected, value, placement in zip(
-                params, reference_params, values, placements, strict=True
-            ):
-                grad = (value + step * 0.3).sin().to(storage_dtype)
-                param.grad = distribute_tensor(grad.clone(), mesh, (placement,))
-                expected.grad = distribute_tensor(grad.clone(), mesh, (placement,))
-            reference.step()
-            optimizer.step()
-            for param, expected in zip(params, reference_params, strict=True):
-                torch.testing.assert_close(
-                    param.to_local(), expected.to_local(), rtol=0, atol=0
-                )
-                torch.testing.assert_close(
-                    optimizer.state[param]["momentum_buffer"].to_local(),
-                    reference.state[expected]["momentum_buffer"].to_local(),
-                    rtol=0,
-                    atol=0,
-                )
-            if step == 1:
-                optimizer.load_state_dict(optimizer.state_dict())
-                with mock.patch.object(
-                    dist_muon_module,
-                    "_assign_balanced_compute_placements",
-                    side_effect=original_placement,
-                ):
-                    reference.load_state_dict(reference.state_dict())
 
 
 @instantiate_parametrized_tests

@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DistMuon：联合计算放置 · PR #5468</title>
+  <style>
+    :root { color-scheme: light; --ink:#182c39; --muted:#60717c; --line:#dce4e5; --paper:#f2f5f3; --fixed:#9daeb4; --blocks:#167d72; --native:#b76b27; --owned:#5363b9; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font:15px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    main { max-width:1160px; margin:auto; padding:40px 28px; }
+    a { color:#315c8c; text-underline-offset:3px; }
+    h1,h2,h3,p { margin:0; }
+    h1 { margin:10px 0 12px; font-size:clamp(26px,4vw,40px); line-height:1.3; letter-spacing:-.8px; }
+    h2 { font-size:20px; line-height:1.4; }
+    h3 { font-size:16px; }
+    .eyebrow { color:var(--blocks); font-size:12px; font-weight:750; letter-spacing:1.2px; }
+    .intro { max-width:850px; color:var(--muted); }
+    .notice { margin-top:20px; padding:12px 16px; border-left:3px solid var(--blocks); background:#e7efeb; font-size:13px; }
+    .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin:24px 0; }
+    .metric,.panel,.flow { background:white; border:1px solid var(--line); border-radius:14px; }
+    .metric { padding:18px 22px; }
+    .metric small { display:block; color:var(--muted); font-size:12px; }
+    .metric strong { display:block; margin-top:4px; font-size:29px; font-weight:650; font-variant-numeric:tabular-nums; }
+    .metric strong span { color:var(--blocks); }
+    .controls { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:18px; }
+    .controls label { font-weight:650; }
+    input[type=range] { flex:1; min-width:160px; accent-color:var(--blocks); }
+    button { border:1px solid #b8c9c6; border-radius:8px; background:white; color:var(--ink); padding:7px 12px; cursor:pointer; font:inherit; }
+    button:hover:not(:disabled) { background:#e7efeb; }
+    button:disabled { opacity:.4; cursor:default; }
+    button:focus-visible,a:focus-visible,input:focus-visible { outline:3px solid #b76b27; outline-offset:3px; }
+    output { min-width:64px; font-variant-numeric:tabular-nums; }
+    .charts { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+    .panel { padding:24px; min-width:0; }
+    .panel-head { display:flex; gap:12px; justify-content:space-between; align-items:start; }
+    .badge { white-space:nowrap; border-radius:20px; padding:3px 9px; font-size:11px; background:#eef1f2; color:var(--muted); }
+    .badge.new { background:#e5f2ec; color:var(--blocks); }
+    .sub { margin:7px 0 20px; font-size:13px; color:var(--muted); }
+    .rank { display:grid; grid-template-columns:44px 1fr 32px; align-items:center; gap:10px; padding:10px 0; }
+    .rank-label,.rank-total { font-size:13px; font-variant-numeric:tabular-nums; }
+    .rank-total { text-align:right; font-weight:750; }
+    .track { height:38px; background:repeating-linear-gradient(to right,#eff3f3 0,#eff3f3 calc(25% - 1px),#dce4e5 calc(25% - 1px),#dce4e5 25%); border-radius:5px; display:flex; overflow:hidden; }
+    .segment { display:flex; align-items:center; justify-content:center; flex:none; color:white; font-size:11px; white-space:nowrap; overflow:hidden; border-right:1px solid #ffffff55; }
+    .segment.fixed { background:var(--fixed); color:#162e38; }
+    .segment.blocks { background:var(--blocks); }
+    .segment.native { background:var(--native); }
+    .segment.owned { background:var(--owned); }
+    .axis { display:flex; justify-content:space-between; margin:4px 42px 0 54px; color:var(--muted); font-size:10px; }
+    .legend { display:flex; flex-wrap:wrap; gap:18px; margin:18px 0 8px; color:var(--muted); font-size:12px; }
+    .legend span { display:inline-flex; align-items:center; gap:6px; }
+    .dot { height:9px; width:9px; border-radius:2px; background:var(--fixed); }
+    .step-note { min-height:62px; padding:12px 0; font-size:14px; }
+    .detail { margin-top:22px; }
+    .table-scroll { overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; font-size:13px; text-align:left; margin-top:14px; }
+    th { color:var(--muted); font-weight:600; }
+    th,td { padding:11px 12px; border-bottom:1px solid #e6eceb; }
+    th:first-child,td:first-child { padding-left:0; }
+    td code { white-space:nowrap; }
+    tr.pending { opacity:.4; }
+    tr.current { background:#eff6f2; }
+    code { font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .flow-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:14px; }
+    .flow { padding:20px; }
+    .flow b { display:block; font-size:11px; color:var(--blocks); letter-spacing:1px; margin-bottom:8px; }
+    .flow p { margin-top:9px; font-size:13px; color:var(--muted); }
+    .flow code { display:block; overflow-wrap:anywhere; margin-top:12px; color:#315c8c; }
+    .scope { margin-top:18px; color:var(--muted); font-size:13px; }
+    footer { margin-top:28px; padding-top:18px; border-top:1px solid var(--line); color:var(--muted); font-size:12px; }
+    footer p+p { margin-top:6px; }
+    noscript { display:block; padding:15px; background:#fff5df; }
+    @media(max-width:760px) { main { padding:25px 16px; } .charts,.flow-grid { grid-template-columns:1fr; } .panel { padding:18px; } .metric { padding:12px; } .metric strong { font-size:22px; } .metric small { font-size:11px; } .controls { gap:9px; } .controls label { flex-basis:100%; } input[type=range] { min-width:100px; } output { min-width:40px; } }
+    @media(max-width:420px) { .metrics { gap:7px; } .metric strong { font-size:16px; white-space:nowrap; } .rank { grid-template-columns:36px 1fr 28px; gap:6px; } .axis { margin-left:42px; margin-right:34px; } }
+    @media(max-width:360px) { .metrics { grid-template-columns:1fr; } .metric strong { font-size:25px; } }
+    @media print { body { background:white; } main { padding:12px; } .controls { display:none; } .panel,.flow,.metric { break-inside:avoid; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">TORCHTITAN / RFC #5278 · PART 2</p>
+    <h1>同样的矩阵，更均匀的计算放置</h1>
+    <p class="intro">旧 planner 只平衡 Owned，分片任务仍从前面的 rank 开始分配。新 planner 先计入固定本地工作，再将 Owned、Shard 和 BlockShard 放进同一个 LPT 队列，减少最忙 rank 的计算负载。</p>
+    <p class="notice">这是核心 CPU 用例的<strong>调度成本可视化</strong>，不是 GPU 性能测试。成本来自现有 NS 估算公式；柱长不代表毫秒，也不能直接换算成训练加速比。</p>
+  </header>
+  <noscript>完整分配结果：旧策略相对负载 [78, 11, 3, 0]，新策略 [30, 11, 27, 24]。总工作量均为 92。启用 JavaScript 可逐步查看任务分配。</noscript>
+  <section class="metrics" aria-label="估算负载对比">
+    <div class="metric"><small>最忙 rank · 旧 → 新</small><strong id="peak">78 → <span>30</span></strong><small>相对 NS 成本</small></div>
+    <div class="metric"><small>不均衡度 · max / mean</small><strong id="imbalance">3.39 → <span>1.30</span></strong><small>1.00 表示完全均衡</small></div>
+    <div class="metric"><small>总工作量 · 旧 = 新</small><strong id="total">92 = <span>92</span></strong><small>改变分配，不减少矩阵计算</small></div>
+  </section>
+  <div class="controls">
+    <label for="step">逐步查看分配</label>
+    <button id="previous" type="button" aria-label="上一步">上一步</button>
+    <input id="step" type="range" min="0" max="4" value="4" aria-label="已安排的任务数">
+    <button id="next" type="button" aria-label="下一步">下一步</button>
+    <output id="step-label" for="step">4 / 4</output>
+  </div>
+  <section class="charts" aria-label="各 rank 的估算成本">
+    <div class="panel">
+      <div class="panel-head"><h2>旧：各自决定放置</h2><span class="badge">Owned-only LPT</span></div>
+      <p class="sub">Owned 不知道已有负载；Shard / BlockShard 保持固定 rank 顺序。</p>
+      <div id="old-chart"></div><div class="axis" aria-hidden="true"><span>0</span><span>20</span><span>40</span><span>60</span><span>80</span></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>新：考虑固定负载的联合分配</h2><span class="badge new">Joint LPT</span></div>
+      <p class="sub">先统计实际本地工作，再把大的可移动任务分给当前负载最低的 rank。</p>
+      <div id="new-chart"></div><div class="axis" aria-hidden="true"><span>0</span><span>20</span><span>40</span><span>60</span><span>80</span></div>
+    </div>
+  </section>
+  <div class="legend" aria-label="图例">
+    <span><i class="dot"></i>固定本地工作</span>
+    <span><i class="dot" style="background:var(--blocks)"></i>BlockShard</span>
+    <span><i class="dot" style="background:var(--native)"></i>Shard</span>
+    <span><i class="dot" style="background:var(--owned)"></i>Owned</span>
+  </div>
+  <p class="step-note" id="step-note" aria-live="polite"></p>
+  <section class="panel detail">
+    <h2>一个核心用例，四个可移动任务</h2>
+    <p class="sub">2 × 4 mesh 中的一个 ep 通信组：rank 0–3。固定专家张量为 [10, 4, 4]，连续两次 Shard(0) 后，该组各 rank 分别持有 [2, 2, 1, 0] 个完整矩阵。</p>
+    <div class="table-scroll"><table>
+      <thead><tr><th>任务</th><th>逻辑矩阵</th><th>相对成本</th><th>旧 rank</th><th>新 rank</th></tr></thead>
+      <tbody id="tasks"></tbody>
+    </table></div>
+    <p class="scope">固定专家的初始成本为 [6, 6, 3, 0]。NS 步数为 5；每个成本单位对应 320 个估算单位。这里只观察放置决策，任务展示顺序不是 GPU 执行时间线。</p>
+  </section>
+  <section class="detail" aria-label="代码如何实现">
+    <h2>代码只改变计算放置</h2>
+    <div class="flow-grid">
+      <article class="flow"><b>01 / COUNT</b><h3>读出真实固定负载</h3><p>复用 PyTorch 的 DTensor 几何计算，处理重复分片和 strided shard，避免把本地专家数估错。</p><code>_compute_ready_costs</code></article>
+      <article class="flow"><b>02 / ASSIGN</b><h3>统一安排可移动任务</h3><p>按 NS 成本降序安排。选择 rank 时先比较当前 bucket 负载，再比较字节数和历史负载；同一参数的块分配给不同 rank。</p><code>_assign_balanced_compute_placements</code></article>
+      <article class="flow"><b>03 / ROUTE</b><h3>复用现有通信计划</h3><p>返回 owner 或分片 rank 顺序，由已有路由生成器完成往返重分布。矩阵边界、NS 运算与参数存储语义保持原样。</p><code>_ComputePlacement</code></article>
+    </div>
+    <p class="scope">范围：只移动已经需要重分布、且块数少于参与 rank 数的分片任务，以及 Owned 参数。本地可直接计算的工作保持原位；块数不少于 rank 数时也保留原分片。跨 bucket 累计量仅用于打破平局，整个 step 不做全局最优求解。改变 owner 可能改变通信量，仍需实测。</p>
+  </section>
+  <footer>
+    <p><a href="https://github.com/pytorch/torchtitan/pull/5468">PR #5468</a> · <a href="https://github.com/pytorch/torchtitan/issues/5278">RFC #5278</a> · <a href="https://github.com/JavaZeroo/torchtitan/blob/feat/distmuon-balanced-placement-v2/tests/unit_tests/cpu/distributed/flex_shard/test_dist_muon_compute_placement.py">核心用例</a> · <a href="https://github.com/JavaZeroo/torchtitan/blob/feat/distmuon-balanced-placement-v2/torchtitan/distributed/flex_shard/dist_muon.py">planner 代码</a></p>
+    <p>成本公式：B × ns_steps × s² × (2l + s)，其中 s = min(rows, columns)，l = max(rows, columns)。旧策略对应 main 8a3f5bcaa4。页面可离线打开，无外部资源依赖。</p>
+  </footer>
+</main>
+<script>
+  const fixed = [6, 6, 3, 0];
+  const jobs = [
+    {name:'blocks / 8 rows', short:'Block 8', kind:'blocks', shape:'[8, 8]', cost:24, old:0, next:3},
+    {name:'native / Shard(0)', short:'Shard', kind:'native', shape:'[1, 8, 8]', cost:24, old:0, next:2},
+    {name:'owned', short:'Owned', kind:'owned', shape:'[8, 8]', cost:24, old:0, next:0},
+    {name:'blocks / 4 rows', short:'Block 4', kind:'blocks', shape:'[4, 8]', cost:5, old:1, next:1}
+  ];
+  const notes = [
+    '起点：先看固定本地工作。rank 3 暂时空闲，rank 2 的工作也少于 rank 0、1。新 planner 会把这些差异计入决策。',
+    '第 1 个任务：8 行的 BlockShard。旧策略给 rank 0；新策略给当前空闲的 rank 3。',
+    '第 2 个任务：native Shard。旧策略仍给 rank 0；新策略看到了真实专家数，把任务给工作较少的 rank 2。',
+    '第 3 个任务：Owned。新策略中 rank 0、1 成本相同，固定顺序选择 rank 0。此时三个大任务已分散。',
+    '分配完成：小 BlockShard 给 rank 1。最忙 rank 的相对成本从 78 变为 30，总成本仍为 92；实际训练收益有待 GPU 测量。'
+  ];
+  const slider = document.getElementById('step');
+  function draw(id, key, count) {
+    const container = document.getElementById(id);
+    container.replaceChildren();
+    const loads = [...fixed];
+    jobs.slice(0, count).forEach(job => loads[job[key]] += job.cost);
+    loads.forEach((load, rank) => {
+      const row = document.createElement('div'); row.className = 'rank';
+      const label = document.createElement('span'); label.className = 'rank-label'; label.textContent = 'R' + rank;
+      const track = document.createElement('div'); track.className = 'track';
+      const pieces = [{kind:'fixed', name:'固定本地工作', cost:fixed[rank]}].concat(jobs.slice(0, count).filter(job => job[key] === rank));
+      pieces.filter(piece => piece.cost > 0).forEach(piece => {
+        const segment = document.createElement('span'); segment.className = 'segment ' + piece.kind;
+        segment.style.width = (piece.cost / 80 * 100) + '%';
+        segment.textContent = piece.cost >= 20 ? piece.short : piece.cost;
+        segment.title = piece.name + ' · ' + piece.cost;
+        track.append(segment);
+      });
+      row.setAttribute('aria-label', 'rank ' + rank + '，总成本 ' + load + '，' + pieces.filter(p => p.cost > 0).map(p => p.name + ' ' + p.cost).join('，'));
+      const total = document.createElement('span'); total.className = 'rank-total'; total.textContent = load;
+      row.append(label, track, total); container.append(row);
+    });
+    return loads;
+  }
+  function render() {
+    const count = Number(slider.value);
+    const before = draw('old-chart', 'old', count), after = draw('new-chart', 'next', count);
+    const sum = before.reduce((a, b) => a + b, 0), peakBefore = Math.max(...before), peakAfter = Math.max(...after);
+    document.getElementById('peak').innerHTML = peakBefore + ' → <span>' + peakAfter + '</span>';
+    document.getElementById('imbalance').innerHTML = (peakBefore / (sum / 4)).toFixed(2) + ' → <span>' + (peakAfter / (sum / 4)).toFixed(2) + '</span>';
+    document.getElementById('total').innerHTML = sum + ' = <span>' + sum + '</span>';
+    document.getElementById('step-label').textContent = count + ' / 4';
+    document.getElementById('step-note').textContent = notes[count];
+    document.getElementById('previous').disabled = count === 0;
+    document.getElementById('next').disabled = count === 4;
+    const tbody = document.getElementById('tasks'); tbody.replaceChildren();
+    jobs.forEach((job, index) => {
+      const row = document.createElement('tr'); row.className = index >= count ? 'pending' : index === count - 1 ? 'current' : '';
+      [job.name, job.shape, job.cost, index < count ? 'R' + job.old : '待分配', index < count ? 'R' + job.next : '待分配'].forEach(value => {
+        const cell = document.createElement('td'); cell.textContent = value; row.append(cell);
+      });
+      tbody.append(row);
+    });
+  }
+  slider.addEventListener('input', render);
+  document.getElementById('previous').addEventListener('click', () => { slider.value = Number(slider.value) - 1; render(); });
+  document.getElementById('next').addEventListener('click', () => { slider.value = Number(slider.value) + 1; render(); });
+  render();
+</script>
+</body>
+</html>
