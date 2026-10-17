@@ -18,11 +18,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.common.hi_mid_lo_linear import (
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear.hi_mid_lo_linear import (
     _split_into_bf16_pieces,
     HiMidLoLinear,
 )
-from torchtitan.models.common.linear import Linear
 
 
 def test_hi_mid_lo_linear_forward_and_backward_contract_cpu():
@@ -191,6 +191,7 @@ def test_lora_wraps_hi_mid_lo_linear():
 
 def test_lm_head_converter_swaps_only_lm_head():
     from torchtitan.config.transform import LMHeadFP32OutputConverter
+    from torchtitan.models.muse_glimmer.model import SoftCappedLinear
     from torchtitan.models.qwen3 import MODEL_FLAVORS
 
     build_config, max_context_length = MODEL_FLAVORS["0.6B"]
@@ -224,6 +225,20 @@ def test_lm_head_converter_swaps_only_lm_head():
     converter = LMHeadFP32OutputConverter.Config(backward_mode="hi_mid_lo").build()
     converter.convert(config)
     assert config.lm_head.backward_mode == "hi_mid_lo"
+    # A later default pass keeps the converted head's backward_mode.
+    LMHeadFP32OutputConverter.Config().build().convert(config)
+    assert config.lm_head.backward_mode == "hi_mid_lo"
+
+    # A Linear subclass would lose its own fields and forward, e.g. a soft cap.
+    config.lm_head = SoftCappedLinear.Config(
+        **{
+            field.name: getattr(lm_head_before, field.name)
+            for field in fields(lm_head_before)
+        },
+        output_soft_cap_temp=30.0,
+    )
+    with pytest.raises(ValueError, match="is a SoftCappedLinear"):
+        LMHeadFP32OutputConverter.Config().build().convert(config)
 
     config.lm_head = None
     with pytest.raises(ValueError, match="lm_head"):

@@ -228,8 +228,8 @@ In `Trainer.__init__`, before any component is built:
 7. Log every replacement.
 
 ```
-INFO: [Override] fused_swiglu: model.layers.0.feed_forward FeedForward.Config -> FeedForward.Config
-INFO: [Override] fused_swiglu: model.layers.1.feed_forward FeedForward.Config -> FeedForward.Config
+INFO: [Override] fused_swiglu: model.layers.0.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
+INFO: [Override] fused_swiglu: model.layers.1.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
 ...
 INFO: Applied 32 override(s)
 ```
@@ -311,7 +311,7 @@ def nvfp4_linear(cfg: Linear.Config) -> "NVFP4Linear.Config":
     return NVFP4Linear.Config(in_features=cfg.in_features, ...)
 
 # Fused MoE only on the later layers
-@override(target=MoE.Config, fqns=["*.layers.1[0-9].moe"])
+@override(target=MoE.Config, fqns=["*.layers.1[0-9].feed_forward"])
 def vendor_moe(cfg: MoE.Config) -> "VendorMoE.Config":
     return VendorMoE.Config(num_experts=cfg.num_experts, ...)
 ```
@@ -340,11 +340,11 @@ This same rule answers the parent/child question directly. Say override A
 targets a parent Config (e.g. `MoE.Config`) and override B targets a Config
 nested inside it (e.g. `GroupedLinear.Config`):
 
-- **Disjoint subtrees** (A on `...layers.0.moe`, B on
-  `...layers.1.moe.routed_experts.w13`) — the claimed nodes are
+- **Disjoint subtrees** (A on `...layers.0.feed_forward`, B on
+  `...layers.1.feed_forward.routed_experts.w13`) — the claimed nodes are
   unrelated, so both apply.
-- **Overlapping** (A on `...layers.0.moe`, B on
-  `...layers.0.moe.routed_experts.w13`) — B's node is inside A's, the
+- **Overlapping** (A on `...layers.0.feed_forward`, B on
+  `...layers.0.feed_forward.routed_experts.w13`) — B's node is inside A's, the
   ancestor case above, so we **error**.
 
 We error rather than pick one of the two plausible behaviors implicitly:
@@ -384,7 +384,7 @@ machinery.
 
 | Override Target | Conflicts with a converter? | Notes |
 |-----------------|------------------------------|-------|
-| RoPE / FeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
+| RoPE / DenseFeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
 | GroupedLinear.Config | Possibly | Quantization converters can rewrite this |
 | Linear.Config | Yes | Quantization and LoRA can replace these |
 
@@ -411,7 +411,7 @@ checkpoint FQNs. By default an override checkpoints whatever real parameters it
 defines. Keep format-specific layout conversion in a model-level
 `BaseStateDictAdapter` (for example, `Llama3StateDictAdapter` converts native
 `w13.weight` into Hugging Face `gate_proj.weight` and `up_proj.weight`). This
-keeps native DCP checkpoints and per-step RL weight synchronization in the
+keeps native DCP checkpoints and per-step RL model state dict pushes in the
 model's physical layout without hook-produced copies.
 
 ## Parallelism
@@ -430,7 +430,7 @@ One thing worth stating plainly:
 
 - **Fusion under TP.** Fusing weights can interact subtly with tensor
   parallelism -- the fused tensor's row order must admit a correct shard.
-  The default `FeedForward` stores a `Linear` weight
+  The default `DenseFeedForward` stores a `Linear` weight
   `(2, hidden, dim)`. Sharding dimension 1 gives each TP rank matching feature
   slices of the gate and up projections while keeping their rows in separate
   contiguous slabs. The output retains the same `(2, hidden)` structure. This
@@ -475,7 +475,7 @@ for the full recipe.
 
 - `torchtitan_recipes/overrides/fused_swiglu.py` -- **the custom Triton activation
   example.** It replaces the default torch-native SiLU and multiply operations
-  while retaining the core `FeedForward` parameter layout and checkpoint
+  while retaining the core `DenseFeedForward` parameter layout and checkpoint
   behavior. Because the override targets `SwiGLU.Config`, it also applies to
   grouped experts and dist-GEMM feed-forwards that use that activation.
 - `torchtitan_recipes/overrides/helion_rope.py` — **the custom-kernel example.** Swaps
@@ -497,7 +497,7 @@ RoPE is an ordinary component override.
 | `torchtitan/config/__init__.py` | Re-exports the override API. |
 | `torchtitan/models/base/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field and applies recipe-provided overrides before builds. |
-| `torchtitan/rl/controller.py` | Holds the RL `override` field and applies it to the trainer and generator models before spawning actors. |
+| `torchtitan/rl/controller/controller.py` | Holds the RL `override` field and applies it to the trainer and generator models before spawning actors. |
 | `torchtitan_recipes/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
 | `tests/unit_tests/cpu/config/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
 

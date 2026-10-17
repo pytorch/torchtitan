@@ -28,6 +28,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
 
 
 logger = logging.getLogger(__name__)
@@ -366,7 +367,7 @@ def annotate_module_fqns(model: nn.Module) -> None:
 
 def annotate_graph_trainer_model(model: Decoder) -> None:
     """Attach the annotations consumed by GraphTrainer passes."""
-    if any(getattr(layer, "moe", None) is not None for layer in model.config.layers):
+    if model.config.first_moe is not None:
         annotate_moe_ep_regions()
     annotate_module_fqns(model)
 
@@ -391,7 +392,7 @@ def annotate_moe_ep_regions() -> None:
         return
 
     from torchtitan.models.common.moe import MoE
-    from torchtitan.models.common.token_dispatcher import (
+    from torchtitan.models.common.moe.token_dispatcher import (
         AllToAllTokenDispatcher,
         LocalTokenDispatcher,
     )
@@ -502,10 +503,10 @@ def get_default_transformer_block_buckets(
                         f"layers.{layer_id}.attention_norm",
                         f"layers.{layer_id}.attention",
                         f"layers.{layer_id}.ffn_norm",
-                        f"layers.{layer_id}.moe.router",
-                        f"layers.{layer_id}.moe.shared_experts",
+                        f"layers.{layer_id}.feed_forward.router",
+                        f"layers.{layer_id}.feed_forward.shared_experts",
                     ],
-                    f"layers.{layer_id}.moe.routed_experts",
+                    f"layers.{layer_id}.feed_forward.routed_experts",
                 ]
             )
         else:
@@ -608,8 +609,8 @@ def apply_simple_fsdp(
         for transformer_block in model.modules():
             if not isinstance(transformer_block, TransformerBlock):
                 continue
-            moe = getattr(transformer_block, "moe", None)
-            if moe is None:
+            moe = transformer_block.feed_forward
+            if not isinstance(moe, MoE):
                 continue
             routed_experts = moe.routed_experts
             experts_shard_dim = 0

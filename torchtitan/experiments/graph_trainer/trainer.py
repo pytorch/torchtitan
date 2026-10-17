@@ -15,7 +15,11 @@ import torch
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
-from torchtitan.distributed.cuda_graph import cuda_graph_teardown
+from torchtitan.distributed.cuda_graph import (
+    cuda_graphs_supported,
+    NUM_CUDA_GRAPH_WARMUP_STEPS,
+    wrap_fwd_bwd_with_cuda_graph,
+)
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
@@ -170,10 +174,12 @@ class GraphTrainingEngine(TrainingEngine):
             self._pp_loss_sentinel_on_non_last_stage = torch.full(
                 (1,), -1.0, device=self.device
             )
-        self._run_forward_backward = partial(
+
+        eager_forward_backward_fn = partial(
             self._forward_backward_body,
             defer_fsdp_gradient_reduction=False,
         )
+        self._run_forward_backward = eager_forward_backward_fn
         if self.config.compile.memory_policy == "sac_and_paged_stash":
             self._paged_stash_runner = build_paged_stash_runner(
                 self.config.compile.paged_stash,
@@ -185,6 +191,17 @@ class GraphTrainingEngine(TrainingEngine):
             self._run_forward_backward = partial(
                 self._page_stashed_forward_backward_body,
                 defer_fsdp_gradient_reduction=False,
+            )
+
+        if not self.config.training.disable_cuda_graphs and cuda_graphs_supported():
+            self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
+                self._run_forward_backward,
+                parameters=(
+                    parameter
+                    for model_part in self.model_parts
+                    for parameter in model_part.parameters()
+                ),
+                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
             )
 
         maybe_apply_numa_binding(self.device.index, self.device.type)
@@ -202,10 +219,15 @@ class GraphTrainingEngine(TrainingEngine):
     def _preprocess_microbatch_groups(
         self,
         microbatch_groups: list[list[TrainingMicrobatch]],
+        *,
+        global_routing_token_counts: torch.Tensor,
     ) -> list[tuple[Any, ...]]:
         """Prepare GraphRuntime schedule inputs for AOT single-stage execution."""
         if self.parallelism_context.pp_enabled:
-            return super()._preprocess_microbatch_groups(microbatch_groups)
+            return super()._preprocess_microbatch_groups(
+                microbatch_groups,
+                global_routing_token_counts=global_routing_token_counts,
+            )
 
         preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
         for microbatch_group in microbatch_groups:
@@ -235,6 +257,7 @@ class GraphTrainingEngine(TrainingEngine):
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
+                        global_routing_token_counts=global_routing_token_counts,
                         **self.preprocess_inputs_kwargs,
                     )
                     self.ntokens_seen += (
@@ -326,8 +349,6 @@ class GraphTrainingEngine(TrainingEngine):
 
         super().close()
 
-        cuda_graph_teardown()
-
         # Free the stash buffers, now that no CUDA graph points into them, and
         # leave any later trainer in this process a fresh manager.
         if self._paged_stash_runner is not None:
@@ -345,9 +366,14 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
-            if self.training.cuda_graph_per_accumulation_group:
+            if self.training.cuda_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."
+                )
+            if self.training.preprocess_microbatch_groups_lazily:
+                raise ValueError(
+                    "training.preprocess_microbatch_groups_lazily is not supported "
+                    "with GraphTrainer."
                 )
             # to_graph_trainer_config and the flavor builders turn these off;
             # this catches a transform applied afterwards that builds them with
@@ -369,6 +395,8 @@ class GraphTrainer(Trainer):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
+        if config.validator is not None and not config.training.disable_cuda_graphs:
+            logger.warning("GraphTrainer validation runs without CUDA graphs.")
         if (
             not self.engine.parallelism_context.pp_enabled
             and self.engine.pp_schedule.num_microbatches > 1

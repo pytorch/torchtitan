@@ -20,14 +20,14 @@ from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import make_ffn_config
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
     RowParallelLinear,
 )
-from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
+from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.models.llama3 import build_model_config
@@ -53,12 +53,12 @@ def test_qwen35_moe_lora_model_config():
     }
 
     assert set(dense_lora) == {
-        f"layers.{layer}.moe.shared_experts.{projection}"
+        f"layers.{layer}.feed_forward.shared_experts.{projection}"
         for layer in range(num_layers)
         for projection in ("w13", "w2")
     }
     assert set(grouped_lora) == {
-        f"layers.{layer}.moe.routed_experts.{projection}"
+        f"layers.{layer}.feed_forward.routed_experts.{projection}"
         for layer in range(num_layers)
         for projection in ("w13", "w2")
     }
@@ -117,7 +117,9 @@ def test_lora_model_builds():
 
 def test_lora_forward():
     """LoRA model forward produces correct output shape."""
-    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+    model_config = build_model_config(
+        "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+    )
     model_config = transform_model_config_(
         model_config,
         [
@@ -137,8 +139,7 @@ def test_lora_forward():
     tokens = torch.randint(0, vocab_size, (num_tokens,))
     positions = torch.arange(seq_len).repeat(num_documents)
     attention_metadata = model._get_attention_metadata(positions)
-    # The default attention backend is FlexInnerAttention, which does not support
-    # backward on CPU; this is a forward-only shape check, so run under no_grad.
+    # Flex supports the CPU forward used by this shape check, but not backward.
     with torch.no_grad():
         output = model(
             tokens, attention_metadata=attention_metadata, positions=positions
@@ -149,7 +150,7 @@ def test_lora_forward():
 def test_lora_targets_fused_feed_forward_projection():
     """The physical w13 projection uses one LoRA adapter."""
     init = {"weight": torch.nn.init.ones_}
-    config = FeedForward.Config(
+    config = DenseFeedForward.Config(
         w13=Linear.Config(
             in_features=4, out_features=8, num_linears=2, param_init=init
         ),
@@ -383,7 +384,7 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
         alpha=4,
         target_modules=["w13"],
     ).transform(config)
-    assert isinstance(config, FeedForward.Config)
+    assert isinstance(config, DenseFeedForward.Config)
 
     feed_forward = config.build()
     assert feed_forward.w13._sharding_config is not None

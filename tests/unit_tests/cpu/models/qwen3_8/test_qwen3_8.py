@@ -13,6 +13,7 @@ import torch
 pytest.importorskip("attn_gym")
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.qwen3_5 import Qwen35Model
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 from torchtitan.models.qwen3_8 import build_model_config, MODEL_FLAVORS
@@ -62,18 +63,18 @@ def test_qwen38_2_4t_a95b_matches_hugging_face_config() -> None:
     assert config.vision_encoder is None
 
     linear_layer = config.layers[0]
-    assert linear_layer.delta_net is not None
-    assert linear_layer.delta_net.in_proj_q.out_features == 16 * 128
-    assert linear_layer.delta_net.in_proj_v.out_features == 128 * 128
+    assert isinstance(linear_layer.attention, GDN.Config)
+    assert linear_layer.attention.in_proj_q.out_features == 16 * 128
+    assert linear_layer.attention.in_proj_v.out_features == 128 * 128
 
     full_attention_layer = config.layers[3]
     assert full_attention_layer.attention is not None
     assert full_attention_layer.attention.n_heads == 64
     assert full_attention_layer.attention.n_kv_heads == 4
 
-    assert linear_layer.moe is not None
-    assert linear_layer.moe.router.num_experts == 512
-    assert linear_layer.moe.router.top_k == 10
+    assert linear_layer.feed_forward is not None
+    assert linear_layer.feed_forward.router.num_experts == 512
+    assert linear_layer.feed_forward.router.top_k == 10
 
 
 def test_text_only_qwen38_sharding_does_not_require_vision() -> None:
@@ -166,8 +167,8 @@ def test_text_only_checkpoint_adapter_converts_fused_deltanet_qkv() -> None:
         parallelism=ParallelismConfig(),
     )
     adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
-    delta_net = config.layers[0].delta_net
-    assert delta_net is not None
+    delta_net = config.layers[0].attention
+    assert isinstance(delta_net, GDN.Config)
     key_dim = delta_net.in_proj_q.out_features
     value_dim = delta_net.in_proj_v.out_features
     fused_qkv = torch.randn(key_dim * 2 + value_dim, 1)
@@ -179,9 +180,9 @@ def test_text_only_checkpoint_adapter_converts_fused_deltanet_qkv() -> None:
         }
     )
     assert set(converted) == {
-        "layers.0.attn.in_proj_q.weight",
-        "layers.0.attn.in_proj_k.weight",
-        "layers.0.attn.in_proj_v.weight",
+        "layers.0.attention.in_proj_q.weight",
+        "layers.0.attention.in_proj_k.weight",
+        "layers.0.attention.in_proj_v.weight",
         "lm_head.weight",
     }
 

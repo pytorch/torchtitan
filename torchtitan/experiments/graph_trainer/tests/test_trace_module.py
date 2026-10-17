@@ -180,7 +180,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
-        from torchtitan.training_engine import TrainingEngine
 
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
@@ -189,6 +188,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             sdc_replayer=None,
             training=SimpleNamespace(
+                disable_cuda_graphs=False,
                 num_tokens_per_microbatch_per_dp_rank=1,
                 num_tokens_per_train_step=2,
             ),
@@ -213,12 +213,21 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 "make_spmd_graph_runtime",
                 return_value=graph_runtime,
             ) as make_runtime,
-            patch.object(TrainingEngine, "_initialize_forward_backward") as base_init,
+            patch(
+                "torchtitan.experiments.graph_trainer.trainer.cuda_graphs_supported",
+                return_value=True,
+            ),
+            patch(
+                "torchtitan.experiments.graph_trainer.trainer."
+                "wrap_fwd_bwd_with_cuda_graph",
+                return_value=MagicMock(),
+            ) as wrap_cuda_graph,
         ):
             engine._initialize_forward_backward()
 
         self.assertIs(engine.pp_schedule, graph_runtime)
-        base_init.assert_not_called()
+        wrap_cuda_graph.assert_called_once()
+        self.assertIs(engine._run_forward_backward, wrap_cuda_graph.return_value)
         make_runtime.assert_called_once_with(
             engine.model_parts[0],
             gradient_accumulation_steps=2,
@@ -271,7 +280,9 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             for index in range(2)
         ]
 
-        prepared_groups = engine._preprocess_microbatch_groups([microbatches])
+        prepared_groups = engine._preprocess_microbatch_groups(
+            [microbatches], global_routing_token_counts=torch.tensor([2])
+        )
         engine._pp_forward_backward_microbatch_group = MagicMock(
             return_value=torch.tensor(3.0)
         )
@@ -337,7 +348,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         )
 
         [(arg_mbs, kwarg_mbs, target_mbs)] = engine._preprocess_microbatch_groups(
-            [[microbatch]]
+            [[microbatch]], global_routing_token_counts=torch.tensor([2, 1])
         )
 
         assert len(arg_mbs) == 1 and len(arg_mbs[0]) == 1
@@ -1835,7 +1846,7 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.common.linear import Linear
         from torchtitan.models.common.nn_modules import RMSNorm
         from torchtitan.models.common.rope import ComplexRoPE
-        from torchtitan.models.deepseek_v3.model import Attention as DSAttention
+        from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
         dim = 64
         n_heads = 4
@@ -1852,7 +1863,7 @@ class TestTraceModels(unittest.TestCase):
                 qk_nope_head_dim = 16
                 v_head_dim = 16
                 qk_head_dim = qk_nope_head_dim + rope_dim
-                attn_config = DSAttention.Config(
+                attn_config = DeepSeekMLAAttention.Config(
                     n_heads=n_heads,
                     dim=dim,
                     q_lora_rank=0,
@@ -1887,7 +1898,7 @@ class TestTraceModels(unittest.TestCase):
                 )
                 # make_fx traces the backward, which cannot add into weight.grad in place.
                 disable_inplace_wgrad_accum(attn_config)
-                self.attn = DSAttention(attn_config)
+                self.attn = DeepSeekMLAAttention(attn_config)
                 self.proj = nn.Linear(dim, vocab_size)
 
             def init_states(self, buffer_device=None):
@@ -2269,7 +2280,7 @@ class TestTraceContextParallel(FSDPTest):
                 config.parallelism.data_parallel_shard_degree = dp_shard_degree
                 config.parallelism.context_parallel_degree = context_parallel_degree
                 config.parallelism.tensor_parallel_degree = 1
-                config.activation_checkpoint = None
+                config.activation_remat = None
                 config.compile.enable_passes = False
                 config.debug.enable_structured_logging = False
                 config.model.layers = config.model.layers[:1]

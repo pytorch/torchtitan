@@ -121,13 +121,13 @@ def test_autoparallel_graph_pass_selection_uses_regular_memory_policy():
         compile=GraphTrainerCompileConfig(
             enable_autoparallel=True,
             enable_async_tensor_parallel=False,
-            disable_passes=["cuda_graph_pass"],
         ),
-        model=SimpleNamespace(layers=[object()]),
+        model=SimpleNamespace(layers=[SimpleNamespace(feed_forward=None)]),
         parallelism=SimpleNamespace(
             fsdp_reshard_after_forward="always",
             pipeline_parallel_degree=1,
         ),
+        training=TrainingConfig(disable_cuda_graphs=True),
     )
 
     graph_passes = passes.construct_default_graph_passes(traced_result, config)
@@ -160,6 +160,10 @@ def test_model_autoparallel_uses_fx_module_path_and_resolved_policy(
     class FakeDeepSeekV3Model(torch.nn.Module):
         def __init__(self, config, *, mesh, compute_dtype):
             super().__init__()
+            assert config.layers[0].feed_forward is not None
+            assert config.layers[0].moe is None
+            assert config.layers[1].feed_forward is None
+            assert config.layers[1].moe is not None
             self.model_args = SimpleNamespace(vocab_size=16)
 
     _FakeAutoParallelGraph.instances.clear()
@@ -183,7 +187,11 @@ def test_model_autoparallel_uses_fx_module_path_and_resolved_policy(
             parallelize_autoparallel,
         )
 
-        model = SimpleNamespace(config=SimpleNamespace())
+        from torchtitan.models.deepseek_v3 import build_model_config
+
+        model = SimpleNamespace(
+            config=build_model_config("debugmodel", parallelism=ParallelismConfig())
+        )
         parallelism_context = _FakeParallelismContext(sparse=True)
         call_parallelize = parallelize_autoparallel.parallelize_autoparallel_deepseekv3
         extra_patches = (
@@ -214,7 +222,7 @@ def test_model_autoparallel_uses_fx_module_path_and_resolved_policy(
             training=_training_config(),
             parallelism=parallelism,
             compile_config=compile_config,
-            ac_config=object(),
+            activation_remat=object(),
             dump_folder="",
         )
 

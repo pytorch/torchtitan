@@ -18,7 +18,6 @@ from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
-from torchtitan.models.common import moe_sharding
 from torchtitan.models.common.activation import Sigmoid, SiTUGLU, Softmax, SqrtSoftplus
 from torchtitan.models.common.config_utils import (
     make_moe_config,
@@ -30,15 +29,16 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     token_id_placement,
 )
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
 )
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import (
     MoE,
     RoundRobinTokenChoiceTopKRouter,
+    sharding as moe_sharding,
     TokenChoiceTopKRouter,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -518,27 +518,27 @@ class TestMoE(unittest.TestCase):
 
         with (
             patch(
-                "torchtitan.models.common.moe.spmd_sparse_mesh",
+                "torchtitan.models.common.moe.moe.spmd_sparse_mesh",
                 return_value=object(),
             ),
             patch(
-                "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                "torchtitan.models.common.moe.moe.spmd_dense_sp_enabled",
                 return_value=False,
             ),
             patch(
-                "torchtitan.models.common.moe.spmd_mesh_group",
+                "torchtitan.models.common.moe.moe.spmd_mesh_group",
                 return_value=tp_group,
             ),
             patch(
-                "torchtitan.models.common.moe.spmd.redistribute",
+                "torchtitan.models.common.moe.moe.spmd.redistribute",
                 side_effect=lambda tensor, *_args, **_kwargs: tensor,
             ) as redistribute,
             patch(
-                "torchtitan.models.common.moe.remat.region",
+                "torchtitan.models.common.moe.moe.remat.region",
                 side_effect=lambda function, *_args, **_kwargs: function,
             ) as region,
             patch(
-                "torchtitan.models.common.moe.remat.recompute_needs_tensor"
+                "torchtitan.models.common.moe.moe.remat.recompute_needs_tensor"
             ) as recompute_needs_tensor,
         ):
             moe._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
@@ -592,11 +592,11 @@ class TestMoE(unittest.TestCase):
 
         with (
             patch(
-                "torchtitan.models.common.moe.spmd_sparse_mesh",
+                "torchtitan.models.common.moe.moe.spmd_sparse_mesh",
                 return_value=None,
             ),
             patch(
-                "torchtitan.models.common.moe.spmd_mesh_group",
+                "torchtitan.models.common.moe.moe.spmd_mesh_group",
                 return_value=object(),
             ),
             self.assertRaisesRegex(
@@ -664,19 +664,19 @@ class TestMoE(unittest.TestCase):
 
         with (
             patch(
-                "torchtitan.models.common.moe.spmd_sparse_mesh",
+                "torchtitan.models.common.moe.moe.spmd_sparse_mesh",
                 return_value=object(),
             ),
             patch(
-                "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                "torchtitan.models.common.moe.moe.spmd_dense_sp_enabled",
                 return_value=True,
             ),
             patch(
-                "torchtitan.models.common.moe.spmd_mesh_group",
+                "torchtitan.models.common.moe.moe.spmd_mesh_group",
                 return_value=tp_group,
             ),
             patch(
-                "torchtitan.models.common.moe.spmd.redistribute",
+                "torchtitan.models.common.moe.moe.spmd.redistribute",
                 side_effect=lambda tensor, *_args, **_kwargs: tensor,
             ) as redistribute,
         ):

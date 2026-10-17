@@ -19,8 +19,8 @@ from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from torchtitan.distributed.local_compile import apply_local_compile
-from torchtitan.models.common import hi_mid_lo_linear
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.linear import hi_mid_lo_linear
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
