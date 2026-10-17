@@ -126,9 +126,9 @@ def generate() -> None:
     attention = model_config.first_full_attention
     if attention is None:
         raise ValueError("No full attention layer found in the model spec.")
-    attention_backend = attention.inner_attention
+    inner_attention_config = attention.inner_attention
     if not isinstance(
-        attention_backend, (VarlenInnerAttention.Config, FlexInnerAttention.Config)
+        inner_attention_config, (VarlenInnerAttention.Config, FlexInnerAttention.Config)
     ):
         raise ValueError("Only varlen and flex attention backends are supported.")
 
@@ -164,7 +164,7 @@ def generate() -> None:
         attention_config=AttentionConfig(
             backend=(
                 AttentionBackendEnum.FLEX_ATTENTION
-                if isinstance(attention_backend, FlexInnerAttention.Config)
+                if isinstance(inner_attention_config, FlexInnerAttention.Config)
                 else AttentionBackendEnum.CUSTOM
             ),
         ),

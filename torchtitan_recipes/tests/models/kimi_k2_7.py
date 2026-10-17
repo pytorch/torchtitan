@@ -50,7 +50,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
+from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
 from torchtitan.models.kimi_k2_7 import (
     build_model_config,
