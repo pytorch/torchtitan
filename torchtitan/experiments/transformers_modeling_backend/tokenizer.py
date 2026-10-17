@@ -34,5 +34,10 @@ class HFBackendTokenizer(HuggingFaceTokenizer):
     def apply_chat_template(self, messages, **kwargs):
         kwargs.setdefault("bos_token", self.bos_token or "")
         kwargs.setdefault("eos_token", self.eos_token or "")
-        kwargs.setdefault("add_generation_prompt", True)
         return super().apply_chat_template(messages, **kwargs)
+
+    def encode(self, text: str, **kwargs) -> list[int]:
+        # Chat templates like Llama 3's render bos_token; don't prepend a second BOS.
+        if self.bos_token and text.startswith(self.bos_token):
+            kwargs["add_bos"] = False
+        return super().encode(text, **kwargs)
