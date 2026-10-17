@@ -180,7 +180,7 @@ def test_per_group_cuda_graph_integration_supports_fake_pg() -> None:
     assert not test.use_real_pg
     assert test.ngpu == 2
     assert config.parallelism.data_parallel_shard_degree == 2
-    assert config.training.cuda_graph_per_accumulation_group
+    assert config.training.cuda_graph_per_microbatch_group
     assert config.training.steps == 10
     assert config.training.num_tokens_per_train_step == (
         3 * test.ngpu * config.training.num_tokens_per_microbatch_per_dp_rank

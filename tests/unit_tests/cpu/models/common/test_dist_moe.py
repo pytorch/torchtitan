@@ -235,7 +235,7 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
         dist_moe_runtime=runtime_config,
         sdc_replayer=None,
         training=SimpleNamespace(
-            cuda_graph_per_accumulation_group=False,
+            cuda_graph_per_microbatch_group=False,
             disable_cuda_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",

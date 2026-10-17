@@ -279,6 +279,8 @@ class FaultTolerantTrainer(Configurable):
 
         # Build validator if validation is configured
         if config.validator is not None:
+            if engine._forward_backward_cuda_graph_enabled:
+                logger.warning("TorchFT validation runs without CUDA graphs.")
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
                 (
                     engine.pp_schedule,
@@ -290,6 +292,7 @@ class FaultTolerantTrainer(Configurable):
             )
 
             self.validator = config.validator.build(
+                cuda_graph_enabled=False,
                 parallelism=config.parallelism,
                 job_config=config,
                 dp_world_size=dp_degree,
