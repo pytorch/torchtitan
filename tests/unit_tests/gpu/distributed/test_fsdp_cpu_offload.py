@@ -18,10 +18,8 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_multimodal_encoder,
 )
-from torchtitan.models.muse_glimmer import (
-    muse_glimmer_vision_encoder_config,
-    MuseGlimmerVisionEncoder,
-)
+from torchtitan.models.muse_spark.flavors import muse_spark_navit_encoder_config
+from torchtitan.models.muse_spark.vision_encoder import NaViTEncoder
 
 
 pytestmark = pytest.mark.multi_gpu
@@ -89,7 +87,7 @@ def _offload_policy(module: nn.Module) -> object | None:
 
 
 def _vision_inputs(
-    encoder: MuseGlimmerVisionEncoder,
+    encoder: NaViTEncoder,
     *,
     has_image: bool,
     device_type: str,
@@ -189,18 +187,20 @@ class TestConditionalVisionFSDP(DTensorTestBase):
     def _run_mixed_rank_image_presence(self, *, cpu_offload: bool) -> None:
         mesh = self.build_device_mesh()
         with torch.device("meta"):
-            encoder = muse_glimmer_vision_encoder_config(
+            config = muse_spark_navit_encoder_config(
                 latent_dim=8,
                 num_layers=0,
                 num_heads=2,
-                mlp_ratio=2.0,
+                mlp_hidden_dim=16,
                 patch_size=2,
                 patch_temporal=1,
                 downsample_factor=2,
                 sparse_attention_factor=1,
                 pos_emb_grid_h=2,
                 pos_emb_grid_w=2,
-            ).build()
+            )
+            config.pos_emb_grid_order = "raster"
+            encoder = config.build()
         apply_fsdp_to_multimodal_encoder(
             encoder,
             mesh,
@@ -256,18 +256,20 @@ class TestVisionHSDP(DTensorTestBase):
             mesh_dim_names=("dp_replicate", "dp_shard"),
         )
         with torch.device("meta"):
-            encoder = muse_glimmer_vision_encoder_config(
+            config = muse_spark_navit_encoder_config(
                 latent_dim=8,
                 num_layers=0,
                 num_heads=2,
-                mlp_ratio=2.0,
+                mlp_hidden_dim=16,
                 patch_size=2,
                 patch_temporal=1,
                 downsample_factor=2,
                 sparse_attention_factor=1,
                 pos_emb_grid_h=2,
                 pos_emb_grid_w=2,
-            ).build()
+            )
+            config.pos_emb_grid_order = "raster"
+            encoder = config.build()
         apply_fsdp_to_multimodal_encoder(
             encoder,
             mesh,

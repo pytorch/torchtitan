@@ -334,7 +334,7 @@ def test_varlen_eval_replays_different_document_counts():
                 metadata = prepared[0][2]["attention_metadata"][VarlenInnerAttention]
                 assert metadata.cu_seq_q.shape == (6,)
                 assert metadata.max_q == metadata.max_k == 8
-                expected = validator._evaluate_body([model], prepared).clone()
+                expected = validator._validate_body([model], prepared).clone()
                 actual = _validate_loss(
                     validator, [model], prepared, step=step + 1
                 ).clone()
@@ -599,44 +599,78 @@ def _run_grouped_eval(rank, port):
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=2)
     try:
+        from torchtitan.components.loss import ChunkedLossWrapper
+        from torchtitan.distributed.fsdp import post_validate_fsdp_for_cuda_graph
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.norm = torch.nn.Linear(8, 8, device="cuda")
+                self.lm_head = torch.nn.Linear(8, 8, device="cuda")
+
+            def forward(self, inputs):
+                return self.norm(inputs)
+
+        torch.manual_seed(42)
         mesh = init_device_mesh("cuda", (2,), mesh_dim_names=("dp",))
-        model = torch.nn.Sequential(
-            torch.nn.Linear(8, 8, device="cuda"),
-            torch.nn.Linear(8, 8, device="cuda"),
-        )
-        fully_shard([model[0], model[1]], mesh=mesh)
-        fully_shard(model, mesh=mesh)
-        inputs = torch.ones(2, 8, device="cuda")
-        # The loss calls the head after a root forward that skips it.
-
-        def body(x):
-            output = model[0](x)
-            return output.square().sum()
-
+        model, reference = Model(), Model()
+        reference.load_state_dict(model.state_dict())
+        losses, optimizers = [], []
+        for module in (model, reference):
+            fully_shard([module.norm, module.lm_head], mesh=mesh)
+            fully_shard(module, mesh=mesh)
+            loss = ChunkedLossWrapper.Config(num_chunks=2).build()
+            loss.set_lm_head(module.lm_head)
+            losses.append(loss)
+            optimizers.append(
+                torch.optim.AdamW(module.parameters(), lr=0.01, fused=True)
+            )
+        inputs = torch.ones(4, 8, device="cuda")
+        labels = torch.zeros(4, dtype=torch.long, device="cuda")
         from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
-        from torchtitan.distributed.fsdp import finish_fsdp_eval
-
-        model(inputs).sum().backward()
-        model.zero_grad(set_to_none=True)
 
         def evaluate(x):
             with torch.no_grad():
-                result = body(x)
-                finish_fsdp_eval([model])
+                result, _ = losses[0](model(x), labels)
+                post_validate_fsdp_for_cuda_graph([model])
                 return result
 
-        evaluate(inputs)
-        graph = wrap_with_cuda_graph(evaluate, name="eval")
-        for _ in range(10):
+        graph = wrap_with_cuda_graph(evaluate, num_warmup_iterations=1, name="eval")
+        for step in range(10):
+            inputs.fill_(1 + step / 10)
+            training_losses = []
+            for module, loss, optimizer in zip(
+                (model, reference), losses, optimizers, strict=True
+            ):
+                module.train()
+                optimizer.zero_grad(set_to_none=True)
+                train_loss, _ = loss(module(inputs), labels)
+                train_loss.backward()
+                training_losses.append(train_loss.detach())
+            torch.testing.assert_close(*training_losses, rtol=0, atol=0)
+            for parameter, expected_parameter in zip(
+                model.parameters(), reference.parameters(), strict=True
+            ):
+                torch.testing.assert_close(
+                    parameter.grad.to_local(),
+                    expected_parameter.grad.to_local(),
+                    rtol=0,
+                    atol=0,
+                )
+            for module, optimizer in zip((model, reference), optimizers, strict=True):
+                optimizer.step()
+                module.eval()
             actual = graph(inputs).clone()
             with torch.no_grad():
-                expected = body(inputs)
-                finish_fsdp_eval([model])
+                expected, _ = losses[1](reference(inputs), labels)
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            state = model[0]._get_fsdp_state()
+            state = model.lm_head._get_fsdp_state()
             assert not state._modules_to_run_forward
             assert state._state_ctx.iter_forward_root is None
             assert state._training_state == TrainingState.IDLE
+            assert reference.norm in (
+                reference.lm_head._get_fsdp_state()._modules_to_run_forward
+            )
     finally:
         cuda_graph_teardown()
         dist.destroy_process_group()

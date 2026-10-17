@@ -83,7 +83,7 @@ class TrainingConfig:
     capture.
     """
 
-    cuda_graph_per_accumulation_group: bool = False
+    cuda_graph_per_microbatch_group: bool = False
     """Capture and replay one uniform microbatch group.
 
     Every group must have the same input structure, tensor metadata, and set of

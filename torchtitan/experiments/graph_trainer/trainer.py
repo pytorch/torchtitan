@@ -366,11 +366,7 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
-            if self.validator is not None and self.validator.enable_cuda_graphs:
-                raise ValueError(
-                    "GraphTrainer does not support validation CUDA graphs."
-                )
-            if self.training.cuda_graph_per_accumulation_group:
+            if self.training.cuda_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."
                 )
@@ -399,6 +395,8 @@ class GraphTrainer(Trainer):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
+        if config.validator is not None and not config.training.disable_cuda_graphs:
+            logger.warning("GraphTrainer validation runs without CUDA graphs.")
         if (
             not self.engine.parallelism_context.pp_enabled
             and self.engine.pp_schedule.num_microbatches > 1

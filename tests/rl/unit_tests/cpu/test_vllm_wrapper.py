@@ -17,7 +17,7 @@ from torchtitan.models.kimi_k3 import build_model_config as build_kimi_config
 from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.generator.vllm import model_wrapper
-from torchtitan.rl.generator.vllm.attention import VLLMAttentionWrapper
+from torchtitan.rl.generator.vllm.attention import VLLMInnerAttention
 from torchtitan.rl.generator.vllm.model_wrapper import (
     _replace_vllm_layer_configs,
     VLLMModelWrapper,
@@ -59,7 +59,7 @@ def test_vllm_replacement_preserves_full_attention_selection(build_config) -> No
 
 @pytest.mark.parametrize("sliding_window_size", [None, 128])
 def test_vllm_attention_classifies_sliding_window(sliding_window_size) -> None:
-    config = VLLMAttentionWrapper.Config(
+    config = VLLMInnerAttention.Config(
         hidden_size=256,
         num_heads=4,
         num_kv_heads=2,

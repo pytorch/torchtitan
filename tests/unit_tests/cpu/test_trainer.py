@@ -443,7 +443,7 @@ def test_forward_backward_runs_whole_accumulation(
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
-    engine._cuda_graph_per_accumulation_group_enabled = per_group_graph
+    engine._cuda_graph_per_microbatch_group_enabled = per_group_graph
     engine.sdc_replayer = None
     engine._non_pp_forward_backward_microbatch = forward_backward_body
     engine._run_forward_backward = partial(
@@ -611,7 +611,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
-                    cuda_graph_per_accumulation_group=False,
+                    cuda_graph_per_microbatch_group=False,
                     disable_cuda_graphs=False,
                 ),
                 parallelism=SimpleNamespace(
@@ -646,7 +646,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
     assert engine._forward_backward_cuda_graph_enabled
 
 
-def test_training_engine_replays_one_cuda_graph_per_accumulation_group() -> None:
+def test_training_engine_replays_one_cuda_graph_per_microbatch_group() -> None:
     graph_loss = torch.tensor(0.0)
     graph_metric = torch.tensor(0.0)
 
@@ -669,7 +669,7 @@ def test_training_engine_replays_one_cuda_graph_per_accumulation_group() -> None
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
-                    cuda_graph_per_accumulation_group=True,
+                    cuda_graph_per_microbatch_group=True,
                     disable_cuda_graphs=False,
                 ),
                 parallelism=SimpleNamespace(
@@ -701,7 +701,7 @@ def test_training_engine_replays_one_cuda_graph_per_accumulation_group() -> None
         2.0,
         3.0,
     ]
-    assert engine._cuda_graph_per_accumulation_group_enabled
+    assert engine._cuda_graph_per_microbatch_group_enabled
     assert engine._forward_backward_cuda_graph_enabled
     wrap_group.assert_called_once()
     wrap_step.assert_not_called()
@@ -724,7 +724,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
-                    cuda_graph_per_accumulation_group=False,
+                    cuda_graph_per_microbatch_group=False,
                     disable_cuda_graphs=False,
                     preprocess_microbatch_groups_lazily=False,
                 ),
@@ -931,7 +931,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses(
         SimpleNamespace(
             config=SimpleNamespace(
                 training=SimpleNamespace(
-                    cuda_graph_per_accumulation_group=False,
+                    cuda_graph_per_microbatch_group=False,
                     disable_cuda_graphs=False,
                 ),
             ),
@@ -1006,7 +1006,7 @@ def test_engine_prepares_pp_metadata_before_cuda_graph(disable_cuda_graphs, per_
         sdc_replayer=None,
         training=SimpleNamespace(
             disable_cuda_graphs=disable_cuda_graphs,
-            cuda_graph_per_accumulation_group=per_group,
+            cuda_graph_per_microbatch_group=per_group,
             preprocess_microbatch_groups_lazily=False,
         ),
         parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
@@ -1063,7 +1063,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
-    engine._cuda_graph_per_accumulation_group_enabled = False
+    engine._cuda_graph_per_microbatch_group_enabled = False
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
     engine._preprocess_microbatch_groups = MagicMock(
@@ -1109,7 +1109,7 @@ def test_replay_failure_propagates_from_engine():
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
-    engine._cuda_graph_per_accumulation_group_enabled = False
+    engine._cuda_graph_per_microbatch_group_enabled = False
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
     engine.num_completed_steps = 0
     engine._preprocess_microbatch_groups = MagicMock(
@@ -1247,7 +1247,7 @@ def test_cuda_graph_accumulation_supports_eager_gradient_reduction() -> None:
             config=SimpleNamespace(
                 dist_moe_runtime=None,
                 training=SimpleNamespace(
-                    cuda_graph_per_accumulation_group=False,
+                    cuda_graph_per_microbatch_group=False,
                     disable_cuda_graphs=False,
                 ),
                 sdc_replayer=None,
@@ -1293,7 +1293,7 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
             config=SimpleNamespace(
                 dist_moe_runtime=None,
                 training=SimpleNamespace(
-                    cuda_graph_per_accumulation_group=False,
+                    cuda_graph_per_microbatch_group=False,
                     disable_cuda_graphs=True,
                     preprocess_microbatch_groups_lazily=lazily,
                 ),

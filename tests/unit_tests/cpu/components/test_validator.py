@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components import validator as validator_module
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.validator import Validator
@@ -198,9 +199,31 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
     validator.metrics_processor.reset.assert_called_once()
 
 
-def test_flux_validator_rejects_unimplemented_graph_capture():
-    with pytest.raises(ValueError, match="not implemented for FluxValidator"):
-        FluxValidator.Config(dataloader=mock.Mock(), steps=1, enable_cuda_graphs=True)
+@pytest.mark.parametrize("cuda_graph_enabled", [False, True])
+def test_flux_validator_keeps_eager_validation_schedule(cuda_graph_enabled, caplog):
+    from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
+
+    config = FluxValidator.Config(
+        dataloader=GrainDataLoader.Config(dataset=mock.Mock()), steps=1, freq=10
+    )
+    validator = FluxValidator(
+        config,
+        parallelism=mock.Mock(),
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=mock.Mock(spec=FluxTokenizerContainer),
+        parallelism_context=mock.Mock(),
+        loss_fn=mock.Mock(),
+        seq_len=4,
+        num_tokens_per_microbatch=4,
+        cuda_graph_enabled=cuda_graph_enabled,
+    )
+    assert validator.should_validate(1)
+    assert not validator.should_validate(2)
+    assert validator.should_validate(10)
+    assert not validator._cuda_graph_enabled
+    warned = "Flux validation runs without CUDA graphs" in caplog.text
+    assert warned == cuda_graph_enabled
 
 
 def _flux_validator(loader):
@@ -410,7 +433,9 @@ def test_pipeline_validator_does_not_keep_outputs(monkeypatch):
     assert validator.pp_schedule.eval.call_args.kwargs.get("return_outputs") is False
 
 
-def _validator_from_init(*, steps: int, dp_world_size: int) -> Validator:
+def _validator_from_init(
+    *, steps: int, dp_world_size: int, cuda_graph_enabled: bool = False
+) -> Validator:
     return Validator(
         Validator.Config(steps=steps),
         parallelism=mock.Mock(),
@@ -423,7 +448,22 @@ def _validator_from_init(*, steps: int, dp_world_size: int) -> Validator:
         metrics_processor=mock.Mock(),
         seq_len=4,
         num_tokens_per_microbatch=4,
+        cuda_graph_enabled=cuda_graph_enabled,
     )
+
+
+@pytest.mark.parametrize("cuda_graph_enabled", [False, True])
+def test_validator_uses_training_capture_mode(cuda_graph_enabled, monkeypatch):
+    from torchtitan.distributed.cuda_graph import cuda_graph_manager
+
+    monkeypatch.setattr(validator_module, "cuda_graphs_supported", lambda: True)
+    monkeypatch.setattr(cuda_graph_manager, "capture_allowed", True)
+    validator = _validator_from_init(
+        steps=1, dp_world_size=1, cuda_graph_enabled=cuda_graph_enabled
+    )
+    assert validator._cuda_graph_enabled == cuda_graph_enabled
+    assert cuda_graph_manager.capture_allowed != cuda_graph_enabled
+    assert validator.should_validate(2) == cuda_graph_enabled
 
 
 def test_validator_rejects_steps_neg1_when_dp_gt_1():

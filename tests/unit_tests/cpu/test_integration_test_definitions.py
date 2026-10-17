@@ -13,9 +13,7 @@ import pytest
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan.models.common.attention.cp_attention import (
-    UlyssesCPVarlenInnerAttention,
-)
+from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 from tests.integration_tests import (
@@ -167,9 +165,7 @@ def test_varlen_cp_combinations_require_real_collectives(
     assert not config.training.disable_cuda_graphs
     assert config.dataloader.max_num_documents is not None
     assert all(
-        isinstance(
-            layer.attention.inner_attention, UlyssesCPVarlenInnerAttention.Config
-        )
+        isinstance(layer.attention.inner_attention, UlyssesVarlenInnerAttention.Config)
         for layer in config.model.layers
     )
     config.__post_init__()
@@ -184,7 +180,7 @@ def test_per_group_cuda_graph_integration_supports_fake_pg() -> None:
     assert not test.use_real_pg
     assert test.ngpu == 2
     assert config.parallelism.data_parallel_shard_degree == 2
-    assert config.training.cuda_graph_per_accumulation_group
+    assert config.training.cuda_graph_per_microbatch_group
     assert config.training.steps == 10
     assert config.training.num_tokens_per_train_step == (
         3 * test.ngpu * config.training.num_tokens_per_microbatch_per_dp_rank

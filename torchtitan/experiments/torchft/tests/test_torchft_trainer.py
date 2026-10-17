@@ -143,7 +143,7 @@ def test_ft_trainer_composes_specialized_training_engine() -> None:
     assert issubclass(ft.FaultTolerantTrainingEngine, TrainingEngine)
 
 
-def test_ft_rejects_validation_cuda_graphs():
+def test_ft_accepts_validation_with_training_cuda_graphs():
     parallelism = ParallelismConfig()
     config = ft.FaultTolerantTrainer.Config(
         model=build_muse_glimmer_config(
@@ -153,12 +153,9 @@ def test_ft_rejects_validation_cuda_graphs():
         loss=CrossEntropyLoss.Config(),
         parallelism=parallelism,
     )
-    config.validator = Validator.Config(enable_cuda_graphs=True, steps=1)
-
-    with pytest.raises(
-        ValueError, match="TorchFT does not support validation CUDA graphs"
-    ):
-        config.__post_init__()
+    config.validator = Validator.Config(steps=1)
+    config.training.disable_cuda_graphs = False
+    config.__post_init__()
 
 
 def test_ft_accepts_eager_validation():

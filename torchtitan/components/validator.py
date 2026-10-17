@@ -29,7 +29,7 @@ from torchtitan.distributed.cuda_graph import (
     cuda_graphs_supported,
     wrap_with_cuda_graph,
 )
-from torchtitan.distributed.fsdp import finish_fsdp_eval
+from torchtitan.distributed.fsdp import post_validate_fsdp_for_cuda_graph
 from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_cuda_graph,
 )
@@ -88,9 +88,6 @@ class Validator(BaseValidator):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseValidator.Config):
-        enable_cuda_graphs: bool = False
-        """Capture validation in the shared CUDA graph pool."""
-
         steps: int = -1
         """
         Number of validation steps. -1 consumes the finite dataset once
@@ -131,6 +128,7 @@ class Validator(BaseValidator):
         metrics_processor: MetricsProcessor,
         seq_len: int,
         num_tokens_per_microbatch: int,
+        cuda_graph_enabled: bool = False,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
@@ -161,11 +159,11 @@ class Validator(BaseValidator):
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
         self._run_eval = None
-        self._cuda_graph_enabled = config.enable_cuda_graphs and cuda_graphs_supported()
+        self._cuda_graph_enabled = cuda_graph_enabled and cuda_graphs_supported()
         if self._cuda_graph_enabled:
             # Keep training and optimizer eager until eval captures.
             cuda_graph_manager.capture_allowed = False
-        elif config.enable_cuda_graphs:
+        elif cuda_graph_enabled:
             logger.warning(
                 "CUDA graph capture is only supported on NVIDIA CUDA; "
                 "using eager validation."
@@ -181,8 +179,8 @@ class Validator(BaseValidator):
             self._cuda_graph_enabled and not cuda_graph_manager.capture_allowed
         )
 
-    def _init_evaluate_fn(self, model_parts):
-        evaluate = partial(self._evaluate_body, model_parts)
+    def _init_validate_fn(self, model_parts):
+        evaluate = partial(self._validate_body, model_parts)
         if not self._cuda_graph_enabled:
             return evaluate
 
@@ -222,7 +220,7 @@ class Validator(BaseValidator):
             cuda_graph_manager.capture_allowed = True
         return self._run_eval
 
-    def _evaluate_body(self, model_parts, prepared):
+    def _validate_body(self, model_parts, prepared):
         with self.parallelism_context.activate_spmd():
             if self.parallelism_context.pp_enabled:
                 assert self.pp_schedule is not None
@@ -255,7 +253,7 @@ class Validator(BaseValidator):
                 predictions = model_parts[0](inputs, **kwargs)
                 loss_sum, _ = self.loss_fn(predictions, labels)
                 del predictions
-            finish_fsdp_eval(model_parts)
+            post_validate_fsdp_for_cuda_graph(model_parts)
         return loss_sum.detach()
 
     @sl.log_trace_span("eval")
@@ -344,7 +342,7 @@ class Validator(BaseValidator):
                             )
                         )
                 if evaluate is None:
-                    evaluate = self._init_evaluate_fn(model_parts)
+                    evaluate = self._init_validate_fn(model_parts)
                 loss_sum = evaluate(prepared)
 
                 if accumulated_loss is None:

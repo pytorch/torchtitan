@@ -95,13 +95,6 @@ class FluxValidator(Validator):
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Sampling configuration for validation image generation"""
 
-        def __post_init__(self) -> None:
-            Validator.Config.__post_init__(self)
-            if self.enable_cuda_graphs:
-                raise ValueError(
-                    "Validation graph capture is not implemented for FluxValidator."
-                )
-
     def __init__(
         self,
         config: Config,
@@ -114,6 +107,7 @@ class FluxValidator(Validator):
         loss_fn: LossFunction,
         seq_len: int,
         num_tokens_per_microbatch: int,
+        cuda_graph_enabled: bool = False,
         metrics_processor: MetricsProcessor | None = None,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
@@ -121,6 +115,9 @@ class FluxValidator(Validator):
         **kwargs,
     ):
         self.config = config
+        self._cuda_graph_enabled = False
+        if cuda_graph_enabled:
+            logger.warning("Flux validation runs without CUDA graphs.")
         self.parallelism = parallelism
         self.tokenizer = tokenizer
         self.parallelism_context = parallelism_context

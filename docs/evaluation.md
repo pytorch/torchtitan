@@ -29,7 +29,7 @@ validator=Validator.Config(
 
 Omitting `dataloader` uses this configuration by default.
 
-Set `enable_cuda_graphs=True` to capture validation in the shared CUDA graph pool.
+Validation follows `training.disable_cuda_graphs` and shares the training graph pool.
 See [CUDA graphs](../torchtitan/distributed/CUDA_GRAPH.md) for capture order and tensor lifetimes.
 
 ## Third-Party Evaluation

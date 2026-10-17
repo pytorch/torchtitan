@@ -164,7 +164,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "The optimization CUDA graph requires CUDA graphs to be enabled."
                 )
-            if self.training.cuda_graph_per_accumulation_group:
+            if self.training.cuda_graph_per_microbatch_group:
                 if self.training.disable_cuda_graphs:
                     raise ValueError(
                         "Per-group CUDA graphs require CUDA graphs to be enabled."
@@ -246,7 +246,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     model_device_mem_stats: DeviceMemStats
     _run_forward_backward: _ForwardBackwardFn
     _forward_backward_cuda_graph_enabled: bool
-    _cuda_graph_per_accumulation_group_enabled: bool
+    _cuda_graph_per_microbatch_group_enabled: bool
     _global_routing_token_counts: torch.Tensor
     _dist_moe_runtime: "DistMoeRuntime | None"
 
@@ -270,7 +270,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.ntokens_seen = 0
         self.sdc_replayer = None
         self._forward_backward_cuda_graph_enabled = False
-        self._cuda_graph_per_accumulation_group_enabled = False
+        self._cuda_graph_per_microbatch_group_enabled = False
         self._dist_moe_runtime = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
@@ -537,7 +537,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
                 )
 
-        if self.config.training.cuda_graph_per_accumulation_group:
+        if self.config.training.cuda_graph_per_microbatch_group:
             graph_group_runner = wrap_with_cuda_graph(
                 eager_forward_backward_fn,
                 num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
@@ -572,7 +572,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 assert accumulated_loss is not None
                 return ForwardBackwardResult(accumulated_loss, loss_metrics)
 
-            self._cuda_graph_per_accumulation_group_enabled = True
+            self._cuda_graph_per_microbatch_group_enabled = True
             self._run_forward_backward = run_forward_backward_groups
             return
 
@@ -604,7 +604,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_accumulation_steps = len(microbatch_groups)
         self.garbage_collector.run(self.num_completed_steps + 1)
         self.optim.zero_grad(
-            set_to_none=not self._cuda_graph_per_accumulation_group_enabled
+            set_to_none=not self._cuda_graph_per_microbatch_group_enabled
         )
         global_loss_token_counts = torch.as_tensor(
             global_loss_token_counts, device=self.device

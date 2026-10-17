@@ -30,7 +30,7 @@ __all__ = [
     "apply_fsdp_to_multimodal_encoder",
     "disable_fsdp_gradient_division",
     "enable_fsdp_symm_mem",
-    "finish_fsdp_eval",
+    "post_validate_fsdp_for_cuda_graph",
     "get_fsdp_reshard_after_forward_policy",
     "linear_param_shard_placements",
     "resolve_fsdp_mesh",
@@ -40,8 +40,14 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def finish_fsdp_eval(model_parts: list[nn.Module]) -> None:
-    """Finish partial grouped forwards and release full parameters after eval."""
+def post_validate_fsdp_for_cuda_graph(model_parts: list[nn.Module]) -> None:
+    """Finish grouped forwards and release full parameters for pool reuse.
+
+    Eager and captured validation use the same cleanup. With ChunkedLossWrapper,
+    the model skips lm_head, then the loss calls it after the root forward.
+    A group containing norm and lm_head can still have norm pending. Validation
+    has no backward callback to clear this state.
+    """
     # TODO: Use public FSDP APIs for grouped eval cleanup.
     for model in model_parts:
         for module in model.modules():
@@ -49,8 +55,6 @@ def finish_fsdp_eval(model_parts: list[nn.Module]) -> None:
                 continue
             state = module._get_fsdp_state()
             if state._modules_to_run_forward:
-                # Loss can call one grouped module after the root forward ends.
-                # Eval has no backward pass to finish the group's cleanup.
                 state._post_forward(module, None, None)
                 state._modules_to_run_forward.clear()
             module.reshard()

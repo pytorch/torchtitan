@@ -24,28 +24,28 @@ Training capture requires `training.disable_cuda_graphs=False`.
 
 | Setting | Captured work |
 | --- | --- |
-| `training.cuda_graph_per_accumulation_group=False` | Forward and backward for all microbatch groups in one optimizer update |
-| `training.cuda_graph_per_accumulation_group=True` | Forward and backward for one microbatch group, replayed for each group |
+| `training.cuda_graph_per_microbatch_group=False` | Forward and backward for all microbatch groups in one optimizer update |
+| `training.cuda_graph_per_microbatch_group=True` | Forward and backward for one microbatch group, replayed for each group |
 | `optim.enable_cuda_graph=True` | Gradient clipping, finite checks, and optimizer update |
-| `validator.enable_cuda_graphs=True` | One eval microbatch group |
+| `training.disable_cuda_graphs=False` | One validation microbatch group, if validation is configured |
 
 An eval microbatch group contains one microbatch without PP. With PP, it contains
 the microbatches for one eval schedule call. A full validation pass runs the
 configured number of groups and reports one validation loss.
 
-With `cuda_graph_per_accumulation_group=False`, one graph captures all microbatch
+With `cuda_graph_per_microbatch_group=False`, one graph captures all microbatch
 groups. Each replay runs all groups for one update. The number of groups and their
 input structure must stay fixed across updates.
 
-With `cuda_graph_per_accumulation_group=True`, one graph captures one microbatch
+With `cuda_graph_per_microbatch_group=True`, one graph captures one microbatch
 group. Each group replays that graph. Groups must have the same input structure,
 tensor shapes, dtypes, devices, and set of parameters receiving gradients. The
 number of groups can change between updates. Each group reduces gradients
 separately. With hybrid sharded data parallelism (HSDP), this can change results
 because eager accumulation reduces replicas once per update.
 
-Training and validation have separate capture flags. Eval-only capture is useful
-when training inputs change but eval inputs have fixed shapes and structure.
+Training and validation use the same capture flag. Disabling training capture
+also disables validation capture.
 Optimizer capture requires training capture to be enabled. Learning rate
 scheduling and exponential moving average (EMA) updates run outside the optimizer
 graph. Optimizer capture uses tensor learning rates so each replay reads the
@@ -56,11 +56,7 @@ even at fixed points. This includes `.item()` and `torch.cuda.synchronize()`.
 CPU waits must run outside capture. GPU stream waits are allowed under CUDA capture
 rules. DistMoE supports expert parallelism (EP) capture. PP requires a schedule that
 supports the requested training or eval work. FluxValidator, GraphTrainer, and
-TorchFT do not support validation capture.
-
-With PP, training capture and configured validation require validation capture.
-Eager eval can replace schedule buffers that the training graph still uses.
-Enable validation capture or disable training capture.
+TorchFT keep validation eager and warn when training capture is enabled.
 
 ## Shared pool and capture order
 
@@ -107,10 +103,8 @@ call. `all_wrappers_warmed_up` checks those registered wrappers.
 It does not block replay of existing graphs.
 
 The first process-local validation pass stays eager on resumed runs too.
-Eval-only capture follows the same order: an eager pass after one training update,
-then capture after the next update. A run that ends before capture still reports
-its validation results. Without eval capture, validation follows its configured
-schedule.
+A run that ends before capture still reports its validation results. With
+training capture disabled, validation follows its configured schedule.
 
 Each validation pass builds its own loader. No warmup result is discarded.
 RNG state and model buffers are not restored. Startup validation can change later
@@ -130,9 +124,8 @@ stream, outside capture. Warmup uses the eager schedule's own initialization.
 With training capture enabled, capturing eval before training warmup ends can
 raise peak memory. The graph pool stays reserved while eager training allocates
 from the normal pool. Waiting until warmup finishes avoids this overlap during
-training warmup. With eval-only capture, training stays eager and this overlap
-can continue. The shared stream also avoids separate eager caches for training
-and eval.
+training warmup. The shared stream also avoids separate eager caches for
+training and eval.
 
 Before its first capture, each wrapper calls `torch.cuda.empty_cache()`. This
 releases unused normal cache. It cannot release storage held by live tensors or
@@ -248,6 +241,13 @@ During replay, eval and forward use their recorded addresses. They can write to
 that storage when gradient values are not needed.
 
 ## Inputs, outputs, and cleanup
+
+`post_validate_fsdp_for_cuda_graph()` finishes pending grouped forwards and
+reshards full parameters so later capture can reuse their storage. With chunked
+loss, the model skips `lm_head`, then the loss calls it outside the root forward.
+The FSDP group containing `norm` and `lm_head` can still have `norm` pending.
+Validation has no backward callback to clear that state. Eager and captured
+validation use the same cleanup.
 
 Before replay, the wrapper copies tensor input values into the buffers used for
 capture. Inputs marked as static are not copied. Their addresses must stay fixed.

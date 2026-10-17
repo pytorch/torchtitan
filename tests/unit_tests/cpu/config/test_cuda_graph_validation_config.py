@@ -30,7 +30,7 @@ def test_shared_eval_cuda_graph_recipe_enables_capture() -> None:
     config = muse_glimmer_debugmodel_shared_eval_cuda_graph()
     assert not config.training.disable_cuda_graphs
     assert config.optim.enable_cuda_graph
-    assert config.validator.enable_cuda_graphs
+    assert not hasattr(config.validator, "enable_cuda_graphs")
 
 
 @pytest.fixture(autouse=True)
@@ -64,11 +64,10 @@ def test_engine_closes_graphs_after_pending_work(engine_cls):
     assert engine._dist_moe_runtime is None
 
 
-def test_graph_trainer_rejects_eval_graphs():
+def test_graph_trainer_accepts_eager_validation_with_training_graphs():
     config = graph_trainer_muse_glimmer_debugmodel()
-    config.validator = Validator.Config(enable_cuda_graphs=True, steps=1)
-    with pytest.raises(ValueError, match="GraphTrainer does not support"):
-        config.__post_init__()
+    config.validator = Validator.Config(steps=1)
+    config.__post_init__()
 
 
 def test_graph_trainer_preserves_eager_pp_validation(monkeypatch):
@@ -94,7 +93,7 @@ def test_graph_trainer_preserves_eager_pp_validation(monkeypatch):
     monkeypatch.setattr("torchtitan.components.validator.utils.device_type", "cpu")
 
     with torch.no_grad():
-        loss = validator._evaluate_body([model], [(inputs, labels, {})])
+        loss = validator._validate_body([model], [(inputs, labels, {})])
 
     torch.testing.assert_close(loss, torch.tensor(2.0), rtol=0, atol=0)
     schedule.eval.assert_called_once()
@@ -118,7 +117,7 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
 
 
 @pytest.mark.parametrize(
-    "loaded_step,freq,training_steps,capture_mode,expected,expected_staged",
+    "loaded_step,freq,training_steps,capture_mode,expected",
     [
         pytest.param(
             0,
@@ -126,12 +125,11 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
             4,
             "enabled",
             [
-                "train checkpoint wait eval:blocked",
-                "train checkpoint wait eval:allowed",
+                "train checkpoint eval:blocked",
+                "train checkpoint eval:allowed",
                 "train checkpoint",
-                "train checkpoint wait eval:allowed",
+                "train checkpoint eval:allowed",
             ],
-            [0, 1, 2],
             id="fresh",
         ),
         pytest.param(
@@ -140,11 +138,10 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
             3,
             "enabled",
             [
-                "train checkpoint wait eval:blocked",
-                "train checkpoint wait eval:allowed",
-                "train checkpoint wait eval:allowed",
+                "train checkpoint eval:blocked",
+                "train checkpoint eval:allowed",
+                "train checkpoint eval:allowed",
             ],
-            [0, 1, 2],
             id="resume",
         ),
         pytest.param(
@@ -153,11 +150,10 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
             3,
             "enabled",
             [
-                "train checkpoint wait eval:blocked",
-                "train checkpoint wait eval:allowed",
+                "train checkpoint eval:blocked",
+                "train checkpoint eval:allowed",
                 "train checkpoint",
             ],
-            [0, 1],
             id="eval-not-due",
         ),
         pytest.param(
@@ -165,8 +161,7 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
             2,
             1,
             "enabled",
-            ["train checkpoint wait eval:blocked"],
-            [0],
+            ["train checkpoint eval:blocked"],
             id="short-run",
         ),
         pytest.param(
@@ -179,7 +174,6 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
                 "train checkpoint eval:allowed",
                 "train checkpoint",
             ],
-            [],
             id="capture-disabled",
         ),
         pytest.param(
@@ -188,36 +182,30 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
             3,
             "unsupported",
             [
-                "train checkpoint wait eval:allowed",
-                "train checkpoint wait eval:allowed",
+                "train checkpoint eval:allowed",
+                "train checkpoint eval:allowed",
                 "train checkpoint",
             ],
-            [0, 1],
             id="unsupported-platform",
         ),
     ],
 )
 def test_trainer_keeps_scheduled_eval_during_warmup(
-    loaded_step, freq, training_steps, capture_mode, expected, expected_staged
+    loaded_step, freq, training_steps, capture_mode, expected
 ):
     cuda_graph_manager.capture_allowed = capture_mode != "enabled"
     events = []
     step_events = []
-    model = torch.nn.Module()
-    model.register_buffer("counter", torch.tensor(0))
-    pending_state = {}
-    staged_counters = []
+    model = torch.nn.Identity()
     validator = object.__new__(Validator)
-    validator.config = Validator.Config(
-        enable_cuda_graphs=capture_mode != "disabled", steps=1, freq=freq
-    )
+    validator.config = Validator.Config(steps=1, freq=freq)
     validator._cuda_graph_enabled = capture_mode == "enabled"
     validator._run_eval = None
     validator.parallelism_context = SimpleNamespace(pp_enabled=False)
-    validator._evaluate_body = lambda *args: model.counter.add_(1)
+    validator._validate_body = MagicMock()
 
     def validate(*args):
-        evaluate = validator._init_evaluate_fn([model])
+        evaluate = validator._init_validate_fn([model])
         step_events.append(
             "eval:allowed" if cuda_graph_manager.capture_allowed else "eval:blocked"
         )
@@ -225,11 +213,6 @@ def test_trainer_keeps_scheduled_eval_during_warmup(
 
     def save_checkpoint(**kwargs):
         step_events.append("checkpoint")
-        pending_state.update(model.state_dict())
-
-    def wait_for_staging():
-        step_events.append("wait")
-        staged_counters.append(pending_state["counter"].clone())
 
     def finish_step():
         events.append(" ".join(step_events))
@@ -244,7 +227,7 @@ def test_trainer_keeps_scheduled_eval_during_warmup(
         start_profiler=lambda: None,
         close_profiler=lambda: None,
         save_checkpoint=save_checkpoint,
-        checkpointer=SimpleNamespace(maybe_wait_for_staging=wait_for_staging),
+        checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
         step_profiler=finish_step,
     )
     trainer = object.__new__(Trainer)
@@ -279,5 +262,5 @@ def test_trainer_keeps_scheduled_eval_during_warmup(
     ):
         trainer.train()
     assert events == expected
-    assert [counter.item() for counter in staged_counters] == expected_staged
+    engine.checkpointer.maybe_wait_for_staging.assert_not_called()
     assert engine.num_completed_steps == loaded_step + training_steps
