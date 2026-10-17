@@ -974,6 +974,16 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
         for layer in model_config.layers
     )
     assert config.dataloader.max_num_documents == max_documents
+    assert "dist_moe_mask_padded_routes" in model_config.local_compile_regions
+
+
+def test_transform_enables_the_padding_mask_region_once() -> None:
+    """The padding-mask compile region is added once, however often the transform runs."""
+    model_config = deepseek_v3_debugmodel().model
+    for _ in range(2):
+        DistMoeTransform().transform(model_config)
+
+    assert model_config.local_compile_regions.count("dist_moe_mask_padded_routes") == 1
 
 
 def test_eager_dist_moe_recipe_supports_cuda_graphs_with_pipeline_parallelism():

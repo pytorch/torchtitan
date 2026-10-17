@@ -21,12 +21,29 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
 
 from torchtitan.models.common.linear import GroupedLinear
 
 from . import _dist_moe as dist_moe
 from .runtime import DistMoeRuntime
+
+
+# dynamic=True: one graph for any token count. The generator's eager warmup
+# compiles it before CUDA graph capture, which cannot compile.
+@local_compile("dist_moe_mask_padded_routes", batch_invariant=True, dynamic=True)
+def _mask_padded_routes(
+    topk_expert_ids_TK: torch.Tensor,
+    topk_scores_TK: torch.Tensor,
+    padding_mask_T: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Route padded rows to expert ``-1`` with score ``0``; one kernel when compiled."""
+    padding_mask_TK = padding_mask_T.unsqueeze(-1)
+    return (
+        topk_expert_ids_TK.masked_fill(padding_mask_TK, -1),
+        topk_scores_TK.masked_fill(padding_mask_TK, 0.0),
+    )
 
 
 class DistMoeRoutedExperts(Module):
@@ -193,9 +210,9 @@ class DistMoeRoutedExperts(Module):
         if runtime is None:
             raise RuntimeError("Dist-MoE context is not initialized")
         if padding_mask_T is not None:
-            padding_mask_TK = padding_mask_T.unsqueeze(-1)
-            topk_expert_ids_TK = topk_expert_ids_TK.masked_fill(padding_mask_TK, -1)
-            topk_scores_TK = topk_scores_TK.masked_fill(padding_mask_TK, 0.0)
+            topk_expert_ids_TK, topk_scores_TK = _mask_padded_routes(
+                topk_expert_ids_TK, topk_scores_TK, padding_mask_T
+            )
         # Every EP rank must pass the annex the same row count, and local batches
         # can differ across ranks. Pad to the call's count with rows routed to
         # expert -1, then slice the output.

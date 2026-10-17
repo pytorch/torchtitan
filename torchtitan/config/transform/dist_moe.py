@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from torchtitan.models.base.model import BaseModel
 from torchtitan.models.base.module import Module
 
 from torchtitan.models.common.activation import ClampedSwiGLU, SwiGLU
@@ -135,7 +136,16 @@ class DistMoeTransform(ModelConfigTransform):
             )
 
     def transform(self, model: Module.Config) -> Module.Config:
-        """Replace each stock routed-expert config with the selected precision."""
+        """Replace each stock routed-expert config with the selected precision.
+
+        Also enables the ``dist_moe_mask_padded_routes`` local compile region.
+        """
+        # Any Module.Config can be the root; only a whole model has compile regions.
+        if (
+            isinstance(model, BaseModel.Config)
+            and "dist_moe_mask_padded_routes" not in model.local_compile_regions
+        ):
+            model.local_compile_regions.append("dist_moe_mask_padded_routes")
         if self.expert_precision == "bf16":
             return _replace_routed_experts(
                 model,
