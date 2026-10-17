@@ -14,6 +14,7 @@ import torch_remat as remat
 
 from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
+    GQAttention,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -37,7 +38,7 @@ class Qwen3TransformerBlock(TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config):
+    class Config(TransformerBlock.Config[GQAttention.Config]):
         pass
 
     def __init__(self, config: Config):
@@ -100,7 +101,7 @@ class Qwen3Model(Decoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[Qwen3TransformerBlock.Config]):
         dim: int = 1024
         vocab_size: int = 151936
         local_compile_regions: list[str] = field(

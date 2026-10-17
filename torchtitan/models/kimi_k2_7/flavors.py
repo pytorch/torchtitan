@@ -25,7 +25,6 @@ from torchtitan.models.common import (
     RMSNorm,
     Sigmoid,
     Softmax,
-    TransformerBlock,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.decoder_sharding import (
@@ -51,6 +50,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_rowwise_sharding_config,
 )
 from torchtitan.models.deepseek_v3.flavors import build_mla_moe_layers
+from torchtitan.models.deepseek_v3.model import DeepSeekV3TransformerBlock
 from .model import KimiK25Model
 from .qk_clip import QKClipFlexInnerAttention
 from .sharding import (
@@ -261,7 +261,7 @@ def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexInnerAttention.Con
     return QKClipFlexInnerAttention.Config()
 
 
-def _build_kimi_layers(**kwargs) -> list[TransformerBlock.Config]:
+def _build_kimi_layers(**kwargs) -> list[DeepSeekV3TransformerBlock.Config]:
     """Build MLA/MoE layers with the Kimi-family parameter initializers."""
     return build_mla_moe_layers(
         **kwargs,

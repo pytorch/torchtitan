@@ -32,7 +32,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config):
+    class Config(TransformerBlock.Config[DeepSeekMLAAttention.Config]):
         pass
 
     def __init__(self, config: Config):
@@ -72,7 +72,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
 
 
 def get_deepseek_v3_nparams_and_flops(
-    model_config: MTPDecoder.Config,
+    model_config: MTPDecoder.Config[DeepSeekV3TransformerBlock.Config],
     model: nn.Module,
     seq_len: int,
     *,
@@ -114,7 +114,7 @@ class DeepSeekV3Model(MTPDecoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(MTPDecoder.Config):
+    class Config(MTPDecoder.Config[DeepSeekV3TransformerBlock.Config]):
         dim: int = 2048
         vocab_size: int = 102400
         local_compile_regions: list[str] = field(

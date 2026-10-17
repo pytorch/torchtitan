@@ -306,9 +306,7 @@ class MuseSparkLMHead(HiMidLoLinear):
 
 class MuseSparkTransformerBlock(TransformerBlock):
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config):
-        # pyrefly: ignore [bad-override]
-        attention: MuseSparkAttention.Config
+    class Config(TransformerBlock.Config[MuseSparkAttention.Config]):
         post_attention_norm: MuseSparkRMSNorm.Config
         attention_residual: MuseSparkNormPreservingResidualConnection.Config
         post_ffn_norm: MuseSparkRMSNormWithInputScale.Config
@@ -381,7 +379,7 @@ class MuseSparkModel(MultimodalModel):
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
 
     @dataclass(kw_only=True, slots=True)
-    class Config(MultimodalModel.Config):
+    class Config(MultimodalModel.Config[MuseSparkTransformerBlock.Config]):
         """Configure stage modalities consistently across ranks.
 
         ``dataset_modalities`` is the union of modalities the current dataset can
@@ -403,7 +401,6 @@ class MuseSparkModel(MultimodalModel):
         )
         # pyrefly: ignore [bad-override]
         tok_embeddings: MuseSparkEmbeddingWithNorm.Config
-        layers: list[MuseSparkTransformerBlock.Config]
         residual_dtype: torch.dtype = torch.float32
         final_norm_input_dtype: torch.dtype | None = None
         dataset_modalities: tuple[Literal["vision", "audio"], ...] = ()
