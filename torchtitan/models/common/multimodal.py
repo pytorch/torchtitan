@@ -62,6 +62,10 @@ class MultimodalModel(Decoder):
             )
         return self
 
+    def _encoder_is_cp_invariant(self, encoder: torch.nn.Module) -> bool:
+        """Whether ``encoder``'s gradients are already reduced across CP, so FSDP skips the CP axis."""
+        return True
+
     def _apply_fsdp(
         self,
         *,
@@ -74,15 +78,14 @@ class MultimodalModel(Decoder):
             resolve_fsdp_mesh,
         )
 
-        # Encoders are CP-invariant, so FSDP shards them over dp_shard only.
-        # That differs from the decoder, so they always get their own FSDP
-        # wrapper, including under PP.
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
-            parallelism_context, shard_on_cp_axis=False
-        )
+        # A CP-invariant encoder shards over dp_shard only, so each encoder gets its own FSDP wrapper, even under PP.
         for encoder_fqn in self.multimodal_encoder_fqns:
             encoder = getattr(self, encoder_fqn)
             if encoder is not None:
+                dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
+                    parallelism_context,
+                    shard_on_cp_axis=not self._encoder_is_cp_invariant(encoder),
+                )
                 apply_fsdp_to_multimodal_encoder(
                     encoder,
                     dp_mesh,
