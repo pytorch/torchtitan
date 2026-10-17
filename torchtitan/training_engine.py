@@ -58,7 +58,9 @@ logger = logging.getLogger(__name__)
 
 class ForwardBackwardResult(NamedTuple):
     loss: torch.Tensor
-    loss_metrics: list[dict[str, torch.Tensor]]
+    loss_metrics: list[list[dict[str, torch.Tensor]]]
+    """Loss metrics, one list per microbatch group with one dict per
+    microbatch. Under PP, they are empty on ranks without the last stage."""
 
 
 _ForwardBackwardFn: TypeAlias = Callable[
@@ -524,7 +526,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 global_loss_token_counts: torch.Tensor,
             ) -> ForwardBackwardResult:
                 accumulated_loss: torch.Tensor | None = None
-                loss_metrics: list[dict[str, torch.Tensor]] = []
+                loss_metrics: list[list[dict[str, torch.Tensor]]] = []
                 for microbatch_group in microbatch_groups:
                     result = graph_group_runner(
                         [microbatch_group],
@@ -536,7 +538,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     else:
                         accumulated_loss.add_(group_loss)
                     loss_metrics.extend(
-                        {key: value.clone() for key, value in group_metrics.items()}
+                        [
+                            {key: value.clone() for key, value in metrics.items()}
+                            for metrics in group_metrics
+                        ]
                         for group_metrics in result.loss_metrics
                     )
                 assert accumulated_loss is not None
@@ -627,7 +632,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         global_routing_token_counts: torch.Tensor,
     ) -> tuple[Any, ...]:
         """Preprocess one group: ``(inputs, labels, model_kwargs, loss_kwargs)``, or with PP
-        ``(arg_mbs, kwarg_mbs, target_mbs)``."""
+        ``(arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs)``."""
         prepared_microbatches: list[tuple[Any, ...]] = []
         for microbatch in microbatch_group:
             with (
@@ -660,11 +665,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             assert len(prepared_microbatches) == 1
             return prepared_microbatches[0]
 
-        if any(loss_kwargs for *_, loss_kwargs in prepared_microbatches):
-            raise ValueError(
-                "Per-microbatch loss arguments are not supported with "
-                "pipeline parallelism yet."
-            )
         arg_mbs = (
             [(inputs,) for inputs, *_ in prepared_microbatches]
             if self.pp_has_first_stage
@@ -676,7 +676,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             if self.pp_has_last_stage
             else None
         )
-        return (arg_mbs, kwarg_mbs, target_mbs)
+        loss_kwarg_mbs = [loss_kwargs for *_, loss_kwargs in prepared_microbatches]
+        return (arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs)
 
     def _forward_backward_body(
         self,
@@ -689,7 +690,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         """Run all microbatch groups in one graphable call."""
 
         accumulated_loss: torch.Tensor | None = None
-        loss_metrics: list[dict[str, torch.Tensor]] = []
+        loss_metrics: list[list[dict[str, torch.Tensor]]] = []
         num_accumulation_steps = len(microbatch_groups)
         for accumulation_index, microbatch_group in enumerate(microbatch_groups):
             is_last_accumulation_step = accumulation_index == num_accumulation_steps - 1
@@ -710,13 +711,19 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
             self.loss_metrics = {}
             if self.parallelism_context.pp_enabled:
-                arg_mbs, kwarg_mbs, target_mbs = prepared_inputs
+                arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs = prepared_inputs
                 # Finalization runs after the group's last PP microbatch.
-                loss = self._pp_forward_backward_microbatch_group(
+                loss, group_loss_metrics = self._pp_forward_backward_microbatch_group(
                     inputs=arg_mbs,
                     model_kwargs=kwarg_mbs,
                     labels=target_mbs,
-                    loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
+                    loss_kwargs=[
+                        {
+                            **mb_loss_kwargs,
+                            "global_loss_token_counts": global_loss_token_counts,
+                        }
+                        for mb_loss_kwargs in loss_kwarg_mbs
+                    ],
                     finalize_gradients=(
                         not defer_fsdp_gradient_reduction or is_last_accumulation_step
                     ),
@@ -737,6 +744,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         "global_loss_token_counts": global_loss_token_counts,
                     },
                 )
+                group_loss_metrics = [self.loss_metrics]
 
             detached_loss = loss.detach()
             if accumulated_loss is None:
@@ -744,10 +752,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             else:
                 accumulated_loss.add_(detached_loss)
             loss_metrics.append(
-                {
-                    key: value.detach().clone()
-                    for key, value in self.loss_metrics.items()
-                }
+                [
+                    {key: value.detach().clone() for key, value in metrics.items()}
+                    for metrics in group_loss_metrics
+                ]
             )
 
         assert accumulated_loss is not None
@@ -781,14 +789,17 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         inputs: list[tuple[torch.Tensor, ...]] | None,
         labels: list[torch.Tensor] | None,
         model_kwargs: list[dict[str, Any]],
-        loss_kwargs: dict[str, Any],
+        loss_kwargs: list[dict[str, Any]],
         finalize_gradients: bool = True,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
         """Run one PP microbatch group.
 
-        The input lists contain one pipeline schedule step. ``finalize_gradients``
-        controls whether that step finishes FSDP gradient reduction.
+        The input lists, including ``loss_kwargs``, hold one entry per
+        microbatch of one pipeline schedule step. ``finalize_gradients``
+        controls whether that step finishes FSDP gradient reduction. Returns
+        the group loss and one loss metrics dict per microbatch.
         """
+        loss_metrics: list[dict[str, torch.Tensor]] = [{} for _ in loss_kwargs]
         with self.parallelism_context.activate_spmd(
             typechecking=self.config.debug.spmd_typechecking,
         ):
@@ -798,7 +809,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 kwarg_mbs=model_kwargs,
                 target_mbs=labels,
                 losses=losses,
-                loss_kwargs=loss_kwargs,
+                **self._pp_schedule_loss_kwargs(loss_kwargs, loss_metrics),
                 return_outputs=False,
                 finalize_gradients=finalize_gradients,
             )
@@ -807,8 +818,27 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             assert losses is not None
             detached_losses = [loss.detach() for loss in losses]
             losses.clear()
-            return torch.sum(torch.stack(detached_losses)).to(self.device)
-        return self._pp_loss_sentinel_on_non_last_stage
+            return torch.sum(torch.stack(detached_losses)).to(self.device), loss_metrics
+        return self._pp_loss_sentinel_on_non_last_stage, loss_metrics
+
+    def _pp_schedule_loss_kwargs(
+        self,
+        loss_kwargs: list[dict[str, Any]],
+        loss_metrics: list[dict[str, torch.Tensor]],
+    ) -> dict[str, Any]:
+        """Return the pipeline schedule ``step`` arguments for the loss.
+
+        Each microbatch's loss receives its own loss arguments and fills its
+        own ``loss_metrics`` dict.
+        """
+        return {
+            "loss_kwarg_mbs": [
+                {**mb_loss_kwargs, "loss_metrics": mb_loss_metrics}
+                for mb_loss_kwargs, mb_loss_metrics in zip(
+                    loss_kwargs, loss_metrics, strict=True
+                )
+            ]
+        }
 
     @sl.log_trace_span("optim_step")
     def optim_step(self) -> torch.Tensor:

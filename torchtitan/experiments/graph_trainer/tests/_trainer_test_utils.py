@@ -222,7 +222,7 @@ def build_minimal_trainer(
                     accumulated_loss = loss.clone()
                 else:
                     accumulated_loss.add_(loss)
-                loss_metrics.append({})
+                loss_metrics.append([{} for _ in model_kwargs])
 
             assert accumulated_loss is not None
             return ForwardBackwardResult(accumulated_loss, loss_metrics)

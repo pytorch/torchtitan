@@ -359,6 +359,15 @@ class Controller(Configurable):
                     "ranks read all microbatches before forward/backward, with no overlap.",
                     stacklevel=2,
                 )
+            # TODO: read RDMA microbatches in pipeline-step groups.
+            if (
+                self.async_loop.batcher.rdma_min_tensor_bytes is not None
+                and self.trainer.parallelism.pipeline_parallel_degree > 1
+            ):
+                raise ValueError(
+                    "async_loop.batcher.rdma_min_tensor_bytes does not support "
+                    "trainer pipeline parallelism yet."
+                )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
                 max_context_length = self.trainer.training.max_context_length
@@ -668,6 +677,11 @@ class Controller(Configurable):
                 max_context_length=config.trainer.training.max_context_length,
                 num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
                 dp_degree=self.trainer_dp_degree,
+                num_pp_microbatches=(
+                    config.trainer.parallelism.num_pp_microbatches
+                    if config.trainer.parallelism.pipeline_parallel_degree > 1
+                    else 1
+                ),
                 pad_id=self.tokenizer.eos_id,
                 temperature=self._sampling.temperature,
                 output_dir=config.dump_folder,
@@ -703,12 +717,15 @@ class Controller(Configurable):
             )
 
         # Torch ranks follow this mesh's order and the trainer lays them out as
-        # (dp, cp, tp) with no PP, so each DP rank's cp * tp ranks are consecutive.
-        trainer_dp_cp_tp = self.trainer.flatten("rank").split(
-            rank=("dp", "cp_tp"), dp=self.trainer_dp_degree
+        # (pp, dp, cp, tp), so each DP rank owns cp * tp consecutive ranks in
+        # every pipeline stage.
+        trainer_pp_dp_cp_tp = self.trainer.flatten("rank").split(
+            rank=("pp", "dp", "cp_tp"),
+            pp=self.config.trainer.parallelism.pipeline_parallel_degree,
+            dp=self.trainer_dp_degree,
         )
         self._trainer_by_dp_rank = [
-            trainer_dp_cp_tp.slice(dp=dp_rank)
+            trainer_pp_dp_cp_tp.slice(dp=dp_rank)
             for dp_rank in range(self.trainer_dp_degree)
         ]
         # Check that layout once: if it drifts, one TP group's ranks get different columns.
@@ -720,7 +737,7 @@ class Controller(Configurable):
                 raise RuntimeError(
                     f"Trainer ranks at DP rank {dp_rank} report DP ranks "
                     f"{reported_dp_ranks}; the controller assumes the trainer orders "
-                    "ranks as (dp, cp, tp)."
+                    "ranks as (pp, dp, cp, tp)."
                 )
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored
@@ -1204,7 +1221,10 @@ class Controller(Configurable):
                         fwd_bwd_results = await asyncio.gather(
                             *(
                                 trainer_at_dp_rank.forward_backward.call(
-                                    [row[dp_rank] for row in packed.microbatches],
+                                    [
+                                        [row[dp_rank] for row in group]
+                                        for group in packed.microbatch_groups
+                                    ],
                                     packed.global_loss_token_counts,
                                     packed.global_routing_token_counts,
                                 )
@@ -1213,7 +1233,13 @@ class Controller(Configurable):
                                 )
                             )
                         )
-                        fwd_bwd_metrics = self._get_rank_0_value(fwd_bwd_results[0])
+                        # Under PP, only trainer ranks holding the last stage
+                        # compute the loss; the others return None.
+                        fwd_bwd_metrics = next(
+                            rank_metrics
+                            for rank_metrics in fwd_bwd_results[0].values()
+                            if rank_metrics is not None
+                        )
                     finally:
                         # With RDMA, every rank has read its column (or the step failed).
                         # Not awaited: it would wait behind an in-flight add_group.
