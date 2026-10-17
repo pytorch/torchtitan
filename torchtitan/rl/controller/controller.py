@@ -108,7 +108,7 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
-from torchtitan.rl.actors.monarch.generator import VLLMGeneratorActor
+from torchtitan.rl.actors.monarch.generator import GeneratorActor
 from torchtitan.rl.actors.monarch.torch_elastic import setup_torch_elastic_env
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.controller.metrics import (
@@ -121,7 +121,8 @@ from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
-from torchtitan.rl.generator.generator import SamplingConfig, VLLMGenerator
+from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
@@ -231,7 +232,7 @@ class AsyncLoopConfig(Configurable.Config):
 class Controller(Configurable):
     """Top-level RL async training orchestrator.
 
-    Owns a `Trainer` actor (gradient updates), a `VLLMGenerator` actor
+    Owns a `Trainer` actor (gradient updates), a `Generator` actor
     (sampling), and a `Rollouter` (datasets + rubric + env construction).
 
     Check the docstring at the top of the file for more details.
@@ -283,8 +284,8 @@ class Controller(Configurable):
         """Trainer config. Controls the trainer model, optimizer, training, parallelism."""
 
         # TODO: put generator, num generators and generator router in a separate config
-        generator: VLLMGenerator.Config
-        """VLLMGenerator actor configuration (generator model, vLLM engine, sampling)."""
+        generator: Generator.Config
+        """Generator actor configuration (generator model, vLLM engine, sampling)."""
 
         num_generators: int = 1
         """Number of generator replicas to spawn as separate proc meshes.
@@ -645,7 +646,7 @@ class Controller(Configurable):
                 )
                 generator = generator_mesh.spawn(
                     actor_name,
-                    VLLMGeneratorActor,
+                    GeneratorActor,
                     config.generator,
                     model_path=config.hf_assets_path,
                     max_num_seqs=max_num_seqs,
@@ -1142,7 +1143,7 @@ class Controller(Configurable):
             Trainer:    forward/backward N+1 (does not mutate persistent model state)
 
         See `Trainer.push_model_state_dict` for why staging can overlap forward/backward, and
-        `VLLMGenerator.load_model_state_dict` for how a generator applies the load between steps.
+        `Generator.load_model_state_dict` for how a generator applies the load between steps.
 
         Impact on off-policiness: no sample is born stale, because the buffer admits new rollout
         groups only after the generators load the new policy.

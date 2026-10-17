@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 
     # Type-only: importing the generator module here would pull in vLLM at import time.
-    from torchtitan.rl.generator.generator import SamplingConfig
+    from torchtitan.rl.generator.types import SamplingConfig
 
 
 logger = logging.getLogger(__name__)

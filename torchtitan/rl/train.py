@@ -8,7 +8,7 @@
 RL training loop using Monarch Actors.
 
 This demonstrates:
-1. Distributed actor architecture with VLLMGenerator (vLLM) and Trainer (TorchTitan)
+1. Distributed actor architecture with Generator (vLLM) and Trainer (TorchTitan)
    running on separate GPU meshes
 2. Model state dict transfer across meshes via TorchStore: the trainer publishes its
    model state dict and the generator pulls it into its own parallelism layout,
@@ -64,11 +64,11 @@ def _preimport_torch() -> None:
 
 
 def _bootstrap_generator() -> None:
-    """``bootstrap`` setup callable for VLLMGenerator."""
+    """``bootstrap`` setup callable for Generator."""
     import os
 
     # TODO: this can be removed if it is addressed upstream in: https://github.com/tile-ai/tvm/issues/55
-    # VLLMGenerator encounters the following issue:
+    # Generator encounters the following issue:
     # 1. vLLM's jit_monitor transitively imports readline through the following chain:
     #      vLLM -> tilelang  -> tvm  -> tvm's base.py -> import readline
     #      https://github.com/vllm-project/vllm/blob/b23bd73f540175f9e117eaee5029cd7d8df63964/vllm/utils/jit_monitor.py#L451
@@ -76,7 +76,7 @@ def _bootstrap_generator() -> None:
     #    readline does tcsetattr on its import, which touches the controlling terminal.
     # 2. Monarch spawns procs in a background process group.
     #
-    # As a result, when spawning the VLLMGenerator mesh, readline-import touches the
+    # As a result, when spawning the Generator mesh, readline-import touches the
     # controlling terminal in background processes, and kernel sends SIGTTOU, which stops
     # the process.
     #

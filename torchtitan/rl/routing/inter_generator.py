@@ -298,7 +298,7 @@ class InterGeneratorRouter(Actor, Configurable):
             prompt_token_ids,
             request_id=request_id,
             group_id=group_id,
-            # VLLMGenerator.generate also requires this field for its
+            # Generator.generate also requires this field for its
             # intra-mesh DP routing.
             routing_session_id=routing_session_id,
             sampling_config=sampling_config,

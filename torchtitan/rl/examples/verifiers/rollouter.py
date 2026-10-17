@@ -49,7 +49,7 @@ from torchtitan.rl.rollout.types import (
 )
 
 if TYPE_CHECKING:
-    from torchtitan.rl.generator.generator import SamplingConfig
+    from torchtitan.rl.generator.types import SamplingConfig
 
 
 logger = logging.getLogger(__name__)

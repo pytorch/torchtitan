@@ -12,11 +12,8 @@ import pytest
 from torchtitan.config import OverrideConfig
 from torchtitan.rl import train
 from torchtitan.rl.controller.controller import AsyncLoopConfig
-from torchtitan.rl.generator.generator import (
-    SamplingConfig,
-    VLLMCudaGraphConfig,
-    VLLMGenerator,
-)
+from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 
@@ -72,9 +69,7 @@ class _FakeConfig:
     dump_folder = "/tmp/test_rl"
     trainer = _FakeTrainerConfig()
     # main() also reads config.generator.parallelism (same stubbing applies).
-    generator = SimpleNamespace(
-        parallelism=None, cuda_graph=VLLMCudaGraphConfig(mode="NONE")
-    )
+    generator = SimpleNamespace(parallelism=None)
     num_generators = 1
 
     @property
@@ -129,7 +124,7 @@ def test_async_loop_config_rejects_bad_windowed_fifo_batches() -> None:
 
 
 def _make_stub_rl_trainer():
-    """Create an Controller with a minimal stub config (no VLLMGenerator validation)."""
+    """Create an Controller with a minimal stub config (no Generator validation)."""
     from torchtitan.rl.observability import metrics as m
 
     class _StubRollouter:
@@ -263,7 +258,7 @@ def test_main_reraises_cancellation_after_shutdown(monkeypatch, stub_mesh_provis
 
 
 def test_vllm_generator_does_not_touch_cuda_from_finalizer():
-    assert "__del__" not in VLLMGenerator.__dict__
+    assert "__del__" not in Generator.__dict__
 
 
 class _StubEndpoint:
