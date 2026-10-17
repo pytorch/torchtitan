@@ -22,6 +22,8 @@ import torch_remat as remat
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
+    sdpa_kernel,
+    SDPBackend,
 )
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
@@ -330,6 +332,15 @@ class VarlenInnerAttention(InnerAttention):
                           is_causal=False.
               - (W, 0): Sliding window causal - attend to at most W previous tokens.
         """
+        sdpa_backends: list[SDPBackend] = field(
+            default_factory=lambda: [
+                SDPBackend.CUDNN_ATTENTION,
+                SDPBackend.FLASH_ATTENTION,
+            ]
+        )
+        """ Backend priority order for varlen_attn, applied via
+            ``sdpa_kernel(..., set_priority=True)``.
+        """
 
         @property
         def is_full_attention(self) -> bool:
@@ -354,6 +365,7 @@ class VarlenInnerAttention(InnerAttention):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.window_size = config.window_size
+        self.sdpa_backends = config.sdpa_backends
 
         from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
@@ -413,18 +425,19 @@ class VarlenInnerAttention(InnerAttention):
             # Preserve the legacy BF16 conversion for full-precision callers.
             attn_dtype = torch.bfloat16
 
-        result = varlen_attn_fn(
-            q_THK.to(attn_dtype),
-            k_THK.to(attn_dtype),
-            v_THV.to(attn_dtype),
-            cu_seq_q,
-            cu_seq_k,
-            max_q,
-            max_k,
-            scale=scale,
-            window_size=self.window_size,
-            **varlen_kwargs,
-        )
+        with sdpa_kernel(self.sdpa_backends, set_priority=True):
+            result = varlen_attn_fn(
+                q_THK.to(attn_dtype),
+                k_THK.to(attn_dtype),
+                v_THV.to(attn_dtype),
+                cu_seq_q,
+                cu_seq_k,
+                max_q,
+                max_k,
+                scale=scale,
+                window_size=self.window_size,
+                **varlen_kwargs,
+            )
 
         # varlen_attn returns the packed output (T, H, V), plus the LSE when an
         # out_transform epilogue was requested.
