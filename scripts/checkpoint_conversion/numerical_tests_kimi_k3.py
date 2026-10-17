@@ -30,9 +30,9 @@ expert IDs.
 
 Add ``--num_frames N`` to replace the image with an N-frame clip, split into
 chunks of the vision encoder's ``max_num_frames`` frames, the longest item the
-encoder takes. The released processor has no
-video branch, so both sides take TorchTitan's chunk patches, and the prompt
-spells each chunk the way the released Kimi K2.5 processor does.
+encoder takes. The released processor has no video branch, so both sides take
+TorchTitan's chunk patches, and the prompt spells each chunk the way the
+released Kimi K2.5 processor does.
 """
 
 import argparse

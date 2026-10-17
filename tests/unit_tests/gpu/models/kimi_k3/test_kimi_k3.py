@@ -201,6 +201,15 @@ class TestKimiK3(unittest.TestCase):
         torch.testing.assert_close(embeds_TD[[3, 4]], expected[1])
         torch.testing.assert_close(embeds_TD[[6, 7]], expected[2])
         torch.testing.assert_close(embeds_TD[[0, 2, 5, 8]], text_TD[[0, 2, 5, 8]])
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA is required.")
+    def test_vision_encoder_refuses_items_longer_than_max_num_frames(self):
+        config = _small_model_config()
+        assert config.vision_encoder is not None
+        vision_config = replace(config.vision_encoder, max_num_frames=4)
+        with torch.device("cuda"):
+            encoder = vision_config.build()
+            encoder.init_states()
         with self.assertRaisesRegex(ValueError, "max_num_frames=4"):
             encoder(
                 torch.randn(5 * 2 * 2, encoder.patch_embed.in_features, device="cuda"),
