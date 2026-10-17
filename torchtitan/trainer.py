@@ -26,7 +26,6 @@ from torchtitan.components.validator import BaseValidator, Validator
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
@@ -83,25 +82,13 @@ class Trainer(Configurable):
                     "Batch-invariant mode is not needed in supervised learning."
                 )
 
-            if (
-                not self.training.disable_cuda_graphs
-                and cuda_graphs_supported()
-                and self.parallelism.pipeline_parallel_degree > 1
-                and self.validator is not None
-            ):
-                raise ValueError(
-                    "CUDA graphs with pipeline parallelism do not support "
-                    "validation because validation reinitializes the shared "
-                    "pipeline schedule. Disable validation or CUDA graphs."
-                )
-
             if self.model is not None:
                 validate_model_training_config(
                     self.model,
                     parallelism=self.parallelism,
                     training=self.training,
                     debug=self.debug,
-                    activation_checkpoint=self.activation_checkpoint,
+                    activation_remat=self.activation_remat,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
 
@@ -162,7 +149,7 @@ class Trainer(Configurable):
             parallelism=config.parallelism,
             training=config.training,
             debug=config.debug,
-            activation_checkpoint=config.activation_checkpoint,
+            activation_remat=config.activation_remat,
             max_num_documents=config.dataloader.max_num_documents,
         )
 
@@ -275,6 +262,7 @@ class Trainer(Configurable):
             )
 
             self.validator = config.validator.build(
+                cuda_graph_enabled=engine._forward_backward_cuda_graph_enabled,
                 parallelism=config.parallelism,
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
@@ -496,10 +484,8 @@ class Trainer(Configurable):
                         last_step=(engine.num_completed_steps == config.training.steps)
                     )
 
-                    # Run validation if validator is available
-                    if (
-                        self.config.validator is not None
-                        and self.validator.should_validate(engine.num_completed_steps)
+                    if config.validator is not None and self.validator.should_validate(
+                        engine.num_completed_steps
                     ):
                         self.validator.validate(
                             engine.model_parts, engine.num_completed_steps

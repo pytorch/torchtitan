@@ -17,7 +17,7 @@ from torch.testing._internal.common_utils import (
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed.utils import configure_nccl_for_ulysses
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.attention.cp_attention import UlyssesCPFlexInnerAttention
+from torchtitan.models.common.attention.cp_attention import UlyssesFlexInnerAttention
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 
@@ -31,10 +31,10 @@ class TestUlyssesNCCL(TestCase):
                 return_value=True,
             )
         )
-        self.model = llama3_debugmodel(seq_len=512).model
+        self.model = llama3_debugmodel(seq_len=512, attn_backend="flex").model
         self.ulysses_model = ContextParallelTransform(
-            inner_attention_map={FlexInnerAttention: UlyssesCPFlexInnerAttention}
-        ).transform(llama3_debugmodel(seq_len=512).model)
+            inner_attention_map={FlexInnerAttention: UlyssesFlexInnerAttention}
+        ).transform(llama3_debugmodel(seq_len=512, attn_backend="flex").model)
 
     def configure(self, model, *, version=(2, 32, 2), **kwargs):
         kwargs = {"device_type": "cuda", "comm_backend": "default"} | kwargs

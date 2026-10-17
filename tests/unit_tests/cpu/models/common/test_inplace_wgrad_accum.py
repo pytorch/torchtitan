@@ -15,8 +15,8 @@ from torchtitan.distributed.pipeline_parallel import (
     _disable_inplace_wgrad_accum,
     _splits_backward,
 )
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
-from torchtitan.models.common.inplace_wgrad_accum import (
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.linear.inplace_wgrad_accum import (
     running_grad,
     uses_inplace_wgrad_accum,
 )

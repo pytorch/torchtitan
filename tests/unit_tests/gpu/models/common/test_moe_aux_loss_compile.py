@@ -9,7 +9,7 @@ import unittest
 import torch
 
 from torchtitan.distributed.local_compile import apply_local_compile
-from torchtitan.models.common.moe import _microbatch_load_balance_local_stats
+from torchtitan.models.common.moe.moe import _microbatch_load_balance_local_stats
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")

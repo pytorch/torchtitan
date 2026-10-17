@@ -9,6 +9,7 @@
 from dataclasses import dataclass, replace
 from typing import cast
 
+import torch
 from torch.distributed.tensor import Shard
 
 from torchtitan.components.data import (
@@ -34,7 +35,10 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_remat import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
@@ -46,7 +50,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.deepseek_v3.model import Attention as DeepSeekV3Attention
+from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
 from torchtitan.models.kimi_k2_7 import (
     build_model_config,
@@ -134,7 +138,7 @@ def kimi_k2_5_debugmodel(
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -182,7 +186,7 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )
 
 
@@ -232,7 +236,7 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )
 
 
@@ -279,7 +283,7 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )
 
 
@@ -294,6 +298,7 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
                 MeshAxisName.DP_SHARD.value: Shard(0),
                 f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Shard(0),
             },
+            compute_dtype=torch.bfloat16,
         )
 
     # Preserve exact EP-first DTensor ownership. If an EP-local expert count is
@@ -309,6 +314,7 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
         shard_order_by_tensor_dim={
             0: (MeshAxisName.EP.value, MeshAxisName.EDP_SHARD.value),
         },
+        compute_dtype=torch.bfloat16,
     )
 
 
@@ -319,11 +325,12 @@ def _dist_muon_optimizer(
     adamw_lr: float,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
-    attention = cast(DeepSeekV3Attention.Config, model_config.first_base_attention)
+    attention = cast(DeepSeekMLAAttention.Config, model_config.first_full_attention)
     owned = ComputeLayout(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: Owned(),
         },
+        compute_dtype=torch.bfloat16,
     )
     # Kimi runs Newton-Schulz per logical projection within each MLA head.
     per_query_head = ComputeLayout(
@@ -334,6 +341,7 @@ def _dist_muon_optimizer(
                 block_sizes=(attention.qk_nope_head_dim, attention.qk_rope_head_dim),
             )
         },
+        compute_dtype=torch.bfloat16,
     )
     kv_latent_and_rope = ComputeLayout(
         shardings_by_mesh_axis={
@@ -343,6 +351,7 @@ def _dist_muon_optimizer(
                 block_sizes=(attention.kv_lora_rank, attention.qk_rope_head_dim),
             )
         },
+        compute_dtype=torch.bfloat16,
     )
     per_key_value_head = ComputeLayout(
         shardings_by_mesh_axis={
@@ -352,6 +361,7 @@ def _dist_muon_optimizer(
                 block_sizes=(attention.qk_nope_head_dim, attention.v_head_dim),
             )
         },
+        compute_dtype=torch.bfloat16,
     )
     per_expert = _per_expert_compute_layout(parallelism)
     query_shardings: dict[str, ComputeLayout] = (
@@ -371,6 +381,7 @@ def _dist_muon_optimizer(
     feed_forward_shardings = {
         "w13": ComputeLayout(
             shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
+            compute_dtype=torch.bfloat16,
         ),
         "w2": owned,
     }
@@ -401,14 +412,14 @@ def _dist_muon_optimizer(
         else:
             shardings.update(
                 {
-                    f"{prefix}.moe.routed_experts.{projection}": per_expert
+                    f"{prefix}.feed_forward.routed_experts.{projection}": per_expert
                     for projection in expert_projections
                 }
             )
-            shardings[f"{prefix}.moe.router.gate.weight"] = owned
+            shardings[f"{prefix}.feed_forward.router.gate.weight"] = owned
             shardings.update(
                 {
-                    f"{prefix}.moe.shared_experts.{projection}.weight": compute_sharding
+                    f"{prefix}.feed_forward.shared_experts.{projection}.weight": compute_sharding
                     for projection, compute_sharding in feed_forward_shardings.items()
                 }
             )
@@ -452,8 +463,8 @@ def _dist_muon_optimizer(
         r"feed_forward\.(?:w13|w2)\.weight|"
         # Keep the 2D router gate on Muon: Moonlight Figure 4 reports its
         # SVD-entropy gain over AdamW is larger than for other matrix groups.
-        r"moe\.router\.gate\.weight|"
-        r"moe\.shared_experts\.(?:w13|w2)\.weight"
+        r"feed_forward\.router\.gate\.weight|"
+        r"feed_forward\.shared_experts\.(?:w13|w2)\.weight"
         r")$"
     )
     return OptimizersContainer.Config(
@@ -515,7 +526,7 @@ def _align_dist_muon_expert_compute_layouts(
     aligned_shardings = {}
     changed = False
     for fqn, compute_layout in compute_sharding_by_fqn.items():
-        if ".moe.routed_experts." in fqn and compute_layout != per_expert:
+        if ".routed_experts." in fqn and compute_layout != per_expert:
             aligned_shardings[fqn] = per_expert
             changed = True
         else:

@@ -35,13 +35,13 @@ class GatedRMSNorm(Module):
     @local_compile("gated_rmsnorm", batch_invariant=False)
     def forward(
         self,
-        x: torch.Tensor,
+        input: torch.Tensor,
         gate: torch.Tensor,
     ) -> torch.Tensor:
-        input_dtype = x.dtype
+        input_dtype = input.dtype
         normalized = F.rms_norm(
-            x.float(),
-            (x.shape[-1],),
+            input.float(),
+            (input.shape[-1],),
             self.weight.float(),
             self.eps,
         )

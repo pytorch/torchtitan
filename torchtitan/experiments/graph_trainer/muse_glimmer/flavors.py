@@ -21,7 +21,7 @@ def build_model_config(
     *,
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "varlen",
 ) -> GraphTrainerMuseGlimmerModel.Config:
     base = build_muse_glimmer_model_config(
         flavor, parallelism=parallelism, seq_len=seq_len, attn_backend=attn_backend

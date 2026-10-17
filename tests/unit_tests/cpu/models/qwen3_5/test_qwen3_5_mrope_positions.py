@@ -45,10 +45,10 @@ class _RecordingLayer(nn.Module):
     ``preprocess_inputs`` and ``forward`` glue.
     """
 
-    def __init__(self, sink: dict, attention_metadata_key: type[nn.Module]):
+    def __init__(self, sink: dict, attention: nn.Module):
         super().__init__()
         self._sink = sink
-        self.attention_metadata_key = attention_metadata_key
+        self.attention = attention
 
     def forward(
         self,
@@ -82,7 +82,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             layer = model.layers[key]
             model.layers[key] = _RecordingLayer(
                 sink,
-                layer.attention_metadata_key,
+                layer.attention,
             )
         parallelism_context = ParallelismContext(
             dp_replicate=1,
@@ -96,9 +96,9 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         )
         parallelism = ParallelismConfig()
         deltanet_backend = next(
-            layer.attention_metadata_key
+            type(layer.attention.inner_attention)
             for layer in model.layers.values()
-            if layer.attention_metadata_key.__name__ == "InnerGDN"
+            if type(layer.attention.inner_attention).__name__ == "InnerGDN"
         )
         return model, sink, parallelism_context, parallelism, deltanet_backend
 
