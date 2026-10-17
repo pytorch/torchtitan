@@ -172,11 +172,11 @@ def build_trainer_model(
     return model, device, parallelism_context
 
 
-# TODO: directly testing against VLLMGenerator with debug model to avoid OOM
+# TODO: directly testing against Generator with debug model to avoid OOM
 def _set_generator_determinism(debug) -> None:
     """Apply deterministic flags for the generator side.
 
-    Mirrors VLLMGenerator._set_determinism() — the generator doesn't use
+    Mirrors Generator._set_determinism() — the generator doesn't use
     torchtitan's ParallelismContext, so we apply the flags directly.
     """
     if debug.deterministic:
@@ -198,7 +198,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     attention_backend = gen_config.model.first_full_attention.inner_attention
     use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
 
-    # Mirror the production VLLMGenerator so the test exercises the same
+    # Mirror the production Generator so the test exercises the same
     # batch-invariant path (v2 runner is required for the logprob-kernel patch).
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     if use_flex:
@@ -209,7 +209,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         if gen_config.debug.batch_invariant:
             set_batch_invariance(True)
             # The v2 logprob Triton kernel bypasses the aten overrides. Apply the
-            # same generator-side patch the production VLLMGenerator does.
+            # same generator-side patch the production Generator does.
             from torchtitan.rl.generator.vllm.batch_invariance import (
                 force_logprobs_fn_for_batch_invariance,
             )
@@ -233,7 +233,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         worker_cls=TORCHTITAN_WORKER_CLS,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=gen_config.cuda_graph.mode == "NONE",
+        enforce_eager=gen_config.engine.cuda_graph.mode == "NONE",
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_config=AttentionConfig(backend=backend_enum),
         disable_log_stats=True,
@@ -257,7 +257,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
     engine_kwargs["max_num_seqs"] = max_num_seqs
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
-    vllm_compilation_config = gen_config.cuda_graph.get_vllm_compilation_config(
+    vllm_compilation_config = gen_config.engine.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,

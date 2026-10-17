@@ -74,9 +74,13 @@ The package is organized by responsibility and dependency boundary:
   checkpoints. Each component defines the data types it produces (e.g.
   `TrainingSample` in `training_sample_builder.py`, `TrainerStepBatch` in
   `batcher.py`).
-- `generator/` contains the standalone generator service and its inference
-  parallelism; `generator/vllm/` holds the vLLM engine integration and the
-  model-side adapters that run TorchTitan models in vLLM.
+- `generator/` contains the standalone generator service (`generator.py`), the
+  SPMD engine loop that drives it (`engine_loop.py`), request dispatch across
+  data-parallel replicas (`dispatcher.py`), the inference engine interface
+  (`engine.py`, `GenerationEngine`), engine-agnostic types (`types.py`), and
+  inference parallelism. `generator/vllm/` holds everything vLLM-specific: the
+  `VLLMEngine` implementation and its config (`Generator.Config.engine`), and
+  the model-side adapters that run TorchTitan models in vLLM.
 - `rollout/` contains rollout execution (`rollouter.py`), the user extension
   APIs for environments (`message_env.py`, `token_env.py`) and rewards
   (`rubric.py`), advantages, data loading, rollout recording, and the rollout
@@ -86,7 +90,9 @@ The package is organized by responsibility and dependency boundary:
 - `routing/` contains request routing across and within generators.
 - `actors/` contains actor-framework adapters; `actors/monarch/` holds the
   Monarch actor wrappers. Actor wrappers should contain endpoint adaptation
-  rather than domain behavior.
+  rather than domain behavior. See
+  [actors/monarch/README.md](actors/monarch/README.md) for where Monarch is
+  still used outside it.
 - `observability/` contains the RL metrics library.
 - `examples/` contains datasets, environments, rewards, integrations, and
   complete configuration recipes. Examples should configure reusable
@@ -146,7 +152,7 @@ def my_experiment() -> Controller.Config:
         trainer=Trainer.Config(
             model=trainer_model, parallelism=trainer_parallelism, loss=..., ...
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model, parallelism=generator_parallelism, ...
         ),
     )
@@ -272,7 +278,7 @@ memory snapshots. Configure it under `config.trainer.profiler` in the recipe.
 
 ### Actor endpoints use `@concurrent_endpoint`
 
-**Every endpoint on a Monarch actor, e.g. `TrainerActor`, `VLLMGeneratorActor`, and `RolloutWorkerActor`, is declared with `@concurrent_endpoint`, not `@endpoint`.** New endpoints follow the same rule. The standalone `Trainer` and `VLLMGenerator` classes contain no Monarch dependency; their actor subclasses are thin transport adapters under `actors/monarch/`.
+**Every endpoint on a Monarch actor, e.g. `TrainerActor`, `GeneratorActor`, and `RolloutWorkerActor`, is declared with `@concurrent_endpoint`, not `@endpoint`.** New endpoints follow the same rule. The standalone `Trainer` and `Generator` classes contain no Monarch dependency; their actor subclasses are thin transport adapters under `actors/monarch/`.
 
 When messages are sent to an actor, the messages are put on this actor's internal queue first, and then dispatched to the corresponding endpoints sequentially. When a plain `@endpoint` is processing a message, it will block the actor from processing the next next message. `@concurrent_endpoint` on the other hand allows the actor to process messages concurrently. Under the hood, `@concurrent_endpoint` is a wrapper of `@endpoint`, but it runs each message in its own asyncio task, in order to avoid the blocking. The caveat is when an actor has both `@endpoint` and `@concurrent_endpoint` endpoints, `@endpoint` will block all the other endpoints, including `@concurrent_endpoint`. This could lead to surprising behaviors. More details can be found in [Monarch's documentation](https://meta-pytorch.org/monarch/stable/actors.html#concurrent-endpoints).
 
