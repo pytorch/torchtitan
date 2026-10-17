@@ -45,7 +45,11 @@ from torchtitan.models.common.attention import Attention, LinearAttention
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
+from torchtitan.models.common.dist_moe import (
+    DistMoeRoutedExperts,
+    DistMoeRuntime,
+    MXFP8DistMoeRoutedExperts,
+)
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
@@ -553,6 +557,8 @@ class VLLMModelWrapper(Module):
         for module in self.model.modules():
             if isinstance(module, DistMoeRoutedExperts):
                 module.requires_grad_(False)
+            if isinstance(module, MXFP8DistMoeRoutedExperts):
+                module.enable_inference()
         self._dist_moe_runtime = runtime_config.build(
             model_parts=[self.model],
             parallelism_context=self.parallelism_context,
