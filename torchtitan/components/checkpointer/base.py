@@ -335,7 +335,7 @@ class BaseCheckpointManager(Configurable, ABC):
             )
             # Reseed EMA from the just-loaded weights if it wasn't itself
             # restored (excluded, or a model_only load).
-            if EMA in self.states and MODEL in states and EMA not in states:
+            if EMA in self.states and EMA not in states:
                 self.states[EMA].load_state_dict({})
             GarbageCollector.collect("GC collection for checkpoint loading.")
             logger.info(
