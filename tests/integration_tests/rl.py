@@ -106,6 +106,8 @@ def build_rl_kda_test_list() -> list[IntegrationTestDefinition]:
             test_descr="RL GRPO Kimi K3 hybrid KDA batch-invariant",
             test_name="rl_grpo_kimi_k3_debug_batch_invariant",
             ngpu=4,
+            # MLA attention is not supported by the TorchTitan vLLM wrapper yet.
+            disabled=True,
         ),
     ]
 
