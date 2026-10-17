@@ -9,15 +9,13 @@
 from __future__ import annotations
 
 import asyncio
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from monarch.actor import Actor, concurrent_endpoint, current_size
-
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
+from torchtitan.rl.actors.system import ServiceHandle
 from torchtitan.rl.routing.strategies import (
     RoutingStrategy,
     StickySessionRoutingStrategy,
@@ -30,11 +28,11 @@ class _GeneratorHandle(RoutingCandidate):
     """Router-side metadata for one generator mesh."""
 
     actor: Any
-    """Monarch actor handle for the full generator mesh. Used for fan-out calls
-    that every rank must run."""
+    """Actor handle for the full generator mesh. Used for fan-out calls that every
+    rank must run."""
 
     rank0_actor: Any
-    """Cached rank-0 slice of ``actor``. Used for calls that only rank 0 needs
+    """Rank-0 handle of the same generator. Used for calls that only rank 0 needs
     to run."""
 
     reserved_load: int = 0
@@ -47,7 +45,7 @@ class _GeneratorHandle(RoutingCandidate):
     """Set while routable; cleared while it drains for a model state dict load (hot_swap=False only)."""
 
 
-class InterGeneratorRouter(Actor, Configurable):
+class InterGeneratorRouter(Configurable):
     """Routes generation calls across generator meshes and pulls model's state dict.
 
     This is layer 1 of the two-layer routing design: it routes each call across
@@ -67,12 +65,11 @@ class InterGeneratorRouter(Actor, Configurable):
         the RL job's scale because the router is just a proxy, and the number of
         concurrent requests should be reasonable for a singleton to handle.
 
-    Monarch Actor:
-       The router singleton needs to be access from different processes or even
-       different hosts. If we instantiate the router as an instance of a normal
-       Python class, that instance's cannot be accessed from other processes or
-       hosts. To solve this problem, we model the router as Monarch Actor, and
-       pass the actor reference around.
+    Actor:
+       The router singleton is reached from different processes and hosts, so it
+       runs as an actor and callers pass its handle around; see
+       ``actors/monarch/router.py`` for the Monarch adapter, which also enforces
+       the singleton.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -102,19 +99,11 @@ class InterGeneratorRouter(Actor, Configurable):
         self,
         config: Config,
         *,
-        generators: Sequence[Any],
+        generators: Sequence[ServiceHandle],
     ):
-        num_actors = math.prod(current_size().values())
-        assert (
-            num_actors == 1
-        ), f"InterGeneratorRouter must be a singleton, but its mesh holds {num_actors} actors"
-
         self._config = config
         self._generators = [
-            _GeneratorHandle(
-                actor=generator,
-                rank0_actor=generator.flatten("rank").slice(rank=0),
-            )
+            _GeneratorHandle(actor=generator.all_ranks, rank0_actor=generator.rank0)
             for generator in generators
         ]
         if not self._generators:
@@ -195,14 +184,6 @@ class InterGeneratorRouter(Actor, Configurable):
         finally:
             self._release(h, routing_ctx.estimated_cost)
 
-    async def _release_session(self, session_id: str) -> None:
-        """Drop a session's affinity, and tell its generator to release the session's held KV."""
-        pinned = self._strategy.pinned_candidate(RoutingContext(session_id=session_id))
-        self._strategy.release_session(session_id)
-        # Without a pin (non-sticky routing), `release_groups` frees the held KV at group end.
-        if pinned is not None:
-            await pinned.rank0_actor.release_sessions.call_one([session_id])
-
     async def _fanout(
         self,
         method: str,
@@ -230,7 +211,7 @@ class InterGeneratorRouter(Actor, Configurable):
             return_exceptions=return_exceptions,
         )
 
-    async def _wait_engine_loop(self) -> None:
+    async def wait_engine_loop(self) -> None:
         """Wait for every generator rank's engine loop; raise on the first one that crashes.
 
         ``call()`` returns only once every rank of a mesh has replied, but when one rank's
@@ -245,7 +226,7 @@ class InterGeneratorRouter(Actor, Configurable):
 
         await asyncio.gather(*(wait(generator) for generator in self._generators))
 
-    async def _pull_model_state_dict(self, *, policy_version: int) -> None:
+    async def pull_model_state_dict(self, policy_version: int) -> None:
         """Pull the given policy version's state dict into every generator.
 
         Args:
@@ -281,7 +262,6 @@ class InterGeneratorRouter(Actor, Configurable):
         #   big models / many generators, not at small scale.
         await asyncio.gather(*[_pull_one(h) for h in self._generators])
 
-    @concurrent_endpoint
     async def generate(
         self,
         prompt_token_ids: list[int],
@@ -310,41 +290,30 @@ class InterGeneratorRouter(Actor, Configurable):
             ),
         )
 
-    @concurrent_endpoint
     async def start_engine_loop(self) -> None:
         """Start the engine loop on every rank of every generator."""
         await self._fanout("start_engine_loop")
 
-    @concurrent_endpoint
-    async def wait_engine_loop(self) -> None:
-        """Wait until every generator rank's engine loop exits; raise as soon as one crashes."""
-        await self._wait_engine_loop()
-
-    @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:
         """Set the step counter in this process and in every generator rank."""
         sl.set_step(step)
         await self._fanout("sync_log_step", step)
 
-    @concurrent_endpoint
     async def release_session(self, routing_session_id: str) -> None:
         """Forget a routing session after its rollout's last generation call, and tell its
         generator to release the session's held KV."""
-        await self._release_session(routing_session_id)
+        pinned = self._strategy.pinned_candidate(
+            RoutingContext(session_id=routing_session_id)
+        )
+        self._strategy.release_session(routing_session_id)
+        # Without a pin (non-sticky routing), `release_groups` frees the held KV at group end.
+        if pinned is not None:
+            await pinned.rank0_actor.release_sessions.call_one([routing_session_id])
 
-    @concurrent_endpoint
     async def release_groups(self, group_ids: list[int]) -> None:
         """Tell every generator that these rollout groups are finished."""
         await self._fanout("release_groups", group_ids)
 
-    @concurrent_endpoint
-    async def pull_model_state_dict(self, policy_version: int) -> None:
-        """Pull the given policy version's state dict into every generator."""
-        # Wrapper the logic in a private method so we can test it independently
-        # without the need to spawn the Monarch actor mesh.
-        await self._pull_model_state_dict(policy_version=policy_version)
-
-    @concurrent_endpoint
     async def close_generators(self) -> list[Any | BaseException]:
         """Close every generator, returning each one's result or exception."""
         return await self._fanout("close", return_exceptions=True)

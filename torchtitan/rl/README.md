@@ -88,11 +88,11 @@ The package is organized by responsibility and dependency boundary:
   `Completion`). Renderers are shared with SFT and live in core
   `torchtitan/components/renderer.py`.
 - `routing/` contains request routing across and within generators.
-- `actors/` contains actor-framework adapters; `actors/monarch/` holds the
-  Monarch actor wrappers. Actor wrappers should contain endpoint adaptation
-  rather than domain behavior. See
-  [actors/monarch/README.md](actors/monarch/README.md) for where Monarch is
-  still used outside it.
+- `actors/` contains the `ActorSystem` interface (`system.py`), which places
+  the services on processes and is selected by `Controller.Config.actor_system`,
+  and its implementations; `actors/monarch/` holds the Monarch actor system and
+  actor wrappers. Actor wrappers should contain endpoint adaptation rather than
+  domain behavior. See [actors/monarch/README.md](actors/monarch/README.md).
 - `observability/` contains the RL metrics library.
 - `examples/` contains datasets, environments, rewards, integrations, and
   complete configuration recipes. Examples should configure reusable
