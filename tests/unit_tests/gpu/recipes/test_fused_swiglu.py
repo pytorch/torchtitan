@@ -34,6 +34,7 @@ from torchtitan_recipes.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 
 _DIM = 16
 _HIDDEN = 32
+_DEVICE = torch.accelerator.current_accelerator()
 
 
 class _ConvertedLinear(Linear):
@@ -106,26 +107,26 @@ class TestFusedSwiGLU(unittest.TestCase):
         self.assertEqual(set(sd), {"w13.weight", "w2.weight"})
         self.assertEqual(sd["w13.weight"].data_ptr(), fused.w13.weight.data_ptr())
 
-    @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
+    @unittest.skipUnless(torch.accelerator.is_available(), "requires an accelerator")
     def test_triton_checkpoint_loads_into_native(self):
-        fused = _build_fused().cuda()
-        native = _build_native().cuda()
+        fused = _build_fused().to(_DEVICE)
+        native = _build_native().to(_DEVICE)
         native.load_state_dict(fused.state_dict())
         self.assertTrue(torch.equal(_logical_w13(native)[0], _logical_w13(fused)[0]))
         self.assertTrue(torch.equal(_logical_w13(native)[1], _logical_w13(fused)[1]))
         self.assertTrue(torch.equal(native.w2.weight, fused.w2.weight))
-        x = torch.randn(4, _DIM, device="cuda")
+        x = torch.randn(4, _DIM, device=_DEVICE)
         self.assertTrue(torch.allclose(fused(x), native(x), atol=1e-4, rtol=1e-5))
 
-    @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
+    @unittest.skipUnless(torch.accelerator.is_available(), "requires an accelerator")
     def test_native_checkpoint_loads_into_triton(self):
-        native = _build_native().cuda()
-        fused = _build_fused().cuda()
+        native = _build_native().to(_DEVICE)
+        fused = _build_fused().to(_DEVICE)
         fused.load_state_dict(native.state_dict())
         self.assertTrue(torch.equal(_logical_w13(fused)[0], _logical_w13(native)[0]))
         self.assertTrue(torch.equal(_logical_w13(fused)[1], _logical_w13(native)[1]))
         self.assertTrue(torch.equal(fused.w2.weight, native.w2.weight))
-        x = torch.randn(4, _DIM, device="cuda")
+        x = torch.randn(4, _DIM, device=_DEVICE)
         self.assertTrue(torch.allclose(fused(x), native(x), atol=1e-4, rtol=1e-5))
 
     def test_fused_roundtrip(self):

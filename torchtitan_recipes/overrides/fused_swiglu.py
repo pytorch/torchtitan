@@ -26,6 +26,7 @@ import triton.language as tl
 
 from torchtitan.config import derive, override
 from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
+from torchtitan.tools.utils import device_type
 
 __all__ = [
     "FusedSwiGLU",
@@ -46,16 +47,16 @@ def _silu_and_mul_forward_kernel(
     up,
     out,
     offsets,
-    NUM_ROWS: tl.constexpr,
+    NUM_ROWS,
     NUM_COLS: tl.constexpr,
-    NUM_OFFSETS: tl.constexpr,
+    NUM_OFFSETS,
     HAS_OFFSETS: tl.constexpr,
-    GATE_ROW_STRIDE: tl.constexpr,
-    GATE_COL_STRIDE: tl.constexpr,
-    UP_ROW_STRIDE: tl.constexpr,
-    UP_COL_STRIDE: tl.constexpr,
-    OUT_ROW_STRIDE: tl.constexpr,
-    OUT_COL_STRIDE: tl.constexpr,
+    GATE_ROW_STRIDE,
+    GATE_COL_STRIDE,
+    UP_ROW_STRIDE,
+    UP_COL_STRIDE,
+    OUT_ROW_STRIDE,
+    OUT_COL_STRIDE,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
@@ -97,20 +98,20 @@ def _silu_and_mul_backward_kernel(
     grad_gate,
     grad_up,
     offsets,
-    NUM_ROWS: tl.constexpr,
+    NUM_ROWS,
     NUM_COLS: tl.constexpr,
-    NUM_OFFSETS: tl.constexpr,
+    NUM_OFFSETS,
     HAS_OFFSETS: tl.constexpr,
-    GRAD_OUT_ROW_STRIDE: tl.constexpr,
-    GRAD_OUT_COL_STRIDE: tl.constexpr,
-    GATE_ROW_STRIDE: tl.constexpr,
-    GATE_COL_STRIDE: tl.constexpr,
-    UP_ROW_STRIDE: tl.constexpr,
-    UP_COL_STRIDE: tl.constexpr,
-    GRAD_GATE_ROW_STRIDE: tl.constexpr,
-    GRAD_GATE_COL_STRIDE: tl.constexpr,
-    GRAD_UP_ROW_STRIDE: tl.constexpr,
-    GRAD_UP_COL_STRIDE: tl.constexpr,
+    GRAD_OUT_ROW_STRIDE,
+    GRAD_OUT_COL_STRIDE,
+    GATE_ROW_STRIDE,
+    GATE_COL_STRIDE,
+    UP_ROW_STRIDE,
+    UP_COL_STRIDE,
+    GRAD_GATE_ROW_STRIDE,
+    GRAD_GATE_COL_STRIDE,
+    GRAD_UP_ROW_STRIDE,
+    GRAD_UP_COL_STRIDE,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
@@ -247,7 +248,7 @@ def silu_and_mul_backward_kernel(
 @torch.library.custom_op(
     "torchtitan::silu_and_mul",
     mutates_args=(),
-    device_types="cuda",
+    device_types=device_type,
 )
 def silu_and_mul_op(
     gate_up: torch.Tensor,
@@ -268,7 +269,7 @@ def silu_and_mul_op_fake(
 @torch.library.custom_op(
     "torchtitan::silu_and_mul_backward",
     mutates_args=(),
-    device_types="cuda",
+    device_types=device_type,
 )
 def silu_and_mul_backward_op(
     grad_out: torch.Tensor,

@@ -47,6 +47,7 @@ import torch
 from torchtitan.config import derive, override
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.observability.logging import warn_once
+from torchtitan.tools.utils import device_type
 
 logger = logging.getLogger(__name__)
 
@@ -318,7 +319,9 @@ if _HELION_IMPORT_ERROR is None:
         )
 
     @torch.library.custom_op(
-        "torchtitan::helion_complex_rope_fwd", mutates_args=(), device_types="cuda"
+        "torchtitan::helion_complex_rope_fwd",
+        mutates_args=(),
+        device_types=device_type,
     )
     def _helion_complex_rope_fwd(
         xq: torch.Tensor,
@@ -348,7 +351,9 @@ if _HELION_IMPORT_ERROR is None:
         )
 
     @torch.library.custom_op(
-        "torchtitan::helion_complex_rope_bwd", mutates_args=(), device_types="cuda"
+        "torchtitan::helion_complex_rope_bwd",
+        mutates_args=(),
+        device_types=device_type,
     )
     def _helion_complex_rope_bwd(
         grad_xq_out: torch.Tensor,
@@ -427,10 +432,7 @@ def _complex_eligible(
     positions: torch.Tensor,
 ) -> bool:
     return (
-        xq.is_cuda
-        and xk.is_cuda
-        and rope_cache_real.is_cuda
-        and positions.is_cuda
+        xq.device.type == device_type
         and xq.device == xk.device == rope_cache_real.device == positions.device
         and xq.ndim == 4
         and xk.ndim == 4
@@ -479,7 +481,7 @@ if _HELION_IMPORT_ERROR is None:
             warn_once(
                 logger,
                 "HelionComplexRoPE: inputs unsupported by the fused kernel "
-                "(need CUDA q/k/cache/positions on one device, a complex cache of "
+                "(need accelerator q/k/cache/positions on one device, a complex cache of "
                 "width head_dim / 2, and integer (num_tokens,) position ids); "
                 "falling back to the PyTorch complex RoPE.",
             )
@@ -565,7 +567,7 @@ class HelionComplexRoPE(ComplexRoPE):
 @override(
     target=ComplexRoPE.Config,
     exact=True,
-    description="Fused Helion complex rotary embedding (CUDA).",
+    description="Fused Helion complex rotary embedding.",
 )
 def helion_complex_rope(cfg: ComplexRoPE.Config) -> HelionComplexRoPE.Config:
     if _HELION_IMPORT_ERROR is not None:
