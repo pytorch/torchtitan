@@ -21,7 +21,10 @@ import numpy as np
 import torch
 import torchvision.transforms.v2.functional as TVF
 from PIL import Image
-from torchtitan.components.data.multimodal.mm_datasets import _process_mm_sample
+from torchtitan.components.data.multimodal.mm_datasets import (
+    _process_chunked_video_text_sample,
+    _process_mm_sample,
+)
 from torchtitan.components.data.multimodal.utils.image import (
     calculate_vision_tokens,
     process_image,
@@ -30,6 +33,7 @@ from torchtitan.components.data.multimodal.utils.image import (
     vision_to_patches,
 )
 from torchtitan.components.data.multimodal.utils.video import (
+    format_video_timestamp,
     load_npy_video_frames,
     process_video,
 )
@@ -410,6 +414,68 @@ class TestProcessMmSampleTemporalPatchSize(unittest.TestCase):
             mock_calc.assert_called_once()
             self.assertEqual(mock_calc.call_args.kwargs["temporal_patch_size"], tps)
             self.assertEqual(mock_calc.call_args.kwargs["num_frames"], 1)
+
+
+class _FakeSharedMediaTokenizer(_FakeMMTokenizer):
+    video_token = _FakeMMTokenizer.image_token
+    video_id = _FakeMMTokenizer.image_id
+
+
+def _process_chunked_video(tokenizer, *, num_frames, temporal_patch_size=1):
+    return _process_chunked_video_text_sample(
+        text="cap",
+        frames=torch.zeros(num_frames, 28, 56, 3, dtype=torch.uint8),
+        tokenizer=tokenizer,
+        patch_size=14,
+        temporal_patch_size=temporal_patch_size,
+        spatial_merge_size=2,
+        min_pixels=1,
+        max_pixels=1_000_000,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        resize_fn=resize_to_navit_patch_grid,
+        max_patches=4096,
+        max_patches_per_side=512,
+        frames_per_chunk=4,
+        fps=8.0,
+        chunk_header="video<|media_content|>",
+    )
+
+
+class TestFormatVideoTimestamp(unittest.TestCase):
+    def test_formats_hours_minutes_seconds_and_millis(self):
+        self.assertEqual(format_video_timestamp(0.0), "00:00:00.000")
+        self.assertEqual(format_video_timestamp(0.5), "00:00:00.500")
+        self.assertEqual(format_video_timestamp(3725.25), "01:02:05.250")
+
+
+class TestProcessChunkedVideoTextSample(unittest.TestCase):
+    def test_chunks_follow_their_timestamps_in_order(self):
+        tokenizer = _FakeSharedMediaTokenizer()
+        sample = _process_chunked_video(tokenizer, num_frames=10)
+
+        self.assertIsNotNone(sample)
+        self.assertEqual(
+            [tuple(chunk.shape) for chunk in sample["pixel_values"]],
+            [(4, 28, 56, 3), (4, 28, 56, 3), (2, 28, 56, 3)],
+        )
+        chunk = "Svideo<|media_content|>" + "I" * 2 + "E"
+        expected = tokenizer.encode(
+            f"00:00:00.000{chunk}00:00:00.500{chunk}00:00:01.000{chunk}capX"
+        )
+        self.assertEqual(sample["input_ids"].tolist(), expected[:-1])
+
+    def test_rejects_a_separate_video_placeholder(self):
+        tokenizer = _FakeSharedMediaTokenizer()
+        tokenizer.video_token = "V"
+        with self.assertRaises(ValueError):
+            _process_chunked_video(tokenizer, num_frames=4)
+
+    def test_rejects_temporal_patches(self):
+        with self.assertRaises(ValueError):
+            _process_chunked_video(
+                _FakeSharedMediaTokenizer(), num_frames=4, temporal_patch_size=2
+            )
 
 
 if __name__ == "__main__":
