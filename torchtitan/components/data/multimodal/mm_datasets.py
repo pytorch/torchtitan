@@ -251,6 +251,7 @@ def _process_chunked_video_text_sample(
     *,
     frames_per_chunk: int,
     fps: float,
+    chunk_header: str,
     image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
 ) -> dict[str, Any] | None:
     """Process frames sampled at ``fps`` and a caption as timestamped chunks of ``frames_per_chunk`` frames."""
@@ -304,7 +305,8 @@ def _process_chunked_video_text_sample(
         vision_start_token=cast(
             str,
             tokenizer.vision_start_token,  # pyrefly: ignore [missing-attribute]
-        ),
+        )
+        + chunk_header,
         vision_token=video_token,
         vision_end_token=cast(
             str,

@@ -438,6 +438,7 @@ def _process_chunked_video(tokenizer, *, num_frames, temporal_patch_size=1):
         max_patches_per_side=512,
         frames_per_chunk=4,
         fps=8.0,
+        chunk_header="video<|media_content|>",
     )
 
 
@@ -458,7 +459,7 @@ class TestProcessChunkedVideoTextSample(unittest.TestCase):
             [tuple(chunk.shape) for chunk in sample["pixel_values"]],
             [(4, 28, 56, 3), (4, 28, 56, 3), (2, 28, 56, 3)],
         )
-        chunk = "S" + "I" * 2 + "E"
+        chunk = "Svideo<|media_content|>" + "I" * 2 + "E"
         expected = tokenizer.encode(
             f"00:00:00.000{chunk}00:00:00.500{chunk}00:00:01.000{chunk}capX"
         )
