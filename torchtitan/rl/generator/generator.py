@@ -1106,8 +1106,8 @@ class VLLMGenerator(Configurable):
             # The prefetch buffers below and each prefetch's TorchStore read pin memory through
             # the CUDA runtime, on the calling thread's device. Both run on this thread, which
             # would otherwise use device 0, rank 0's GPU.
-            torch.cuda.set_device(
-                self._call_on_engine_thread(torch.cuda.current_device)
+            torch.accelerator.set_device_index(
+                self._call_on_engine_thread(torch.accelerator.current_device_index)
             )
             logger.info("vLLM rollout engine initialized")
 
