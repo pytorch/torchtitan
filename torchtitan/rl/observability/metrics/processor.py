@@ -90,7 +90,7 @@ class MetricsProcessor(Configurable):
                 "validation/reward/_mean",
                 "validation/reward/_max",
                 "validation/response_length/mean",
-                "timing/validate",
+                "timing/validation/",
             ]
         )
         """Same as console_log_keys_train but used when

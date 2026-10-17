@@ -121,7 +121,11 @@ from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
-from torchtitan.rl.generator.generator import SamplingConfig, VLLMGenerator
+from torchtitan.rl.generator.generator import (
+    OVERLAPPED_VALIDATION_FIRST_GROUP_ID,
+    SamplingConfig,
+    VLLMGenerator,
+)
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
@@ -138,16 +142,36 @@ logger = logging.getLogger(__name__)
 
 @dataclass(kw_only=True, slots=True)
 class ValidationConfig:
-    """Held-out validation that runs at the start and end of training"""
+    """Held-out validation that runs before training, every `freq` steps, and after the last step.
 
-    # TODO: enable periodic validation with proper overlapping
+    Example, `freq=25`, `overlap_training=True`, 100 steps:
+        step 0:   pass 0 starts on policy 0; training starts at once.
+        step 7:   pass 0 ends and is logged at step 7; its slowest rollouts sampled up to policy 6.
+        step 25:  pass 25 starts on policy 25 or later. Had pass 0 still been running, pass 25 would
+                  start at the end of the step in which pass 0 ends.
+        step 100: a pass that ends in step 100, or is still running, is logged at step 100; the
+                  final pass then logs at step 101.
+    """
 
     steps: int = 20
     """Maximum prompts per pass. -1 consumes one finite source pass; 0 disables."""
 
+    freq: int | None = None
+    """Also validate after every `freq` train steps; None validates only before and after."""
+
+    overlap_training: bool = False
+    """False: training waits for each pass, so all its rollouts sample one policy.
+    True: the pre-training and periodic passes run beside training on the same generators:
+    - at the lowest vLLM priority, so on busy generators a pass takes longer;
+    - a rollout's later tokens can sample a newer policy (`validation/max_policy_version`);
+    - a failed pass logs `validation/pass_failures`; training continues.
+    Keep False for a clean pre-training score."""
+
     def __post_init__(self) -> None:
         if self.steps < -1:
             raise ValueError("validation steps must be -1 or non-negative")
+        if self.freq is not None and self.freq <= 0:
+            raise ValueError(f"validation freq must be positive, got {self.freq}")
 
 
 @dataclass(kw_only=True, slots=True)
@@ -445,10 +469,17 @@ class Controller(Configurable):
         self.rollout_recorder = config.rollout_recorder.build(
             dump_dir=config.dump_folder
         )
+        # With `validation.overlap_training`: the pass running beside training.
+        self._validation_task: asyncio.Task[list[m.Metric]] | None = None
 
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
         logger.info("Closing: tearing down actors and process meshes.")
+
+        # Still running only if run() crashed; finish cancelling it before closing the rollouter it uses.
+        if self._validation_task is not None:
+            self._validation_task.cancel()
+            await asyncio.gather(self._validation_task, return_exceptions=True)
 
         if self.trainer is not None:
             try:
@@ -565,15 +596,22 @@ class Controller(Configurable):
             trainer_mesh: ProcMesh the trainer actor is spawned on.
             generator_meshes: ProcMesh objects the generator actors are spawned on.
         """
-        # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
+        # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass);
+        # sizes max_num_seqs below. With periodic or overlapped validation, training rollouts keep
+        # generating during a pass, so the peak is the sum.
         async_loop = self.config.async_loop
         max_active_rollout_groups = async_loop.max_active_rollout_groups
-        num_validation_groups = len(
-            self._rollouter.get_validation_samples(async_loop.validation.steps)
+        num_training_rollouts = (
+            max_active_rollout_groups * async_loop.num_samples_per_prompt
         )
-        rollout_concurrency = max(
-            max_active_rollout_groups * async_loop.num_samples_per_prompt,
-            num_validation_groups,
+        validation = async_loop.validation
+        num_validation_groups = len(
+            self._rollouter.get_validation_samples(validation.steps)
+        )
+        rollout_concurrency = (
+            num_training_rollouts + num_validation_groups
+            if validation.freq is not None or validation.overlap_training
+            else max(num_training_rollouts, num_validation_groups)
         )
         config = self.config
         if not generator_meshes:
@@ -757,15 +795,25 @@ class Controller(Configurable):
         with sl.log_trace_span("generator_pull_model_state_dict"):
             await self.generator_router.pull_model_state_dict.call_one(self.start_step)
 
-    # TODO: fold validation into a Validator(Configurable) the controller attaches, instead of 4 methods.
+    # TODO: fold validation into a Validator(Configurable) the controller attaches, instead of these methods.
     @sl.log_trace_span("_collect_validation_rollouts")
     async def _collect_validation_rollouts(
-        self, *, samples: list[object], sampling: SamplingConfig, step: int
+        self,
+        *,
+        samples: list[object],
+        sampling: SamplingConfig,
+        step: int,
+        overlapped: bool = False,
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
         generate = self._make_generate_fn(metrics_prefix="validation_generator")
         release_session_fn = self._make_release_session_fn()
+        # Negative ids keep validation disjoint from training group ids, so their request_ids can't
+        # collide in the shared engine (e.g. post-validation). An overlapped pass's ids also get the
+        # lowest vLLM priority (`vllm_priority`).
+        first_group_id = OVERLAPPED_VALIDATION_FIRST_GROUP_ID if overlapped else -1
+        group_ids = [first_group_id - i for i in range(len(samples))]
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         group_results = await asyncio.gather(
             *(
@@ -773,52 +821,68 @@ class Controller(Configurable):
                     generate_fn=generate,
                     release_session_fn=release_session_fn,
                     sample=sample,
-                    # Negative ids keep validation disjoint from training group ids, so their
-                    # request_ids can't collide in the shared engine (e.g. post-validation).
-                    group_id=-(i + 1),
+                    group_id=group_id,
                     group_size=1,
                     sampling=sampling,
                 )
-                for i, sample in enumerate(samples)
+                for group_id, sample in zip(group_ids, samples, strict=True)
             ),
             return_exceptions=True,
         )
         # Validation group ids are reused every validation, so their cache salts must not outlive it.
-        await self.generator_router.release_groups.call_one(
-            [-(i + 1) for i in range(len(samples))]
-        )
+        await self.generator_router.release_groups.call_one(group_ids)
 
         # Keep the groups that succeeded; log + count the ones that raised.
         rollout_groups: list[RolloutGroup] = []
         num_failed_groups = 0
-        for i, result in enumerate(group_results):
+        for group_id, result in zip(group_ids, group_results, strict=True):
             if isinstance(result, BaseException):
                 logger.error(
-                    f"validation group {-(i + 1)} (step={step}) failed; dropping",
+                    f"validation group {group_id} (step={step}) failed; dropping",
                     exc_info=(type(result), result, result.__traceback__),
                 )
                 num_failed_groups += 1
                 continue
             rollout_groups.append(result)
 
-        metrics = compute_rollout_metrics(
-            prefix="validation",
-            rollouts=[
-                rollout for group in rollout_groups for rollout in group.rollouts
-            ],
-        )
+        rollouts = [rollout for group in rollout_groups for rollout in group.rollouts]
+        metrics = compute_rollout_metrics(prefix="validation", rollouts=rollouts)
         metrics.append(
             m.Metric("validation/group_failures", m.Sum(float(num_failed_groups)))
         )
+        # Policies the pass sampled. One, unless the pass overlaps training: then a weight sync
+        # during a rollout makes its later tokens sample a newer policy.
+        turns = [turn for rollout in rollouts for turn in rollout.turns]
+        is_mixed_policy = [
+            rollout.turns[-1].max_policy_version > rollout.turns[0].min_policy_version
+            for rollout in rollouts
+            if rollout.turns
+        ]
+        metrics += [
+            m.Metric(
+                "validation/min_policy_version",
+                m.Min.from_list([turn.min_policy_version for turn in turns]),
+            ),
+            m.Metric(
+                "validation/max_policy_version",
+                m.Max.from_list([turn.max_policy_version for turn in turns]),
+            ),
+            m.Metric(
+                "validation/mixed_policy_rollouts", m.Mean.from_list(is_mixed_policy)
+            ),
+        ]
         return rollout_groups, metrics
 
     @sl.log_trace_span("validate")
-    async def validate(self, *, step: int) -> list[m.Metric]:
+    async def validate(self, *, step: int, overlapped: bool = False) -> list[m.Metric]:
         """Run greedy validation on held-out prompts.
 
         Args:
             step: Training step this validation pass belongs to (0 for the
                 pre-training pass); tagged into logged rollout samples.
+            overlapped: The pass runs while training keeps stepping, so its wall time is
+                logged as `timing/validation/overlapped`, not `timing/validation/blocking`,
+                and its generator requests get the lowest vLLM priority.
 
         Returns:
             Validation rollout metrics, generation metrics, and validation
@@ -829,17 +893,23 @@ class Controller(Configurable):
         steps = self.config.async_loop.validation.steps
         if steps == 0:  # skip validation (e.g. loss guard CI)
             return []
-        samples = self._rollouter.get_validation_samples(steps)
+        # In a thread: building the dataset would otherwise block the training loops.
+        samples = await asyncio.to_thread(self._rollouter.get_validation_samples, steps)
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
 
         rollout_groups, validation_metrics = await self._collect_validation_rollouts(
-            samples=samples, sampling=greedy, step=step
+            samples=samples, sampling=greedy, step=step, overlapped=overlapped
         )
 
         self.rollout_recorder.record(is_validation=True, rollout_groups=rollout_groups)
 
         t_validate_s = time.perf_counter() - t_validate_start
-        validation_metrics.append(m.Metric("timing/validate", m.NoReduce(t_validate_s)))
+        timing_key = (
+            "timing/validation/overlapped"
+            if overlapped
+            else "timing/validation/blocking"
+        )
+        validation_metrics.append(m.Metric(timing_key, m.NoReduce(t_validate_s)))
         return validation_metrics
 
     async def run(self) -> None:
@@ -870,7 +940,13 @@ class Controller(Configurable):
         )
 
         sl.log_trace_instant("validation_start")
-        pre_validation = await self._validate_and_log(step=self.start_step)
+        pre_validation_task: asyncio.Task[list[m.Metric]] | None = None
+        if async_loop.validation.overlap_training:
+            # Generators already hold policy `start_step` (setup_async), so training can start right away.
+            pre_validation_task = self._start_validation(step=self.start_step)
+            pre_validation = {}  # read from the task after training
+        else:
+            pre_validation = await self._validate_and_log(step=self.start_step)
         sl.log_trace_instant("training_start")
 
         # Trainer policy version, seeded from the resumed step; advances at each optimizer step.
@@ -973,8 +1049,24 @@ class Controller(Configurable):
                 *background_tasks, trainer_task, return_exceptions=True
             )
 
+        final_pass_step = num_training_steps
+        # Wait for a pass still running instead of cancelling it: its result gets logged, and the
+        # generators would keep serving its requests anyway. A failed pass doesn't raise here.
+        if self._validation_task is not None:
+            logger.info(
+                f"Training done; waiting for {self._validation_task.get_name()} before the final pass"
+            )
+            await asyncio.wait([self._validation_task])
+            self._log_finished_validation(step=num_training_steps)
+            # At the same step, W&B would keep only the final pass's values for keys both passes log.
+            final_pass_step += 1
+        if pre_validation_task is not None and pre_validation_task.exception() is None:
+            pre_validation = m.MetricsProcessor._aggregate_metrics(
+                pre_validation_task.result()
+            )
+
         # Post-training validation (held-out eval after the final step).
-        post_validation = await self._validate_and_log(step=num_training_steps)
+        post_validation = await self._validate_and_log(step=final_pass_step)
         # Push the last row now; close() would push it only after teardown.
         self.metrics_processor.commit()
         self._log_reward_delta(pre_validation, post_validation)
@@ -989,11 +1081,55 @@ class Controller(Configurable):
         self.metrics_processor.log(step=step, metrics=metrics, is_validation=True)
         return m.MetricsProcessor._aggregate_metrics(metrics)
 
+    def _start_validation(self, *, step: int) -> asyncio.Task[list[m.Metric]]:
+        """Start a validation pass beside training; `_log_finished_validation` logs it once it ends.
+
+        The caller makes sure the generators hold at least policy `step` and no pass is running.
+        """
+        # TODO: this pass's rollouts compete with training rollouts for env-server sandboxes, which
+        # have no request priority; the generators already serve training first (`vllm_priority`).
+        logger.info(f"Starting validation at step {step}, beside training")
+        self._validation_task = asyncio.create_task(
+            self.validate(step=step, overlapped=True),
+            name=f"validation_step_{step}",
+        )
+        return self._validation_task
+
+    def _log_finished_validation(self, *, step: int) -> None:
+        """If the pass started by `_start_validation` has ended, log it at `step`. A failed pass logs
+        its error and `validation/pass_failures` instead of raising.
+
+        Logged at the step it ends, not the one it started at: metric backends need steps that never go back.
+        """
+        task = self._validation_task
+        if task is None or not task.done():
+            return
+        self._validation_task = None
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                f"{task.get_name()} failed; logging validation/pass_failures at step {step}",
+                exc_info=error,
+            )
+            metrics = [m.Metric("validation/pass_failures", m.Sum(1.0))]
+        else:
+            logger.info(f"{task.get_name()} ended; logging it at step {step}")
+            metrics = task.result()
+        self.metrics_processor.log(step=step, metrics=metrics, is_validation=True)
+
     def _log_reward_delta(self, pre: dict[str, float], post: dict[str, float]) -> None:
         """Console pre/post reward summary, visible without scrolling back through the loop."""
         reward_keys = sorted(key for key in set(pre) | set(post) if "reward" in key)
         logger.info("=" * 60)
         logger.info("Validation reward (pre / post):")
+        # With `overlap_training`, "pre" is the first pass, which ran beside training.
+        oldest_pre_policy = pre.get("validation/min_policy_version/min", 0)
+        newest_pre_policy = pre.get("validation/max_policy_version/max", 0)
+        if newest_pre_policy > oldest_pre_policy:
+            logger.info(
+                f"  pre sampled policies {oldest_pre_policy:.0f} to {newest_pre_policy:.0f}: "
+                "not a clean pre-training score"
+            )
         for key in reward_keys:
             logger.info(
                 f"  {key}:  {pre.get(key, float('nan')):+.3f}  /  {post.get(key, float('nan')):+.3f}"
@@ -1156,6 +1292,8 @@ class Controller(Configurable):
         # The previous step's push and pull, each returning its wall time; None before the first.
         push_task: asyncio.Task[float] | None = None
         pull_task: asyncio.Task[float] | None = None
+        # With `validation.overlap_training`: a pass is due, but waits for the running one to end.
+        validation_requested = False
         for step in range(self.start_step + 1, num_training_steps + 1):
             # Push the previous step; the last step stays open for post-training validation.
             self.metrics_processor.commit()
@@ -1311,6 +1449,39 @@ class Controller(Configurable):
                         ),
                     ],
                 )
+
+            validation = self.config.async_loop.validation
+            is_validation_step = (
+                validation.freq is not None
+                and step % validation.freq == 0
+                and step < num_training_steps
+            )
+            if validation.overlap_training:
+                # Leave a pass that ends in the last step to run(), which logs it before the final pass.
+                if step < num_training_steps:
+                    self._log_finished_validation(step=step)
+                if is_validation_step:
+                    validation_requested = True
+                    if self._validation_task is not None:
+                        logger.info(
+                            f"Validation step {step}: {self._validation_task.get_name()} is still "
+                            "running; the next pass starts when it ends"
+                        )
+                # No pass starts at the last step: the final pass after training covers it.
+                if (
+                    validation_requested
+                    and self._validation_task is None
+                    and step < num_training_steps
+                ):
+                    # Wait only for this step's weight pull, so the pass starts on at least policy `step`.
+                    await pull_task
+                    self._start_validation(step=step)
+                    validation_requested = False
+            elif is_validation_step:
+                # Pause training until the pass ends. Only this loop syncs weights, so every
+                # validation rollout samples this step's policy; training rollouts keep generating.
+                await pull_task
+                await self._validate_and_log(step=step)
 
         # Finish the last push and pull so generators hold the final weights for post-validation.
         if push_task is not None:
