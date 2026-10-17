@@ -69,6 +69,9 @@ class BaseValidator(Configurable):
 
 
 class Validator(BaseValidator):
+    # TODO: Simplify validation by limiting its options and matching the training
+    # forward workload. See Tianyu's review:
+    # https://github.com/pytorch/torchtitan/pull/5241#discussion_r4301298181
     """
     Simple validator focused on correctness and integration.
 
