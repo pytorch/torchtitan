@@ -54,6 +54,13 @@ class ActorSystem(Configurable, abc.ABC):
     drives it: ``provision`` once, then a ``spawn_*`` call per service, and
     ``stop`` on close. The rollouter spawns and stops its worker pool through it.
 
+    The name follows Akka/Pekko, where an actor system is the container that
+    creates actors, places them and stops them
+    (https://pekko.apache.org/docs/pekko/1.3/general/actor-systems.html). This
+    class has that role for the RL services: it owns where they run
+    (``provision``) and their lifecycle (``spawn_*``, ``stop``, ``shutdown``),
+    not only how actors execute, which a name like "runtime" would suggest.
+
     Handles follow one call convention. An endpoint ``handle.<method>`` is called
     with:
 
