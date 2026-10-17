@@ -53,6 +53,7 @@ from torchtitan.rl.generator.generator import (
     VLLMGenerator,
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.vllm.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.generator.vllm.registry import register_to_vllm
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
@@ -654,6 +655,33 @@ def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
     assert engine_kwargs["scheduling_policy"] == "priority"
 
 
+def test_cpu_kv_offload_names_vllms_offloading_connector(monkeypatch, tmp_path):
+    engine_kwargs = _build_engine_kwargs(
+        monkeypatch,
+        tmp_path,
+        VLLMGenerator.Config(
+            model=_MODEL_CONFIG,
+            session_kv_holder=VLLMSessionKVHolder.Config(
+                cpu_kv_offload=CPUKVOffload.Config(size_gib=16)
+            ),
+        ),
+    )
+    kv_transfer_config = engine_kwargs["kv_transfer_config"]
+    # Named, not set through kv_offloading_size: vLLM's in-process config checks see it, so vLLM
+    # rejects router replay with it.
+    assert kv_transfer_config.kv_connector == "OffloadingConnector"
+    assert kv_transfer_config.kv_role == "kv_both"
+    assert kv_transfer_config.kv_connector_extra_config == {
+        "cpu_bytes_to_use": 16 << 30,
+        "offload_prompt_only": False,
+    }
+
+    engine_kwargs = _build_engine_kwargs(
+        monkeypatch, tmp_path, VLLMGenerator.Config(model=_MODEL_CONFIG)
+    )
+    assert not engine_kwargs.keys() & {"kv_offloading_size", "kv_transfer_config"}
+
+
 @pytest.mark.parametrize(
     "key, match",
     [
@@ -665,6 +693,10 @@ def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
             r"use VLLMGenerator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use VLLMGenerator\.Config\.debug\.seed"),
+        (
+            "kv_offloading_size",
+            r"use VLLMGenerator\.Config\.session_kv_holder\.cpu_kv_offload",
+        ),
     ],
 )
 def test_extra_vllm_engine_args_rejects_torchtitan_owned_keys(key, match):

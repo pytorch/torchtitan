@@ -17,6 +17,8 @@ from torchtitan.rl.generator.generator import (
     VLLMCudaGraphConfig,
     VLLMGenerator,
 )
+from torchtitan.rl.generator.vllm.cpu_kv_offload import CPUKVOffload
+from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 
@@ -73,7 +75,9 @@ class _FakeConfig:
     trainer = _FakeTrainerConfig()
     # main() also reads config.generator.parallelism (same stubbing applies).
     generator = SimpleNamespace(
-        parallelism=None, cuda_graph=VLLMCudaGraphConfig(mode="NONE")
+        parallelism=None,
+        cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+        session_kv_holder=None,
     )
     num_generators = 1
 
@@ -214,6 +218,47 @@ def test_main_passes_configured_num_generators(monkeypatch, stub_mesh_provisioni
         "generator_mesh_0",
         "generator_mesh_1",
     ]
+
+
+@pytest.mark.parametrize(
+    "session_kv_holder, generator_env",
+    [
+        (None, {}),
+        (VLLMSessionKVHolder.Config(), {}),
+        (
+            VLLMSessionKVHolder.Config(cpu_kv_offload=CPUKVOffload.Config(size_gib=16)),
+            {
+                "PYTORCH_ALLOC_CONF": "expandable_segments:False",
+                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False,max_split_size_mb:512",
+                "PYTHONHASHSEED": "0",
+            },
+        ),
+    ],
+)
+def test_main_launches_kv_offload_generators_without_expandable_segments(
+    monkeypatch, stub_mesh_provisioning, session_kv_holder, generator_env
+):
+    """Offload needs expandable_segments off (other allocator options stay) and PYTHONHASHSEED=0."""
+    monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    monkeypatch.setenv(
+        "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:512"
+    )
+    spawn_kwargs = []
+    monkeypatch.setattr(
+        train,
+        "spawn_proc_mesh",
+        lambda *args, **kwargs: spawn_kwargs.append(kwargs)
+        or ("trainer_mesh", ["generator_mesh_0"]),
+    )
+    _FakeConfigLoader.config = _FakeConfig(
+        generator=SimpleNamespace(parallelism=None, session_kv_holder=session_kv_holder)
+    )
+    _FakeController.instances = []
+    monkeypatch.setattr(train, "ConfigLoader", _FakeConfigLoader)
+
+    asyncio.run(train.main())
+
+    assert spawn_kwargs[0]["generator_env"] == generator_env
 
 
 def test_main_shuts_down_after_train_failure(monkeypatch, stub_mesh_provisioning):
