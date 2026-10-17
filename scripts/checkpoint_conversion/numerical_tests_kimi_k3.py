@@ -28,8 +28,9 @@ Usage:
 Add ``--force-hf-routing`` to isolate arithmetic after imposing Moonshot's
 expert IDs.
 
-Add ``--num_frames N`` to replace the image with an N-frame clip in chunks of
-the vision encoder's ``max_num_frames`` frames. The released processor has no
+Add ``--num_frames N`` to replace the image with an N-frame clip, split into
+chunks of the vision encoder's ``max_num_frames`` frames, the longest item the
+encoder takes. The released processor has no
 video branch, so both sides take TorchTitan's chunk patches, and the prompt
 spells each chunk the way the released Kimi K2.5 processor does.
 """
@@ -78,6 +79,8 @@ _PROMPT = (
 )
 _VIDEO_FPS = 8.0
 _MAX_PATCHES_PER_FRAME = 16384
+_VIDEO_MAX_PIXELS = 16777216
+_VIDEO_MIN_PIXELS = 65536
 _VIDEO_CHUNK = "{}<|media_begin|>video<|media_content|><|media_pad|><|media_end|>"
 _VIDEO_PROMPT = "\nWhat happens in this video? Describe it briefly."
 
@@ -380,8 +383,8 @@ def _video_chunks(
         frames,
         patch_size=_PATCH_SIZE,
         merge_size=_MERGE_SIZE,
-        max_pixels=16777216,
-        min_pixels=65536,
+        max_pixels=_VIDEO_MAX_PIXELS,
+        min_pixels=_VIDEO_MIN_PIXELS,
         resize_fn=resize_to_navit_patch_grid,
         max_patches=_MAX_PATCHES_PER_FRAME,
         max_patches_per_side=_MAX_PATCHES_PER_SIDE,

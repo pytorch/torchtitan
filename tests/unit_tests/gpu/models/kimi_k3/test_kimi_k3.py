@@ -201,6 +201,11 @@ class TestKimiK3(unittest.TestCase):
         torch.testing.assert_close(embeds_TD[[3, 4]], expected[1])
         torch.testing.assert_close(embeds_TD[[6, 7]], expected[2])
         torch.testing.assert_close(embeds_TD[[0, 2, 5, 8]], text_TD[[0, 2, 5, 8]])
+        with self.assertRaisesRegex(ValueError, "max_num_frames=4"):
+            encoder(
+                torch.randn(5 * 2 * 2, encoder.patch_embed.in_features, device="cuda"),
+                grid_thw=torch.tensor([[5, 2, 2]], device="cuda"),
+            )
 
     def test_flex_attention_mask(self):
         config = _small_model_config()
