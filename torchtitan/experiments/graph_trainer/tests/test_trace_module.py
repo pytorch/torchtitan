@@ -284,7 +284,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             [microbatches], global_routing_token_counts=torch.tensor([2])
         )
         engine._pp_forward_backward_microbatch_group = MagicMock(
-            return_value=torch.tensor(3.0)
+            return_value=(torch.tensor(3.0), [{}, {}])
         )
         result = engine._forward_backward_body(
             prepared_groups,
@@ -294,14 +294,16 @@ class TestGraphGradientAccumulation(unittest.TestCase):
 
         assert engine.ntokens_seen == 2
         torch.testing.assert_close(result.loss, torch.tensor(3.0))
-        assert result.loss_metrics == [{}]
+        assert result.loss_metrics == [[{}, {}]]
         call = engine._pp_forward_backward_microbatch_group.call_args
         assert len(call.kwargs["inputs"]) == 2
         assert len(call.kwargs["model_kwargs"]) == 2
         assert len(call.kwargs["labels"]) == 2
-        torch.testing.assert_close(
-            call.kwargs["loss_kwargs"]["global_loss_token_counts"], torch.tensor(2)
-        )
+        assert len(call.kwargs["loss_kwargs"]) == 2
+        for mb_loss_kwargs in call.kwargs["loss_kwargs"]:
+            torch.testing.assert_close(
+                mb_loss_kwargs["global_loss_token_counts"], torch.tensor(2)
+            )
         assert call.kwargs["finalize_gradients"]
 
     def test_aot_fx_preserves_tuple_model_inputs(self):
