@@ -166,7 +166,7 @@ class TestLoss(unittest.TestCase):
             "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
         ):
-            input_tokens, loss_labels, extra_kwargs = model.preprocess_inputs(
+            input_tokens, loss_labels, extra_kwargs, _ = model.preprocess_inputs(
                 {
                     "input": tokens,
                     "labels": labels,

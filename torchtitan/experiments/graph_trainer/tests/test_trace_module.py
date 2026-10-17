@@ -248,6 +248,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             input_dict["input"],
             input_dict["labels"],
             {"positions": input_dict["positions"]},
+            {},
         )
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
@@ -319,6 +320,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             (main_tokens, mtp_tokens),
             (main_labels, mtp_labels),
             {"mtp_input_valid_masks": (torch.tensor([True, False]),)},
+            {},
         )
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(

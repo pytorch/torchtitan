@@ -250,7 +250,7 @@ class GraphTrainingEngine(TrainingEngine):
                     sl.log_trace_span("preprocess_inputs"),
                     self.parallelism_context.activate_spmd(),
                 ):
-                    inputs_mb, labels_mb, extra_kwargs_mb = self.model_parts[
+                    inputs_mb, labels_mb, extra_kwargs_mb, _ = self.model_parts[
                         0
                     ].preprocess_inputs(
                         input_dict,

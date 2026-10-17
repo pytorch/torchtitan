@@ -32,6 +32,7 @@ class TestInvalidLoss(unittest.TestCase):
                     input_dict["input"],
                     input_dict["labels"],
                     {},
+                    {},
                 ),
                 parameters=lambda: iter(()),
                 modules=lambda: iter(()),

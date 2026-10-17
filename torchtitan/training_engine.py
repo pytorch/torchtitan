@@ -634,26 +634,23 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 sl.log_trace_span("preprocess_inputs"),
                 self.parallelism_context.activate_spmd(),
             ):
-                inputs, labels, model_kwargs = self.model_parts[0].preprocess_inputs(
-                    microbatch.to_input_dict(self.device, non_blocking=True),
-                    parallelism_context=self.parallelism_context,
-                    parallelism=self.config.parallelism,
-                    max_num_documents=self.max_num_documents,
-                    max_context_length=self.config.training.max_context_length,
-                    global_routing_token_counts=global_routing_token_counts,
-                    **self.preprocess_inputs_kwargs,
+                prepared_microbatches.append(
+                    self.model_parts[0].preprocess_inputs(
+                        microbatch.to_input_dict(self.device, non_blocking=True),
+                        parallelism_context=self.parallelism_context,
+                        parallelism=self.config.parallelism,
+                        max_num_documents=self.max_num_documents,
+                        max_context_length=self.config.training.max_context_length,
+                        global_routing_token_counts=global_routing_token_counts,
+                        loss_kwargs=microbatch.to_loss_kwargs(
+                            self.device, non_blocking=True
+                        ),
+                        **self.preprocess_inputs_kwargs,
+                    )
                 )
             self.ntokens_seen += (
                 self.config.training.num_tokens_per_microbatch_per_dp_rank
                 // self.parallelism_context.cp
-            )
-            prepared_microbatches.append(
-                (
-                    inputs,
-                    labels,
-                    model_kwargs,
-                    microbatch.to_loss_kwargs(self.device, non_blocking=True),
-                )
             )
 
         if not self.parallelism_context.pp_enabled:

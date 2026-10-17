@@ -221,7 +221,9 @@ class Validator(BaseValidator):
 
                 for input_dict in microbatch_group:
                     with self.parallelism_context.activate_spmd():
-                        inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
+                        inputs, labels, extra_kwargs, _ = model_parts[
+                            0
+                        ].preprocess_inputs(
                             input_dict,
                             parallelism_context=self.parallelism_context,
                             parallelism=self.parallelism,
@@ -256,7 +258,7 @@ class Validator(BaseValidator):
                 assert len(microbatch_group) == 1
                 input_dict = microbatch_group[0]
                 with self.parallelism_context.activate_spmd():
-                    inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
+                    inputs, labels, extra_kwargs, _ = model_parts[0].preprocess_inputs(
                         input_dict,
                         parallelism_context=self.parallelism_context,
                         parallelism=self.parallelism,
