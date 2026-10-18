@@ -58,12 +58,11 @@ from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
 from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
     TerminalTasksetConfig,
 )
-from torchtitan.rl.generator.generator import (
-    SamplingConfig,
-    VLLMCudaGraphConfig,
-    VLLMGenerator,
-)
+from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.recorder import (
@@ -263,10 +262,12 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY"),
+            engine=VLLMEngine.Config(
+                cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
+            ),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -406,10 +407,10 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -527,10 +528,10 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
