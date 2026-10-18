@@ -45,7 +45,7 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
     replay and graph ownership stay intact.
 
     This costs one additional graph capture per decode-specialized batch size
-    (11 at max_num_seqs 1024); ``TorchTitanGPUModelRunner.initialize_kv_cache``
+    (83 at max_num_seqs 1024); ``TorchTitanGPUModelRunner.initialize_kv_cache``
     keeps them out of vLLM's graph-memory estimate.
 
     TODO: drop this class once vLLM captures FULL decode graphs next to FULL mixed
@@ -148,7 +148,7 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         super().initialize_kv_cache(kv_cache_config, is_profiling, **kwargs)
         # vLLM's graph-memory estimate, taken out of the KV cache, charges every FULL graph
         # like the second largest (a mixed graph). Decode graphs take far less (Qwen3-8B TP2:
-        # 11 of them add 0.03 GiB to 1.57), so profile the mixed graphs only. vLLM drops
+        # 11 decode graphs added 0.03 GiB to 1.57), so profile the mixed graphs only. vLLM drops
         # these profiling keys afterwards; the real call rebuilds them, decode keys included
         # (test_generator_dp_cudagraph.py checks a decode graph still replays).
         # TODO: drop once vLLM's estimate charges decode graphs at their own size.
