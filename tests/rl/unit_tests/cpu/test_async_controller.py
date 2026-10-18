@@ -846,3 +846,51 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
         RuntimeError, match="generator_wait_engine_loop exited unexpectedly"
     ):
         _run_with_generator_watcher(exited)
+
+
+def test_cancelled_rollout_loop_releases_its_group() -> None:
+    """A cancel (shutdown) still releases the group: post-training validation reuses the generators."""
+
+    async def run() -> None:
+        started = asyncio.Event()
+        events = []
+
+        async def run_group_rollouts(**kwargs) -> RolloutGroup:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                events.append("group cancelled")
+                raise
+
+        async def release_groups(group_ids) -> None:
+            events.append(("release_groups", group_ids))
+
+        controller = object.__new__(Controller)
+        controller.config = SimpleNamespace(
+            async_loop=SimpleNamespace(num_samples_per_prompt=2)
+        )
+        controller._sampling = None
+        controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+        controller.generator_router = SimpleNamespace(
+            release_groups=SimpleNamespace(call_one=release_groups)
+        )
+        group_buffer = SimpleNamespace(
+            claim_next=AsyncMock(
+                return_value=RolloutGroupWork(group_id=3, sample=object())
+            ),
+            finalize_work=AsyncMock(),
+        )
+        loop = asyncio.create_task(
+            controller._rollout_loop(
+                group_buffer=group_buffer, generate_fn=None, release_session_fn=None
+            )
+        )
+        await started.wait()
+        loop.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await loop
+        assert events == ["group cancelled", ("release_groups", [3])]
+        group_buffer.finalize_work.assert_not_awaited()
+
+    asyncio.run(run())
