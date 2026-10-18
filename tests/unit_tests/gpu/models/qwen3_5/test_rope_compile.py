@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
 import unittest
 
 import torch
@@ -247,14 +248,16 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
         apply_local_compile([])
         torch._dynamo.reset()
 
-    def _run(self, rope, query, key, positions, inverse):
-        query = query.detach().clone().requires_grad_()
+    def _run(self, rope, query_base, key, positions, inverse):
+        # RoPE reads the last 64 dims of query_base: all of it, or a strided slice.
+        query_base = query_base.detach().clone().requires_grad_()
+        query = query_base[..., -64:]
         key = key.detach().clone().requires_grad_()
         if inverse:
-            inputs = (query,)
+            inputs = (query_base,)
             outputs = (rope(query, positions=positions, inverse=True),)
         else:
-            inputs = (query, key)
+            inputs = (query_base, key)
             outputs = rope(query, key, positions)
         generator = torch.Generator(device="cuda").manual_seed(1)
         grad_outputs = [
@@ -267,19 +270,27 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
     def test_compiled_matches_eager_complex(self):
         torch.manual_seed(42)
         rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
-        query = torch.randn(64, 8, 64, device="cuda", dtype=torch.bfloat16)
-        key = torch.randn(64, 1, 64, device="cuda", dtype=torch.bfloat16)
         positions = torch.randperm(128, device="cuda")[:64]
 
-        for inverse in (False, True):
-            apply_local_compile([])
-            eager_outputs, eager_grads = self._run(rope, query, key, positions, inverse)
-            apply_local_compile(["complex_rope"])
-            outputs, grads = self._run(rope, query, key, positions, inverse)
-            for compiled, eager in zip(
-                (*outputs, *grads), (*eager_outputs, *eager_grads), strict=True
-            ):
-                torch.testing.assert_close(compiled, eager)
+        # bf16 and fp32; a contiguous query and a strided slice of a wider one (DeepSeek-V3's q_pe).
+        # Compiled real arithmetic can differ from eager complex by 1 bf16 ulp in rare elements.
+        for dtype, query_dim, inverse in itertools.product(
+            (torch.bfloat16, torch.float32), (64, 192), (False, True)
+        ):
+            query_base = torch.randn(64, 8, query_dim, device="cuda", dtype=dtype)
+            key = torch.randn(64, 1, 64, device="cuda", dtype=dtype)
+            with self.subTest(dtype=dtype, query_dim=query_dim, inverse=inverse):
+                torch._dynamo.reset()  # 8 cases: stay clear of the 8-graph limit
+                apply_local_compile([])
+                eager_outputs, eager_grads = self._run(
+                    rope, query_base, key, positions, inverse
+                )
+                apply_local_compile(["complex_rope"])
+                outputs, grads = self._run(rope, query_base, key, positions, inverse)
+                for compiled, eager in zip(
+                    (*outputs, *grads), (*eager_outputs, *eager_grads), strict=True
+                ):
+                    torch.testing.assert_close(compiled, eager)
 
     def test_compiled_is_batch_invariant(self):
         torch.manual_seed(42)
