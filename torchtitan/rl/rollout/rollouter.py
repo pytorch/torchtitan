@@ -11,16 +11,14 @@ import itertools
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
-from monarch.actor import ProcMesh, this_host
 
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
-from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataLoader, RLDataset
 from torchtitan.rl.rollout.message_env import MessageEnv
@@ -39,10 +37,10 @@ from torchtitan.rl.rollout.types import (
 if TYPE_CHECKING:
     from renderers import Renderer
 
-    from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
+    from torchtitan.rl.actors.system import ActorSystem
 
     # Type-only: importing the generator module here would pull in vLLM at import time.
-    from torchtitan.rl.generator.generator import SamplingConfig
+    from torchtitan.rl.generator.types import SamplingConfig
 
 
 logger = logging.getLogger(__name__)
@@ -132,8 +130,9 @@ class Rollouter(Configurable):
             raise ValueError("training_dataloader must build an RLDataLoader")
         self._training_dataloader = iter(training_dataloader)
 
-        self._worker_actors: RolloutWorkerActor | None = None
-        self._worker_mesh: ProcMesh | None = None
+        # The worker pool's actor handle and the actor system that spawned it.
+        self._worker_actors: Any | None = None
+        self._actor_system: ActorSystem | None = None
 
     def get_training_sample(self) -> tuple[int, object]:
         """Return the next globally identified input from the training loader."""
@@ -157,28 +156,20 @@ class Rollouter(Configurable):
     async def setup_async(
         self,
         *,
+        actor_system: ActorSystem,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
     ) -> None:
-        """Spawn and initialize the owned worker proc mesh and actor pool."""
-        # Import lazily to avoid a circular dependency through Rollouter.Config.
-        from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
-
-        if self._worker_mesh is not None or self._worker_actors is not None:
+        """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
+        if self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
 
-        self._worker_mesh = this_host().spawn_procs(
-            per_host={"cpus": self._config.worker_pool_size},
-        )
-        self._worker_actors = self._worker_mesh.spawn(
-            "rollout_worker",
-            RolloutWorkerActor,
-            worker_config=self._config.worker,
+        self._actor_system = actor_system
+        self._worker_actors = await actor_system.spawn_rollout_workers(
+            self._config.worker,
+            num_workers=self._config.worker_pool_size,
             num_threads=self._config.num_threads_per_worker,
-            # None when structured logging is off. Else each worker calls it with its own source and rank,
-            # so it writes its own JSONL next to the controller's.
-            structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
         )
         await self._worker_actors.setup_async.call(
             tokenizer_config=tokenizer_config,
@@ -187,12 +178,12 @@ class Rollouter(Configurable):
         )
 
     async def close(self) -> None:
-        """Stop the owned rollout worker proc mesh."""
-        worker_mesh = self._worker_mesh
+        """Stop the rollout worker pool."""
+        actor_system = self._actor_system
         self._worker_actors = None
-        self._worker_mesh = None
-        if worker_mesh is not None:
-            await worker_mesh.stop()
+        self._actor_system = None
+        if actor_system is not None:
+            await actor_system.stop_rollout_workers()
 
     async def sync_log_step(self, step: int) -> None:
         """Propagate the controller log step to every rollout worker."""
@@ -230,8 +221,8 @@ class Rollouter(Configurable):
         if self._worker_actors is None:
             raise RuntimeError("rollout worker pool is not initialized")
 
-        # Use Monarch `choose` API to randomly select an actor in the mesh, and
-        # send the message to its `run_group` endpoint.
+        # `choose` (see ActorSystem's call convention) sends the call to the `run_group`
+        # endpoint of one worker in the pool.
         return await self._worker_actors.run_group.choose(
             generate_fn=generate_fn,
             release_session_fn=release_session_fn,

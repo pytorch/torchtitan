@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Attention Gym kernels with placeholders when the package is missing."""
+"""Attention Gym kernels with placeholders when the package or a backend is missing."""
 
 # TODO: Revisit Attention Gym imports and dependency handling to remove this
 # placeholder workaround.
@@ -120,7 +120,20 @@ _EXPORTS = {
 }
 
 
+# Import errors raised from inside attn_gym, keyed by the attn_gym module that
+# raised them. The package is installed, but a kernel backend it imports at
+# module import time (cutlass, triton, ...) is not available on this platform.
+_BACKEND_ERRORS: dict[str, ModuleNotFoundError] = {}
+
+
 def _raise_missing(*args: Any, **kwargs: Any) -> NoReturn:
+    error = next(iter(_BACKEND_ERRORS.values()), None)
+    if error is not None:
+        # A fresh exception each time: re-raising the recorded instance would
+        # keep appending tracebacks to one shared object.
+        raise ModuleNotFoundError(
+            str(error), name=error.name, path=error.path
+        ) from error
     raise ModuleNotFoundError(
         "Attention Gym kernels require attn_gym. "
         "Install it with: python -m pip install 'attn-gym[linear,cudnn]==0.0.16'.",
@@ -140,8 +153,16 @@ def _load_module(name: str) -> ModuleType | None:
     try:
         return import_module(name)
     except ModuleNotFoundError as error:
-        if error.name != "attn_gym":
+        if error.name == "attn_gym":
+            return None
+        if error.name is None or error.name.split(".")[0] == "attn_gym":
+            # An attn_gym module itself is missing (moved in a release, or a
+            # typo in _EXPORTS): that is breakage, so it stays loud.
             raise
+        # attn_gym is installed but this module needs a backend (cutlass,
+        # triton, ...) that is not. Keep the models importable and report the
+        # backend when a kernel is built, as when attn_gym itself is missing.
+        _BACKEND_ERRORS.setdefault(name, error)
         return None
 
 
@@ -155,5 +176,9 @@ def __getattr__(name: str) -> Any:
 
 
 def require_attn_gym() -> None:
-    if _load_module("attn_gym") is None:
+    # TODO: _BACKEND_ERRORS fills in as exports are first accessed, and any
+    # recorded backend failure makes this raise, so the error can name a
+    # backend the requested kernel does not use. Recording the module on each
+    # placeholder would let kernels report their own backend.
+    if _BACKEND_ERRORS or _load_module("attn_gym") is None:
         _raise_missing()
