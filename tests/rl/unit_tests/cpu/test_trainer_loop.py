@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from torchtitan.rl.actors.system import TrainerHandle
 from torchtitan.rl.controller.controller import Controller
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
@@ -88,7 +89,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     )
     controller.start_step = 0
     controller._trainer_policy_version = 0
-    controller.trainer = SimpleNamespace(
+    trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
         forward_backward=_Endpoint(forward_backward),
         optim_step=_Endpoint(optim_step),
@@ -96,7 +97,9 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         push_model_state_dict=_Endpoint(push),
     )
     # DP degree 1: every trainer rank is at DP rank 0.
-    controller._trainer_by_dp_rank = [controller.trainer]
+    controller.trainer = TrainerHandle(
+        all_ranks=trainer, rank0=trainer, by_dp_rank=[trainer]
+    )
     controller.generator_router = SimpleNamespace(
         sync_log_step=_Endpoint(), pull_model_state_dict=_Endpoint(pull)
     )
@@ -232,8 +235,8 @@ def test_step_total_covers_the_save_and_the_previous_metrics_log(monkeypatch) ->
         return on_call
 
     controller = _controller([])
-    controller.trainer.sync_log_step = _Endpoint(takes(1.0))
-    controller.trainer.save_checkpoint = _Endpoint(takes(30.0))
+    controller.trainer.all_ranks.sync_log_step = _Endpoint(takes(1.0))
+    controller.trainer.all_ranks.save_checkpoint = _Endpoint(takes(30.0))
     log = controller.metrics_processor.log
 
     def slow_log(**kwargs):

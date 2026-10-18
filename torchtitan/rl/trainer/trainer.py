@@ -31,7 +31,7 @@ from torchtitan.rl.controller.metrics import combine_microbatch_metrics
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.controller_state import CONTROLLER_STATE_KEY, MirroredState
 from torchtitan.rl.trainer.rdma_microbatch import (
-    MonarchRDMAMicrobatch,
+    RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )
 from torchtitan.tools import utils
@@ -245,7 +245,7 @@ class Trainer(Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        microbatches: list[TrainingMicrobatch] | list[MonarchRDMAMicrobatch],
+        microbatches: list[TrainingMicrobatch] | list[RDMAMicrobatch],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
@@ -253,7 +253,7 @@ class Trainer(Configurable):
 
         Args:
             microbatches: This rank's column of the batcher's `[num_microbatches][dp_degree]` grid;
-                `MonarchRDMAMicrobatch`es when `rdma_min_tensor_bytes` is set, read a few ahead of training.
+                `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set, read a few ahead of training.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -278,9 +278,7 @@ class Trainer(Configurable):
             len(microbatches)
             * self.config.training.num_tokens_per_microbatch_per_dp_rank
         )
-        uses_rdma = bool(microbatches) and isinstance(
-            microbatches[0], MonarchRDMAMicrobatch
-        )
+        uses_rdma = bool(microbatches) and isinstance(microbatches[0], RDMAMicrobatch)
         microbatch_groups = [[microbatch] for microbatch in microbatches]
         if uses_rdma:
             # A wrong column, or a batch read twice or out of order, fails here instead of training.

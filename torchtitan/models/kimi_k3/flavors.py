@@ -78,12 +78,8 @@ from torchtitan.models.kimi_k2_7.sharding import (
     moonvit_rotary_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from .model import (
-    AttentionResidual,
-    KimiK3Model,
-    KimiK3TransformerBlock,
-    KimiMLAAttention,
-)
+from .attention import KimiMLAAttention
+from .model import AttentionResidual, KimiK3Model, KimiK3TransformerBlock
 from .moe import KimiLatentMoE
 from .sharding import (
     inner_kda_sharding_config,

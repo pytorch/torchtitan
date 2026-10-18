@@ -15,6 +15,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import torch
+import torch.cuda.nccl
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.config as dist_config
 import torch.distributed.distributed_c10d as c10d
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallelism_context import ParallelismContext
+    from torchtitan.models.base.module import Module
 
 
 def get_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -368,6 +370,39 @@ def _init_real_pp_fake_spmd(
     )
 
 
+def _warn_overwrite_env(name: str, value: str) -> None:
+    if name in os.environ:
+        logger.warning("%s=%s will be overridden to %s.", name, os.environ[name], value)
+    os.environ[name] = value
+
+
+def configure_nccl_for_ulysses(
+    model: Module.Config, *, device_type: str, comm_backend: str
+) -> None:
+    """Disable graph registration on affected NCCL versions before initialization.
+
+    NCCL < 2.32.3 can reuse partial IPC imports for Ulysses graph buffers.
+    Fix: https://github.com/NVIDIA/nccl/pull/2362 (NCCL 2.32.3).
+    """
+    if device_type != "cuda" or comm_backend in {"fake", "real_pp_fake_spmd"}:
+        return
+
+    from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttention
+
+    # TODO: Remove this workaround once supported PyTorch builds ship
+    # NCCL >= 2.32.3.
+    if not dist.is_nccl_available() or torch.cuda.nccl.version() >= (2, 32, 3):
+        return
+
+    # We could only reproduce this issue with Ulysses. Always turning on
+    # this flag may have performance regressions.
+    if not any(model.traverse(UlyssesInnerAttention.Config)):
+        return
+
+    _warn_overwrite_env("NCCL_GRAPH_REGISTER", "0")
+    logger.info("Using NCCL_GRAPH_REGISTER=0 for Ulysses on NCCL before 2.32.3.")
+
+
 def init_distributed(
     comm_config: CommConfig,
     enable_cpu_backend: bool = False,
@@ -418,13 +453,6 @@ def init_distributed(
             )
         init_fake_mode(logical_world_size, rank=rank)
         return DistributedTopology(logical_world_size)
-
-    def _warn_overwrite_env(env, val):
-        if env in os.environ:
-            logger.warning(
-                f"ENV[{env}] = {os.environ[env]} will be overridden to {val} based on job config"
-            )
-        os.environ[env] = val
 
     def _get_distributed_backend(enable_cpu_backend):
         backend = "nccl"
