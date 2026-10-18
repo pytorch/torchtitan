@@ -52,7 +52,7 @@ from torchtitan.models.common.decoder_sharding import (
     rope_cache_sharding_config,
     rowwise_sharding_config,
 )
-from torchtitan.models.common.moe_sharding import shared_experts_sharding_config
+from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
 from torchtitan.models.common.vision_encoder import (
@@ -582,7 +582,7 @@ def _build_qwen35_moe_layers(
         layers.append(
             Qwen35TransformerBlock.Config(
                 attention=attention,
-                moe=make_moe_config(
+                feed_forward=make_moe_config(
                     num_experts=num_experts,
                     router=make_router_config(
                         dim=dim,

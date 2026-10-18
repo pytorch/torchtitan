@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from renderers import Qwen3RendererConfig
+from renderers import CustomRendererConfig, Qwen3RendererConfig
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
@@ -34,11 +34,10 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, TokenDispatcherTransform
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
-from torchtitan.models.muse_glimmer.renderer import MuseGlimmerRendererConfig
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
@@ -48,12 +47,11 @@ from torchtitan.rl.controller.controller import (
 from torchtitan.rl.examples.search_r1.data import SearchR1Dataset
 from torchtitan.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.rl.examples.search_r1.rubric import RewardExactMatch
-from torchtitan.rl.generator.generator import (
-    SamplingConfig,
-    VLLMCudaGraphConfig,
-    VLLMGenerator,
-)
+from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRLDataLoader
@@ -142,7 +140,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
-                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
             ),
@@ -165,11 +162,11 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
@@ -289,7 +286,6 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             # TODO: Tune the trainer token budget and maximum context length.
             training=TrainingConfig(
                 disable_cuda_graphs=True,
-                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
             ),
@@ -306,11 +302,11 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 global_vocab_size=decoder_vocab_size(trainer_model),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
             max_num_batched_tokens=max_num_batched_tokens,
@@ -404,7 +400,11 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             validation=ValidationConfig(steps=500),
         ),
         rollouter=_search_r1_rollouter_config(),
-        renderer=MuseGlimmerRendererConfig(),
+        renderer=from_renderers(
+            CustomRendererConfig(
+                import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
+            )
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
             model=trainer_model,
@@ -418,7 +418,6 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
-                cuda_graph_per_accumulation_group=True,
                 num_tokens_per_microbatch_per_dp_rank=4096,
                 max_context_length=4096,
             ),
@@ -439,11 +438,11 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,

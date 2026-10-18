@@ -1385,6 +1385,7 @@ class TestBaseCheckpointManagerTracing(unittest.TestCase):
         manager.initial_load_path = None
         manager.initial_load_in_hf = False
         manager.initial_load_in_hf_quantized = False
+        manager.states = {}
         manager._storage = mock.Mock()
         manager._storage.isdir.return_value = True
         manager._create_checkpoint_id.return_value = "/checkpoint/step-10"
@@ -1700,7 +1701,7 @@ class TestModelWrapper(unittest.TestCase):
     def test_hook_tensor_storage_stable_and_refreshed(self):
         class HookedModule(nn.Module):
             # Slice a non-leading dim so .contiguous() allocates new storage
-            # disconnected from the parameter, mirroring FeedForward's split.
+            # disconnected from the parameter, mirroring DenseFeedForward's split.
             def __init__(self):
                 super().__init__()
                 self.w = nn.Parameter(torch.zeros(4, 2, 3))

@@ -50,7 +50,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
+from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
 from torchtitan.models.kimi_k2_7 import (
     build_model_config,
@@ -412,14 +412,14 @@ def _dist_muon_optimizer(
         else:
             shardings.update(
                 {
-                    f"{prefix}.moe.routed_experts.{projection}": per_expert
+                    f"{prefix}.feed_forward.routed_experts.{projection}": per_expert
                     for projection in expert_projections
                 }
             )
-            shardings[f"{prefix}.moe.router.gate.weight"] = owned
+            shardings[f"{prefix}.feed_forward.router.gate.weight"] = owned
             shardings.update(
                 {
-                    f"{prefix}.moe.shared_experts.{projection}.weight": compute_sharding
+                    f"{prefix}.feed_forward.shared_experts.{projection}.weight": compute_sharding
                     for projection, compute_sharding in feed_forward_shardings.items()
                 }
             )
@@ -463,8 +463,8 @@ def _dist_muon_optimizer(
         r"feed_forward\.(?:w13|w2)\.weight|"
         # Keep the 2D router gate on Muon: Moonlight Figure 4 reports its
         # SVD-entropy gain over AdamW is larger than for other matrix groups.
-        r"moe\.router\.gate\.weight|"
-        r"moe\.shared_experts\.(?:w13|w2)\.weight"
+        r"feed_forward\.router\.gate\.weight|"
+        r"feed_forward\.shared_experts\.(?:w13|w2)\.weight"
         r")$"
     )
     return OptimizersContainer.Config(
@@ -526,7 +526,7 @@ def _align_dist_muon_expert_compute_layouts(
     aligned_shardings = {}
     changed = False
     for fqn, compute_layout in compute_sharding_by_fqn.items():
-        if ".moe.routed_experts." in fqn and compute_layout != per_expert:
+        if ".routed_experts." in fqn and compute_layout != per_expert:
             aligned_shardings[fqn] = per_expert
             changed = True
         else:

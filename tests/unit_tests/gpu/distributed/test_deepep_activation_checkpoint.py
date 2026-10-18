@@ -27,7 +27,7 @@ from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 
 deep_ep = pytest.importorskip("deep_ep")
 

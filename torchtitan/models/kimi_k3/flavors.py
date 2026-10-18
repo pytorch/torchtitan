@@ -22,8 +22,8 @@ from torchtitan.config.transform import (
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     Conv1d,
+    DenseFeedForward,
     Embedding,
-    FeedForward,
     GatedRMSNorm,
     HiMidLoLinear,
     Linear,
@@ -51,7 +51,7 @@ from torchtitan.models.common.decoder_sharding import (
     token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe import QuantileBalancedTopKRouter
-from torchtitan.models.common.moe_sharding import (
+from torchtitan.models.common.moe.sharding import (
     moe_sharding_config,
     router_gate_sharding_config,
     router_sharding_config,
@@ -78,12 +78,8 @@ from torchtitan.models.kimi_k2_7.sharding import (
     moonvit_rotary_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from .model import (
-    AttentionResidual,
-    KimiK3Model,
-    KimiK3TransformerBlock,
-    KimiMLAAttention,
-)
+from .attention import KimiMLAAttention
+from .model import AttentionResidual, KimiK3Model, KimiK3TransformerBlock
 from .moe import KimiLatentMoE
 from .sharding import (
     inner_kda_sharding_config,
@@ -203,7 +199,7 @@ def _feed_forward_config(
     dim: int,
     hidden_dim: int,
     enable_sp: bool,
-) -> FeedForward.Config:
+) -> DenseFeedForward.Config:
     return replace(
         make_ffn_config(
             dim=dim,
@@ -628,11 +624,6 @@ def _kimi_k3_config(
                     _feed_forward_config(
                         dim=dim, hidden_dim=dense_hidden_dim, enable_sp=enable_sp
                     )
-                    if layer_idx == 0
-                    else None
-                ),
-                moe=(
-                    None
                     if layer_idx == 0
                     else _latent_moe_config(
                         dim=dim,

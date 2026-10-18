@@ -26,13 +26,14 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.attention.cp_attention import UlyssesCPInnerAttention
+from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rope import RoPE
 
 from .state_dict_adapter import GptOssStateDictAdapter
@@ -67,6 +68,15 @@ class GptOssAttention(Attention):
         """Per-layer causal sliding-window size"""
         rope: RoPE.Config
 
+        @property
+        def softmax_scale(self) -> float:
+            scale = 1.0 / math.sqrt(self.head_dim)
+            if self.rope.scaling == "yarn" and self.rope.rope_factor > 1.0:
+                mscale = 0.1 * math.log(self.rope.rope_factor) + 1.0
+                # RoPE is a pure rotation; apply YaRN's Q/K magnitude here.
+                scale *= mscale * mscale
+            return scale
+
     def __init__(self, config: Config):
         super().__init__()
         self.head_dim = config.head_dim
@@ -76,13 +86,7 @@ class GptOssAttention(Attention):
 
         self.n_rep = self.n_heads // self.n_kv_heads
 
-        # Standard attention softmax scale (1/sqrt(head_dim))
-        self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
-        if config.rope.scaling == "yarn" and config.rope.rope_factor > 1.0:
-            mscale = 0.1 * math.log(config.rope.rope_factor) + 1.0
-            # Merge YaRN attention mscale into softmax_scale, with
-            # m**2 being equivalent to scaling q / k each by mscale.
-            self.softmax_scale *= mscale * mscale
+        self.softmax_scale = config.softmax_scale
 
         self.qkv_linear = config.qkv_linear.build()
         self.wo = config.wo.build()
@@ -153,9 +157,8 @@ class GptOssTransformerBlock(TransformerBlock):
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
 
-        assert config.moe is not None
-        self.moe = config.moe.build()
-        self.moe_enabled = True  # for composability with load balancing
+        assert isinstance(config.feed_forward, MoE.Config)
+        self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -183,7 +186,7 @@ class GptOssTransformerBlock(TransformerBlock):
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
-        moe_out = self.moe(
+        moe_out = self.feed_forward(
             self.ffn_norm(x),
             padding_mask_T=padding_mask,
             aux_loss_denominator=aux_loss_denominator,
@@ -255,7 +258,7 @@ class GptOssModel(Decoder):
         dump_folder: str,
     ) -> GptOssModel:
         if parallelism_context.cp_enabled and any(
-            isinstance(layer.attention.inner_attention, UlyssesCPInnerAttention.Config)
+            isinstance(layer.attention.inner_attention, UlyssesInnerAttention.Config)
             for layer in self.config.layers
         ):
             raise NotImplementedError(

@@ -18,11 +18,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.common.hi_mid_lo_linear import (
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear.hi_mid_lo_linear import (
     _split_into_bf16_pieces,
     HiMidLoLinear,
 )
-from torchtitan.models.common.linear import Linear
 
 
 def test_hi_mid_lo_linear_forward_and_backward_contract_cpu():

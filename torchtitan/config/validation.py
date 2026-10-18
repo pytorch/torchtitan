@@ -39,7 +39,7 @@ def validate_model_training_config(
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE
-    from torchtitan.models.common.token_dispatcher import (
+    from torchtitan.models.common.moe.token_dispatcher import (
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,
@@ -154,7 +154,7 @@ def validate_context_parallel(
     from torchtitan.distributed.context_parallel import supports_cp_inner_attention
     from torchtitan.models.common.attention.cp_attention import (
         CPInnerAttention,
-        UlyssesCPInnerAttention,
+        UlyssesInnerAttention,
     )
     from torchtitan.models.common.decoder import Decoder
 
@@ -167,7 +167,7 @@ def validate_context_parallel(
         if cp > 1 and not is_cp_attention:
             raise ValueError(
                 f"{fqn}.inner_attention must use CPInnerAttention, such as "
-                "KVAllGatherCPFlexInnerAttention, when the context parallel degree is "
+                "AllGatherKVFlexInnerAttention, when the context parallel degree is "
                 "larger than 1. Apply ContextParallelTransform; see an example in "
                 "torchtitan_recipes/models/muse_glimmer.py."
             )
@@ -183,7 +183,7 @@ def validate_context_parallel(
         assert cp_inner_attention is not None and issubclass(
             cp_inner_attention, CPInnerAttention
         )
-        if issubclass(cp_inner_attention, UlyssesCPInnerAttention):
+        if issubclass(cp_inner_attention, UlyssesInnerAttention):
             head_shard_degree = parallelism.tensor_parallel_degree * cp
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
@@ -204,7 +204,7 @@ def validate_context_parallel(
             continue
         if isinstance(model, Decoder.Config) and model.first_full_attention is None:
             continue
-        if issubclass(cp_inner_attention, UlyssesCPInnerAttention):
+        if issubclass(cp_inner_attention, UlyssesInnerAttention):
             raise ValueError(
                 f"{fqn}.inner_attention uses {cp_inner_attention.__qualname__}, so "
                 "context_parallel_load_balancer must be None."

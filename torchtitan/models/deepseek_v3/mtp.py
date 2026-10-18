@@ -33,6 +33,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 
 
@@ -128,13 +129,7 @@ class MTPTransformerBlock(TransformerBlock):
         self.eh_proj = config.eh_proj.build()
         self.mtp_norm = config.mtp_norm.build()
 
-        self.moe_enabled = config.moe is not None
-        if self.moe_enabled:
-            assert config.moe is not None
-            self.moe = config.moe.build()
-        else:
-            assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build()
+        self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -164,8 +159,8 @@ class MTPTransformerBlock(TransformerBlock):
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
         h = h + self.attention(self.attention_norm(h), attention_metadata, positions)
-        if self.moe_enabled:
-            h = h + self.moe(
+        if isinstance(self.feed_forward, MoE):
+            h = h + self.feed_forward(
                 self.ffn_norm(h),
                 padding_mask_T=mtp_padding_mask_T,
                 aux_loss_denominator=aux_loss_denominator,
@@ -258,6 +253,7 @@ class MTPDecoder(Decoder):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
@@ -325,7 +321,7 @@ class MTPDecoder(Decoder):
 
         main_tokens = input_dict.pop("input")
         main_labels = input_dict.pop("labels")
-        input_dict["aux_loss_denominators"] = None
+        input_dict["aux_loss_denominators"] = global_routing_token_counts
         if self.mtp_layers is None:
             return main_tokens, main_labels, input_dict
 

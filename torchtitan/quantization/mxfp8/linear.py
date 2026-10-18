@@ -28,11 +28,11 @@ from torchao.prototype.mx_formats.kernels import (
 )
 
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.common.inplace_wgrad_accum import (
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear.inplace_wgrad_accum import (
     running_grad,
     uses_inplace_wgrad_accum,
 )
-from torchtitan.models.common.linear import Linear
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (

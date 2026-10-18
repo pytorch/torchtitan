@@ -7,7 +7,7 @@
 """Eager producer for the EP-overlap chunk metadata contract.
 
 Eager chunking is intentionally narrow: it supports the model input contracts
-used by ``layers.*`` TransformerBlock roots and ``layers.*.moe`` MoE roots, and
+used by ``layers.*`` TransformerBlock roots and ``layers.*.feed_forward`` MoE roots, and
 fails loudly if those upstream forward signatures drift.
 """
 
@@ -31,6 +31,7 @@ from torchtitan.experiments.graph_trainer.configs import (
     validate_ep_overlap_config,
 )
 from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.moe import MoE
 
 
 logger = logging.getLogger(__name__)
@@ -422,8 +423,10 @@ def maybe_apply_ep_overlap_eager_chunking(
             if (
                 module_fqn == TRANSFORMER_BLOCK_FQN
                 and isinstance(module, TransformerBlock)
-                and getattr(module, "moe", None) is None
+                and not isinstance(module.feed_forward, MoE)
             ):
+                continue
+            if root_kind == "moe" and not isinstance(module, MoE):
                 continue
             _wrap_forward_with_eager_chunking(
                 module,
