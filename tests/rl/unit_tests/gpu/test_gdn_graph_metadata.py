@@ -24,7 +24,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import ForwardContext, override_forward_context
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -99,6 +99,14 @@ def test_full_metadata_and_native_dispatch_variants():
                 descriptor.num_tokens, uniform_decode=descriptor.uniform
             ) == (mode, descriptor)
     assert dispatcher.dispatch(9)[0] == CUDAGraphMode.NONE
+    # After the DP sync vLLM allows only the agreed mode (FULL); a decoding rank padded
+    # past max_num_seqs (2) must still find a graph: the mixed one.
+    for num_tokens in (1, 2, 4, 8):
+        mode, descriptor = dispatcher.dispatch(
+            num_tokens, uniform_decode=True, valid_modes={CUDAGraphMode.FULL}
+        )
+        assert mode == CUDAGraphMode.FULL
+        assert descriptor.uniform == (num_tokens <= 2)
     assert (
         dispatcher.dispatch(2, uniform_decode=True, valid_modes={CUDAGraphMode.NONE})[0]
         == CUDAGraphMode.NONE
@@ -206,6 +214,10 @@ def test_full_metadata_and_native_dispatch_variants():
 
     dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)
     assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
+
+    # Keep last: it switches the shared config to DP2.
+    config.parallel_config.data_parallel_size = 2
+    assert builder.get_cudagraph_support(config, spec) == AttentionCGSupport.ALWAYS
 
 
 @pytest.mark.parametrize("decode", [False, True])

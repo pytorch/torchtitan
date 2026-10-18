@@ -63,10 +63,13 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
         invalid_modes: Set[CUDAGraphMode] | None = None,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         dispatch = super().dispatch
+        # DP>1: vLLM pads a decoding (or idle) rank to the busiest rank's token count. Decode graphs
+        # stop at max_num_seqs, and a missing graph is an AssertionError, so replay the mixed graph.
         if (
             self.keys_initialized
             and self.cudagraph_mode == CUDAGraphMode.FULL
             and uniform_decode
+            and num_tokens <= self.vllm_config.scheduler_config.max_num_seqs
         ):
             dispatch = self.decode_dispatcher.dispatch
         return dispatch(

@@ -72,11 +72,8 @@ class TorchTitanLinearAttentionMetadataBuilder(
         cls, vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec
     ) -> AttentionCGSupport:
         parallel = vllm_config.parallel_config
-        if (
-            parallel.data_parallel_size != 1
-            or parallel.use_ubatching
-            or parallel.enable_dbo
-        ):
+        # DP>1 keeps FULL: TorchTitanCudagraphDispatcher.dispatch handles padded decode ranks.
+        if parallel.use_ubatching or parallel.enable_dbo:
             return AttentionCGSupport.UNIFORM_BATCH
         return AttentionCGSupport.ALWAYS
 
