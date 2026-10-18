@@ -444,12 +444,24 @@ class Generator(Configurable):
         """Fetch weights into pinned CPU memory without interrupting generation."""
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
-        await ts.get_state_dict(
+        fetched_state_dict = await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=self._prefetched_model_state_dict,
             strict=False,
             direct_rdma=False,
         )
+        # strict=False skips weights the trainer didn't publish; they would silently keep their old values.
+        # vLLM's attention scales exist only in the generator, so they are exempt.
+        unpublished = sorted(
+            key
+            for key in self._prefetched_model_state_dict
+            if ".vllm_attn." not in key and key not in fetched_state_dict
+        )
+        if unpublished:
+            raise RuntimeError(
+                f"The trainer did not publish {len(unpublished)} of the generator's weights "
+                f"(first 5: {unpublished[:5]}). Check that the trainer and generator model configs match."
+            )
 
     async def close(self) -> None:
         """Stop the engine loop, which releases the dispatcher and the engine on exit."""
