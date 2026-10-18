@@ -708,13 +708,35 @@ def test_batch_invariant_requires_kv_cache_reset():
         )
 
 
-def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_path):
-    with pytest.raises(
-        ValueError, match="needs reset_kv_cache_on_model_state_dict_load=False"
-    ):
-        VLLMEngine.Config(session_kv_holder=VLLMSessionKVHolder.Config()).build(
+@pytest.mark.parametrize(
+    "holder, parallelism, reset_kv_cache, match",
+    [
+        (
+            VLLMSessionKVHolder.Config(),
+            _PARALLELISM,
+            True,
+            "needs reset_kv_cache_on_model_state_dict_load=False",
+        ),
+        (
+            VLLMSessionKVHolder.Config(cpu_kv_offload=CPUKVOffload.Config(size_gib=16)),
+            # Full EP, as a generator at DP > 1 requires.
+            InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=2,
+                expert_parallel_degree=4,
+            ),
+            False,
+            "needs parallelism.data_parallel_degree=1",
+        ),
+    ],
+)
+def test_session_kv_holder_rejects_unsupported_settings(
+    tmp_path, holder, parallelism, reset_kv_cache, match
+):
+    with pytest.raises(ValueError, match=match):
+        VLLMEngine.Config(session_kv_holder=holder).build(
             model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
+            parallelism=parallelism,
             model_path="unused",
             max_num_seqs=8,
             model_dtype="bfloat16",
@@ -723,28 +745,10 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             checkpointer=None,
             dist_moe_runtime=None,
             debug=DebugConfig(),
-            reset_kv_cache_on_model_state_dict_load=True,
+            reset_kv_cache_on_model_state_dict_load=reset_kv_cache,
             rank=0,
             generator_name="generator",
             output_dir=str(tmp_path),
-        )
-
-
-def test_cpu_kv_offload_rejects_data_parallel():
-    with pytest.raises(ValueError, match="needs parallelism.data_parallel_degree=1"):
-        Generator.Config(
-            model=_MODEL_CONFIG,
-            # Full EP, so the config passes the EP checks and reaches the offload check.
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=2,
-                tensor_parallel_degree=2,
-                expert_parallel_degree=4,
-            ),
-            engine=VLLMEngine.Config(
-                session_kv_holder=VLLMSessionKVHolder.Config(
-                    cpu_kv_offload=CPUKVOffload.Config(size_gib=16)
-                )
-            ),
         )
 
 
