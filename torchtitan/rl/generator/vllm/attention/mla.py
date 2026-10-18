@@ -72,9 +72,17 @@ class _VLLMNativeMLAAttention(VLLMNativeMLAAttention, Module):
     sync's in-place copy updates them without re-deriving.
     """
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(
+        self, act_dtype: torch.dtype | None = None
+    ) -> None:
         """Derive the absorbed decode weights as non-persistent views of ``wkv_b``."""
-        super().process_weights_after_loading(act_dtype)
+        # vLLM main's loader passes no argument (the layer reads its own act_dtype);
+        # the vLLM nightly on PyTorch's index (9f03b51) passes act_dtype.
+        # TODO: drop act_dtype once that nightly includes vllm-project/vllm#57678.
+        if act_dtype is None:
+            super().process_weights_after_loading()
+        else:
+            super().process_weights_after_loading(act_dtype)
         wkv_b_storage = self.kv_b_proj.weight.untyped_storage().data_ptr()
         for name in ("W_UK_T", "W_UV"):
             weight = self._parameters.pop(name)

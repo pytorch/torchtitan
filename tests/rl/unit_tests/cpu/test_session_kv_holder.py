@@ -121,8 +121,7 @@ def _holder(
         manager,
         requests=requests,
         running=running,
-        waiting=waiting,
-        skipped_waiting=skipped_waiting,
+        get_request_counts=lambda: (len(running), len(waiting) + len(skipped_waiting)),
     )
     holder = VLLMSessionKVHolder.Config().build(scheduler=scheduler)
     holder.free_floor_blocks = floor
