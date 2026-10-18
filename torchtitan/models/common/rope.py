@@ -185,6 +185,23 @@ class ComplexRoPE(RoPE):
     class Config(RoPE.Config):
         pass
 
+    # Cat options: _rotate_pairs writes its real/imag halves with one store each, not one masked
+    # kernel over both: 1.08-1.20x faster fwd+bwd on GB300 (needs the per-half cast there).
+    @local_compile(
+        "complex_rope",
+        batch_invariant=True,
+        options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
+    )
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return super().forward(query, key, positions, inverse=inverse)
+
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute complex cis values.
 
@@ -262,6 +279,18 @@ class ComplexRoPE(RoPE):
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Apply complex RoPE using adjacent-dim pairs."""
+        if torch.compiler.is_compiling():
+            # Inductor can't compile a complex multiply, so rotate in real arithmetic: it fuses
+            # with the casts, within 1 bf16 ulp of eager. Eager keeps the complex ops.
+            cache = torch.view_as_real(rope_cache)
+            cos, sin = cache[..., 0], cache[..., 1]
+            if inverse:
+                sin = -sin
+            query_out = _RotatePairs.apply(query, cos, sin)
+            if key is None:
+                return query_out
+            return query_out, _RotatePairs.apply(key, cos, sin)
+
         if inverse:
             rope_cache = rope_cache.conj()
 
@@ -273,6 +302,43 @@ class ComplexRoPE(RoPE):
         xk_ = torch.view_as_complex(key.float().reshape(*key.shape[:-1], -1, 2))
         key_out = torch.view_as_real(xk_ * rope_cache).flatten(-2).type_as(key)
         return query_out, key_out
+
+    @staticmethod
+    def _rotate_pairs(
+        x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    ) -> torch.Tensor:
+        """Rotate each ``(x[2i], x[2i + 1])`` pair by the angle with ``cos[i]``, ``sin[i]``."""
+        x_pairs = x.float().unflatten(-1, (-1, 2))
+        x_real, x_imag = x_pairs[..., 0], x_pairs[..., 1]
+        # Cast each half before the stack so the stack writes the output dtype directly.
+        rotated = torch.stack(
+            (
+                (x_real * cos - x_imag * sin).type_as(x),
+                (x_real * sin + x_imag * cos).type_as(x),
+            ),
+            dim=-1,
+        )
+        return rotated.flatten(-2)
+
+
+class _RotatePairs(torch.autograd.Function):
+    """`ComplexRoPE._rotate_pairs` whose backward rotates the gradient by the opposite angle.
+
+    One strided kernel each way, instead of autograd's masked `select_backward`.
+    `cos` and `sin` get no gradient: they come from the RoPE cache buffer.
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    ) -> torch.Tensor:
+        ctx.save_for_backward(cos, sin)
+        return ComplexRoPE._rotate_pairs(x, cos, sin)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):  # pyrefly: ignore[bad-override]
+        cos, sin = ctx.saved_tensors
+        return ComplexRoPE._rotate_pairs(grad, cos, -sin), None, None
 
 
 class CosSinRoPE(RoPE):
