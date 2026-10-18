@@ -46,7 +46,6 @@ from torchtitan.rl.examples.verifiers.data import (
     VerifiersTaskDataset,
 )
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
-from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
     VerifiersRollouter,
@@ -58,6 +57,7 @@ from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
 from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
     TerminalTasksetConfig,
 )
+from torchtitan.rl.generator.generation_server import GenerationServer
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
