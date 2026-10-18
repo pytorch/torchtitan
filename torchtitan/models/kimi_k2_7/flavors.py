@@ -615,6 +615,9 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
+    # Kimi's router has no expert groups, so moe_router_topk compiles its whole top-k
+    # (DeepSeek-V3's list leaves it out for its group-limited router).
+    config.local_compile_regions.append("moe_router_topk")
     if converters is not None:
         validate_converter_compatibility(converters)
         for c in converters:
