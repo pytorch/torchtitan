@@ -263,7 +263,8 @@ class VerifiersRollouter(Rollouter):
             ),
             return_exceptions=True,
         )
-        # Raise only once every sibling finished: the caller releases the group right after.
+        # Raise only after every sibling finished: the caller releases the group next, and a
+        # sibling still generating would pin the group again, with nothing left to release it.
         for result in results:
             if isinstance(result, BaseException):
                 raise result
@@ -314,9 +315,11 @@ class VerifiersRollouter(Rollouter):
                 **{GROUP_ID_SAMPLING_PARAM: group_id},
             ),
         )
-        # The rollout made its last call. Verifiers sent each trace's id as its X-Session-ID.
-        # TODO: sessions of attempts Verifiers retried (not in `traces`) wait for the group's
-        # release; the generation server could track each rollout's sessions.
+        # `run` returned, so this rollout starts no new calls. Release each trace's routing
+        # session: Verifiers sends the trace id as X-Session-ID.
+        # TODO: an attempt Verifiers retried has no trace here, so its held KV waits for the
+        # group's release and its routing pin for the router's `max_sessions` LRU. The generation
+        # server could record each rollout's session ids and release those too.
         for trace in verifiers_episode.traces:
             try:
                 await release_session_fn(routing_session_id=trace.id)
