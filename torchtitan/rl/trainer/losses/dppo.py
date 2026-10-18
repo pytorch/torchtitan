@@ -28,6 +28,7 @@ class DPPOLoss(BaseLoss):
     For each response token with advantage `A`:
 
         dropped    = sign(A) * (p - p_gen) > divergence_threshold
+                     (symmetric=True: |p - p_gen| > divergence_threshold)
         token_loss = -A * detach(min(p / p_gen, max_ratio)) * log p,  0 if dropped
         loss       = sum(token_loss) / global_loss_token_counts
 
@@ -49,11 +50,22 @@ class DPPOLoss(BaseLoss):
     class Config(BaseLoss.Config):
         divergence_threshold: float = 0.2
         """Drop a token whose probability moved more than this from the generator's, in
-        the direction its advantage pushes it (the paper's binary-TV delta)."""
+        the direction its advantage pushes it, or either way with `symmetric` (the
+        paper's binary-TV delta)."""
 
         max_ratio: float = 5.0
         """Truncate the detached ratio `p / p_gen` at this value. Unlike a PPO clip, a
         truncated token keeps its gradient, scaled by `max_ratio`."""
+
+        symmetric: bool = False
+        """Also drop tokens that moved past the threshold against their advantage.
+        With p_gen = 0.5 and threshold 0.2:
+
+            p = 0.8, A = 1: moved +0.3, the way A pushes   dropped either way
+            p = 0.2, A = 1: moved -0.3, against A          False: kept, True: dropped
+
+        False is the paper's rule: a token that moved back keeps the gradient that pulls it
+        back. True bounds |p - p_gen| on every token, whatever its advantage."""
 
         global_vocab_size: int | None = None
         """Full vocabulary size; required when TP shards the vocabulary."""
@@ -61,6 +73,7 @@ class DPPOLoss(BaseLoss):
     def __init__(self, config: Config) -> None:
         self.divergence_threshold = config.divergence_threshold
         self.max_ratio = config.max_ratio
+        self.symmetric = config.symmetric
         self.global_vocab_size = config.global_vocab_size
 
     def __call__(
@@ -95,11 +108,14 @@ class DPPOLoss(BaseLoss):
         with torch.no_grad():
             # TODO: add the binary-KL variant (paper Eq. 14).
             # Left out to keep one variant with one default; the paper finds them on par.
-            # How far p moved in the direction A pushes it; negative if it moved back.
-            prob_change = tokens.advantages.sign() * (
-                torch.exp(tokens.trainer_logprobs)
-                - torch.exp(tokens.generator_logprobs)
+            prob_change = torch.exp(tokens.trainer_logprobs) - torch.exp(
+                tokens.generator_logprobs
             )
+            if self.symmetric:
+                prob_change = prob_change.abs()
+            else:
+                # How far p moved in the direction A pushes it; negative if it moved back.
+                prob_change = tokens.advantages.sign() * prob_change
             dropped = (prob_change > self.divergence_threshold) & tokens.mask
             keep_mask = tokens.mask & ~dropped
             truncated_ratio = torch.clamp(tokens.ratio, max=self.max_ratio)

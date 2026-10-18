@@ -127,18 +127,29 @@ def _dppo_logits_grad_and_metrics(
     return logits.grad, metrics
 
 
-def test_dppo_drops_tokens_that_moved_past_threshold() -> None:
+# Token 3 moved +0.29 against its advantage: only the symmetric trust region drops it.
+@pytest.mark.parametrize(
+    "symmetric, expected_has_grad, expected_dropped_frac",
+    [
+        (False, [False, True, False, True], 0.5),
+        (True, [False, True, False, False], 0.75),
+    ],
+    ids=["paper", "symmetric"],
+)
+def test_dppo_drops_tokens_that_moved_past_threshold(
+    symmetric, expected_has_grad, expected_dropped_frac
+) -> None:
     # The DPPOLoss docstring example.
     grad, metrics = _dppo_logits_grad_and_metrics(
-        DPPOLoss.Config(divergence_threshold=0.2),
+        DPPOLoss.Config(divergence_threshold=0.2, symmetric=symmetric),
         trainer_probs=[0.50, 0.05, 0.10, 0.30],
         generator_probs=[0.20, 0.01, 0.40, 0.01],
         advantages=[1.0, 1.0, -1.0, -1.0],
     )
 
     has_grad = grad.abs().sum(-1) > 0
-    assert has_grad.tolist() == [False, True, False, True]
-    assert metrics["loss/trust_region_dropped_frac"] == 0.5
+    assert has_grad.tolist() == expected_has_grad
+    assert metrics["loss/trust_region_dropped_frac"] == expected_dropped_frac
 
 
 def test_dppo_keeps_zero_advantage_and_a_move_of_exactly_the_threshold() -> None:
@@ -213,3 +224,75 @@ def test_dppo_gradient_matches_unclipped_policy_gradient_inside_trust_region() -
 
     assert metrics["loss/trust_region_dropped_frac"] == 0
     torch.testing.assert_close(dppo_grad, ppo_grad)
+
+
+def _reference_symmetric_trust_region_loss_sum(
+    trainer_logprobs: torch.Tensor,
+    generator_logprobs: torch.Tensor,
+    advantages: torch.Tensor,
+    *,
+    threshold: float,
+    max_ratio: float,
+) -> torch.Tensor:
+    """A separate implementation on already-masked tokens: drop |p - q| > threshold, cap the ratio's value."""
+    log_ratio = trainer_logprobs - generator_logprobs
+    larger = torch.maximum(trainer_logprobs, generator_logprobs)
+    smaller = torch.minimum(trainer_logprobs, generator_logprobs)
+    abs_prob_diff = torch.exp(larger) * -torch.expm1(smaller - larger)
+    keep = ~(abs_prob_diff > threshold)
+    kept = log_ratio[keep]
+    capped = kept.detach().clamp(max=kept.new_tensor(max_ratio).log())
+    importance_ratio = torch.exp(capped + (kept - kept.detach()))
+    return (-advantages[keep] * importance_ratio).sum()
+
+
+def test_dppo_symmetric_gradient_matches_reference() -> None:
+    torch.manual_seed(0)
+    num_tokens, vocab_size = 256, 64
+    logits = (torch.randn(num_tokens, vocab_size) * 4).requires_grad_(True)
+    labels = torch.randint(0, vocab_size, (num_tokens,))
+    # The first 64 labels are each row's likeliest token, so a far-off generator crosses 0.3.
+    labels[:64] = logits[:64].argmax(-1)
+    with torch.no_grad():
+        exact = torch.log_softmax(logits, -1).gather(-1, labels[:, None])[:, 0]
+    generator_logprobs = exact + torch.randn(num_tokens) * 0.5
+    # Rare under the generator: dropped where p is large, a capped huge ratio elsewhere.
+    generator_logprobs[:8] = -30.0
+    generator_logprobs[64:72] = -30.0
+    advantages = torch.randn(num_tokens)
+    loss_mask = torch.rand(num_tokens) > 0.2
+    num_loss_tokens = int(loss_mask.sum())
+
+    loss_config = DPPOLoss.Config(
+        divergence_threshold=0.3, max_ratio=1e4, symmetric=True
+    )
+    loss, metrics = loss_config.build()(
+        logits,
+        labels,
+        torch.tensor(num_loss_tokens),
+        generator_logprobs=generator_logprobs,
+        temperature=torch.ones(num_tokens),
+        advantages=advantages,
+        loss_mask=loss_mask,
+    )
+    (grad,) = torch.autograd.grad(loss, logits)
+
+    reference_logits = logits.detach().clone().requires_grad_(True)
+    trainer_logprobs = torch.log_softmax(reference_logits, -1).gather(
+        -1, labels[:, None]
+    )[:, 0]
+    reference_loss = (
+        _reference_symmetric_trust_region_loss_sum(
+            trainer_logprobs[loss_mask],
+            generator_logprobs[loss_mask],
+            advantages[loss_mask],
+            threshold=0.3,
+            max_ratio=1e4,
+        )
+        / num_loss_tokens
+    )
+    (reference_grad,) = torch.autograd.grad(reference_loss, reference_logits)
+
+    # Only the gradients match: this loss reports -A * w * log p, the reference -A * w.
+    torch.testing.assert_close(grad, reference_grad)
+    assert 0 < metrics["loss/trust_region_dropped_frac"] < 1
