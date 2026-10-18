@@ -56,7 +56,7 @@ into separate files and directories.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, cast
@@ -249,12 +249,12 @@ def _process_chunked_video_text_sample(
     max_patches: int,
     max_patches_per_side: int,
     *,
+    frame_times: Sequence[float],
     frames_per_chunk: int,
-    fps: float,
     chunk_header: str,
     image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
 ) -> dict[str, Any] | None:
-    """Process frames sampled at ``fps`` and a caption as timestamped chunks of ``frames_per_chunk`` frames."""
+    """Process sampled frames, their times in seconds and a caption as timestamped chunks of ``frames_per_chunk`` frames."""
     video_token = cast(
         str,
         tokenizer.video_token,  # pyrefly: ignore [missing-attribute]
@@ -271,6 +271,10 @@ def _process_chunked_video_text_sample(
     if temporal_patch_size != 1:
         raise ValueError(
             "Video chunks pool time in the encoder; temporal_patch_size must be 1."
+        )
+    if len(frame_times) != frames.shape[0]:
+        raise ValueError(
+            f"Got {len(frame_times)} frame times for {frames.shape[0]} frames."
         )
     processed_video = process_video(
         frames,
@@ -296,7 +300,10 @@ def _process_chunked_video_text_sample(
     chunks = list(processed_video.split(frames_per_chunk))
     input_parts: list[str | None] = []
     for index in range(len(chunks)):
-        input_parts += [format_video_timestamp(index * frames_per_chunk / fps), None]
+        input_parts += [
+            format_video_timestamp(frame_times[index * frames_per_chunk]),
+            None,
+        ]
     input_parts.append(text)
 
     processed_text = insert_vision_placeholders(
