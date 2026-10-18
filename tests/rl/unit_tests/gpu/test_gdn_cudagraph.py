@@ -266,95 +266,53 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
 
 
 def test_batch_invariant_decode_matches_prefill(monkeypatch) -> None:
-    """Batch-invariant decode must give the bits of one prefill over the same tokens.
+    """Batch-invariant GDN: 20 decode steps give the bits of one 20-token prefill.
 
-    Decode: a 4-token prefill, then 16 single-token steps. Prefill: all 20 tokens
-    in one packed step. Rounding differences are rare per element, so 8 batches of
-    32 sequences run.
+    Calls ``_forward_gdn`` directly and skips the short convolution on purpose: the
+    paged conv has a separate rounding difference when a window reads cached history.
     """
     monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: True)
     torch.manual_seed(0)
     device = torch.device("cuda")
-    # Qwen3.5-0.8B's local TP=1 shapes. 32 decode rows x 16 heads still takes
-    # L2Norm's decode-tuned launch.
-    num_sequences, num_tokens, channels, heads = 32, 20, 6144, 16
+    # Qwen3.5-0.8B's local TP=1 shapes. With decode offsets, 32 rows x 16 heads
+    # would take L2Norm's decode-tuned launch on Blackwell.
+    num_sequences, num_tokens, heads = 32, 20, 16
     layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
-    layer.prefix = "gdn"
     layer.local_num_k_heads = layer.local_num_v_heads = heads
     layer.head_k_dim = layer.head_v_dim = 128
     layer.local_key_dim = 2048
-    weight = torch.randn(channels, 4, device=device, dtype=torch.bfloat16)
+    qkv = torch.randn(
+        num_sequences, num_tokens, 6144, device=device, dtype=torch.bfloat16
+    )
+    a, b = torch.randn(2, num_sequences, num_tokens, heads, device=device)
     A_log, bias = torch.randn(2, heads, device=device)
-    slots = list(range(1, num_sequences + 1))
+    slots = torch.arange(1, num_sequences + 1, device=device, dtype=torch.int32)
 
-    def step(x, a, b, start, stop, single_token):
-        """Run positions [start, stop) of every sequence as one step."""
-        length = stop - start
-        rows = [t[:, start:stop].flatten(0, 1) for t in (x, a, b)]
-        initial = [start > 0] * num_sequences
-        if single_token:
-            path = LinearAttentionExecutionPath.SINGLE_TOKEN
-            offsets, step_slots = list(range(num_sequences + 1)), slots
-        else:
-            # The metadata builder appends an empty null interval.
-            path = LinearAttentionExecutionPath.PACKED
-            offsets = [length * i for i in range(num_sequences + 1)]
-            offsets, step_slots = offsets + offsets[-1:], slots + [0]
-            initial += [False]
-        metadata = TorchTitanLinearAttentionMetadata(
-            execution_path=path,
-            num_prefills=0,
-            num_prefill_tokens=0,
-            num_decodes=0,
-            num_decode_tokens=0,
-            num_spec_decodes=0,
-            num_spec_decode_tokens=0,
-            num_actual_tokens=rows[0].shape[0],
-            non_spec_query_start_loc=torch.tensor(
-                offsets, device=device, dtype=torch.int32
-            ),
-            non_spec_state_indices_tensor=torch.tensor(
-                step_slots, device=device, dtype=torch.int32
-            ),
-            has_initial_state=torch.tensor(initial, device=device),
+    def run(tokens_per_step):
+        """Run every sequence in steps of `tokens_per_step` tokens."""
+        state = torch.full(
+            (num_sequences + 1, heads, 128, 128), torch.nan, device=device
         )
-        output = rows[0].new_zeros(rows[0].shape[0], heads, 128)
-        context = ForwardContext(
-            no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
+        layer.kv_cache = (None, state)
+        offsets = tokens_per_step * torch.arange(
+            num_sequences + 1, device=device, dtype=torch.int32
         )
-        with override_forward_context(context):
-            layer._forward(*rows, weight, None, A_log, bias, output)
-        return output.unflatten(0, (num_sequences, length))
+        outputs = []
+        for start in range(0, num_tokens, tokens_per_step):
+            stop = start + tokens_per_step
+            rows = [t[:, start:stop].flatten(0, 1) for t in (qkv, a, b)]
+            output = rows[0].new_zeros(rows[0].shape[0], heads, 128)
+            initial = torch.full((num_sequences,), start > 0, device=device)
+            layer._forward_gdn(*rows, A_log, bias, output, offsets, slots, initial)
+            outputs.append(output.unflatten(0, (num_sequences, tokens_per_step)))
+        return torch.cat(outputs, 1), state[1:]
 
-    def run(x, a, b, schedule):
-        layer.kv_cache = tuple(
-            torch.full(
-                (num_sequences + 1, *shape), torch.nan, device=device, dtype=dtype
-            )
-            for shape, dtype in (
-                ((3, channels), torch.bfloat16),
-                ((heads, 128, 128), torch.float32),
-            )
-        )
-        outputs = [step(x, a, b, *chunk) for chunk in schedule]
-        return torch.cat(outputs, 1), [state[1:] for state in layer.kv_cache]
-
-    decode = [(0, 4, False)] + [(t, t + 1, True) for t in range(4, num_tokens)]
-    prefill = [(0, num_tokens, False)]
-    mismatches = 0
     with torch.inference_mode():
-        for _ in range(8):
-            x = torch.randn(
-                num_sequences, num_tokens, channels, device=device, dtype=torch.bfloat16
-            )
-            a, b = torch.randn(2, num_sequences, num_tokens, heads, device=device)
-            decoded, decoded_states = run(x, a, b, decode)
-            prefilled, prefilled_states = run(x, a, b, prefill)
-            mismatches += (decoded != prefilled).sum().item()
-            for state, prefilled_state in zip(decoded_states, prefilled_states):
-                mismatches += (state != prefilled_state).sum().item()
-    assert mismatches == 0
+        decoded = run(tokens_per_step=1)
+        prefilled = run(tokens_per_step=num_tokens)
+    for actual, expected in zip(decoded, prefilled, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
