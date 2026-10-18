@@ -146,15 +146,11 @@ class MuseSparkAttention(GQAttention):
         output_TD = self.wo(output_TO)
         return output_TD
 
-    # One region for everything between the qkv projection and attention: per-head
-    # norms, query scale, position temperature and RoPE fuse into one kernel per
-    # tensor, with no bf16 round trip between norm and rotation. The cat options
-    # lower RoPE's real/imag stack as per-half copies (see ComplexRoPE.forward).
-    # recompile_limit=16: RoPE and no-RoPE layers share this region, so it needs 8
-    # graphs across training, prefill and decode shapes (default limit 8).
+    # Limit 16: RoPE and no-RoPE layers share this region and use 8 graphs, exactly the default limit.
+    # Cat options: write RoPE's real/imag halves with one store each (see ComplexRoPE.forward).
     @local_compile(
         "muse_spark_attention_qk",
-        batch_invariant=True,
+        batch_invariant=False,
         recompile_limit=16,
         options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
     )
@@ -164,10 +160,10 @@ class MuseSparkAttention(GQAttention):
         key_TKH: torch.Tensor,
         positions: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the query and key as attention reads them.
+        """Return the query and key as attention reads them. Each step runs only if configured.
 
-        Applies, each when configured: per-head norms with ``scale_query_by`` on the
-        query, position temperature on the query, and RoPE on both.
+        query: q_norm -> * scale_query_by -> * position temperature -> RoPE
+        key:   k_norm -> RoPE
         """
         if self.q_norm is not None or self.k_norm is not None:
             if self.q_norm is None or self.k_norm is None:

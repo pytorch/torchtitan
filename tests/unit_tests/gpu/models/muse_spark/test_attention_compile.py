@@ -22,11 +22,14 @@ def _run(fn, inputs_):
     return [*outputs, *(t.grad for t in leaves)]
 
 
+# Debug model layer 0: sliding window with RoPE. Layer 3: global, position temperature, no RoPE.
+@pytest.mark.parametrize("layer_id", [0, 3])
 @pytest.mark.parametrize(
     "region", ["muse_spark_attention_qk", "muse_spark_attention_output"]
 )
-def test_attention_region_matches_eager(region):
-    attention = build_model_config("debugmodel").layers[0].attention.build().cuda()
+def test_attention_region_matches_eager(region, layer_id):
+    layer = build_model_config("debugmodel").layers[layer_id]
+    attention = layer.attention.build().cuda()
     num_tokens, num_heads, num_kv_heads = 64, attention.n_heads, attention.n_kv_heads
     head_dim = attention.head_dim
     query_TNH = torch.randn(
