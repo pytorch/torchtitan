@@ -35,11 +35,13 @@ from torchtitan.rl.generator.generation_server import (
     GenerationServer,
     VerifiersGenerationMetadata,
 )
+from torchtitan.rl.generator.http_client import GeneratorClient
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
+from torchtitan.rl.routing.inter_generator import GeneratorEndpoint
 
 
 def _recorded_error(error_type: str, status_code: int | None = None) -> SimpleNamespace:
@@ -232,11 +234,6 @@ def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> 
     from torchtitan.components.renderer import from_renderers
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
-    generation_server = SimpleNamespace(
-        start=AsyncMock(),
-        close=AsyncMock(),
-        base_url="http://127.0.0.1:2",
-    )
     env_server = SimpleNamespace(
         start=AsyncMock(return_value="http://127.0.0.1:1"),
         close=AsyncMock(),
@@ -249,12 +246,10 @@ def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> 
 
     rollouter = object.__new__(VerifiersRollouter)
     rollouter._verifiers_config = SimpleNamespace(
-        generation_server=SimpleNamespace(build=lambda: generation_server),
         connection_timeout_sec=5.0,
         renderer_multiplex=8,
     )
     rollouter._verifiers_env_server = env_server
-    rollouter._generation_server = None
     rollouter._verifiers_env_client = None
     rollouter._verifiers_train_client_config = None
     renderers_config = CustomRendererConfig(
@@ -555,6 +550,7 @@ def test_generation_server_forwards_token_request() -> None:
             group_id,
             routing_session_id=None,
             sampling_config=None,
+            metrics_prefix="generator",
         ):
             received.append(
                 {
@@ -563,6 +559,7 @@ def test_generation_server_forwards_token_request() -> None:
                     "group_id": group_id,
                     "routing_session_id": routing_session_id,
                     "sampling_config": sampling_config,
+                    "metrics_prefix": metrics_prefix,
                 }
             )
             request_index = int(request_id.rsplit("=", 1)[1])
@@ -579,12 +576,11 @@ def test_generation_server_forwards_token_request() -> None:
                 ],
             )
 
-        server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
+        server = GenerationServer(generate=generate_fn, max_context_length=40960)
         await server.start()
         try:
             async with ClientSession() as session:
-                response = await session.get(f"{server.base_url}/models")
+                response = await session.get(f"{server.url}/v1/models")
                 assert response.status == 200
                 assert await response.json() == {
                     "object": "list",
@@ -598,9 +594,9 @@ def test_generation_server_forwards_token_request() -> None:
                         }
                     ],
                 }
-                for _ in range(2):
+                for metrics_prefix in ({}, {"torchtitan_metrics_prefix": "validation"}):
                     response = await session.post(
-                        f"http://{server.host}:{server.port}/inference/v1/generate",
+                        f"{server.url}/inference/v1/generate",
                         headers={"X-Session-ID": "group=1/rollout=2"},
                         json={
                             "token_ids": [10, 11],
@@ -612,18 +608,21 @@ def test_generation_server_forwards_token_request() -> None:
                                 "logprobs": 1,
                                 "torchtitan_group_id": 1,
                                 "stop_token_ids": [99],
+                                **metrics_prefix,
                             },
                         },
                     )
                     assert response.status == 200
                     payload = await response.json()
-            generation_metadata = server.pop_generation_metadata("group=1/rollout=2")
+            generation_metadata = server.pop_generation_metadata(
+                ["group=1/rollout=2"]
+            ).get("group=1/rollout=2")
         finally:
             await server.close()
 
         assert [request["request_id"] for request in received] == [
-            "group=1/rollout=2/request=0",
-            "group=1/rollout=2/request=1",
+            "group=1/rollout=2/http=0",
+            "group=1/rollout=2/http=1",
         ]
         assert all(request["prompt_token_ids"] == [10, 11] for request in received)
         assert all(request["group_id"] == 1 for request in received)
@@ -631,8 +630,12 @@ def test_generation_server_forwards_token_request() -> None:
             request["routing_session_id"] == "group=1/rollout=2" for request in received
         )
         assert all(request["sampling_config"].seed == 4 for request in received)
+        assert [request["metrics_prefix"] for request in received] == [
+            "generator",
+            "validation",
+        ]
         assert payload == {
-            "request_id": "group=1/rollout=2/request=1",
+            "request_id": "group=1/rollout=2/http=1",
             "choices": [
                 {
                     "index": 0,
@@ -671,6 +674,7 @@ def test_generation_server_rejects_aborted_generation() -> None:
             group_id,
             routing_session_id=None,
             sampling_config=None,
+            metrics_prefix="generator",
         ):
             return Completion(
                 min_policy_version=7,
@@ -681,13 +685,12 @@ def test_generation_server_rejects_aborted_generation() -> None:
                 finish_reason="abort",
             )
 
-        server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
+        server = GenerationServer(generate=generate_fn, max_context_length=40960)
         await server.start()
         try:
             async with ClientSession() as session:
                 response = await session.post(
-                    f"http://{server.host}:{server.port}/inference/v1/generate",
+                    f"{server.url}/inference/v1/generate",
                     headers={"X-Session-ID": "group=1/rollout=2"},
                     json={
                         "token_ids": [10, 11],
@@ -702,7 +705,9 @@ def test_generation_server_rejects_aborted_generation() -> None:
                 )
                 assert response.status == 502
                 payload = await response.json()
-            generation_metadata = server.pop_generation_metadata("group=1/rollout=2")
+            generation_metadata = server.pop_generation_metadata(
+                ["group=1/rollout=2"]
+            ).get("group=1/rollout=2")
         finally:
             await server.close()
 
@@ -719,13 +724,12 @@ def test_generation_server_requires_group_id() -> None:
         async def generate_fn(*args, **kwargs):
             raise AssertionError("generate_fn must not run without a group id")
 
-        server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
+        server = GenerationServer(generate=generate_fn, max_context_length=40960)
         await server.start()
         try:
             async with ClientSession() as session:
                 response = await session.post(
-                    f"http://{server.host}:{server.port}/inference/v1/generate",
+                    f"{server.url}/inference/v1/generate",
                     headers={"X-Session-ID": "group=1/rollout=2"},
                     json={"token_ids": [10, 11], "sampling_params": {}},
                 )
@@ -741,13 +745,11 @@ def test_generation_server_requires_group_id() -> None:
 
 def test_generation_server_does_not_log_each_request(caplog) -> None:
     async def run_test() -> None:
-        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        server = GenerationServer(generate=AsyncMock(), max_context_length=40960)
         await server.start()
         try:
             async with ClientSession() as session:
-                response = await session.get(
-                    f"http://{server.host}:{server.port}/healthz"
-                )
+                response = await session.get(f"{server.url}/healthz")
                 assert response.status == 200
         finally:
             await server.close()
@@ -766,15 +768,14 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
             prompt_lengths.append(len(prompt_token_ids))
             raise RuntimeError("generator reached")
 
-        server = GenerationServer.Config(max_rollout_tokens=8).build()
-        server.set_generate_fn(generate_fn)
+        server = GenerationServer(generate=generate_fn, max_context_length=8)
         await server.start()
         try:
             async with ClientSession() as session:
                 statuses, errors = [], []
                 for num_tokens in (7, 8, 9):
                     response = await session.post(
-                        f"http://{server.host}:{server.port}/inference/v1/generate",
+                        f"{server.url}/inference/v1/generate",
                         headers={"X-Session-ID": "group=1/rollout=2"},
                         json={
                             "token_ids": [1] * num_tokens,
@@ -861,9 +862,6 @@ def test_rollout_whose_first_model_call_failed_has_no_turns(
         branches=[],
     )
     rollouter = object.__new__(VerifiersRollouter)
-    rollouter._generation_server = SimpleNamespace(
-        model_id="model", pop_generation_metadata=lambda trace_id: None
-    )
     rollouter._verifiers_env_client = SimpleNamespace(
         run=AsyncMock(
             return_value=SimpleNamespace(
@@ -871,12 +869,22 @@ def test_rollout_whose_first_model_call_failed_has_no_turns(
             )
         )
     )
-    rollouter._verifiers_train_client_config = object()
+    rollouter._verifiers_train_client_config = SimpleNamespace(
+        model_copy=lambda update: update
+    )
+    client = SimpleNamespace(
+        metrics_prefix="generator",
+        acquire_rollout=AsyncMock(
+            return_value=GeneratorEndpoint(index=0, url="http://localhost:1")
+        ),
+        # Its one model call failed, so its generator folded nothing for it.
+        release_rollout=AsyncMock(return_value={}),
+    )
 
     with caplog.at_level(logging.WARNING):
         rollout = asyncio.run(
             rollouter._run_single_rollout(
-                release_session_fn=AsyncMock(),
+                generator_client=cast(GeneratorClient, client),
                 sample=VerifiersTaskSample(verifiers_task_data={"name": "huge-task"}),
                 sampling=SamplingConfig(),
                 group_id=1,
@@ -1012,12 +1020,6 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
         ],
     )
     rollouter = object.__new__(VerifiersRollouter)
-    rollouter._generation_server = SimpleNamespace(
-        model_id="model",
-        pop_generation_metadata=lambda trace_id: VerifiersGenerationMetadata(
-            min_policy_version=0, max_policy_version=0, metrics=[]
-        ),
-    )
     rollouter._verifiers_env_client = SimpleNamespace(
         run=AsyncMock(
             return_value=SimpleNamespace(
@@ -1025,12 +1027,27 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
             )
         )
     )
-    rollouter._verifiers_train_client_config = object()
+    rollouter._verifiers_train_client_config = SimpleNamespace(
+        model_copy=lambda update: update
+    )
+    client = SimpleNamespace(
+        metrics_prefix="generator",
+        acquire_rollout=AsyncMock(
+            return_value=GeneratorEndpoint(index=0, url="http://localhost:1")
+        ),
+        release_rollout=AsyncMock(
+            return_value={
+                "trace": VerifiersGenerationMetadata(
+                    min_policy_version=0, max_policy_version=0, metrics=[]
+                )
+            }
+        ),
+    )
 
     with caplog.at_level(logging.WARNING):
         rollout = asyncio.run(
             rollouter._run_single_rollout(
-                release_session_fn=AsyncMock(),
+                generator_client=cast(GeneratorClient, client),
                 sample=VerifiersTaskSample(verifiers_task_data={"name": "slow-task"}),
                 sampling=SamplingConfig(),
                 group_id=1,
@@ -1043,7 +1060,7 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
     assert VERIFIERS_REWARD_KEY not in rollout.turns[-1].env_rewards
 
 
-def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) -> None:
+def test_rollout_releases_every_trace_session_in_one_call() -> None:
     """Each trace generated under its own id; another agent's trace has one too."""
     span = SimpleNamespace(duration=0.0)
     traces = [
@@ -1068,9 +1085,6 @@ def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) 
         for trace_id, trainable in [("opponent", False), ("policy", True)]
     ]
     rollouter = object.__new__(VerifiersRollouter)
-    rollouter._generation_server = SimpleNamespace(
-        model_id="model", pop_generation_metadata=lambda trace_id: None
-    )
     rollouter._verifiers_env_client = SimpleNamespace(
         run=AsyncMock(
             return_value=SimpleNamespace(
@@ -1078,25 +1092,32 @@ def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) 
             )
         )
     )
-    rollouter._verifiers_train_client_config = object()
-    release_session_fn = AsyncMock(side_effect=[RuntimeError("router down"), None])
+    rollouter._verifiers_train_client_config = SimpleNamespace(
+        model_copy=lambda update: update
+    )
+    client = SimpleNamespace(
+        metrics_prefix="generator",
+        acquire_rollout=AsyncMock(
+            return_value=GeneratorEndpoint(index=0, url="http://localhost:1")
+        ),
+        release_rollout=AsyncMock(return_value={}),
+    )
 
-    with caplog.at_level(logging.ERROR):
-        rollout = asyncio.run(
-            rollouter._run_single_rollout(
-                release_session_fn=release_session_fn,
-                sample=VerifiersTaskSample(verifiers_task_data={"name": "task"}),
-                sampling=SamplingConfig(),
-                group_id=1,
-                rollout_id=0,
-            )
+    rollout = asyncio.run(
+        rollouter._run_single_rollout(
+            generator_client=cast(GeneratorClient, client),
+            sample=VerifiersTaskSample(verifiers_task_data={"name": "task"}),
+            sampling=SamplingConfig(),
+            group_id=1,
+            rollout_id=0,
         )
+    )
 
-    assert [call.kwargs for call in release_session_fn.call_args_list] == [
-        {"routing_session_id": "opponent"},
-        {"routing_session_id": "policy"},
+    client.release_rollout.assert_awaited_once()
+    assert client.release_rollout.await_args.kwargs["session_ids"] == [
+        "opponent",
+        "policy",
     ]
-    assert "releasing routing session opponent failed" in caplog.text
     assert rollout.group_id == 1
 
 
@@ -1125,15 +1146,14 @@ def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage(
         ]
 
     rollouter = object.__new__(VerifiersRollouter)
-    rollouter._generation_server = SimpleNamespace(set_generate_fn=lambda fn: None)
     rollouter._run_single_rollout = run_single_rollout
     rollouter._rubric = SimpleNamespace(score_group=score_group)
     rollouter._advantage_estimator = AdvantageEstimator.Config().build()
 
     group = asyncio.run(
         rollouter.run_group_rollouts(
-            generate_fn=AsyncMock(),
-            release_session_fn=AsyncMock(),
+            generate_fn=GeneratorClient(router=None),
+            release_session_fn=None,
             sample=None,
             group_id=1,
             group_size=3,

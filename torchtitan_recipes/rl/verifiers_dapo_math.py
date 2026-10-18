@@ -44,7 +44,6 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
     VerifiersRollouter,
 )
-from torchtitan.rl.generator.generation_server import GenerationServer
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
@@ -70,9 +69,7 @@ def _math_taskset_config(
     return VerifiersMathTasksetConfig(id=taskset_id, dataset=dataset)
 
 
-def _verifiers_math_rollouter_config(
-    *, max_rollout_tokens: int
-) -> VerifiersRollouter.Config:
+def _verifiers_math_rollouter_config() -> VerifiersRollouter.Config:
     return VerifiersRollouter.Config(
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=VerifiersTaskDataset.Config(
@@ -98,9 +95,6 @@ def _verifiers_math_rollouter_config(
         rubric=Rubric.Config(
             reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
             error_reward=0.0,
-        ),
-        generation_server=GenerationServer.Config(
-            max_rollout_tokens=max_rollout_tokens
         ),
     )
 
@@ -140,7 +134,7 @@ def _qwen3_4b_verifiers_config(
             target_offpolicy_steps=4,
             validation=ValidationConfig(steps=num_validation_samples),
         ),
-        rollouter=_verifiers_math_rollouter_config(max_rollout_tokens=max_total_tokens),
+        rollouter=_verifiers_math_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
         metrics=MetricsProcessor.Config(

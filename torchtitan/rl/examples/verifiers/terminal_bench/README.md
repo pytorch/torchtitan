@@ -18,13 +18,12 @@ them.
 
 ```text
 +------------------------- GPU actors (Monarch) -------------------------+
-|  router -> vLLM generators  <-- new weights --  trainer (GRPO loss)    |
+|  vLLM generators (HTTP)  <-- new weights --  trainer (GRPO loss)       |
 +-------^-----------------------------------------------------^----------+
-        | 4. generate                                         | 7. batch
-+-------|-------- controller process (torchtitan.rl.train) ---|----------+
-|  GenerationServer       dataset -> VerifiersRollouter -> batcher       |
-|  (localhost HTTP)                       |      ^                       |
-+-------^---------------------------------|------|-----------------------+
+        |                                                     | 7. batch
+        |    +---- controller process (torchtitan.rl.train) --|--------+
+        |    |  dataset -> VerifiersRollouter -> batcher               |
+        |    +----------------------------|------^---------------------+
         | 4. token ids            1. task |      | 6. trace, reward
 +-------|---------------------------------v------|-----------------------+
 |  Verifiers env server (spawned process)                                |
@@ -46,8 +45,8 @@ them.
    tmux shell and reads the screen back.
 3. **Model call.** Each agent turn is a chat request to Verifiers' interception server,
    which records the turn in the rollout's trace.
-4. **Generation.** The request reaches TitanRL's `GenerationServer` as token ids and is
-   served by the vLLM generators.
+4. **Generation.** The request goes as token ids straight to the HTTP server of the
+   generator the rollouter picked for this rollout, which serves it with vLLM.
 5. **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the
    container and reads the reward file it writes.
 6. **Trace.** `VerifiersRollouter` turns the trace into rollout turns, with the exact
@@ -64,7 +63,7 @@ the start and end of training.
 | Terminus-2 harness and the program it runs in the container, copied from Verifiers 0.3.1 to expose reasoning in the history and summarization | [`harness.py`](./harness.py), [`terminus_harness.py`](./terminus_harness.py) |
 | Harbor taskset, declared here so the env-server worker imports it | [`taskset.py`](./taskset.py) |
 | Offline TMax to Harbor task conversion | [`prepare_tmax.py`](./prepare_tmax.py) |
-| Bridge: task dataset, env server, generation server, trace to turns | [Verifiers integration](../README.md) |
+| Bridge: task dataset, env server, trace to turns | [Verifiers integration](../README.md) |
 | CPU tests | `tests/rl/unit_tests/cpu/test_verifiers_terminal_bench*.py` |
 
 ## Run
