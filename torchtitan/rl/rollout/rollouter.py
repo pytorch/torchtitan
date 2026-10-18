@@ -45,8 +45,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# How long `Rollouter.close` waits for in-flight `run_group` calls before stopping their workers anyway.
-# Drains took under 0.3 s once the generators closed; 30 s only covers a group stuck in a slow env step.
+# How long shutdown waits for in-flight groups: `Rollouter.close` for its `run_group` calls, and a
+# cancelled dispatch for `cancel_group`. Drains took under 0.3 s once the generators closed; 30 s only
+# covers a group stuck in a slow env step.
 _RUN_GROUP_DRAIN_TIMEOUT_S = 30.0
 
 
@@ -261,8 +262,20 @@ class Rollouter(Configurable):
         )
         self._inflight_run_group_calls.add(call)
         call.add_done_callback(self._on_run_group_call_done)
-        # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
-        return await asyncio.shield(call)
+        try:
+            # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
+            return await asyncio.shield(call)
+        except asyncio.CancelledError:
+            # Monarch runs a call to completion even when its caller is cancelled, so stop the
+            # group on its worker (see `RolloutWorkerActor.cancel_group`).
+            try:
+                async with asyncio.timeout(_RUN_GROUP_DRAIN_TIMEOUT_S):
+                    await self._worker_actors.cancel_group.call(group_id)
+            except Exception:
+                logger.exception(
+                    "cancel_group(%d) failed; the group may keep running", group_id
+                )
+            raise
 
     def _on_run_group_call_done(self, call: asyncio.Future[RolloutGroup]) -> None:
         self._inflight_run_group_calls.discard(call)
@@ -401,8 +414,8 @@ class RolloutWorker(Configurable):
         # TODO(perf): siblings in a group share the first-turn prompt; tokenize it once per group and
         # reuse across the group_size rollouts (truest spot is the worker's first-turn render).
         try:
-            # produce the rollouts. With return_exceptions, a failing sibling doesn't end the gather
-            # early: see `rollouts_from_gather`.
+            # produce the rollouts. A cancel cancels every sibling, and with return_exceptions the
+            # gather still waits for each one's `finally` (session release) before it raises.
             results = await asyncio.gather(
                 *(
                     self._run_single_rollout(
@@ -532,8 +545,6 @@ class RolloutWorker(Configurable):
 
             status = env_step.status
         except Exception as error:
-            # TODO: at shutdown, every rollout still generating lands here with a ~40-line remote
-            # traceback. Raise a typed error on generator close and log it at info, without the traceback.
             logger.exception(
                 "rollout %s/rollout=%d failed after %d turn(s); marking ERROR_SYSTEM",
                 group_id,
@@ -542,12 +553,15 @@ class RolloutWorker(Configurable):
             )
             status = RolloutStatus.ERROR_SYSTEM
             logs["error"] = repr(error)
-
-        try:
-            await release_session_fn(routing_session_id=routing_session_id)
-        except Exception:
-            # Not fatal: `max_sessions` evicts an unreleased session.
-            logger.exception("releasing routing session %s failed", routing_session_id)
+        finally:
+            # Also on a cancel, so a cancelled rollout releases its session like a failed one.
+            try:
+                await release_session_fn(routing_session_id=routing_session_id)
+            except Exception:
+                # Not fatal: `max_sessions` evicts an unreleased session.
+                logger.exception(
+                    "releasing routing session %s failed", routing_session_id
+                )
         return Rollout(
             group_id=group_id,
             rollout_id=rollout_id,
