@@ -249,14 +249,13 @@ class VerifiersRollouter(Rollouter):
         sampling: SamplingConfig,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
-        # TODO: release each rollout's session; until then `max_sessions` evicts them.
-        del release_session_fn
         if self._generation_server is None:
             raise RuntimeError("Verifiers rollouter is not initialized")
         self._generation_server.set_generate_fn(generate_fn)
-        rollouts = await asyncio.gather(
+        results = await asyncio.gather(
             *(
                 self._run_single_rollout(
+                    release_session_fn=release_session_fn,
                     sample=sample,
                     sampling=(
                         sampling
@@ -267,8 +266,15 @@ class VerifiersRollouter(Rollouter):
                     rollout_id=rollout_id,
                 )
                 for rollout_id in range(group_size)
-            )
+            ),
+            return_exceptions=True,
         )
+        # Raise only after every sibling finished: the caller releases the group next, and a
+        # sibling still generating would pin the group again, with nothing left to release it.
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        rollouts = results
 
         outputs = await self._rubric.score_group(rollouts, sample)
         for rollout, output in zip(rollouts, outputs, strict=True):
@@ -284,12 +290,13 @@ class VerifiersRollouter(Rollouter):
     async def _run_single_rollout(
         self,
         *,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         sampling: SamplingConfig,
         group_id: int,
         rollout_id: int,
     ) -> Rollout:
-        """Send one task to Verifiers and convert its trace to a rollout."""
+        """Send one task to Verifiers, release its sessions, and convert its trace to a rollout."""
         if not isinstance(sample, VerifiersTaskSample):
             raise TypeError("Verifiers requires a VerifiersTaskSample")
         if (
@@ -314,6 +321,17 @@ class VerifiersRollouter(Rollouter):
                 **{GROUP_ID_SAMPLING_PARAM: group_id},
             ),
         )
+        # `run` returned, so this rollout starts no new calls. Release each trace's routing
+        # session: Verifiers sends the trace id as X-Session-ID.
+        # TODO: an attempt Verifiers retried has no trace here, so its held KV waits for the
+        # group's release and its routing pin for the router's `max_sessions` LRU. The generation
+        # server could record each rollout's session ids and release those too.
+        for trace in verifiers_episode.traces:
+            try:
+                await release_session_fn(routing_session_id=trace.id)
+            except Exception:
+                # Not fatal: `max_sessions` evicts an unreleased session.
+                logger.exception("releasing routing session %s failed", trace.id)
         traces = [trace for trace in verifiers_episode.traces if trace.agent.trainable]
         if len(traces) != 1:
             raise ValueError(
