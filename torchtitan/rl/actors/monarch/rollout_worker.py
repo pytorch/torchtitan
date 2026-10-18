@@ -39,6 +39,8 @@ class RolloutWorkerActor(Actor):
             ThreadPoolExecutor(max_workers=num_threads)
         )
         self._worker = worker_config.build()
+        # group id -> the `run_group` call running it here, for `cancel_group`.
+        self._group_tasks: dict[int, asyncio.Task] = {}
 
     @concurrent_endpoint
     async def setup_async(
@@ -65,14 +67,34 @@ class RolloutWorkerActor(Actor):
         group_size: int,
         sampling: Any,
     ) -> RolloutGroup:
-        return await self._worker.run_group(
-            generate_fn=generate_fn,
-            release_session_fn=release_session_fn,
-            sample=sample,
-            group_id=group_id,
-            group_size=group_size,
-            sampling=sampling,
-        )
+        task = asyncio.current_task()
+        self._group_tasks[group_id] = task
+        try:
+            return await self._worker.run_group(
+                generate_fn=generate_fn,
+                release_session_fn=release_session_fn,
+                sample=sample,
+                group_id=group_id,
+                group_size=group_size,
+                sampling=sampling,
+            )
+        finally:
+            # Validation reuses group ids, and a `run_group` can outlive a failed `cancel_group`:
+            # don't drop a newer call's entry.
+            if self._group_tasks.get(group_id) is task:
+                del self._group_tasks[group_id]
+
+    @concurrent_endpoint
+    async def cancel_group(self, group_id: int) -> None:
+        """Cancel this group's `run_group` if this worker runs it, and wait until it ended. Monarch
+        starts one sender's concurrent calls in order, so a `run_group` sent first is found here.
+        A group that never stops (e.g. an env that swallows the cancel) hangs this call."""
+        # TODO: every validation pass reuses group ids -1, -2, ...; if two passes ever overlap,
+        # this cancels both groups with one id. Give each pass its own ids first.
+        task = self._group_tasks.get(group_id)
+        if task is not None:
+            task.cancel()
+            await asyncio.wait([task])
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:

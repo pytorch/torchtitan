@@ -976,8 +976,10 @@ class Controller(Configurable):
                     rollouts=[],
                     metrics=[m.Metric("rollout/group_failures", m.Sum(1.0))],
                 )
-            # The group makes no more generation calls, so its cache salts can go.
-            await self.generator_router.release_groups.call_one([work.group_id])
+            finally:
+                # The group makes no more generation calls, so its cache salts can go. Also on a
+                # cancel: post-training validation reuses the generators.
+                await self.generator_router.release_groups.call_one([work.group_id])
             await group_buffer.finalize_work(group)
 
             # Drop both refs (work.rollout_group is the group too): held groups made every full GC slow.
