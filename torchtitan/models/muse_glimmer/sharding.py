@@ -28,9 +28,6 @@ DP = MeshAxisName.DP
 CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
-_VISION_STATE_INVARIANT = SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})
-_VISION_ACTIVATION_INVARIANT = SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I})
-
 
 def vision_bank_indices_placement(*, enable_sp: bool) -> SpmdType:
     """Placement for token-aligned indices into the packed vision bank."""
@@ -95,49 +92,3 @@ def perception_emb_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     if enable_sp:
         vision_norm.out_dst_shardings = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R})
     return vision_norm
-
-
-def vision_encoder_sharding_config() -> ShardingConfig:
-    """Keep the learned positional grid Replicate.
-
-    The grid is a raw nn.Parameter on the encoder and is bilinearly resampled
-    per image (see ``_get_pos_emb``).
-    """
-    return ShardingConfig(
-        state_shardings={"positional_embedding_vlm": _VISION_STATE_INVARIANT},
-        # Keep TP invariant for the external adapter/projection. With SP,
-        # perception_emb_norm's output performs the TP I -> R conversion.
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
-    )
-
-
-def vision_rope_freq_sharding_config() -> ShardingConfig:
-    """TP-invariant vision RoPE frequencies."""
-    return ShardingConfig(state_shardings={"inv_freq": _VISION_STATE_INVARIANT})
-
-
-def vision_pos_embed_sharding_config() -> ShardingConfig:
-    """Local positional-embedding resampling with invariant input and output."""
-    return ShardingConfig(
-        in_src_shardings={"pos_param": _VISION_STATE_INVARIANT},
-        in_dst_shardings={"pos_param": _VISION_STATE_INVARIANT},
-        out_src_shardings=_VISION_ACTIVATION_INVARIANT,
-        local_spmd=True,
-    )
-
-
-def vision_token_permute_sharding_config() -> ShardingConfig:
-    """Local token permutation with invariant input and output."""
-    return ShardingConfig(
-        in_src_shardings={
-            "x": _VISION_ACTIVATION_INVARIANT,
-            "index": _VISION_ACTIVATION_INVARIANT,
-        },
-        in_dst_shardings={
-            "x": _VISION_ACTIVATION_INVARIANT,
-            "index": _VISION_ACTIVATION_INVARIANT,
-        },
-        out_src_shardings=_VISION_ACTIVATION_INVARIANT,
-        local_spmd=True,
-    )

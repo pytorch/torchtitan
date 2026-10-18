@@ -81,7 +81,7 @@ from torchtitan.config import derive, override
 from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
-from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
+from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
 __all__ = [
     "FusedMLAAttention",

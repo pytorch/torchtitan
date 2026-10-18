@@ -12,11 +12,12 @@ from monarch.actor import Actor, endpoint
 
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
+from torchtitan.rl.actors.monarch.rdma_microbatch import (
+    create_cuda_context_to_silence_monarch_log,
+    MonarchRDMAMicrobatch,
+)
 from torchtitan.rl.rollout.types import RolloutGroup
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
-from torchtitan.rl.trainer.rdma_microbatch import (
-    create_cuda_context_to_silence_monarch_log,
-)
 
 
 class _BatcherActorEndpoints:
@@ -50,6 +51,7 @@ class _BatcherActorEndpoints:
             dp_degree=dp_degree,
             pad_id=pad_id,
             temperature=temperature,
+            register_rdma_microbatch=MonarchRDMAMicrobatch.register,
         )
 
     @endpoint
