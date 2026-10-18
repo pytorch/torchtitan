@@ -279,10 +279,16 @@ from torchtitan.models.common.attention import (
     gdn,
     kda,
 )
-from torchtitan.models.common.attn_gym import _MissingKernel, require_attn_gym
+from torchtitan.models.common.attn_gym import (
+    _MissingKernel,
+    is_missing_kernel,
+    require_attn_gym,
+)
 from spmd_types._local_registration import _LOCAL_AUTOGRAD_FUNCTIONS
 
 assert _MissingKernel not in _LOCAL_AUTOGRAD_FUNCTIONS
+assert not any(is_missing_kernel(f) for f in _LOCAL_AUTOGRAD_FUNCTIONS)
+assert is_missing_kernel(kda.chunk_kda) and kda.chunk_kda is not _MissingKernel
 
 for kernel in (
     kda.chunk_kda,
@@ -393,12 +399,14 @@ available = {
 def load_module(name):
     if name in available:
         return available[name]
-    raise ModuleNotFoundError("blocked dependency", name="triton")
+    backend = "cutlass" if name == "attn_gym.linear.kda.impl.fused" else "triton"
+    raise ModuleNotFoundError("blocked dependency", name=backend)
 
 
 facade.import_module = load_module
 facade._BACKEND_ERRORS.clear()
-for name in ("_ShortConv", "_ConfiguredShortConv", "_L2Norm", "KernelOptions"):
+facade._BACKEND_KERNELS.clear()
+for name in ("_ShortConv", "_ConfiguredShortConv", "_L2Norm", "KernelOptions", "_ChunkKDA"):
     facade.__dict__.pop(name, None)
 register = Mock()
 spmd.register_local_autograd_function = register
@@ -409,14 +417,28 @@ assert register.call_args_list.count(call(Kernel)) == 1
 assert register.call_args_list.count(call(OtherKernel)) == 1
 assert call(facade._MissingKernel) not in register.call_args_list
 assert linear_attention._ShortConv is Kernel
-assert linear_attention._L2Norm is facade._MissingKernel
+assert facade.is_missing_kernel(linear_attention._L2Norm)
+assert linear_attention._L2Norm is not facade._MissingKernel
 assert set(facade._BACKEND_ERRORS) == {"attn_gym.linear.kda.fwd.triton.l2norm_fwd"}
-try:
-    linear_attention._L2Norm()
-except ModuleNotFoundError as error:
-    assert error.name == "triton" and str(error) == "blocked dependency", error
-else:
+
+
+def backend_of(kernel):
+    try:
+        kernel()
+    except ModuleNotFoundError as error:
+        assert str(error) == "blocked dependency", error
+        return error.name
     raise AssertionError("A kernel with a missing backend ran")
+
+
+# Each placeholder reports its own module's backend, whichever failed first.
+assert backend_of(linear_attention._L2Norm) == "triton"
+assert backend_of(facade._ChunkKDA) == "cutlass"
+assert backend_of(facade._ChunkKDA.apply) == "cutlass"
+assert backend_of(lambda: facade.require_attn_gym(facade._ChunkKDA)) == "cutlass"
+assert backend_of(lambda: facade.require_attn_gym(Kernel, linear_attention._L2Norm)) == "triton"
+facade.require_attn_gym(Kernel, OtherKernel)
+assert backend_of(facade.require_attn_gym) == "triton"
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
