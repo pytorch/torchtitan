@@ -45,6 +45,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# How long `Rollouter.close` waits for in-flight `run_group` calls before stopping their workers anyway.
+# Drains took under 0.3 s once the generators closed; 30 s only covers a group stuck in a slow env step.
+_RUN_GROUP_DRAIN_TIMEOUT_S = 30.0
+
 
 class Rollouter(Configurable):
     """Turns a problem (train/val datasets, the `MessageEnv` to build per sample, and a
@@ -133,6 +137,8 @@ class Rollouter(Configurable):
         # The worker pool's actor handle and the actor system that spawned it.
         self._worker_actors: Any | None = None
         self._actor_system: ActorSystem | None = None
+        # `run_group` calls still running on a worker, including those whose caller was cancelled.
+        self._inflight_run_group_calls: set[asyncio.Future[RolloutGroup]] = set()
 
     def get_training_sample(self) -> tuple[int, object]:
         """Return the next globally identified input from the training loader."""
@@ -178,10 +184,30 @@ class Rollouter(Configurable):
         )
 
     async def close(self) -> None:
-        """Stop the rollout worker pool."""
+        """Wait for in-flight `run_group` calls, then stop the rollout worker pool.
+
+        Close the generators first, so pending `generate_fn` calls fail fast:
+
+            generators closed -> generate_fn raises -> run_group returns -> stop_rollout_workers()
+            run_group still running after _RUN_GROUP_DRAIN_TIMEOUT_S       -> stop_rollout_workers()
+
+        Why wait: if a worker stops while the generator router still owes it a reply, Monarch fails the
+        router and the finished job exits 130.
+        """
         actor_system = self._actor_system
         self._worker_actors = None
         self._actor_system = None
+        calls = tuple(self._inflight_run_group_calls)
+        if calls:
+            _, pending = await asyncio.wait(calls, timeout=_RUN_GROUP_DRAIN_TIMEOUT_S)
+            if pending:
+                logger.warning(
+                    "Stopping rollout workers with %d run_group calls still running",
+                    len(pending),
+                )
+                for call in pending:
+                    call.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
         if actor_system is not None:
             await actor_system.stop_rollout_workers()
 
@@ -223,14 +249,26 @@ class Rollouter(Configurable):
 
         # `choose` (see ActorSystem's call convention) sends the call to the `run_group`
         # endpoint of one worker in the pool.
-        return await self._worker_actors.run_group.choose(
-            generate_fn=generate_fn,
-            release_session_fn=release_session_fn,
-            sample=sample,
-            group_id=group_id,
-            group_size=group_size,
-            sampling=sampling,
+        call = asyncio.ensure_future(
+            self._worker_actors.run_group.choose(
+                generate_fn=generate_fn,
+                release_session_fn=release_session_fn,
+                sample=sample,
+                group_id=group_id,
+                group_size=group_size,
+                sampling=sampling,
+            )
         )
+        self._inflight_run_group_calls.add(call)
+        call.add_done_callback(self._on_run_group_call_done)
+        # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
+        return await asyncio.shield(call)
+
+    def _on_run_group_call_done(self, call: asyncio.Future[RolloutGroup]) -> None:
+        self._inflight_run_group_calls.discard(call)
+        # A cancelled caller never reads the error; read it so asyncio does not log it.
+        if not call.cancelled():
+            call.exception()
 
     def state_dict(self) -> dict[str, object]:
         """Return the checkpoint state of the training input iterator."""
@@ -481,6 +519,8 @@ class RolloutWorker(Configurable):
 
             status = env_step.status
         except Exception:
+            # TODO: at shutdown, every rollout still generating lands here with a ~40-line remote
+            # traceback. Raise a typed error on generator close and log it at info, without the traceback.
             logger.exception(
                 "rollout %s/rollout=%d failed after %d turn(s); marking ERROR",
                 group_id,
