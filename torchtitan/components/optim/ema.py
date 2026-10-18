@@ -17,6 +17,7 @@ from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
+from torchtitan.distributed.utils import get_local_tensor
 
 from .optimizer import OptimizersContainer
 
@@ -77,14 +78,30 @@ class _EMAParamOptimizer(Optimizer):
         self,
         named_tensors: Sequence[tuple[str, torch.Tensor]],
         ema_keys: Sequence[str],
+        *,
+        offload_to_cpu: bool,
     ) -> None:
         tensors = [t for _, t in named_tensors]
         names = [canonical_fqn(name) for name, _ in named_tensors]
         super().__init__([{"params": tensors, "param_names": names}], {})
         for t in tensors:
-            self.state[t][_EMA_STATE_KEY] = {
-                key: t.detach().clone() for key in ema_keys
-            }
+            if offload_to_cpu:
+                # TODO: DTensor lacks pin_memory() (aten._pin_memory.default),
+                # so pin the local shard and rewrap it using the live param's
+                # spec at checkpoint save/load in EMA._materialize_dtensor.
+                # Native support must handle process-group membership changes
+                # across resumes and world-size changes before replacing this.
+                local = get_local_tensor(t.detach())
+                self.state[t][_EMA_STATE_KEY] = {
+                    key: torch.empty_like(local, device="cpu", pin_memory=True).copy_(
+                        local
+                    )
+                    for key in ema_keys
+                }
+            else:
+                self.state[t][_EMA_STATE_KEY] = {
+                    key: t.detach().clone() for key in ema_keys
+                }
 
     def step(self, closure=None) -> None:  # pyrefly: ignore[bad-override]
         raise RuntimeError(
@@ -215,7 +232,9 @@ class EMA(OptimizersContainer):
                 (name, p) for name, p in model.named_parameters() if p.requires_grad
             ]
             self._param_optimizers.append(
-                _EMAParamOptimizer(named_params, self.ema_keys)
+                _EMAParamOptimizer(
+                    named_params, self.ema_keys, offload_to_cpu=self.offload_to_cpu
+                )
             )
             all_params.extend(p for _, p in named_params)
         self._validate_params(all_params)
@@ -241,7 +260,9 @@ class EMA(OptimizersContainer):
                         )
                 total_matched += len(named_buffers)
                 self._buffer_optimizers.append(
-                    _EMAParamOptimizer(named_buffers, self.ema_keys)
+                    _EMAParamOptimizer(
+                        named_buffers, self.ema_keys, offload_to_cpu=self.offload_to_cpu
+                    )
                 )
             if total_matched == 0:
                 logger.warning(
@@ -285,7 +306,7 @@ class EMA(OptimizersContainer):
         self._offload_pool: torch.Tensor | None = None
         self._pending_event: torch.cuda.Event | None = None
         if self.offload_to_cpu:
-            self._init_cpu_offload()
+            self._offload_stream = torch.cuda.Stream()
 
     def zero_grad(self, *args, **kwargs) -> None:
         pass  # never called by the training loop; no-op for safety
@@ -372,7 +393,7 @@ class EMA(OptimizersContainer):
             # ema_params are pinned local-shard CPU tensors; localize the
             # live tensors too so the foreach ops never mix DTensor with
             # Tensor.
-            local_tensors = [self._local_view(t) for t in tensors]
+            local_tensors = [get_local_tensor(t) for t in tensors]
         # Each EMA copy is updated independently, one after another.
         # TODO: with offload_to_cpu, each copy runs its own _update_offloaded,
         # so K copies cost K wait_stream/wait_event round trips and hold the
@@ -395,35 +416,12 @@ class EMA(OptimizersContainer):
     # is exactly what offloading is meant to free.
     _SCRATCH_BYTES = 128 * 1024 * 1024
 
-    @staticmethod
-    def _local_view(t: torch.Tensor) -> torch.Tensor:
-        return t.to_local() if isinstance(t, DTensor) else t
-
-    def _init_cpu_offload(self) -> None:
-        self._offload_stream = torch.cuda.Stream()
-        for ema_opt in self.optimizers:
-            for param_state in ema_opt.state.values():
-                copies = param_state[_EMA_STATE_KEY]
-                for key in copies:
-                    copies[key] = self._pin_local(copies[key])
-
-    # TODO: DTensor doesn't support pin_memory() (NYI: aten._pin_memory.default),
-    # so we pin the local shard only, then rewrap it as a DTensor around the
-    # param's live spec at save/load time (_materialize_dtensor). If DTensor
-    # gains native pin_memory() support this shard-unwrap/rewrap dance can be
-    # dropped. There may be additional complexity around process-group
-    # restore (PG membership can change across resumes/world-size changes)
-    # that a native implementation would need to account for.
-    def _pin_local(self, tensor: torch.Tensor) -> torch.Tensor:
-        return self._local_view(tensor).cpu().pin_memory()
-
     def _materialize_dtensor(
         self, p: torch.Tensor, local: torch.Tensor
     ) -> torch.Tensor:
-        """Inverse of ``_pin_local``: move the local shard back onto the
-        accelerator and rewrap it as a DTensor matching ``p``'s own
-        sharding, for the copy handed to DCP at checkpoint save/load -- this
-        is what DCP needs to (re)shard EMA state correctly across world sizes.
+        """Move the local shard onto the accelerator and rewrap it as a DTensor
+        matching ``p``'s sharding for the copy handed to DCP at checkpoint
+        save/load. This lets DCP reshard EMA state across world sizes.
         ``p`` is still the live DTensor param, so its spec is read directly
         rather than cached. ``run_check=False`` skips the collective that
         would otherwise verify a ``Replicate()`` placement is consistent
@@ -440,6 +438,8 @@ class EMA(OptimizersContainer):
             device_mesh=p.device_mesh,
             placements=p.placements,
             run_check=False,
+            shape=p.shape,
+            stride=p.stride(),
         )
 
     def _scratch_chunks(
@@ -556,7 +556,7 @@ class EMA(OptimizersContainer):
                 for p in (p for p in model.parameters() if p.requires_grad):
                     source = p.detach()
                     if self.offload_to_cpu:
-                        source = self._local_view(source)
+                        source = get_local_tensor(source)
                     for ema_param in ema_opt.state[p][_EMA_STATE_KEY].values():
                         ema_param.copy_(source)
             for ema_opt, model in zip(self._buffer_optimizers, self.model_parts):
@@ -565,7 +565,7 @@ class EMA(OptimizersContainer):
                         continue
                     source = b.detach()
                     if self.offload_to_cpu:
-                        source = self._local_view(source)
+                        source = get_local_tensor(source)
                     for ema_param in ema_opt.state[b][_EMA_STATE_KEY].values():
                         ema_param.copy_(source)
             logger.warning(
@@ -599,4 +599,4 @@ class EMA(OptimizersContainer):
                         incoming = state_dict.get(f"state.{fqn}.{_EMA_STATE_KEY}.{key}")
                         if incoming is None:
                             continue
-                        ema_param.copy_(self._local_view(incoming))
+                        ema_param.copy_(get_local_tensor(incoming))

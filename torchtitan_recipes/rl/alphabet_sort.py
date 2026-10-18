@@ -28,28 +28,36 @@ from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     BatchInvariantFlexConverter,
-    LMHeadFP32OutputConverter,
     ModelConfigConverter,
     MXFP8LinearConverter,
 )
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
-from torchtitan.rl.components.data import IterableRLDataLoader
-from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.rl.controller.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
 from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortDataset
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
-from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
-from torchtitan.rl.losses import GRPOLoss
+from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
+from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
-from torchtitan.rl.rubric import Rubric
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.rollout.rubric import Rubric
+from torchtitan.rl.trainer.losses import GRPOLoss
+from torchtitan.rl.trainer.trainer import Trainer
+
+from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
@@ -70,35 +78,47 @@ def _alphabet_sort_rollouter_config() -> Rollouter.Config:
     )
 
 
-def _build_qwen3_rl_model_config(
+def _qwen3_rl_model_configs(
     flavor: str,
     *,
     seq_len: int,
     attn_backend: str,
+    trainer_parallelism: ParallelismConfig,
+    generator_parallelism: InferenceParallelismConfig,
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> Decoder.Config:
-    """``qwen3.build_model_config`` for RL, with fp32 lm_head logits.
-
-    RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadFP32OutputConverter`` on top of whatever converters it passes.
-    """
-    converters = list(converters or [])
-    converters.append(LMHeadFP32OutputConverter.Config())
-    spec = build_model_config(
-        flavor, seq_len=seq_len, attn_backend=attn_backend, converters=converters
+) -> tuple[Decoder.Config, Decoder.Config]:
+    """Qwen3 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
+    return build_rl_model_configs(
+        build_model_config,
+        flavor,
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        converters=converters,
     )
-    return spec
 
 
 def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
     num_samples_per_prompt = 8
-    model_config = _build_qwen3_rl_model_config(
-        "0.6B", seq_len=seq_len, attn_backend="varlen"
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=2,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=4,
+    )
+    trainer_model, generator_model = _qwen3_rl_model_configs(
+        "0.6B",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-0.6B",
+        hf_assets_path="./assets/hf/Qwen3-0.6B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -109,6 +129,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
@@ -123,10 +144,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
@@ -135,16 +153,14 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=4,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -156,8 +172,8 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
 
 def rl_grpo_qwen3_0_6b_varlen_no_compile(*, seq_len: int = 2048) -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
-    assert config.model is not None
-    config.model.local_compile_regions = []
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.local_compile_regions = []
     return config
 
 
@@ -165,12 +181,23 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = _build_qwen3_rl_model_config(
-        "0.6B", seq_len=seq_len, attn_backend="flex"
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=2,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=2,
+    )
+    trainer_model, generator_model = _qwen3_rl_model_configs(
+        "0.6B",
+        seq_len=seq_len,
+        attn_backend="flex",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-0.6B",
+        hf_assets_path="./assets/hf/Qwen3-0.6B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -181,6 +208,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
@@ -196,10 +224,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 max_context_length=seq_len,
                 dtype="bfloat16",
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
@@ -208,16 +233,14 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=2,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -232,9 +255,9 @@ def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen()
     # TODO: Allow LMHeadCastConverter and QuantizationConverter to
     # co-exist, since they target different layers
-    config.model = (
-        MXFP8LinearConverter.Config(fqns=["layers."]).build().convert(config.model)
-    )
+    converter = MXFP8LinearConverter.Config(fqns=["layers."]).build()
+    config.trainer.model = converter.convert(config.trainer.model)
+    config.generator.model = converter.convert(config.generator.model)
     return config
 
 
@@ -247,18 +270,6 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     forward (even at data_parallel_shard_degree=1), matching the bf16 generator.
     """
     config = rl_grpo_qwen3_0_6b_flex()
-    config.model = _build_qwen3_rl_model_config(
-        "0.6B",
-        seq_len=config.trainer.training.max_context_length,
-        attn_backend="flex",
-        converters=[BatchInvariantFlexConverter.Config()],
-    )
-    # Local compile regions do not support batch-invariant mode.
-    config.model.local_compile_regions = []
-    block_size = config.model.layers[0].attention.inner_attention.block_size
-    config.async_loop.batcher = dataclasses.replace(
-        config.async_loop.batcher, per_sample_pad_multiple=block_size
-    )
     # Batch invariance requires strict on-policy: the generator must run the
     # latest weights before generating so trainer/generator logprobs stay
     # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
@@ -275,7 +286,22 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_weight_sync=True,
+        reset_kv_cache_on_model_state_dict_load=True,
+    )
+    config.trainer.model, config.generator.model = _qwen3_rl_model_configs(
+        "0.6B",
+        seq_len=config.trainer.training.max_context_length,
+        attn_backend="flex",
+        trainer_parallelism=config.trainer.parallelism,
+        generator_parallelism=config.generator.parallelism,
+        converters=[BatchInvariantFlexConverter.Config()],
+    )
+    # Local compile regions do not support batch-invariant mode.
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.local_compile_regions = []
+    block_size = config.trainer.model.layers[0].attention.inner_attention.block_size
+    config.async_loop.batcher = dataclasses.replace(
+        config.async_loop.batcher, per_sample_pad_multiple=block_size
     )
     return config
 
@@ -289,15 +315,26 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     """
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = build_gpt_oss_model_config(
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=2,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=4,
+        expert_parallel_degree=4,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_gpt_oss_model_config,
         "20b",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/gpt-oss-20b",
+        hf_assets_path="./assets/hf/gpt-oss-20b",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=5,
@@ -308,6 +345,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         renderer=from_renderers(GptOssRendererConfig(reasoning_effort="low")),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
@@ -322,11 +360,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-                expert_parallel_degree=2,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
@@ -335,20 +369,17 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=4,
-                expert_parallel_degree=4,
-            ),
+            parallelism=generator_parallelism,
             # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
             # distributed MoE token dispatcher is enabled for GPT-OSS.
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -362,12 +393,23 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
     """GRPO training config for Qwen3-1.7B (6 GPUs: 4 gen + 2 train)."""
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = _build_qwen3_rl_model_config(
-        "1.7B", seq_len=seq_len, attn_backend="varlen"
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=2,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=4,
+    )
+    trainer_model, generator_model = _qwen3_rl_model_configs(
+        "1.7B",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-1.7B",
+        hf_assets_path="./assets/hf/Qwen3-1.7B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -378,6 +420,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
@@ -392,10 +435,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
@@ -404,16 +444,14 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=4,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -427,12 +465,23 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
     """GRPO training config for Qwen3-14B (16 GPUs: 8 gen + 8 train)."""
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = _build_qwen3_rl_model_config(
-        "14B", seq_len=seq_len, attn_backend="varlen"
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=8,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=8,
+    )
+    trainer_model, generator_model = _qwen3_rl_model_configs(
+        "14B",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-14B",
+        hf_assets_path="./assets/hf/Qwen3-14B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -443,6 +492,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
@@ -458,10 +508,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 max_context_length=seq_len,
                 dtype="bfloat16",
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=8,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
@@ -470,16 +517,14 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=8,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -498,15 +543,27 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
     """
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = build_model_config(
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        data_parallel_replicate_degree=1,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=4,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=2,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=4,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_model_config,
         "30B-A3B",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-30B-A3B",
+        hf_assets_path="./assets/hf/Qwen3-30B-A3B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -517,6 +574,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
@@ -532,12 +590,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
                 max_context_length=seq_len,
                 dtype="bfloat16",
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=2,
-                data_parallel_replicate_degree=1,
-                tensor_parallel_degree=2,
-                expert_parallel_degree=4,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
@@ -546,18 +599,15 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=2,
-                tensor_parallel_degree=2,
-                expert_parallel_degree=4,
-            ),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -571,7 +621,7 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     """Qwen3-30B-A3B GRPO with throughput overrides (8 GPUs: 4 gen + 4 train).
 
     Same model/parallelism/data as ``rl_grpo_qwen3_30b_a3b_varlen``, but applies
-    opt-in overrides (per-actor) to both the trainer and generator:
+    opt-in overrides to both the trainer and generator models:
 
     * ``fused_swiglu`` fuses the dense SwiGLU activation; the sibling grouped
       experts override also fuses its gate/up projections
@@ -581,18 +631,8 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     non-fused 30B config.
     """
     config = rl_grpo_qwen3_30b_a3b_varlen()
-    # Applied before each actor builds its model; separate
-    # OverrideConfig instances keep the trainer and generator overrides
-    # independent (they run in different actors).
-    perf_imports = [
-        "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
-    ]
-    config.trainer = dataclasses.replace(
-        config.trainer, override=OverrideConfig(imports=list(perf_imports))
-    )
-    config.generator = dataclasses.replace(
-        config.generator,
-        override=OverrideConfig(imports=list(perf_imports)),
+    config.override = OverrideConfig(
+        imports=["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
     )
     return config
 
@@ -612,14 +652,27 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
     """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     num_samples_per_prompt = 8
-    model_config = _build_qwen3_rl_model_config(
-        "0.6B", seq_len=seq_len, attn_backend="varlen"
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=2,
+        enable_sequence_parallel=False,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=2,
+    )
+    trainer_model, generator_model = _qwen3_rl_model_configs(
+        "0.6B",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     # Local compile regions do not support batch-invariant mode.
-    model_config.local_compile_regions = []
+    for model_config in (trainer_model, generator_model):
+        model_config.local_compile_regions = []
     return Controller.Config(
-        model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-0.6B",
+        hf_assets_path="./assets/hf/Qwen3-0.6B",
         num_generators=3,
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
@@ -634,6 +687,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
@@ -648,11 +702,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-                enable_sequence_parallel=False,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
@@ -662,16 +712,14 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=2,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 # T=1 so the RL loss golden doesn't depend on the T != 1 TODO in SamplingConfig.
@@ -679,27 +727,26 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
                 max_tokens=700,
             ),
             debug=batch_invariant_config,
-            reset_kv_cache_on_weight_sync=True,
+            reset_kv_cache_on_model_state_dict_load=True,
         ),
     )
 
 
-def _build_qwen3_5_rl_model_config(
+def _qwen3_5_rl_model_configs(
     flavor: str,
     *,
     seq_len: int,
     attn_backend: str = "varlen",
+    trainer_parallelism: ParallelismConfig,
+    generator_parallelism: InferenceParallelismConfig,
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> Decoder.Config:
-    """``qwen3_5.build_model_config`` for RL, with fp32 lm_head logits.
-
-    RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadFP32OutputConverter`` on top of whatever converters it passes.
-    """
-    converters = list(converters or [])
-    converters.append(LMHeadFP32OutputConverter.Config())
-    return build_qwen3_5_model_config(
+) -> tuple[Decoder.Config, Decoder.Config]:
+    """Qwen3.5 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
+    return build_rl_model_configs(
+        build_qwen3_5_model_config,
         flavor,
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
         converters=converters,
@@ -710,12 +757,24 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
     """Qwen3.5-9B GRPO with trainer and generator TP=2 (6 GPUs)."""
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = _build_qwen3_5_rl_model_config(
-        "9B", seq_len=seq_len, attn_backend="varlen"
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=2,
+        enable_sequence_parallel=True,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=2,
+    )
+    trainer_model, generator_model = _qwen3_5_rl_model_configs(
+        "9B",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3.5-9B",
+        hf_assets_path="./assets/hf/Qwen3.5-9B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
@@ -726,6 +785,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
@@ -741,11 +801,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
                 max_context_length=seq_len,
                 dtype="bfloat16",
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=2,
-                tensor_parallel_degree=2,
-                enable_sequence_parallel=True,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
@@ -754,17 +810,15 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=2,
-            ),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -777,9 +831,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
 def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5-9B GRPO with matching TP=2."""
     config = rl_grpo_qwen3_5_9b_varlen()
-    assert config.model is not None
-    # Local compile regions do not support batch-invariant mode.
-    config.model.local_compile_regions = []
     config.async_loop = dataclasses.replace(config.async_loop, target_offpolicy_steps=0)
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -794,8 +845,17 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_weight_sync=True,
+        reset_kv_cache_on_model_state_dict_load=True,
     )
+    config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
+        "9B",
+        seq_len=config.trainer.training.max_context_length,
+        trainer_parallelism=config.trainer.parallelism,
+        generator_parallelism=config.generator.parallelism,
+    )
+    # Local compile regions do not support batch-invariant mode.
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.local_compile_regions = []
     return config
 
 
@@ -807,20 +867,34 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
     """
     seq_len = 65536
     config = rl_grpo_qwen3_5_9b_varlen()
-    config.model = _build_qwen3_5_rl_model_config(
-        "27B", seq_len=seq_len, attn_backend="varlen"
+    config.hf_assets_path = "./assets/hf/Qwen3.6-27B"
+    trainer_parallelism = dataclasses.replace(
+        config.trainer.parallelism,
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=2,
     )
-    config.hf_assets_path = "torchtitan/rl/example_checkpoint/Qwen3.6-27B"
+    generator_parallelism = dataclasses.replace(
+        config.generator.parallelism,
+        data_parallel_degree=1,
+        tensor_parallel_degree=4,
+    )
+    trainer_model, generator_model = _qwen3_5_rl_model_configs(
+        "27B",
+        seq_len=seq_len,
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
     loss_config = config.trainer.loss
     assert isinstance(loss_config, ChunkedLossWrapper.Config)
     assert isinstance(loss_config.loss_fn, GRPOLoss.Config)
     config.trainer = dataclasses.replace(
         config.trainer,
+        model=trainer_model,
         loss=dataclasses.replace(
             loss_config,
             loss_fn=dataclasses.replace(
                 loss_config.loss_fn,
-                global_vocab_size=decoder_vocab_size(config.model),
+                global_vocab_size=decoder_vocab_size(trainer_model),
             ),
         ),
         optim=dataclasses.replace(
@@ -836,19 +910,10 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
                 ],
             ),
         ),
-        activation_checkpoint=FullAC.Config(),
-        parallelism=dataclasses.replace(
-            config.trainer.parallelism,
-            data_parallel_shard_degree=2,
-            tensor_parallel_degree=2,
-        ),
+        activation_remat=FullActivationRematConfig(),
+        parallelism=trainer_parallelism,
     )
     config.generator = dataclasses.replace(
-        config.generator,
-        parallelism=dataclasses.replace(
-            config.generator.parallelism,
-            data_parallel_degree=1,
-            tensor_parallel_degree=4,
-        ),
+        config.generator, model=generator_model, parallelism=generator_parallelism
     )
     return config

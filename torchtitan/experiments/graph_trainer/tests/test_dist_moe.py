@@ -81,9 +81,10 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
 
     engine = cast(Any, object.__new__(GraphTrainingEngine))
     engine.config = SimpleNamespace(
-        dist_moe=runtime_config,
+        dist_moe_runtime=runtime_config,
         sdc_replayer=None,
         training=SimpleNamespace(
+            disable_cuda_graphs=True,
             num_tokens_per_train_step=-1,
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",
@@ -351,7 +352,7 @@ def _assert_common_recipe(
     from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 
     experts = list(config.model.traverse(DistMoeRoutedExperts.Config))
-    runtime = config.dist_moe
+    runtime = config.dist_moe_runtime
 
     assert len(experts) == num_expert_modules
     assert isinstance(runtime, DistMoeRuntime.Config)

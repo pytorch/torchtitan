@@ -17,7 +17,7 @@ package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
 
 ## Integration flow
 
-![TorchTitan and Verifiers integration architecture](./assets/integration_architecture.svg)
+![TorchTitan and Verifiers integration architecture](../../../../assets/images/rl_verifiers_integration_architecture.svg)
 
 1. [`data.py`](./data.py) loads a Verifiers taskset in the TitanRL controller,
    where TitanRL samples each rollout task. It converts the task's typed data

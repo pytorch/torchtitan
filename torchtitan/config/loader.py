@@ -41,13 +41,13 @@ class ConfigLoader:
         config = self._load_config(namespace.module, namespace.config)
 
         if namespace.override:
-            override_imports = parse_cli_imports(namespace.override)
-            trainer_config = self._trainer_config(config)
-            trainer_config.override.imports.extend(override_imports)
-            generator_config = getattr(config, "generator", None)
-            generator_override = getattr(generator_config, "override", None)
-            if isinstance(generator_override, OverrideConfig):
-                generator_override.imports.extend(override_imports)
+            override_config = getattr(config, "override", None)
+            if not isinstance(override_config, OverrideConfig):
+                raise ValueError(
+                    "--override requires a recipe whose top-level config has an "
+                    f"`override` field; {type(config).__qualname__} has none."
+                )
+            override_config.imports.extend(parse_cli_imports(namespace.override))
 
         self._apply_launch_options(config, namespace)
         self._validate_assets_path(config)
@@ -161,18 +161,21 @@ class ConfigLoader:
 
     @staticmethod
     def _trainer_config(config: Configurable.Config):
-        from torchtitan.trainer import Trainer
+        """Return the training-engine config of a pretraining or RL recipe.
 
-        if isinstance(config, Trainer.Config):
+        Pretraining recipes are a ``TrainingEngine.Config`` subclass; RL recipes
+        nest one under ``trainer``.
+        """
+        from torchtitan.training_engine import TrainingEngine
+
+        if isinstance(config, TrainingEngine.Config):
             return config
-
-        from torchtitan.rl.controller import Controller
-
-        if isinstance(config, Controller.Config):
-            return config.trainer
+        trainer_config = getattr(config, "trainer", None)
+        if isinstance(trainer_config, TrainingEngine.Config):
+            return trainer_config
         raise ValueError(
-            "--comm-backend and --resume-step require a Trainer.Config or "
-            "Controller.Config recipe."
+            "--comm-backend and --resume-step require a recipe that "
+            "is or contains a training-engine config (TrainingEngine.Config)."
         )
 
     @staticmethod

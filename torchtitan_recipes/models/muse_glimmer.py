@@ -9,6 +9,7 @@
 from collections.abc import Mapping
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -19,12 +20,11 @@ from torchtitan.components.optim import (
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.distributed.context_parallel import (
     ContextParallelLoadBalancer,
     HeadTailCPLoadBalancer,
 )
-from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     InnerAttention,
@@ -32,19 +32,27 @@ from torchtitan.models.common.attention import (
     VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
-    KVAllGatherCPSlidingWindowFlexInnerAttention,
-    UlyssesCPFlexInnerAttention,
-    UlyssesCPSlidingWindowFlexInnerAttention,
-    UlyssesCPVarlenInnerAttention,
+    AllGatherKVFlexInnerAttention,
+    AllGatherKVSlidingWindowFlexInnerAttention,
+    UlyssesFlexInnerAttention,
+    UlyssesSlidingWindowFlexInnerAttention,
+    UlyssesVarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
 
-def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("30B", seq_len=seq_len, attn_backend="flex")
+
+def muse_glimmer_30b(
+    seq_len: int | None = None, *, attn_backend: str = "varlen"
+) -> Trainer.Config:
+    parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "30B", seq_len=seq_len, attn_backend=attn_backend, parallelism=parallelism
+    )
+    num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -55,6 +63,9 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
@@ -63,13 +74,13 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
-        parallelism=ParallelismConfig(),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )
 
 
@@ -91,7 +102,8 @@ def _muse_glimmer_30b_cp(
     cp_degree: int,
     load_balancer: ContextParallelLoadBalancer.Config | None,
 ) -> Trainer.Config:
-    config = muse_glimmer_30b()
+    # These CP recipes use Flex-specific kernels and load balancers.
+    config = muse_glimmer_30b(attn_backend="flex")
     config.parallelism.context_parallel_degree = cp_degree
     config.parallelism.context_parallel_load_balancer = load_balancer
     return apply_transforms(
@@ -104,9 +116,9 @@ def muse_glimmer_30b_allgather_cp8() -> Trainer.Config:
     """Muse Glimmer 30B with all-gather CP degree 8."""
     return _muse_glimmer_30b_cp(
         inner_attention_map={
-            FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+            FlexInnerAttention: AllGatherKVFlexInnerAttention,
             SlidingWindowFlexInnerAttention: (
-                KVAllGatherCPSlidingWindowFlexInnerAttention
+                AllGatherKVSlidingWindowFlexInnerAttention
             ),
         },
         cp_degree=8,
@@ -121,8 +133,8 @@ def muse_glimmer_30b_ulysses_cp2() -> Trainer.Config:
     """
     return _muse_glimmer_30b_cp(
         inner_attention_map={
-            FlexInnerAttention: UlyssesCPFlexInnerAttention,
-            SlidingWindowFlexInnerAttention: (UlyssesCPSlidingWindowFlexInnerAttention),
+            FlexInnerAttention: UlyssesFlexInnerAttention,
+            SlidingWindowFlexInnerAttention: (UlyssesSlidingWindowFlexInnerAttention),
         },
         cp_degree=2,
         # Ulysses does not support token reordering.
@@ -136,18 +148,16 @@ def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
     The model has two KV heads, which limits Ulysses CP to degree 2.
     """
     config = muse_glimmer_30b()
-    config.model = build_model_config("30B", attn_backend="varlen")
-    assert isinstance(config.dataloader, GrainDataLoader.Config)
-    config.dataloader.max_num_documents = 64
     config.parallelism.context_parallel_degree = 2
     config.parallelism.context_parallel_load_balancer = None
+    config.model = build_model_config(
+        "30B", attn_backend="varlen", parallelism=config.parallelism
+    )
     return apply_transforms(
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    VarlenInnerAttention: UlyssesCPVarlenInnerAttention
-                }
+                inner_attention_map={VarlenInnerAttention: UlyssesVarlenInnerAttention}
             )
         ],
     )

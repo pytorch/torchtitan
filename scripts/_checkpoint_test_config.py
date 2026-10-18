@@ -56,7 +56,7 @@ def checkpoint_test_config():
     if isinstance(config, Trainer.Config):
         trainer_config = config
     else:
-        from torchtitan.rl.controller import Controller
+        from torchtitan.rl.controller.controller import Controller
 
         if not isinstance(config, Controller.Config):
             raise TypeError("Expected a Trainer.Config or Controller.Config recipe.")

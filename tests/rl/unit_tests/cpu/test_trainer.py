@@ -5,8 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import threading
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -18,10 +20,14 @@ from torchtitan.components.data.types import (
 from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
-from torchtitan.rl.components.checkpointer import MirroredState
-from torchtitan.rl.distributed.actors.trainer import TrainerActor
-from torchtitan.rl.trainer import Trainer
-from torchtitan.rl.types import TrainingMicrobatch
+from torchtitan.rl.actors.monarch.trainer import TrainerActor
+from torchtitan.rl.trainer.batcher import TrainingMicrobatch
+from torchtitan.rl.trainer.controller_state import MirroredState
+from torchtitan.rl.trainer.rdma_microbatch import (
+    RDMAMicrobatch,
+    RDMAMicrobatchPrefetcher,
+)
+from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
@@ -49,18 +55,23 @@ def test_mirrored_state_uses_a_fixed_opaque_template() -> None:
 
 
 def test_rl_trainer_uses_training_engine_config_defaults() -> None:
-    assert not Trainer.Config().training.disable_cuda_graphs
+    assert not Trainer.Config(model=MagicMock()).training.disable_cuda_graphs
 
 
-def test_pipeline_parallelism_is_rejected_until_weight_sync_supports_it() -> None:
+def test_pipeline_parallelism_is_rejected_until_model_state_dict_push_supports_it() -> None:
     with pytest.raises(ValueError, match="TorchStore"):
-        Trainer.Config(parallelism=ParallelismConfig(pipeline_parallel_degree=2))
+        Trainer.Config(
+            model=MagicMock(),
+            parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+        )
 
 
 def test_initialize_torchstore_client_uses_publisher_role() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
-        with patch("torchtitan.rl.trainer.ts.client", new_callable=AsyncMock) as client:
+        with patch(
+            "torchtitan.rl.trainer.trainer.ts.client", new_callable=AsyncMock
+        ) as client:
             await trainer.initialize_torchstore_client()
 
         client.assert_awaited_once_with(role=RankRole.PUBLISHER)
@@ -68,8 +79,137 @@ def test_initialize_torchstore_client_uses_publisher_role() -> None:
     asyncio.run(run())
 
 
+def test_push_model_state_dict_reuses_final_dtype_cpu_staging_buffers() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        trainer.engine = SimpleNamespace(device=torch.device("cuda", 0))
+        trainer.model = torch.nn.Linear(2, 2, bias=False)
+        trainer.model.register_buffer("scale", torch.tensor(3.0, dtype=torch.float32))
+        trainer._transfer_dtype = torch.bfloat16
+        trainer._staging_model_state_dict_stream = None
+
+        empty_like = torch.empty_like
+        pin_memory_requests = []
+
+        def allocate_without_pinning(*args, **kwargs):
+            pin_memory_requests.append(kwargs.get("pin_memory", False))
+            kwargs["pin_memory"] = False
+            return empty_like(*args, **kwargs)
+
+        with patch(
+            "torchtitan.rl.trainer.trainer.torch.empty_like",
+            side_effect=allocate_without_pinning,
+        ):
+            trainer._staging_state_dict = trainer._setup_staging_model_state_dict()
+
+        staging = trainer._staging_state_dict
+        weight_data_ptr = staging["weight"].data_ptr()
+        scale_data_ptr = staging["scale"].data_ptr()
+        assert set(staging) == {"weight", "scale"}
+        assert staging["weight"].device.type == "cpu"
+        assert staging["weight"].dtype == torch.bfloat16
+        assert staging["scale"].dtype == torch.float32
+        assert pin_memory_requests == [True, True]
+
+        with patch(
+            "torchtitan.rl.trainer.trainer.ts.put_state_dict", new_callable=AsyncMock
+        ) as put_state_dict:
+            await trainer.push_model_state_dict()
+            trainer.model.weight.data.fill_(2.0)
+            await trainer.push_model_state_dict()
+
+        assert staging["weight"].data_ptr() == weight_data_ptr
+        torch.testing.assert_close(
+            staging["weight"],
+            torch.full((2, 2), 2.0, dtype=torch.bfloat16),
+        )
+        assert put_state_dict.await_count == 2
+        for call in put_state_dict.await_args_list:
+            assert call.args[0] is staging
+            assert call.args[1] == "model_state_dict"
+            assert call.kwargs == {"direct_rdma": False}
+        assert staging["scale"].data_ptr() == scale_data_ptr
+        torch.testing.assert_close(staging["scale"], torch.tensor(3.0))
+
+    asyncio.run(run())
+
+
+def test_push_model_state_dict_stages_on_dedicated_cuda_stream() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        trainer._staging_state_dict = {"weight": torch.empty(4)}
+        trainer._staging_model_state_dict_stream = MagicMock()
+        trainer._staging_device_module = MagicMock()
+        source = torch.arange(4, dtype=torch.float32)
+        trainer.model = SimpleNamespace(
+            state_dict=MagicMock(return_value={"weight": source})
+        )
+        staging_complete = MagicMock()
+        trainer._staging_device_module.stream.return_value = nullcontext()
+        trainer._staging_device_module.Event.return_value = staging_complete
+        main_thread_id = threading.get_ident()
+        worker_thread_ids = []
+
+        def synchronize() -> None:
+            worker_thread_ids.append(threading.get_ident())
+
+        async def put_state_dict(*args, **kwargs) -> None:
+            worker_thread_ids.append(threading.get_ident())
+
+        staging_complete.synchronize.side_effect = synchronize
+
+        with patch(
+            "torchtitan.rl.trainer.trainer.ts.put_state_dict",
+            new_callable=AsyncMock,
+            side_effect=put_state_dict,
+        ) as put:
+            await trainer.push_model_state_dict()
+
+        staging_complete.record.assert_called_once_with(
+            trainer._staging_model_state_dict_stream
+        )
+        staging_complete.synchronize.assert_called_once_with()
+        put.assert_awaited_once_with(
+            trainer._staging_state_dict,
+            "model_state_dict",
+            direct_rdma=False,
+        )
+        assert len(worker_thread_ids) == 2
+        assert worker_thread_ids[0] == worker_thread_ids[1]
+        assert worker_thread_ids[0] != main_thread_id
+        torch.testing.assert_close(trainer._staging_state_dict["weight"], source)
+
+    asyncio.run(run())
+
+
+def test_push_staging_copies_parameters_already_in_transfer_dtype() -> None:
+    trainer = object.__new__(Trainer)
+    trainer.engine = SimpleNamespace(device=torch.device("cuda", 0))
+    trainer.model = torch.nn.Linear(2, 2, bias=False, dtype=torch.bfloat16)
+    trainer._transfer_dtype = torch.bfloat16
+
+    empty_like = torch.empty_like
+    pin_memory_requests = []
+
+    def allocate_without_pinning(*args, **kwargs):
+        pin_memory_requests.append(kwargs.get("pin_memory", False))
+        kwargs["pin_memory"] = False
+        return empty_like(*args, **kwargs)
+
+    with patch(
+        "torchtitan.rl.trainer.trainer.torch.empty_like",
+        side_effect=allocate_without_pinning,
+    ):
+        staging = trainer._setup_staging_model_state_dict()
+
+    assert set(staging) == {"weight"}
+    assert staging["weight"].dtype == torch.bfloat16
+    assert pin_memory_requests == [True]
+
+
 def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
     config = Trainer.Config(
+        model=MagicMock(),
         debug=DebugConfig(deterministic=True),
         training=TrainingConfig(disable_cuda_graphs=True),
         sdc_replayer=SDCReplayer.Config(),
@@ -78,23 +218,26 @@ def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
     assert isinstance(config.sdc_replayer, SDCReplayer.Config)
 
 
-def test_rl_trainer_validates_model_training_config_before_initialization() -> None:
+def test_rl_trainer_validates_model_training_config_before_initialization(
+    tmp_path,
+) -> None:
     class ValidationReachedError(Exception):
         pass
 
-    config = Trainer.Config(training=TrainingConfig(disable_cuda_graphs=True))
     model_config = MagicMock()
+    config = Trainer.Config(
+        model=model_config, training=TrainingConfig(disable_cuda_graphs=True)
+    )
 
     with patch(
-        "torchtitan.rl.trainer.validate_model_training_config",
+        "torchtitan.rl.trainer.trainer.validate_model_training_config",
         side_effect=ValidationReachedError,
     ) as validate:
         with pytest.raises(ValidationReachedError):
             Trainer(
                 config,
-                model_config=model_config,
                 max_num_documents=None,
-                output_dir="",
+                output_dir=str(tmp_path),
             )
 
     validate.assert_called_once_with(
@@ -102,7 +245,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
         parallelism=config.parallelism,
         training=config.training,
         debug=config.debug,
-        activation_checkpoint=config.activation_checkpoint,
+        activation_remat=config.activation_remat,
         max_num_documents=None,
     )
 
@@ -114,7 +257,9 @@ def test_forward_backward_uses_global_token_count() -> None:
         garbage_collector=SimpleNamespace(run=MagicMock()),
         optim=SimpleNamespace(zero_grad=MagicMock()),
         config=SimpleNamespace(
-            training=SimpleNamespace(disable_cuda_graphs=True),
+            training=SimpleNamespace(
+                disable_cuda_graphs=True, preprocess_microbatch_groups_lazily=False
+            ),
             parallelism=SimpleNamespace(
                 fsdp_defer_gradient_reduction=False,
                 fsdp_reshard_after_forward="default",
@@ -130,7 +275,7 @@ def test_forward_backward_uses_global_token_count() -> None:
         _run_forward_backward=MagicMock(
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
         ),
-        _cuda_graph_per_accumulation_group_enabled=False,
+        _cuda_graph_per_microbatch_group_enabled=False,
         sdc_replayer=None,
     )
     microbatch_groups = [[object()], [object()], [object()]]
@@ -146,7 +291,9 @@ def test_forward_backward_uses_global_token_count() -> None:
     engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
     assert engine.num_accumulation_steps == 3
-    engine._preprocess_microbatch_groups.assert_called_once_with(microbatch_groups)
+    engine._preprocess_microbatch_groups.assert_called_once_with(
+        microbatch_groups, global_routing_token_counts=torch.tensor([19])
+    )
 
 
 def test_close_stops_training_engine() -> None:
@@ -191,7 +338,8 @@ def test_get_controller_state_returns_restored_state() -> None:
     asyncio.run(run())
 
 
-def test_forward_backward_accumulates_microbatch_metrics() -> None:
+@pytest.mark.parametrize("rdma", [False, True])
+def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         engine = SimpleNamespace(
@@ -199,6 +347,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             ntokens_seen=10,
             sdc_replayer=None,
             model_config=SimpleNamespace(mtp_layers=None),
+            device=torch.device("cpu"),
         )
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
@@ -216,8 +365,9 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             )
         )
         trainer.engine = engine
-        trainer.config = Trainer.Config()
-        trainer.dp_rank = 0
+        trainer.config = Trainer.Config(model=MagicMock())
+        trainer.dp_rank = 1
+        trainer._num_rdma_batches_read = 0
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
                 key: float(value.item())
@@ -240,23 +390,78 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             advantages=torch.tensor([1.0]),
         )
 
+        # This rank's column (dp_rank 1); with `rdma_min_tensor_bytes` the trainer reads it.
+        microbatches = (
+            [
+                MagicMock(
+                    spec=RDMAMicrobatch,
+                    read=AsyncMock(return_value=batch),
+                    batch_index=0,
+                    dp_rank=1,
+                    microbatch_index=microbatch_index,
+                )
+                for microbatch_index in range(2)
+            ]
+            if rdma
+            else [batch, batch]
+        )
+
         result = await Trainer.forward_backward(
             trainer,
-            [[batch], [batch]],
+            microbatches,
             torch.tensor([3]),
             torch.tensor([2]),
         )
 
         engine.forward_backward.assert_called_once_with(
-            microbatch_groups=[[batch], [batch]],
+            microbatch_groups=ANY,
             global_loss_token_counts=torch.tensor([3]),
             global_routing_token_counts=torch.tensor([2]),
         )
-        assert trainer._step_num_tokens_per_dp_rank == 2
-        assert trainer._reduce_forward_backward_metrics.call_count == 2
+        # RDMAMicrobatches are read through the prefetcher; by value, the column is passed as is.
+        groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
+        assert isinstance(groups, RDMAMicrobatchPrefetcher) == rdma
+        assert list(groups) == [[batch], [batch]]
+        assert trainer._step_num_tokens_per_dp_rank == (
+            2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
+        )
+        if rdma:
+            assert trainer._num_rdma_batches_read == 1
+            # The read time is reported only when there was a read.
+            assert result.pop("timing/trainer/read_microbatches/max") >= 0
+        assert trainer._reduce_forward_backward_metrics.call_count == (3 if rdma else 2)
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("batch_index", "dp_rank", "microbatch_index"),
+    [(1, 1, 0), (0, 0, 0), (0, 1, 1)],
+    ids=["another_batch", "another_rank", "out_of_order"],
+)
+def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
+    batch_index: int, dp_rank: int, microbatch_index: int
+) -> None:
+    trainer = object.__new__(Trainer)
+    trainer.engine = SimpleNamespace(num_completed_steps=0)
+    trainer.config = Trainer.Config(model=MagicMock())
+    trainer.dp_rank = 1
+    trainer._num_rdma_batches_read = 0
+    wrong = MagicMock(
+        spec=RDMAMicrobatch,
+        batch_index=batch_index,
+        dp_rank=dp_rank,
+        microbatch_index=microbatch_index,
+    )
+
+    with pytest.raises(ValueError, match=r"expected \(0, 1, 0\)"):
+        asyncio.run(
+            Trainer.forward_backward(
+                trainer, [wrong], torch.tensor([1]), torch.tensor([1])
+            )
+        )
+    wrong.read.assert_not_called()
 
 
 def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
@@ -287,6 +492,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             ntokens_seen=12,
             num_flops_per_token=200,
             has_quantization=False,
+            device=torch.device("cuda", 0),
             device_memory_monitor=device_memory_monitor,
             optim_step=MagicMock(return_value=torch.tensor(2.0)),
             save_checkpoint=MagicMock(),
@@ -301,15 +507,19 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         trainer.gpu_peak_flops = 1000
         trainer._step_compute_start = 0.0
         trainer._step_num_tokens_per_dp_rank = 10
+        trainer._staging_model_state_dict_stream = MagicMock()
+        trainer._staging_device_module = MagicMock()
+        compute_stream = MagicMock()
+        trainer._staging_device_module.current_stream.return_value = compute_stream
 
         with (
-            patch("torchtitan.rl.trainer.time.perf_counter", return_value=2.0),
+            patch("torchtitan.rl.trainer.trainer.time.perf_counter", return_value=2.0),
             patch(
-                "torchtitan.rl.trainer.collect_aux_loss_metrics",
+                "torchtitan.rl.trainer.trainer.collect_aux_loss_metrics",
                 return_value={"aux_loss/mean": 0.5},
             ),
             patch(
-                "torchtitan.rl.trainer.compute_training_performance_metrics",
+                "torchtitan.rl.trainer.trainer.compute_training_performance_metrics",
                 return_value={
                     "tokens_per_second": 10.0,
                     "tflops": 2.0,
@@ -323,6 +533,9 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             )
 
         assert result.policy_version == 5
+        trainer._staging_model_state_dict_stream.wait_stream.assert_called_once_with(
+            compute_stream
+        )
         assert result.metrics == {
             "trainer/grad_norm/mean": 2.0,
             "trainer/lr/AdamW/0": 0.25,

@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
 from verifiers.v1.configs.client import TrainClientConfig as VerifiersTrainClientConfig
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.dialects.chat import message_to_wire
@@ -22,7 +23,6 @@ from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 from torchtitan.components.renderer import RendererConfig, RenderersConfigAdapter
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.examples.verifiers.data import (
     VerifiersTaskDataset,
     VerifiersTaskSample,
@@ -34,19 +34,23 @@ from torchtitan.rl.examples.verifiers.generation_server import (
     VerifiersGenerationMetadata,
 )
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
+from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
     GenerateFn,
+    ReleaseSessionFn,
     Rollout,
     RolloutGroup,
     RolloutStatus,
     RolloutTurn,
+    RolloutTurnID,
+    split_prompt,
 )
-from torchtitan.rl.rubric import RewardFn, Rubric
-from torchtitan.rl.types import RolloutTurnID
 
 if TYPE_CHECKING:
-    from torchtitan.rl.generator import SamplingConfig
+    from torchtitan.rl.actors.system import ActorSystem
+    from torchtitan.rl.generator.types import SamplingConfig
 
 
 logger = logging.getLogger(__name__)
@@ -165,12 +169,17 @@ class VerifiersRollouter(Rollouter):
     async def setup_async(
         self,
         *,
+        actor_system: ActorSystem,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
     ) -> None:
-        """Start the EnvServer and connect it to TorchTitan generation."""
-        del tokenizer_config
+        """Start the EnvServer and connect it to TorchTitan generation.
+
+        Rollouts run in the EnvServer, so no rollout worker pool is spawned through
+        ``actor_system``.
+        """
+        del actor_system, tokenizer_config
         if self._verifiers_env_client is not None:
             return
         if not isinstance(renderer_config, RenderersConfigAdapter):
@@ -198,7 +207,7 @@ class VerifiersRollouter(Rollouter):
                 # The local endpoint does not authenticate. An empty environment
                 # variable name makes Verifiers send its required "EMPTY" value.
                 api_key_var="",
-                renderer=renderer_config.renderers_config,
+                renderer=renderer_config.get_renderers_config(),
                 multiplex=self._verifiers_config.renderer_multiplex,
                 renderer_model_name=hf_assets_path,
             )
@@ -233,12 +242,15 @@ class VerifiersRollouter(Rollouter):
         self,
         *,
         generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
+        # TODO: release each rollout's session; until then `max_sessions` evicts them.
+        del release_session_fn
         if self._generation_server is None:
             raise RuntimeError("Verifiers rollouter is not initialized")
         generate_fns = self._generation_server.generate_fns
@@ -260,7 +272,7 @@ class VerifiersRollouter(Rollouter):
                 )
             )
         finally:
-            # The group sends no more generation requests, even when a rollout raised.
+            # Remove it even when a rollout raised: training group ids never repeat, so a kept entry leaks.
             generate_fns.pop(group_id, None)
 
         outputs = await self._rubric.score_group(rollouts, sample)
@@ -325,6 +337,19 @@ class VerifiersRollouter(Rollouter):
         )
         status = self.rollout_status(verifiers_episode=verifiers_episode, trace=trace)
         if not turns:
+            if trace.stop_condition == "context_length":
+                # The harness builds the first prompt in the env server, so the dataset can't
+                # be filtered for it; flag it here as a data problem, not a policy one.
+                task = sample.verifiers_task_data.get(
+                    "name", sample.verifiers_task_data.get("idx")
+                )
+                logger.warning(
+                    "rollout group=%d/rollout=%d: the first prompt%s does not fit the "
+                    "context; marking ERROR",
+                    group_id,
+                    rollout_id,
+                    "" if task is None else f" of task {task}",
+                )
             status = RolloutStatus.ERROR
         logs = verifiers_rollout_logs(verifiers_episode, trace)
         if status == RolloutStatus.ERROR:
@@ -384,6 +409,8 @@ class VerifiersRollouter(Rollouter):
         replied_nodes: set[int] = set()
         last_turn_by_node: dict[int, RolloutTurn] = {}
         turns: list[RolloutTurn] = []
+        # The last appended turn's prompt + completion; not reset between branches
+        previous_token_ids: list[int] = []
 
         for branch in trace.branches:
             token_ids = branch.token_ids
@@ -401,6 +428,10 @@ class VerifiersRollouter(Rollouter):
                 for start, end in _trainable_token_spans(mask):
                     absolute_start = branch_offset + start
                     absolute_end = branch_offset + end
+                    prompt_prefix_len, prompt_delta_token_ids = split_prompt(
+                        token_ids[:absolute_start], previous_token_ids
+                    )
+                    previous_token_ids = token_ids[:absolute_end]
                     turns.append(
                         RolloutTurn(
                             rollout_id=RolloutTurnID(
@@ -408,12 +439,13 @@ class VerifiersRollouter(Rollouter):
                                 rollout_id=rollout_id,
                                 turn_id=len(turns),
                             ),
-                            prompt_token_ids=list(token_ids[:absolute_start]),
-                            completion_token_ids=list(
-                                token_ids[absolute_start:absolute_end]
+                            prompt_prefix_len=prompt_prefix_len,
+                            prompt_delta_token_ids=prompt_delta_token_ids,
+                            completion_token_ids=np.asarray(
+                                token_ids[absolute_start:absolute_end], dtype=np.int32
                             ),
-                            completion_logprobs=list(
-                                logprobs[absolute_start:absolute_end]
+                            completion_logprobs=np.asarray(
+                                logprobs[absolute_start:absolute_end], dtype=np.float32
                             ),
                             min_policy_version=generation_metadata.min_policy_version,
                             max_policy_version=generation_metadata.max_policy_version,

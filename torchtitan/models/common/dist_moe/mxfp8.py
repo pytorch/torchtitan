@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.quantization._fsdp_tensor import (
     _ShardedFSDPTensor,
     _UnshardedFSDPTensor,
@@ -156,6 +158,24 @@ class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
             _DistMoeW2ShardedTensor(self.w2.weight.data),
             requires_grad=self.w2.weight.requires_grad,
         )
+
+    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
+        # spmd_types returns a plain tensor when EP/TP shards a weight. Restore
+        # the FSDP extension wrappers before fully_shard() consumes them.
+        super()._parallelize(parallelism_context)
+        for proj, wrapper_cls in (
+            (self.w13, _DistMoeW13ShardedTensor),
+            (self.w2, _DistMoeW2ShardedTensor),
+        ):
+            if isinstance(proj.weight, wrapper_cls):
+                continue
+            distributed_weight = proj.weight
+            wrapped_weight = torch.nn.Parameter(
+                wrapper_cls(distributed_weight.data),
+                requires_grad=distributed_weight.requires_grad,
+            )
+            spmd.assert_type_like(wrapped_weight, distributed_weight)
+            proj.weight = wrapped_weight
 
     def _weight_operands(
         self,

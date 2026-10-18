@@ -11,27 +11,36 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from attn_gym.linear._delta_rule.gate import _FusedGate
-from attn_gym.linear.context_parallel import ContextParallelRouting
-from attn_gym.linear.kda import bound_gate, chunk_kda
-from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm, l2norm
-from attn_gym.linear.kda.impl.cudnn import ChunkKdaCudnn
-from attn_gym.linear.kda.impl.fused import _ChunkKDA
-from attn_gym.linear.kda.masking import _MaskRows
-from attn_gym.linear.short_conv import causal_conv1d
-from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
+from torchtitan.models.base.module import Module
+
+from torchtitan.models.common.attn_gym import (
+    _ChunkKDA,
+    _FusedGate,
+    _MaskRows,
+    _MissingKernel,
+    bound_gate,
+    causal_conv1d,
+    chunk_kda,
+    ChunkKdaCudnn,
+    ContextParallelRouting,
+    l2norm,
+    require_attn_gym,
+)
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
-from torchtitan.protocols.module import Module
 
 from .attention import (
     create_varlen_metadata_for_document,
     InnerAttention,
     local_head_split,
-    VarlenAttentionMetadata,
+)
+from .linear_attention import (
+    chunk_kernel_options,
+    LinearAttention,
+    LinearAttentionMetadata,
 )
 
 # Shape suffixes:
@@ -40,31 +49,11 @@ from .attention import (
 # W = convolution kernel width.
 
 
-@dataclass(frozen=True, slots=True)
-class LinearAttentionMetadata:
-    """Sequence metadata shared by convolutional linear-attention backends."""
-
-    varlen: VarlenAttentionMetadata | None
-    num_conv_history_tokens: int
-
-    def annotate_spmd_types(self) -> None:
-        """Annotate sequence offsets."""
-        if self.varlen is not None:
-            self.varlen.annotate_spmd_types()
-
-
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
 # SPMD region.
-for _kernel_function in (
-    _ShortConv,
-    _ConfiguredShortConv,
-    _FusedGate,
-    _L2Norm,
-    _ChunkKDA,
-    ChunkKdaCudnn,
-    _MaskRows,
-):
-    spmd.register_local_autograd_function(_kernel_function)
+for _kernel_function in (_FusedGate, _ChunkKDA, ChunkKdaCudnn, _MaskRows):
+    if _kernel_function is not _MissingKernel:
+        spmd.register_local_autograd_function(_kernel_function)
 
 
 class KDAKernel(Module):
@@ -82,6 +71,7 @@ class KDAKernel(Module):
                 )
 
     def __init__(self, config: Config):
+        require_attn_gym()
         super().__init__()
         self.lower_bound = config.lower_bound
 
@@ -113,6 +103,7 @@ class KDAKernel(Module):
             beta_1TH,
             cu_seqlens=cu_seqlens,
             autotune=not torch.are_deterministic_algorithms_enabled(),
+            kernel_options=chunk_kernel_options(q_1THK),
         )
         return output_1THV
 
@@ -138,9 +129,10 @@ class KDAKernel(Module):
             lower_bound=self.lower_bound,
             impl="fused",
         )
+        autotune = not torch.are_deterministic_algorithms_enabled()
         return (
-            l2norm(q_1THK),
-            l2norm(k_1THK),
+            l2norm(q_1THK, autotune=autotune),
+            l2norm(k_1THK, autotune=autotune),
             gate_1THK,
             raw_beta_1TH.float().sigmoid(),
         )
@@ -315,12 +307,11 @@ class InnerKDA(InnerAttention):
         )
 
 
-class KDA(Module):
+class KDA(LinearAttention):
     """Kimi Delta Attention with checkpoint-compatible Kimi K3 parameters."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        num_heads: int
+    class Config(LinearAttention.Config):
         head_dim: int
         conv_kernel_size: int
         q_proj: Linear.Config
@@ -333,13 +324,13 @@ class KDA(Module):
         forget_b: Linear.Config
         beta: Linear.Config
         output_gate: Linear.Config
-        inner_kda: Module.Config
         output_norm: GatedRMSNorm.Config
         output_proj: Linear.Config
 
         def __post_init__(self):
-            if self.num_heads < 1:
-                raise ValueError(f"num_heads must be positive, got {self.num_heads}")
+            if self.n_heads < 1:
+                raise ValueError(f"n_heads must be positive, got {self.n_heads}")
+            LinearAttention.Config.__post_init__(self)
             if self.head_dim != 128:
                 raise ValueError(
                     "Attention Gym KDA requires head_dim=128, " f"got {self.head_dim}."
@@ -351,7 +342,7 @@ class KDA(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.num_heads = config.num_heads
+        self.n_heads = config.n_heads
         self.head_dim = config.head_dim
 
         self.q_proj = config.q_proj.build()
@@ -364,12 +355,12 @@ class KDA(Module):
         self.forget_b = config.forget_b.build()
         self.beta = config.beta.build()
         self.output_gate = config.output_gate.build()
-        self.inner_kda = config.inner_kda.build()
+        self.inner_attention = config.inner_attention.build()
         self.output_norm = config.output_norm.build()
         self.output_proj = config.output_proj.build()
 
-        self.A_log = nn.Parameter(torch.empty(config.num_heads))
-        self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
+        self.A_log = nn.Parameter(torch.empty(config.n_heads))
+        self.dt_bias = nn.Parameter(torch.empty(config.n_heads, config.head_dim))
 
     def forward(
         self,
@@ -394,7 +385,7 @@ class KDA(Module):
         )
         raw_beta_TH = self.beta(x_TD)
         out_THV = remat.region(
-            self.inner_kda,
+            self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(

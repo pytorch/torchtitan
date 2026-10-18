@@ -119,9 +119,7 @@ def _common_setup(config):
 
     # TODO: Factor the model setup below with the training path so precompile
     # and training share a single implementation of build/parallelize/init.
-    model_config = copy.deepcopy(config.model)
-    model_config.set_sharding_(config.parallelism)
-    config.model = model_config
+    config.model = copy.deepcopy(config.model)
     if config.override.imports:
         apply_overrides(config.override, config)
     model_config = config.model
@@ -140,7 +138,7 @@ def _common_setup(config):
         training=config.training,
         parallelism=parallelism,
         compile_config=compile_config,
-        ac_config=config.activation_checkpoint,
+        activation_remat=config.activation_remat,
         dump_folder=config.dump_folder,
     )
 
@@ -251,9 +249,7 @@ def _precompile_aot_fx_trace(
 
         uses_aux_loss = next(model_config.traverse(AuxLoss.Config), None) is not None
         if not uses_aux_loss:
-            uses_aux_loss = any(
-                getattr(layer, "moe", None) is not None for layer in model_config.layers
-            )
+            uses_aux_loss = model_config.first_moe is not None
         if uses_aux_loss:
             _, routing_token_counts = get_mtp_token_counts(
                 target_mask=torch.ones_like(dummy_labels, dtype=torch.bool),
@@ -306,7 +302,7 @@ def _precompile_aot_fx_trace(
 
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
-    # CUDA graph is excluded — it runs at load time on each rank.
+    # Opt-in passes from cuda_graph.py must be applied by the caller at runtime.
     from torchtitan.experiments.graph_trainer.passes import (
         apply_graph_passes,
         compile_time_passes,
