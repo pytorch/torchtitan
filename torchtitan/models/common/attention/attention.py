@@ -508,11 +508,8 @@ class FlexInnerAttention(InnerAttention):
         "triton.cudagraphs": False,
     }
 
-    # fullgraph=True: flex must never run eagerly, so a graph break or the
-    # recompile limit raises instead of silently falling back to eager.
-    # recompile_limit=16: one compiled flex serves every layer, so graphs multiply
-    # across mask kinds (sliding vs global), grad mode, the first static token
-    # count, size-1 queries and Inductor's short-query branch.
+    # fullgraph=True: a graph break or a 17th graph raises, instead of silently running flex eagerly.
+    # recompile_limit=16: one compile serves every layer; Muse Spark needs 10 graphs (default 8).
     # pyrefly: ignore[no-matching-overload]
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention,
