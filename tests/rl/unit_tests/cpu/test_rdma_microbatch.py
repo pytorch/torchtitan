@@ -77,6 +77,8 @@ def _microbatch(num_tokens: int) -> TrainingMicrobatch:
         temperature=torch.ones(num_tokens),
         loss_mask=tokens % 2 == 0,
         advantages=tokens.float() / num_tokens,
+        num_real_tokens=num_tokens,
+        sum_squared_document_lengths=num_tokens**2,
         model_kwargs={
             "routed_expert_ids": torch.arange(num_tokens * 4, dtype=torch.uint8).view(
                 num_tokens, 2, 2
@@ -110,6 +112,9 @@ def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
     for leaf, rdma_leaf, read_leaf in zip(
         leaves, rdma_leaves, read_leaves, strict=True
     ):
+        if isinstance(leaf, int):  # the real-token counts go by value
+            assert rdma_leaf == read_leaf == leaf
+            continue
         assert isinstance(rdma_leaf, _TensorRef) == (leaf.nbytes >= min_bytes)
         assert torch.equal(leaf, read_leaf) and leaf.dtype == read_leaf.dtype
 

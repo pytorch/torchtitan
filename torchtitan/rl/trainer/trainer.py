@@ -273,11 +273,6 @@ class Trainer(Configurable):
         )
         engine = self.engine
         self._step_compute_start = time.perf_counter()
-        # The batcher pads every microbatch to the same token count.
-        self._step_num_tokens_per_dp_rank = (
-            len(microbatches)
-            * self.config.training.num_tokens_per_microbatch_per_dp_rank
-        )
         uses_rdma = bool(microbatches) and isinstance(microbatches[0], RDMAMicrobatch)
         microbatch_groups = [[microbatch] for microbatch in microbatches]
         if uses_rdma:
@@ -335,6 +330,27 @@ class Trainer(Configurable):
                     },
                 )
             )
+
+        # For MFU. Plain ints, so an RDMA microbatch carries them by value in `.fields`.
+        # The controller logs DP rank 0's metrics, so every rank keeps the mean over DP ranks.
+        # TODO: only MonarchRDMAMicrobatch has `fields`; declare these two counts on RDMAMicrobatch
+        # when another actor system implements it.
+        local_counts = torch.tensor(
+            [
+                sum(
+                    microbatch.fields[name] if uses_rdma else getattr(microbatch, name)
+                    for microbatch in microbatches
+                )
+                for name in ("num_real_tokens", "sum_squared_document_lengths")
+            ],
+            device=engine.device,
+        )
+        dp_counts = dist_utils.dist_sum_tensor(
+            local_counts, engine.parallelism_context.get_optional_mesh("dp")
+        )
+        self._step_num_real_tokens, self._step_sum_squared_document_lengths = (
+            count / self.dp_size for count in dp_counts.tolist()
+        )
         return metrics
 
     @sl.log_trace_span("optim_step")
@@ -354,13 +370,27 @@ class Trainer(Configurable):
         self._mark_model_state_dict_ready_for_staging()
         self._controller_state.value = controller_state
 
+        # f(L), the per-token FLOPs at L attended tokens, is intercept + slope * L. A document of
+        # length L costs L * f(L), so a DP rank's step costs intercept * sum(L) + slope * sum(L**2).
+        # TODO: sliding-window layers and DeepSeek-V4's compressed attention are not linear in L.
+        # Use a per-batch FLOPs estimator once one lands in core.
+        slope = (
+            engine.num_flops_per_token - engine.num_flops_per_token_at_one_token
+        ) / (self.config.training.max_context_length - 1)
+        intercept = engine.num_flops_per_token_at_one_token - slope
+        num_real_tokens = self._step_num_real_tokens
+        step_flops = (
+            intercept * num_real_tokens
+            + slope * self._step_sum_squared_document_lengths
+        )
+
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.
         performance = compute_training_performance_metrics(
-            num_tokens=self._step_num_tokens_per_dp_rank,
+            num_tokens=num_real_tokens,
             elapsed_time=time.perf_counter() - self._step_compute_start,
             non_data_parallel_size=engine.parallelism_context.non_data_parallel_size,
-            num_flops_per_token=engine.num_flops_per_token,
+            num_flops_per_token=step_flops / num_real_tokens,
             gpu_peak_flops=self.gpu_peak_flops,
             has_quantization=engine.has_quantization,
         )

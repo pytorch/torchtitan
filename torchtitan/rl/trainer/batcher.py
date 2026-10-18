@@ -49,6 +49,8 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
     temperature: torch.Tensor  # [T]
     loss_mask: torch.Tensor  # [T]
     advantages: torch.Tensor  # [T]
+    num_real_tokens: int  # non-padding tokens: sum of the packed samples' input lengths
+    sum_squared_document_lengths: int  # sum of each packed sample's input length squared
 
     def loss_kwargs(self) -> dict[str, torch.Tensor]:
         return {
@@ -812,6 +814,9 @@ class Batcher(Configurable):
         def pad(key: str, num_tokens: int) -> np.ndarray:
             return np.full(num_tokens, pad_values[key], dtype=_DTYPES[key])
 
+        num_real_tokens = 0
+        sum_squared_document_lengths = 0
+
         # Shift labels/logits and pad to per_sample_pad_multiple.
         for training_sample in training_samples:
             sample = {
@@ -823,6 +828,8 @@ class Batcher(Configurable):
             }
             sample_len = len(sample["input_ids"])
             unpadded_len = sample_len
+            num_real_tokens += unpadded_len
+            sum_squared_document_lengths += unpadded_len**2
 
             # pad to multiple
             if self._per_sample_pad_multiple:
@@ -873,6 +880,8 @@ class Batcher(Configurable):
             padding_mask=padding_mask_tensor,
             loss_token_counts=loss_token_counts,
             routing_token_counts=routing_token_counts,
+            num_real_tokens=num_real_tokens,
+            sum_squared_document_lengths=sum_squared_document_lengths,
         )
 
     def _padding_fraction(

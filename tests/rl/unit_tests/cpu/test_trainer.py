@@ -19,7 +19,9 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.observability.sdc_replayer import SDCReplayer
+from torchtitan.rl.actors.monarch.rdma_microbatch import MonarchRDMAMicrobatch
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.controller_state import MirroredState
@@ -348,6 +350,9 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             sdc_replayer=None,
             model_config=SimpleNamespace(mtp_layers=None),
             device=torch.device("cpu"),
+            parallelism_context=SimpleNamespace(
+                get_optional_mesh={"dp": "dp_mesh"}.get
+            ),
         )
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
@@ -367,6 +372,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         trainer.engine = engine
         trainer.config = Trainer.Config(model=MagicMock())
         trainer.dp_rank = 1
+        trainer.dp_size = 2
         trainer._num_rdma_batches_read = 0
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
@@ -388,14 +394,17 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             temperature=torch.tensor([1.0]),
             loss_mask=torch.tensor([True]),
             advantages=torch.tensor([1.0]),
+            num_real_tokens=3,
+            sum_squared_document_lengths=5,
         )
 
         # This rank's column (dp_rank 1); with `rdma_min_tensor_bytes` the trainer reads it.
+        # min_bytes above every tensor's size: nothing is registered, and every field goes by value.
         microbatches = (
             [
-                MagicMock(
-                    spec=RDMAMicrobatch,
-                    read=AsyncMock(return_value=batch),
+                MonarchRDMAMicrobatch.register(
+                    batch,
+                    min_bytes=1024,
                     batch_index=0,
                     dp_rank=1,
                     microbatch_index=microbatch_index,
@@ -406,12 +415,17 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             else [batch, batch]
         )
 
-        result = await Trainer.forward_backward(
-            trainer,
-            microbatches,
-            torch.tensor([3]),
-            torch.tensor([2]),
-        )
+        # DP rank 0 got only padding bins, so the sum over the DP mesh is this rank's counts.
+        with patch(
+            "torchtitan.rl.trainer.trainer.dist_utils.dist_sum_tensor",
+            side_effect=lambda counts, mesh: counts,
+        ) as dist_sum_tensor:
+            result = await Trainer.forward_backward(
+                trainer,
+                microbatches,
+                torch.tensor([3]),
+                torch.tensor([2]),
+            )
 
         engine.forward_backward.assert_called_once_with(
             microbatch_groups=ANY,
@@ -422,9 +436,10 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
         assert isinstance(groups, RDMAMicrobatchPrefetcher) == rdma
         assert list(groups) == [[batch], [batch]]
-        assert trainer._step_num_tokens_per_dp_rank == (
-            2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
-        )
+        # Summed over the column (from `.fields` for RDMA), then averaged over the 2 DP ranks.
+        assert dist_sum_tensor.call_args.args[1] == "dp_mesh"
+        assert trainer._step_num_real_tokens == 2 * 3 / 2
+        assert trainer._step_sum_squared_document_lengths == 2 * 5 / 2
         if rdma:
             assert trainer._num_rdma_batches_read == 1
             # The read time is reported only when there was a read.
@@ -491,6 +506,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             num_completed_steps=4,
             ntokens_seen=12,
             num_flops_per_token=200,
+            num_flops_per_token_at_one_token=200,
             has_quantization=False,
             device=torch.device("cuda", 0),
             device_memory_monitor=device_memory_monitor,
@@ -505,8 +521,10 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         trainer.engine = engine
         trainer._controller_state = MirroredState()
         trainer.gpu_peak_flops = 1000
+        trainer.config = Trainer.Config(model=MagicMock())
         trainer._step_compute_start = 0.0
-        trainer._step_num_tokens_per_dp_rank = 10
+        trainer._step_num_real_tokens = 10
+        trainer._step_sum_squared_document_lengths = 50
         trainer._staging_model_state_dict_stream = MagicMock()
         trainer._staging_device_module = MagicMock()
         compute_stream = MagicMock()
@@ -568,3 +586,42 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         device_memory_monitor.reset_peak_stats.assert_called_once_with()
 
     asyncio.run(run())
+
+
+def test_optim_step_counts_each_real_document_at_its_own_length() -> None:
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+    with torch.device("meta"):
+        model = model_config.build()
+
+    def flops_per_token(num_attended_tokens: int) -> int:
+        return model_config.get_nparams_and_flops(model, num_attended_tokens)[1]
+
+    trainer = object.__new__(Trainer)
+    trainer.config = Trainer.Config(model=MagicMock())
+    trainer.engine = MagicMock(
+        num_flops_per_token=flops_per_token(trainer.config.training.max_context_length),
+        num_flops_per_token_at_one_token=flops_per_token(1),
+        has_quantization=False,
+        parallelism_context=SimpleNamespace(non_data_parallel_size=1),
+    )
+    trainer._controller_state = MirroredState()
+    trainer._staging_model_state_dict_stream = None
+    trainer.gpu_peak_flops = 1e15
+    trainer._step_compute_start = 0.0
+    # Documents of length 3 and 2.
+    trainer._step_num_real_tokens = 3 + 2
+    trainer._step_sum_squared_document_lengths = 3**2 + 2**2
+
+    with (
+        patch("torchtitan.rl.trainer.trainer.time.perf_counter", return_value=1.0),
+        patch(
+            "torchtitan.rl.trainer.trainer.collect_aux_loss_metrics", return_value={}
+        ),
+    ):
+        result = asyncio.run(Trainer.optim_step(trainer, controller_state={}))
+
+    # One second on one GPU. Exact in float64; a tight tolerance catches a wrong attention slope.
+    step_flops = 3 * flops_per_token(3) + 2 * flops_per_token(2)
+    assert result.metrics["trainer/mfu_percent"] == pytest.approx(
+        100 * step_flops / trainer.gpu_peak_flops, rel=1e-12
+    )
