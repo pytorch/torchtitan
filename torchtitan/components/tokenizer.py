@@ -287,7 +287,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         self, token_str: str, token_config: dict, token_id: int | None = None
     ) -> AddedToken:
         """
-        Process a special token and update BOS/EOS attributes if applicable.
+        Process a configured added token and update BOS/EOS attributes if applicable.
 
         Args:
             token_str: The token string content
@@ -386,7 +386,8 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 )
                 added_tokens_to_add.append(added_token)
 
-        # add_special_tokens would mark ordinary added tokens as special too.
+        # add_tokens keeps each AddedToken.special flag; add_special_tokens would
+        # set special=True on all of them.
         if added_tokens_to_add:
             self.tokenizer.add_tokens(added_tokens_to_add)
 
