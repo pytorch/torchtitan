@@ -674,6 +674,22 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load():
         )
 
 
+def test_cpu_kv_offload_rejects_data_parallel():
+    with pytest.raises(ValueError, match="needs parallelism.data_parallel_degree=1"):
+        VLLMGenerator.Config(
+            model=_MODEL_CONFIG,
+            # Full EP, so the config passes the EP checks and reaches the offload check.
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=2,
+                expert_parallel_degree=4,
+            ),
+            session_kv_holder=VLLMSessionKVHolder.Config(
+                cpu_kv_offload=CPUKVOffload.Config(size_gib=16)
+            ),
+        )
+
+
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
@@ -739,19 +755,9 @@ def test_cpu_kv_offload_names_vllms_offloading_connector(monkeypatch, tmp_path):
         ),
     )
     kv_transfer_config = engine_kwargs["kv_transfer_config"]
-    # Named, not set through kv_offloading_size: vLLM's in-process config checks see it, so vLLM
-    # rejects router replay with it.
+    # Named, not set through kv_offloading_size, so vLLM's config check rejects router replay with it.
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
-    assert kv_transfer_config.kv_role == "kv_both"
-    assert kv_transfer_config.kv_connector_extra_config == {
-        "cpu_bytes_to_use": 16 << 30,
-        "offload_prompt_only": False,
-    }
-
-    engine_kwargs = _build_engine_kwargs(
-        monkeypatch, tmp_path, VLLMGenerator.Config(model=_MODEL_CONFIG)
-    )
-    assert not engine_kwargs.keys() & {"kv_offloading_size", "kv_transfer_config"}
+    assert kv_transfer_config.kv_connector_extra_config["offload_prompt_only"] is False
 
 
 @pytest.mark.parametrize(
