@@ -185,10 +185,8 @@ class ComplexRoPE(RoPE):
     class Config(RoPE.Config):
         pass
 
-    # Lower the real/imag stack in _rotate_pairs as per-half copies instead of
-    # Inductor's masked pointwise stack: 1.08-1.20x faster fwd+bwd across RoPE
-    # shapes (GB300). It relies on the per-half cast there; without it the
-    # option adds an fp32 -> bf16 copy and is slower.
+    # Cat options: _rotate_pairs writes its real/imag halves with one store each, not one masked
+    # kernel over both: 1.08-1.20x faster fwd+bwd on GB300 (needs the per-half cast there).
     @local_compile(
         "complex_rope",
         batch_invariant=True,
@@ -282,10 +280,8 @@ class ComplexRoPE(RoPE):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Apply complex RoPE using adjacent-dim pairs."""
         if torch.compiler.is_compiling():
-            # Inductor cannot generate code for complex mul. The same products
-            # in real arithmetic fuse with the casts and match the eager forward
-            # to 1 bf16 ulp (FMA contraction can differ). Eager keeps the
-            # complex ops: fewer kernels without fusion.
+            # Inductor can't compile a complex multiply, so rotate in real arithmetic: it fuses
+            # with the casts, within 1 bf16 ulp of eager. Eager keeps the complex ops.
             cache = torch.view_as_real(rope_cache)
             cos, sin = cache[..., 0], cache[..., 1]
             if inverse:
@@ -326,12 +322,10 @@ class ComplexRoPE(RoPE):
 
 
 class _RotatePairs(torch.autograd.Function):
-    """``ComplexRoPE._rotate_pairs`` with a backward that is also one rotation kernel.
+    """`ComplexRoPE._rotate_pairs` whose backward rotates the gradient by the opposite angle.
 
-    The gradient of a rotation is the rotation by the opposite angle; written
-    out, the backward is the same strided kernel as the forward instead of the
-    masked ``select_backward`` kernel autograd would build. ``cos`` and ``sin``
-    get no gradient: RoPE caches are buffers.
+    One strided kernel each way, instead of autograd's masked `select_backward`.
+    `cos` and `sin` get no gradient: they come from the RoPE cache buffer.
     """
 
     @staticmethod
