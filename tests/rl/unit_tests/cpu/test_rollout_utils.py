@@ -318,43 +318,33 @@ def test_build_from_group_drops_only_the_rollout_with_an_empty_completion(
     assert dropped.value.value == 1.0
 
 
-def test_build_from_group_drops_a_lone_trainable_rollout_as_zero_std() -> None:
-    # One rollout left of two has no sibling to compare against
-    empty = _scored_rollout([], reward=0.0, advantage=-0.5)
+@pytest.mark.parametrize("num_trainable", [0, 1])
+def test_build_from_group_drops_a_group_with_fewer_than_two_trainable_rollouts(
+    num_trainable: int,
+) -> None:
+    # One rollout left of two has no sibling to compare against, even with zero-std groups kept.
     trainable = _scored_rollout(
         [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
         reward=1.0,
         advantage=0.5,
     )
     trainable.rollout_id = 1
+    empty = _scored_rollout([], reward=0.0, advantage=-0.5)
+    rollouts = [trainable] * num_trainable + [empty] * (2 - num_trainable)
 
     group = (
-        TrainingSampleBuilder.Config()
+        TrainingSampleBuilder.Config(drop_zero_std_reward_groups=False)
         .build()
         .build_from_group(
-            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[empty, trainable])
-        )
-    )
-
-    assert group.training_samples == []
-    metric_keys = [metric.key for metric in group.metrics]
-    assert "training_sample_builder/num_groups_dropped_zero_std" in metric_keys
-
-
-def test_build_from_group_counts_an_all_empty_group_as_untrainable() -> None:
-    empty_rollouts = [_scored_rollout([], reward=0.0, advantage=0.0) for _ in range(2)]
-
-    group = (
-        TrainingSampleBuilder.Config()
-        .build()
-        .build_from_group(
-            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=empty_rollouts)
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=rollouts)
         )
     )
 
     assert group.training_samples == []
     assert {metric.key: metric.value.value for metric in group.metrics} == {
-        "training_sample_builder/num_rollouts_dropped_empty_completion": 2.0,
+        "training_sample_builder/num_rollouts_dropped_empty_completion": float(
+            2 - num_trainable
+        ),
         "training_sample_builder/num_groups_dropped_untrainable": 1.0,
     }
 

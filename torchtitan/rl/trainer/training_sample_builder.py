@@ -142,9 +142,9 @@ class TrainingSampleBuilder(Configurable):
 
         # Drop each rollout with no turns or an empty completion, and keep its siblings: e.g. the env
         # failed before the first turn, the initial prompt was too long, or a request was aborted.
-        # TODO: `AdvantageEstimator` runs in the rollouter, before this filter, so dropped rollouts still
-        # count in the group mean: k of G dropped at reward 0 raise each trainable advantage by
-        # k * mean(trainable rewards) / G. Skip them there too; that needs this same check there.
+        # TODO: `AdvantageEstimator` runs earlier, in the rollouter, so dropped rollouts still shift their
+        # siblings' advantages (1 of 16 dropped at reward 0, about half the rest passing: about +0.03).
+        # Apply this same check there.
         trainable_rollouts = [
             rollout
             for rollout in rollout_group.rollouts
@@ -164,7 +164,8 @@ class TrainingSampleBuilder(Configurable):
                     m.Sum(float(num_rollouts_dropped_empty_completion)),
                 )
             )
-        if not trainable_rollouts:
+        # Drop the group if fewer than 2 rollouts are left to compare (a group of 1 by config keeps its one).
+        if len(trainable_rollouts) < min(2, len(rollout_group.rollouts)):
             metrics.append(
                 m.Metric(
                     "training_sample_builder/num_groups_dropped_untrainable", m.Sum(1.0)
@@ -174,12 +175,9 @@ class TrainingSampleBuilder(Configurable):
                 group_id=rollout_group.group_id, training_samples=[], metrics=metrics
             )
 
-        # Zero-std reward: no learning signal across siblings. One rollout left of several has no
-        # sibling to compare against, so it counts as zero-std.
+        # Zero-std reward: no learning signal across siblings.
         rewards = [rollout.reward for rollout in trainable_rollouts]
-        is_zero_std = (
-            len(rollout_group.rollouts) > 1 and statistics.pstdev(rewards) == 0.0
-        )
+        is_zero_std = len(rewards) > 1 and statistics.pstdev(rewards) == 0.0
         metrics.append(
             m.Metric(
                 "rollout_reward/group_zero_std_frac",
