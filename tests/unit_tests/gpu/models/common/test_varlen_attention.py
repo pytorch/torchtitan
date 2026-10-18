@@ -28,9 +28,7 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.attention.cp_attention import (
-    UlyssesCPVarlenInnerAttention,
-)
+from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -194,7 +192,7 @@ class TestVarlenUlyssesNumerics(DTensorTestBase):
                     expected_loss.backward()
 
                     with set_current_spmd_mesh(mesh):
-                        actual = UlyssesCPVarlenInnerAttention.Config().build()(
+                        actual = UlyssesVarlenInnerAttention.Config().build()(
                             *local_inputs,
                             attention_metadata=metadata,
                             enable_gqa=kv_heads != 8,

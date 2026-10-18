@@ -17,7 +17,7 @@ from torchtitan.experiments.transformers_modeling_backend.model import (
     HFTransformerModel,
 )
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
+    AllGatherKVFlexInnerAttention,
 )
 
 
@@ -117,7 +117,7 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         shard_tensors,
     )
     monkeypatch.setattr(
-        KVAllGatherCPFlexInnerAttention,
+        AllGatherKVFlexInnerAttention,
         "prepare_cp_metadata",
         staticmethod(prepare_cp_metadata),
     )

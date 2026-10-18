@@ -49,7 +49,8 @@ from torchtitan.rl.rollout.types import (
 )
 
 if TYPE_CHECKING:
-    from torchtitan.rl.generator.generator import SamplingConfig
+    from torchtitan.rl.actors.system import ActorSystem
+    from torchtitan.rl.generator.types import SamplingConfig
 
 
 logger = logging.getLogger(__name__)
@@ -168,12 +169,17 @@ class VerifiersRollouter(Rollouter):
     async def setup_async(
         self,
         *,
+        actor_system: ActorSystem,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
     ) -> None:
-        """Start the EnvServer and connect it to TorchTitan generation."""
-        del tokenizer_config
+        """Start the EnvServer and connect it to TorchTitan generation.
+
+        Rollouts run in the EnvServer, so no rollout worker pool is spawned through
+        ``actor_system``.
+        """
+        del actor_system, tokenizer_config
         if self._verifiers_env_client is not None:
             return
         if not isinstance(renderer_config, RenderersConfigAdapter):

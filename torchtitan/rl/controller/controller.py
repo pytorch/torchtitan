@@ -47,7 +47,7 @@ _batcher_loop
                         |  ^                           |
           add group     |  | maybe_training_batch      | put batch
                         v  |                           v
-BatcherActor (own process)                           training_batch_queue
+Batcher (own process)                                training_batch_queue
 +-------------------------------------------------+   +----------------------------------------------+
 | build_from_group -> add_training_samples        |   | size 1; holds TrainerStepBatch | None        |
 | pack at num_prompts_per_train_step               |   +---------------------+------------------------+
@@ -95,22 +95,17 @@ import os
 import time
 import warnings
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
 import torch  # noqa: F401
-import torchstore as ts
-
-from monarch.actor import ProcMesh, this_host
 
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.observability import structured_logger as sl
-from torchtitan.rl.actors.monarch.batcher import BatcherActor
-from torchtitan.rl.actors.monarch.generator import VLLMGeneratorActor
-from torchtitan.rl.actors.monarch.torch_elastic import setup_torch_elastic_env
-from torchtitan.rl.actors.monarch.trainer import TrainerActor
+from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
@@ -121,7 +116,8 @@ from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
-from torchtitan.rl.generator.generator import SamplingConfig, VLLMGenerator
+from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
@@ -228,11 +224,20 @@ class AsyncLoopConfig(Configurable.Config):
         ) // self.num_prompts_per_train_step
 
 
+def _default_actor_system_config() -> ActorSystem.Config:
+    # Imported here so the controller depends on Monarch only when it is the configured
+    # actor system.
+    from torchtitan.rl.actors.monarch.system import MonarchActorSystem
+
+    return MonarchActorSystem.Config()
+
+
 class Controller(Configurable):
     """Top-level RL async training orchestrator.
 
-    Owns a `Trainer` actor (gradient updates), a `VLLMGenerator` actor
-    (sampling), and a `Rollouter` (datasets + rubric + env construction).
+    Owns a `Trainer` actor (gradient updates), `Generator` actors
+    (sampling), and a `Rollouter` (datasets + rubric + env construction),
+    placed on processes by its `ActorSystem` (`Config.actor_system`).
 
     Check the docstring at the top of the file for more details.
 
@@ -240,12 +245,11 @@ class Controller(Configurable):
 
         config = recipes.rl_grpo_qwen3_0_6b_varlen()
         controller = config.build()
-        trainer_mesh = ...        # provisioned by the caller (see train.py)
-        generator_meshes = ...
-        await controller.setup_async(
-            trainer_mesh=trainer_mesh, generator_meshes=generator_meshes
-        )
-        await controller.run()
+        try:
+            await controller.setup_async()
+            await controller.run()
+        finally:
+            await controller.close()
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -283,8 +287,8 @@ class Controller(Configurable):
         """Trainer config. Controls the trainer model, optimizer, training, parallelism."""
 
         # TODO: put generator, num generators and generator router in a separate config
-        generator: VLLMGenerator.Config
-        """VLLMGenerator actor configuration (generator model, vLLM engine, sampling)."""
+        generator: Generator.Config
+        """Generator actor configuration (generator model, vLLM engine, sampling)."""
 
         num_generators: int = 1
         """Number of generator replicas to spawn as separate proc meshes.
@@ -298,6 +302,13 @@ class Controller(Configurable):
             default_factory=InterGeneratorRouter.Config
         )
         """Generator routing strategy configuration."""
+
+        actor_system: ActorSystem.Config = field(
+            default_factory=_default_actor_system_config
+        )
+        """The actor framework that places the trainer, generators, router and rollout
+        workers on processes, selected by config type, e.g.
+        ``MonarchActorSystem.Config()`` (default)."""
 
         # TODO: rename it to metrics_processor
         metrics: m.MetricsProcessor.Config = field(
@@ -418,14 +429,13 @@ class Controller(Configurable):
         if config.override.imports:
             apply_overrides(config.override, config)
         config.maybe_log()
-        self.trainer: Trainer | None = None
-        # One trainer sub-mesh per DP rank (its cp * tp ranks); set in setup_async.
-        self._trainer_by_dp_rank = []
+        self.actor_system: ActorSystem | None = None
+        self.trainer: TrainerHandle | None = None
         self.generator_router: InterGeneratorRouter | None = None
-        self.batcher: BatcherActor | None = None
+        # The batcher's single-actor handle.
+        self.batcher: Any | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
         self.start_step = 0
-        self._proc_meshes = []
         self.metrics_processor: m.MetricsProcessor = config.metrics.build(
             log_dir=config.dump_folder,
             job_config=config.to_dict(),
@@ -447,12 +457,12 @@ class Controller(Configurable):
         )
 
     async def close(self):
-        """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
+        """Best-effort: tear down actors, close metric backends, then stop the actor system."""
         logger.info("Closing: tearing down actors and process meshes.")
 
         if self.trainer is not None:
             try:
-                await self.trainer.close.call()
+                await self.trainer.all_ranks.close.call()
             except Exception:
                 logger.exception("trainer.close failed")
 
@@ -484,12 +494,8 @@ class Controller(Configurable):
         except Exception:
             logger.exception("metrics_processor close failed")
 
-        for i, mesh in enumerate(self._proc_meshes):
-            try:
-                await mesh.stop()
-            except Exception:
-                logger.exception("mesh.stop[%d] failed", i)
-        self._proc_meshes = []
+        if self.actor_system is not None:
+            await self.actor_system.stop()
 
     def _get_rank_0_value(self, result):
         """Extract rank 0 result from a Monarch ValueMesh.
@@ -542,28 +548,22 @@ class Controller(Configurable):
         return release_session
 
     @sl.log_trace_span("setup_async")
-    async def setup_async(
-        self,
-        *,
-        trainer_mesh: ProcMesh,
-        generator_meshes: list[ProcMesh],
-    ):
-        """Spawn Monarch actors on separate meshes and initialize weights.
+    async def setup_async(self, *, actor_system: ActorSystem | None = None):
+        """Spawn the services through the actor system and initialize weights.
 
-        Kept separate from ``__init__`` because actor spawning, torch
-        elastic env setup, TorchStore initialization, and the initial
-        model state dict push/pull are all ``await``-based runtime side effects
-        that cannot run in a synchronous constructor.
+        Kept separate from ``__init__`` because provisioning processes, spawning
+        actors, TorchStore initialization, and the initial model state dict
+        push/pull are all ``await``-based runtime side effects that cannot run in
+        a synchronous constructor.
 
-        The trainer and generator meshes are provisioned by the caller (see
-        ``spawn_proc_mesh``). The router and rollout worker meshes are created
-        on the controller host. This method spawns the actors and synchronizes
-        initial weights from trainer to generator. Must be called before
-        :meth:`run`.
+        Provisions and spawns the trainer, generators, router, batcher and rollout
+        workers through the actor system, and synchronizes initial weights from
+        trainer to generator. Must be called before :meth:`run`.
 
         Args:
-            trainer_mesh: ProcMesh the trainer actor is spawned on.
-            generator_meshes: ProcMesh objects the generator actors are spawned on.
+            actor_system: An actor system the launcher built, e.g. a
+                ``MonarchActorSystem`` on hosts it allocated; None builds
+                ``config.actor_system``.
         """
         # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
@@ -576,8 +576,6 @@ class Controller(Configurable):
             num_validation_groups,
         )
         config = self.config
-        if not generator_meshes:
-            raise ValueError("setup_async requires at least one generator mesh")
 
         trainer_parallelism = config.trainer.parallelism
         dp_shard = max(trainer_parallelism.data_parallel_shard_degree, 1)
@@ -586,7 +584,7 @@ class Controller(Configurable):
         )
 
         generator_dp_degree = max(config.generator.parallelism.data_parallel_degree, 1)
-        num_generator_dp_shards = len(generator_meshes) * generator_dp_degree
+        num_generator_dp_shards = config.num_generators * generator_dp_degree
 
         # Ceiling (not target) for the generator's max_num_seqs: the per-generator
         # upper bound on concurrently scheduled sequences. vLLM may admit fewer if KV
@@ -602,65 +600,32 @@ class Controller(Configurable):
             num_generator_dp_shards,
         )
 
-        # TODO(observability): the mesh_spawn span wraps ~80 LoC of branching
-        # provisioner logic. Pull a PerHostProvisioner.spawn_meshes(...) helper and
-        # shrink this span to a single call.
         with sl.log_trace_span("mesh_spawn"):
-            # One process, so the router is a singleton and every caller reaches
-            # it with `call_one`. It gets its own mesh rather than sharing the
-            # controller's process so routing does not contend with the training
-            # loop for the controller's GIL.
-            router_mesh = this_host().spawn_procs(per_host={"cpus": 1})
-            # Same for the batcher: build + pack would contend for the controller's GIL.
-            # It drops its own buffers (maybe_release_oldest_batch): Monarch's drop must run on the owner's host.
-            batcher_mesh = this_host().spawn_procs(per_host={"cpus": 1})
-            # Store proc meshes for cleanup
-            self._proc_meshes = [
-                router_mesh,
-                batcher_mesh,
-                trainer_mesh,
-                *generator_meshes,
-            ]
-
-            await setup_torch_elastic_env(trainer_mesh)
-            for generator_mesh in generator_meshes:
-                await setup_torch_elastic_env(generator_mesh)
-
-            # Spawn actors on their respective meshes
-            self.trainer = trainer_mesh.spawn(
-                "trainer",
-                TrainerActor,
+            if actor_system is None:
+                actor_system = config.actor_system.build()
+            self.actor_system = actor_system
+            await actor_system.provision(
+                trainer_parallelism=config.trainer.parallelism,
+                generator_parallelism=config.generator.parallelism,
+                num_generators=config.num_generators,
+            )
+            self.trainer = await actor_system.spawn_trainer(
                 config.trainer,
+                dp_degree=self.trainer_dp_degree,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
                 max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
             )
-
             # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
-            generators = []
-            for idx, generator_mesh in enumerate(generator_meshes):
-                actor_name = (
-                    "generator" if len(generator_meshes) == 1 else f"generator_{idx}"
-                )
-                generator = generator_mesh.spawn(
-                    actor_name,
-                    VLLMGeneratorActor,
-                    config.generator,
-                    model_path=config.hf_assets_path,
-                    max_num_seqs=max_num_seqs,
-                    output_dir=config.dump_folder,
-                )
-                generators.append(generator)
-            self.generator_router = router_mesh.spawn(
-                "generator_router",
-                InterGeneratorRouter,
+            self.generator_router = await actor_system.spawn_generator_router(
                 config.generator_router,
-                generators=generators,
+                generator_config=config.generator,
+                model_path=config.hf_assets_path,
+                max_num_seqs=max_num_seqs,
+                output_dir=config.dump_folder,
             )
-            self.batcher = batcher_mesh.spawn(
-                "batcher",
-                BatcherActor,
+            self.batcher = await actor_system.spawn_batcher(
                 async_loop.batcher,
                 num_tokens_per_microbatch_per_dp_rank=(
                     config.trainer.training.num_tokens_per_microbatch_per_dp_rank
@@ -675,60 +640,21 @@ class Controller(Configurable):
             )
 
             await self._rollouter.setup_async(
+                actor_system=actor_system,
                 tokenizer_config=config.tokenizer,
                 renderer_config=config.renderer,
                 hf_assets_path=config.hf_assets_path,
             )
 
         # Initialize TorchStore, which carries the model state dict from the trainer to the generators.
-        # StorageVolumes are spawned on the trainer mesh so they are colocated
-        # with the weight source for faster data access in the non-RDMA path.
-        # https://github.com/meta-pytorch/torchstore
         with sl.log_trace_span("torchstore_init"):
-            await ts.initialize(
-                mesh=trainer_mesh,
-                strategy=ts.TorchStoreStrategy(),
-                client_type=ts.ClientType.ROUTING,
-            )
-            # TorchStore clients are cached per process. Initialize every actor
-            # rank before the role-less state-dict APIs use that cache.
-            await asyncio.gather(
-                self.trainer.initialize_torchstore_client.call(),
-                *(
-                    generator.initialize_torchstore_client.call(
-                        requester_index=requester_index
-                    )
-                    for requester_index, generator in enumerate(generators)
-                ),
-            )
-
-        # Torch ranks follow this mesh's order and the trainer lays them out as
-        # (dp, cp, tp) with no PP, so each DP rank's cp * tp ranks are consecutive.
-        trainer_dp_cp_tp = self.trainer.flatten("rank").split(
-            rank=("dp", "cp_tp"), dp=self.trainer_dp_degree
-        )
-        self._trainer_by_dp_rank = [
-            trainer_dp_cp_tp.slice(dp=dp_rank)
-            for dp_rank in range(self.trainer_dp_degree)
-        ]
-        # Check that layout once: if it drifts, one TP group's ranks get different columns.
-        for dp_rank, trainer_at_dp_rank in enumerate(self._trainer_by_dp_rank):
-            reported_dp_ranks = list(
-                (await trainer_at_dp_rank.get_dp_rank.call()).values()
-            )
-            if set(reported_dp_ranks) != {dp_rank}:
-                raise RuntimeError(
-                    f"Trainer ranks at DP rank {dp_rank} report DP ranks "
-                    f"{reported_dp_ranks}; the controller assumes the trainer orders "
-                    "ranks as (dp, cp, tp)."
-                )
+            await actor_system.initialize_torchstore()
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored
         # policy version and controller-owned data state.
-        rank_0_trainer = self.trainer.flatten("rank").slice(rank=0)
         self.start_step, controller_state = await asyncio.gather(
-            rank_0_trainer.get_policy_version.call_one(),
-            rank_0_trainer.get_controller_state.call_one(),
+            self.trainer.rank0.get_policy_version.call_one(),
+            self.trainer.rank0.get_controller_state.call_one(),
         )
         if controller_state is not None:
             dataloader_state = controller_state[DATALOADER_STATE_KEY]
@@ -753,7 +679,7 @@ class Controller(Configurable):
 
         # Initial push and pull: only the trainer loads weights; generators pull them at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):
-            await self.trainer.push_model_state_dict.call()
+            await self.trainer.all_ranks.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
             await self.generator_router.pull_model_state_dict.call_one(self.start_step)
 
@@ -1142,7 +1068,7 @@ class Controller(Configurable):
             Trainer:    forward/backward N+1 (does not mutate persistent model state)
 
         See `Trainer.push_model_state_dict` for why staging can overlap forward/backward, and
-        `VLLMGenerator.load_model_state_dict` for how a generator applies the load between steps.
+        `Generator.load_model_state_dict` for how a generator applies the load between steps.
 
         Impact on off-policiness: no sample is born stale, because the buffer admits new rollout
         groups only after the generators load the new policy.
@@ -1157,7 +1083,7 @@ class Controller(Configurable):
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
             with sl.log_trace_span("sync_log_step"):
-                await self.trainer.sync_log_step.call(step)
+                await self.trainer.all_ranks.sync_log_step.call(step)
                 await self.generator_router.sync_log_step.call_one(step)
                 # Not awaited: it would wait behind an in-flight add_group.
                 self.batcher.sync_log_step.broadcast(step)
@@ -1198,7 +1124,7 @@ class Controller(Configurable):
                     step_timer.record("timing/step/forward_backward"),
                 ):
                     # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over TCP).
-                    # Sending the MonarchRDMAMicrobatches during the previous optim_step would hide it.
+                    # Sending the RDMAMicrobatches during the previous optim_step would hide it.
                     try:
                         # Send each DP rank only its column of the grid.
                         fwd_bwd_results = await asyncio.gather(
@@ -1209,7 +1135,7 @@ class Controller(Configurable):
                                     packed.global_routing_token_counts,
                                 )
                                 for dp_rank, trainer_at_dp_rank in enumerate(
-                                    self._trainer_by_dp_rank
+                                    self.trainer.by_dp_rank
                                 )
                             )
                         )
@@ -1246,7 +1172,7 @@ class Controller(Configurable):
                         DATALOADER_STATE_KEY: self._rollouter.state_dict()
                     }
                     optimizer_result = self._get_rank_0_value(
-                        await self.trainer.optim_step.call(
+                        await self.trainer.all_ranks.optim_step.call(
                             controller_state=controller_state,
                             last_step=(step == num_training_steps),
                         )
@@ -1317,7 +1243,7 @@ class Controller(Configurable):
         """Push the trainer's model state dict to TorchStore; returns its wall time in seconds."""
         with sl.log_trace_span("trainer_push_model_state_dict"):
             start = time.perf_counter()
-            await self.trainer.push_model_state_dict.call()
+            await self.trainer.all_ranks.push_model_state_dict.call()
             return time.perf_counter() - start
 
     async def _pull_model_state_dict_and_release_groups(
