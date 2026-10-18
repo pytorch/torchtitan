@@ -314,11 +314,18 @@ class RolloutWorker(Configurable):
         """Post-scoring advantage estimator. Default = Dr.GRPO (mean-baseline only);
         set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO."""
 
+        rollout_timeout_s: float | None = None
+        """Wall-clock limit of one rollout (env init and every turn, not `score_group`): a
+        liveness guard against a hung env or generator. Past it the rollout ends as ERROR_TIMEOUT
+        and its in-flight generate call is cancelled. Set it well above the p99 rollout time: a
+        cut biases toward short rollouts. None means no limit."""
+
     def __init__(self, config: Config) -> None:
         self.rubric: Rubric = config.rubric.build()
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
         self.advantage_estimator: AdvantageEstimator = config.advantage.build()
+        self._rollout_timeout_s = config.rollout_timeout_s
         self._renderer: Renderer
 
     async def setup_async(
@@ -494,61 +501,72 @@ class RolloutWorker(Configurable):
         ).to_string(include_turn=False)
         turns: list[RolloutTurn] = []
         status = RolloutStatus.ERROR
+        timeout = asyncio.timeout(self._rollout_timeout_s)
         try:
-            env_step = await env.init()
-            while not env_step.status.is_terminal():
-                turn_rollout_id = RolloutTurnID(
-                    group_id=group_id,
-                    rollout_id=rollout_id,
-                    turn_id=len(turns),
-                )
-
-                # generator call
-                completion = await generate_fn(
-                    prompt_token_ids=env_step.next_prompt_token_ids,
-                    request_id=turn_rollout_id.to_string(),
-                    group_id=group_id,
-                    routing_session_id=routing_session_id,
-                    sampling_config=sampling,
-                )
-
-                # env call
-                next_env_step = await env.step(completion)
-
-                # this turn from a token and message perspective
-                turns.append(
-                    RolloutTurn(
-                        rollout_id=turn_rollout_id,
-                        prompt_prefix_len=env_step.next_prompt_prefix_len,
-                        prompt_delta_token_ids=env_step.next_prompt_delta_token_ids,
-                        prompt_messages=env_step.next_prompt_messages or [],
-                        completion_token_ids=np.asarray(
-                            completion.token_ids, dtype=np.int32
-                        ),
-                        completion_logprobs=np.asarray(
-                            completion.token_logprobs, dtype=np.float32
-                        ),
-                        completion_message=next_env_step.completion_message,
-                        env_messages=next_env_step.env_messages,
-                        env_rewards=next_env_step.env_rewards,
-                        min_policy_version=completion.min_policy_version,
-                        max_policy_version=completion.max_policy_version,
-                        metrics=completion.metrics,
+            async with timeout:
+                env_step = await env.init()
+                while not env_step.status.is_terminal():
+                    turn_rollout_id = RolloutTurnID(
+                        group_id=group_id,
+                        rollout_id=rollout_id,
+                        turn_id=len(turns),
                     )
-                )
 
-                # holds the input for next generation call
-                env_step = next_env_step
+                    # generator call
+                    completion = await generate_fn(
+                        prompt_token_ids=env_step.next_prompt_token_ids,
+                        request_id=turn_rollout_id.to_string(),
+                        group_id=group_id,
+                        routing_session_id=routing_session_id,
+                        sampling_config=sampling,
+                    )
+
+                    # env call
+                    next_env_step = await env.step(completion)
+
+                    # this turn from a token and message perspective
+                    turns.append(
+                        RolloutTurn(
+                            rollout_id=turn_rollout_id,
+                            prompt_prefix_len=env_step.next_prompt_prefix_len,
+                            prompt_delta_token_ids=env_step.next_prompt_delta_token_ids,
+                            prompt_messages=env_step.next_prompt_messages or [],
+                            completion_token_ids=np.asarray(
+                                completion.token_ids, dtype=np.int32
+                            ),
+                            completion_logprobs=np.asarray(
+                                completion.token_logprobs, dtype=np.float32
+                            ),
+                            completion_message=next_env_step.completion_message,
+                            env_messages=next_env_step.env_messages,
+                            env_rewards=next_env_step.env_rewards,
+                            min_policy_version=completion.min_policy_version,
+                            max_policy_version=completion.max_policy_version,
+                            metrics=completion.metrics,
+                        )
+                    )
+
+                    # holds the input for next generation call
+                    env_step = next_env_step
 
             status = env_step.status
         except Exception:
-            logger.exception(
-                "rollout %s/rollout=%d failed after %d turn(s); marking ERROR",
-                group_id,
-                rollout_id,
-                len(turns),
-            )
-            status = RolloutStatus.ERROR
+            if timeout.expired():
+                logger.warning(
+                    "rollout %s/rollout=%d timed out after %d turn(s); marking ERROR_TIMEOUT",
+                    group_id,
+                    rollout_id,
+                    len(turns),
+                )
+                status = RolloutStatus.ERROR_TIMEOUT
+            else:
+                logger.exception(
+                    "rollout %s/rollout=%d failed after %d turn(s); marking ERROR",
+                    group_id,
+                    rollout_id,
+                    len(turns),
+                )
+                status = RolloutStatus.ERROR
         finally:
             # Also on a cancel, so a cancelled rollout releases its session like a failed one.
             try:

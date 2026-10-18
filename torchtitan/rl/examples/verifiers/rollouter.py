@@ -210,7 +210,8 @@ class VerifiersRolloutWorker(RolloutWorker):
     """Runs Verifiers rollout groups in a rollout worker process: the env client, the trace
     decode and the conversion to rollout turns.
 
-    Unused inherited field: `token_env`."""
+    Unused inherited fields: `token_env`, and `rollout_timeout_s` (set Verifiers'
+    `timeout.rollout`, which keeps the trace)."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(RolloutWorker.Config):
