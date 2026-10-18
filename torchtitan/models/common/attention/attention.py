@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from . import AttentionMetadata
 
 __all__ = [
-    "BaseAttention",
+    "Attention",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
@@ -70,7 +70,224 @@ __all__ = [
 ]
 
 
-FlexAttentionMetadata: TypeAlias = BlockMask
+class InnerAttention(Module):
+    """Base class for attention kernels used by outer attention modules."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        @property
+        def is_full_attention(self) -> bool:
+            """Whether queries attend to their full document (possibly causally)."""
+            return False
+
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> "AttentionMetadata | None":
+            """Build metadata consumed by this inner attention, if any.
+
+            Inner attentions that do not require metadata inherit the default
+            ``None`` result.
+            """
+            del positions, padding_mask, max_num_documents, max_context_length
+            return None
+
+
+class Attention(Module):
+    inner_attention: InnerAttention
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        n_heads: int
+        inner_attention: InnerAttention.Config
+
+        @property
+        def softmax_scale(self) -> float | None:
+            """None selects the attention backend's default scale."""
+            return None
+
+        def __post_init__(self):
+            assert self.n_heads > 0, "n_heads must be > 0"
+
+
+class QKVLinear(Module):
+    """Single fused linear projection, split along R dimension.
+
+    Uses a single linear layer and splits the output along the R dimension,
+    where R = n_heads // n_kv_heads + 2 (Q-heads-per-KV-group + K + V).
+    Reduces kernel launch overhead compared to three separate projections.
+
+    Compatible with ColwiseParallel on the ``wqkv`` linear layer.
+
+    Native state dicts retain the physical ``wqkv`` parameter. Hugging Face
+    state-dict adapters split and merge the logical Q/K/V projections at the
+    external checkpoint boundary.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        head_dim: int
+        n_heads: int
+        n_kv_heads: int
+        wqkv: Linear.Config
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.head_dim = config.head_dim
+        if config.n_heads % config.n_kv_heads != 0:
+            raise ValueError(
+                f"n_heads ({config.n_heads}) must be divisible by "
+                f"n_kv_heads ({config.n_kv_heads}) for fused QKV"
+            )
+        self.wqkv = config.wqkv.build()
+        self.heads_per_kv = config.n_heads // config.n_kv_heads
+        self.r_dim = self.heads_per_kv + 2
+
+    @spmd.local_map(
+        out_types=(
+            (
+                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+                spmd.PartitionSpec(("dp", "cp"), "tp", None),
+            ),
+        )
+        * 3
+    )
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Fused QKV: single matmul, then reshape and split along R dim.
+        # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim]
+        # Use -1 for n_kv_heads so TP sharding is handled automatically.
+        qkv = self.wqkv(x)
+        # The split below copies the wqkv projection output with bare ops.
+        remat.recompute_needs_tensor(qkv)
+        num_tokens = qkv.shape[0]
+        with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
+            qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
+            if spmd.is_type_checking():
+                spmd.assert_type(
+                    qkv,
+                    spmd.V,
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
+                )
+
+        local_num_tokens = qkv.shape[0]
+        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
+        # split leaves xk/xv as strided views into the fused buffer; vLLM
+        # attention/KV-cache kernels read raw memory assuming a contiguous
+        # head-major layout, so materialize all three contiguously here.
+        return (
+            xq.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xk.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xv.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+        )
+
+
+class GQAttention(Attention):
+    """Grouped-Query Attention with a fused Q/K/V projection.
+
+    ``rope=None`` selects NoPE (no positional encoding) for this layer: q/k go to
+    the inner attention unrotated, and positional information reaches the layer
+    only through the attention mask. Interleaved RoPE/NoPE models (iRoPE) set it
+    per layer.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Attention.Config):
+        dim: int
+        qkv_linear: QKVLinear.Config
+        wo: Linear.Config
+        qk_norm: RMSNorm.Config | None = None
+        n_kv_heads: int | None = None
+        head_dim: int | None = None
+        rope: RoPE.Config | None
+
+        def __post_init__(self) -> None:
+            Attention.Config.__post_init__(self)
+            if self.head_dim is None and self.dim % self.n_heads != 0:
+                raise ValueError(
+                    f"dim ({self.dim}) must be divisible by n_heads "
+                    f"({self.n_heads}) when head_dim is not specified"
+                )
+
+            n_kv_heads = self.n_heads if self.n_kv_heads is None else self.n_kv_heads
+            if self.n_heads % n_kv_heads != 0:
+                raise ValueError(
+                    f"n_heads ({self.n_heads}) must be divisible by "
+                    f"n_kv_heads ({n_kv_heads})"
+                )
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.n_heads = config.n_heads
+        self.n_kv_heads = (
+            config.n_heads if config.n_kv_heads is None else config.n_kv_heads
+        )
+        self.head_dim = (
+            config.head_dim
+            if config.head_dim is not None
+            else config.dim // config.n_heads
+        )
+        self.enable_gqa = self.n_heads > self.n_kv_heads
+        self.rope: RoPE | None = None if config.rope is None else config.rope.build()
+
+        # Pluggable QKV projection
+        self.qkv_linear = config.qkv_linear.build()
+        self.wo = config.wo.build()
+        self.inner_attention = config.inner_attention.build()
+
+        # Optional QK normalization (Qwen3-style)
+        self.q_norm: RMSNorm | None = None
+        self.k_norm: RMSNorm | None = None
+        if config.qk_norm is not None:
+            self.q_norm = config.qk_norm.build()
+            self.k_norm = config.qk_norm.build()
+
+        # Scaling factor (needed when head_dim differs from dim // n_heads)
+        self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
+
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        attention_metadata: "FlexAttentionMetadata | VarlenAttentionMetadata | None",
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # The projection's linear declares its own remat regions.
+        xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
+
+        # Optional QK normalization (before RoPE, per Qwen3)
+        if self.q_norm is not None or self.k_norm is not None:
+            assert self.q_norm is not None and self.k_norm is not None
+            remat.recompute_needs_tensor(xq_THK)
+            xq_THK = self.q_norm(xq_THK)
+            remat.recompute_needs_tensor(xk_THK)
+            xk_THK = self.k_norm(xk_THK)
+
+        # Apply rotary embeddings
+        if self.rope is not None:
+            remat.recompute_needs_tensor(xq_THK, xk_THK)
+            xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
+
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
+            xq_THK,
+            xk_THK,
+            xv_THV,
+            attention_metadata=attention_metadata,
+            scale=self.scaling,
+            enable_gqa=self.enable_gqa,
+        )
+        remat.recompute_needs_tensor(out_THV)
+        out_THV = out_THV.contiguous()
+        out_TD = out_THV.view(out_THV.shape[0], -1)
+        return self.wo(out_TD)
 
 
 class VarlenAttentionMetadata(NamedTuple):
@@ -99,70 +316,6 @@ class VarlenAttentionMetadata(NamedTuple):
             spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
 
 
-@spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))
-def varlen_attn(*args, **kwargs):
-    return _varlen_attn(*args, **kwargs)
-
-
-@spmd.no_typecheck(
-    out_types=(
-        spmd.PartitionSpec(("dp", "cp"), "tp", None),
-        spmd.PartitionSpec("tp", ("dp", "cp")),
-    )
-)
-def varlen_attn_with_lse(*args, **kwargs):
-    return _varlen_attn(*args, return_aux=VarlenAuxRequest(lse=True), **kwargs)
-
-
-def local_head_split(
-    t: torch.Tensor,
-    head_dim: int,
-    *,
-    dp_shard_dim: int = 0,
-    cp_shard_dim: int | None = None,
-) -> torch.Tensor:
-    # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
-    input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
-    output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
-    if cp_shard_dim is not None:
-        input_type["cp"] = spmd.S(cp_shard_dim)
-        output_type["cp"] = spmd.S(cp_shard_dim)
-    with spmd.local():
-        if spmd.is_type_checking():
-            spmd.assert_type(t, input_type)
-        out = t.view(*t.shape[:-1], -1, head_dim)
-        if spmd.is_type_checking():
-            spmd.assert_type(out, output_type)
-    return out
-
-
-class InnerAttention(Module):
-    """Base class for attention kernels used by outer attention modules."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        def build_attention_metadata(
-            self,
-            positions: torch.Tensor,
-            *,
-            padding_mask: torch.Tensor | None = None,
-            max_num_documents: int | None = None,
-            max_context_length: int | None = None,
-        ) -> "AttentionMetadata | None":
-            """Build metadata consumed by this inner attention, if any.
-
-            Inner attentions that do not require metadata inherit the default
-            ``None`` result.
-            """
-            del positions, padding_mask, max_num_documents, max_context_length
-            return None
-
-    def __init__(self) -> None:
-        super().__init__()
-        # SimpleFSDP may replace the runtime class; preserve the backend key.
-        self.attention_metadata_key: type[InnerAttention] = type(self)
-
-
 class VarlenInnerAttention(InnerAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
@@ -177,6 +330,10 @@ class VarlenInnerAttention(InnerAttention):
                           is_causal=False.
               - (W, 0): Sliding window causal - attend to at most W previous tokens.
         """
+
+        @property
+        def is_full_attention(self) -> bool:
+            return self.window_size[0] == -1 and self.window_size[1] in (-1, 0)
 
         def build_attention_metadata(
             self,
@@ -281,6 +438,9 @@ class VarlenInnerAttention(InnerAttention):
         return out_transform(out_THV, lse_TH)
 
 
+FlexAttentionMetadata: TypeAlias = BlockMask
+
+
 class FlexInnerAttention(InnerAttention):
     """Inner attention using ``flex_attention`` with torch.compile.
 
@@ -297,6 +457,10 @@ class FlexInnerAttention(InnerAttention):
     class Config(InnerAttention.Config):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
+
+        @property
+        def is_full_attention(self) -> bool:
+            return True
 
         def build_attention_metadata(
             self,
@@ -471,6 +635,10 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
     class Config(FlexInnerAttention.Config):
         window_size: int
 
+        @property
+        def is_full_attention(self) -> bool:
+            return False
+
         def build_attention_metadata(
             self,
             positions: torch.Tensor,
@@ -501,6 +669,43 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
                 # for batch invariance, we disable this optimization
                 separate_full_blocks=not is_in_batch_invariant_mode(),
             )
+
+
+@spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))
+def varlen_attn(*args, **kwargs):
+    return _varlen_attn(*args, **kwargs)
+
+
+@spmd.no_typecheck(
+    out_types=(
+        spmd.PartitionSpec(("dp", "cp"), "tp", None),
+        spmd.PartitionSpec("tp", ("dp", "cp")),
+    )
+)
+def varlen_attn_with_lse(*args, **kwargs):
+    return _varlen_attn(*args, return_aux=VarlenAuxRequest(lse=True), **kwargs)
+
+
+def local_head_split(
+    t: torch.Tensor,
+    head_dim: int,
+    *,
+    dp_shard_dim: int = 0,
+    cp_shard_dim: int | None = None,
+) -> torch.Tensor:
+    # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
+    input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
+    output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
+    if cp_shard_dim is not None:
+        input_type["cp"] = spmd.S(cp_shard_dim)
+        output_type["cp"] = spmd.S(cp_shard_dim)
+    with spmd.local():
+        if spmd.is_type_checking():
+            spmd.assert_type(t, input_type)
+        out = t.view(*t.shape[:-1], -1, head_dim)
+        if spmd.is_type_checking():
+            spmd.assert_type(out, output_type)
+    return out
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:
@@ -751,197 +956,3 @@ def create_varlen_metadata_for_document(
         max_q=max_seqlen,
         max_k=max_seqlen,
     )
-
-
-class BaseAttention(Module):
-    inner_attention: InnerAttention
-
-    @property
-    def attention_metadata_key(self) -> type[InnerAttention]:
-        return self.inner_attention.attention_metadata_key
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        n_heads: int
-        inner_attention: Module.Config
-
-        def __post_init__(self):
-            assert self.n_heads > 0, "n_heads must be > 0"
-
-
-class QKVLinear(Module):
-    """Single fused linear projection, split along R dimension.
-
-    Uses a single linear layer and splits the output along the R dimension,
-    where R = n_heads // n_kv_heads + 2 (Q-heads-per-KV-group + K + V).
-    Reduces kernel launch overhead compared to three separate projections.
-
-    Compatible with ColwiseParallel on the ``wqkv`` linear layer.
-
-    Native state dicts retain the physical ``wqkv`` parameter. Hugging Face
-    state-dict adapters split and merge the logical Q/K/V projections at the
-    external checkpoint boundary.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        head_dim: int
-        n_heads: int
-        n_kv_heads: int
-        wqkv: Linear.Config
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.head_dim = config.head_dim
-        if config.n_heads % config.n_kv_heads != 0:
-            raise ValueError(
-                f"n_heads ({config.n_heads}) must be divisible by "
-                f"n_kv_heads ({config.n_kv_heads}) for fused QKV"
-            )
-        self.wqkv = config.wqkv.build()
-        self.heads_per_kv = config.n_heads // config.n_kv_heads
-        self.r_dim = self.heads_per_kv + 2
-
-    @spmd.local_map(
-        out_types=(
-            (
-                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
-                spmd.PartitionSpec(("dp", "cp"), "tp", None),
-            ),
-        )
-        * 3
-    )
-    def forward(
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Fused QKV: single matmul, then reshape and split along R dim.
-        # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim]
-        # Use -1 for n_kv_heads so TP sharding is handled automatically.
-        qkv = self.wqkv(x)
-        # The split below copies the wqkv projection output with bare ops.
-        remat.recompute_needs_tensor(qkv)
-        num_tokens = qkv.shape[0]
-        with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
-            qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
-            if spmd.is_type_checking():
-                spmd.assert_type(
-                    qkv,
-                    spmd.V,
-                    spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
-                )
-
-        local_num_tokens = qkv.shape[0]
-        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
-        # split leaves xk/xv as strided views into the fused buffer; vLLM
-        # attention/KV-cache kernels read raw memory assuming a contiguous
-        # head-major layout, so materialize all three contiguously here.
-        return (
-            xq.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
-            xk.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
-            xv.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
-        )
-
-
-class GQAttention(BaseAttention):
-    """Grouped-Query Attention with a fused Q/K/V projection.
-
-    ``rope=None`` selects NoPE (no positional encoding) for this layer: q/k go to
-    the inner attention unrotated, and positional information reaches the layer
-    only through the attention mask. Interleaved RoPE/NoPE models (iRoPE) set it
-    per layer.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
-        n_heads: int
-        dim: int
-        qkv_linear: QKVLinear.Config
-        wo: Linear.Config
-        qk_norm: RMSNorm.Config | None = None
-        n_kv_heads: int | None = None
-        head_dim: int | None = None
-        inner_attention: Module.Config
-        rope: RoPE.Config | None
-
-        def __post_init__(self) -> None:
-            BaseAttention.Config.__post_init__(self)
-            if self.head_dim is None and self.dim % self.n_heads != 0:
-                raise ValueError(
-                    f"dim ({self.dim}) must be divisible by n_heads "
-                    f"({self.n_heads}) when head_dim is not specified"
-                )
-
-            n_kv_heads = self.n_heads if self.n_kv_heads is None else self.n_kv_heads
-            if self.n_heads % n_kv_heads != 0:
-                raise ValueError(
-                    f"n_heads ({self.n_heads}) must be divisible by "
-                    f"n_kv_heads ({n_kv_heads})"
-                )
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.n_heads = config.n_heads
-        self.n_kv_heads = (
-            config.n_heads if config.n_kv_heads is None else config.n_kv_heads
-        )
-        self.head_dim = (
-            config.head_dim
-            if config.head_dim is not None
-            else config.dim // config.n_heads
-        )
-        self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.rope: RoPE | None = None if config.rope is None else config.rope.build()
-
-        # Pluggable QKV projection
-        self.qkv_linear = config.qkv_linear.build()
-        self.wo = config.wo.build()
-        self.inner_attention = config.inner_attention.build()
-
-        # Optional QK normalization (Qwen3-style)
-        self.q_norm: RMSNorm | None = None
-        self.k_norm: RMSNorm | None = None
-        if config.qk_norm is not None:
-            self.q_norm = config.qk_norm.build()
-            self.k_norm = config.qk_norm.build()
-
-        # Scaling factor (needed when head_dim differs from dim // n_heads)
-        self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
-
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        # The projection's linear declares its own remat regions.
-        xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
-
-        # Optional QK normalization (before RoPE, per Qwen3)
-        if self.q_norm is not None or self.k_norm is not None:
-            assert self.q_norm is not None and self.k_norm is not None
-            remat.recompute_needs_tensor(xq_THK)
-            xq_THK = self.q_norm(xq_THK)
-            remat.recompute_needs_tensor(xk_THK)
-            xk_THK = self.k_norm(xk_THK)
-
-        # Apply rotary embeddings
-        if self.rope is not None:
-            remat.recompute_needs_tensor(xq_THK, xk_THK)
-            xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
-
-        out_THV = remat.region(
-            self.inner_attention,
-            self.remat_region_name("inner_attention"),
-            recompute=self.remat_should_recompute("inner_attention"),
-        )(
-            xq_THK,
-            xk_THK,
-            xv_THV,
-            attention_metadata=attention_metadata,
-            scale=self.scaling,
-            enable_gqa=self.enable_gqa,
-        )
-        remat.recompute_needs_tensor(out_THV)
-        out_THV = out_THV.contiguous()
-        out_TD = out_THV.view(out_THV.shape[0], -1)
-        return self.wo(out_TD)

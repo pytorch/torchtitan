@@ -25,8 +25,8 @@ from torchtitan.models.common.attention import (
     SlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
-    KVAllGatherCPSlidingWindowFlexInnerAttention,
+    AllGatherKVFlexInnerAttention,
+    AllGatherKVSlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.moe import MoE
 from torchtitan.trainer import Trainer
@@ -80,9 +80,7 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -143,9 +141,7 @@ def deepseek_v3_debugmodel_mtp_cp2(
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -187,9 +183,7 @@ def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -213,9 +207,7 @@ def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -284,9 +276,7 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -313,9 +303,7 @@ def qwen3_debugmodel_fsdp2_tp2_cp2(
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -427,9 +415,9 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                    FlexInnerAttention: AllGatherKVFlexInnerAttention,
                     SlidingWindowFlexInnerAttention: (
-                        KVAllGatherCPSlidingWindowFlexInnerAttention
+                        AllGatherKVSlidingWindowFlexInnerAttention
                     ),
                 }
             )
@@ -524,9 +512,9 @@ def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                    FlexInnerAttention: AllGatherKVFlexInnerAttention,
                     SlidingWindowFlexInnerAttention: (
-                        KVAllGatherCPSlidingWindowFlexInnerAttention
+                        AllGatherKVSlidingWindowFlexInnerAttention
                     ),
                 }
             )
@@ -566,14 +554,66 @@ def muse_glimmer_debugmodel_mm_tp2_cp2_pp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                    FlexInnerAttention: AllGatherKVFlexInnerAttention,
                     SlidingWindowFlexInnerAttention: (
-                        KVAllGatherCPSlidingWindowFlexInnerAttention
+                        AllGatherKVSlidingWindowFlexInnerAttention
                     ),
                 }
             )
         ],
     )
+
+
+def muse_spark_debugmodel_fsdp2_cp2_ep4() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.muse_spark import muse_spark_debugmodel
+
+    config = muse_spark_debugmodel(
+        seq_len=512,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2,
+            expert_parallel_degree=4,
+        ),
+    )
+    config.parallelism.context_parallel_degree = 2
+    config.override.imports = []
+    _set_spmd_typechecking(config, typechecking=True)
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    FlexInnerAttention: AllGatherKVFlexInnerAttention,
+                    SlidingWindowFlexInnerAttention: (
+                        AllGatherKVSlidingWindowFlexInnerAttention
+                    ),
+                }
+            )
+        ],
+    )
+
+
+def muse_spark_debugmodel_mm_fsdp2_tp2_cp2_ep4() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.muse_spark import muse_spark_debugmodel_mm
+
+    config = muse_spark_debugmodel_mm(
+        seq_len=512,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=4,
+        ),
+        context_parallel_transform=ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: AllGatherKVFlexInnerAttention,
+                SlidingWindowFlexInnerAttention: (
+                    AllGatherKVSlidingWindowFlexInnerAttention
+                ),
+            }
+        ),
+    )
+    config.override.imports = []
+    _set_spmd_typechecking(config, typechecking=True)
+    return config
 
 
 def build_model_tests_list() -> list[IntegrationTestDefinition]:
@@ -788,6 +828,21 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="Muse Glimmer multimodal TP+CP+PP+SP",
             test_name="muse_glimmer_mm_tp+cp+pp+sp",
             ngpu=8,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[muse_spark_debugmodel_fsdp2_cp2_ep4],
+            test_descr="Muse Spark FSDP+CP+EP with SPMD typechecking",
+            test_name="muse_spark_fsdp+cp+ep",
+            ngpu=4,
+        ),
+        IntegrationTestDefinition(
+            configs=[muse_spark_debugmodel_mm_fsdp2_tp2_cp2_ep4],
+            test_descr="Muse Spark multimodal FSDP+TP+CP+EP+SP with SPMD typechecking",
+            test_name="muse_spark_mm_fsdp+tp+cp+ep+sp",
+            ngpu=8,
+            # Fake TP cannot supply embeddings from the other vocabulary shard.
+            # Zero token rows overflow during RMSNorm backward across the blocks.
             use_real_pg=True,
         ),
     ]

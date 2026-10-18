@@ -22,7 +22,7 @@ from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_shared_expert_ffn_config,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.param_init import depth_scaled_std
 
@@ -35,7 +35,7 @@ def _fill(value: float) -> Callable[[torch.Tensor], None]:
 
 
 def test_feed_forward_uses_one_physical_gate_up_linear():
-    config = FeedForward.Config(
+    config = DenseFeedForward.Config(
         w13=Linear.Config(
             in_features=4,
             out_features=8,
@@ -153,7 +153,7 @@ def test_routed_experts_depth_scale_only_output(flavors, layer_id):
 
 
 def test_feed_forward_requires_two_w13_projections():
-    config = FeedForward.Config(
+    config = DenseFeedForward.Config(
         w13=Linear.Config(in_features=4, out_features=8),
         w2=Linear.Config(in_features=8, out_features=4),
     )
@@ -163,7 +163,7 @@ def test_feed_forward_requires_two_w13_projections():
 
 
 def test_feed_forward_loads_native_checkpoint_and_matches_reference():
-    config = FeedForward.Config(
+    config = DenseFeedForward.Config(
         w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
         w2=Linear.Config(in_features=8, out_features=4),
     )
@@ -200,7 +200,7 @@ def test_feed_forward_loads_native_checkpoint_and_matches_reference():
 
 def test_feed_forward_uses_configured_activation():
     activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=25.0)
-    config = FeedForward.Config(
+    config = DenseFeedForward.Config(
         w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
         w2=Linear.Config(in_features=8, out_features=4),
         activation_fn=activation_fn,

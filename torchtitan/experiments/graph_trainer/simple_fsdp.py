@@ -220,6 +220,9 @@ def _register_parametrization(
     TODO: In checkpoint saving/loading, avoid parametrization calls when calling
     get_model_state_dict func in torchtitan/components/checkpointer/dcp.py.
     """
+    # Keep parameterless module types stable for attention metadata lookup.
+    if not param_names:
+        return
     param_name_to_property = {}
     for param_name in param_names:
         parametrization = parametrization_init(param_name)

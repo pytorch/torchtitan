@@ -41,7 +41,9 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import InnerAttention
+from torchtitan.models.common.attention import Attention, LinearAttention
+from torchtitan.models.common.attention.gdn import GDN
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -59,7 +61,7 @@ def _replace_vllm_layer_configs(model_config):
     # models do not acquire its vLLM-specific dependencies.
     from torchtitan.rl.generator.vllm.attention import (
         get_attention_dimensions,
-        VLLMAttentionWrapper,
+        VLLMInnerAttention,
     )
 
     new_layers = []
@@ -67,24 +69,22 @@ def _replace_vllm_layer_configs(model_config):
         new_layer_cfg = layer_cfg
 
         attention_cfg = getattr(layer_cfg, "attention", None)
-        if attention_cfg is not None:
-            attention_metadata_key = attention_cfg.inner_attention._owner
-            assert attention_metadata_key is not None and issubclass(
-                attention_metadata_key, InnerAttention
-            )
+        if isinstance(attention_cfg, Attention.Config) and not isinstance(
+            attention_cfg, LinearAttention.Config
+        ):
             (
                 num_heads,
                 num_kv_heads,
                 head_dim,
                 value_head_dim,
             ) = get_attention_dimensions(attention_cfg, model_config.dim)
-            vllm_attention_cfg = VLLMAttentionWrapper.Config(
-                attention_metadata_key=attention_metadata_key,
+            vllm_attention_cfg = VLLMInnerAttention.Config(
                 hidden_size=model_config.dim,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
                 value_head_dim=value_head_dim,
+                scale=attention_cfg.softmax_scale,
                 sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
                 sharding_config=attention_cfg.inner_attention.sharding_config,
             )
@@ -96,11 +96,11 @@ def _replace_vllm_layer_configs(model_config):
                 ),
             )
 
-        delta_net_cfg = getattr(layer_cfg, "delta_net", None)
-        if delta_net_cfg is not None:
-            from torchtitan.rl.generator.vllm.gdn import VLLMInnerGatedDeltaNet
+        elif isinstance(attention_cfg, GDN.Config):
+            delta_net_cfg = attention_cfg
+            from torchtitan.rl.generator.vllm.gdn import VLLMInnerGDN
 
-            vllm_inner_gdn_cfg = VLLMInnerGatedDeltaNet.Config(
+            vllm_inner_gdn_cfg = VLLMInnerGDN.Config(
                 layer_idx=layer_idx,
                 num_k_heads=(
                     delta_net_cfg.in_proj_q.out_features // delta_net_cfg.key_head_dim
@@ -111,33 +111,33 @@ def _replace_vllm_layer_configs(model_config):
                 head_k_dim=delta_net_cfg.key_head_dim,
                 head_v_dim=delta_net_cfg.value_head_dim,
                 conv_kernel_size=delta_net_cfg.conv_kernel_size,
-                sharding_config=delta_net_cfg.inner_gated_delta_net.sharding_config,
+                sharding_config=delta_net_cfg.inner_attention.sharding_config,
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
-                delta_net=dataclasses.replace(
+                attention=dataclasses.replace(
                     delta_net_cfg,
-                    inner_gated_delta_net=vllm_inner_gdn_cfg,
+                    inner_attention=vllm_inner_gdn_cfg,
                 ),
             )
 
-        kda_cfg = getattr(layer_cfg, "delta_attention", None)
-        if kda_cfg is not None:
+        elif isinstance(attention_cfg, KDA.Config):
+            kda_cfg = attention_cfg
             from torchtitan.rl.generator.vllm.kda import VLLMInnerKDA
 
             vllm_inner_kda_cfg = VLLMInnerKDA.Config(
-                num_heads=kda_cfg.num_heads,
+                num_heads=kda_cfg.n_heads,
                 head_dim=kda_cfg.head_dim,
                 conv_kernel_size=kda_cfg.conv_kernel_size,
-                lower_bound=kda_cfg.inner_kda.kernel.lower_bound,
+                lower_bound=kda_cfg.inner_attention.kernel.lower_bound,
                 layer_index=layer_idx,
-                sharding_config=kda_cfg.inner_kda.sharding_config,
+                sharding_config=kda_cfg.inner_attention.sharding_config,
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
-                delta_attention=dataclasses.replace(
+                attention=dataclasses.replace(
                     kda_cfg,
-                    inner_kda=vllm_inner_kda_cfg,
+                    inner_attention=vllm_inner_kda_cfg,
                 ),
             )
 
@@ -573,11 +573,11 @@ class VLLMModelWrapper(Module):
         """Give each gpt-oss attention's vLLM backend its sink-rescale hook."""
         from torchtitan.models.gpt_oss.model import (
             apply_attention_sink_rescale,
-            Attention,
+            GptOssAttention,
         )
 
         for module in self.model.modules():
-            if not isinstance(module, Attention):
+            if not isinstance(module, GptOssAttention):
                 continue
             # Read sinks per call: FSDP swaps the parameter between its sharded
             # and unsharded tensors and frees the sharded storage after unsharding.

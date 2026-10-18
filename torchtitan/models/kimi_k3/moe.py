@@ -21,7 +21,7 @@ from torchtitan.models.common.nn_modules import RMSNorm
 
 
 class KimiLatentMoE(MoE):
-    """``common/moe.py::MoE`` with Kimi's latent routed-expert path."""
+    """``common/moe/moe.py::MoE`` with Kimi's latent routed-expert path."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(MoE.Config):

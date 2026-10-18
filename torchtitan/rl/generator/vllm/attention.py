@@ -298,7 +298,7 @@ class _VLLMAttention(Attention, Module):
     """vLLM attention that participates in the TorchTitan Module protocol."""
 
 
-class VLLMAttentionWrapper(Module):
+class VLLMInnerAttention(InnerAttention):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
@@ -321,8 +321,7 @@ class VLLMAttentionWrapper(Module):
     )
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        attention_metadata_key: type[InnerAttention]
+    class Config(InnerAttention.Config):
         hidden_size: int
         num_heads: int
         num_kv_heads: int
@@ -332,9 +331,12 @@ class VLLMAttentionWrapper(Module):
         sliding_window_size: int | None = None
         """Causal sliding-window size (``None`` => full attention)."""
 
+        @property
+        def is_full_attention(self) -> bool:
+            return self.sliding_window_size is None
+
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.attention_metadata_key = config.attention_metadata_key
 
         from vllm.config import get_current_vllm_config
 
@@ -380,7 +382,7 @@ class VLLMAttentionWrapper(Module):
         )
 
         # TODO: This need to be compatible with Pipeline Parallelism
-        layer_id = next(VLLMAttentionWrapper._layer_counter)
+        layer_id = next(VLLMInnerAttention._layer_counter)
         diff_kv_kwargs: dict[str, Any] = {}
         if value_head_dim != head_dim:
             FlashAttentionDiffKVBackend.set_head_size_v(value_head_dim)
@@ -415,6 +417,7 @@ class VLLMAttentionWrapper(Module):
         v_THV: torch.Tensor,
         *,
         attention_metadata: None = None,
+        scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Run vLLM paged attention on local (non-DTensor) tensors.
@@ -423,14 +426,20 @@ class VLLMAttentionWrapper(Module):
             q_THK: ``(num_tokens, num_heads, query/key_head_dim)``
             k_THK: ``(num_tokens, num_kv_heads, query/key_head_dim)``
             v_THV: ``(num_tokens, num_kv_heads, value_head_dim)``
+            scale: Optional per-call scale; must match the scale set at construction.
 
         Returns:
             ``(num_tokens, num_heads, value_head_dim)``.
         """
         if attention_metadata is not None:
             raise ValueError(
-                "VLLMAttentionWrapper does not support attention_metadata; vLLM "
+                "VLLMInnerAttention does not support attention_metadata; vLLM "
                 "manages causal masking and the KV-cache internally."
+            )
+
+        if scale is not None and scale != self.scale:
+            raise ValueError(
+                f"Model attention scale {scale} != vLLM scale {self.scale}"
             )
 
         if self.value_head_dim != self.head_dim:

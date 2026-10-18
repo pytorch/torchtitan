@@ -35,8 +35,8 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import LinearAttentionMetadata
+from torchtitan.models.common.attention import InnerAttention, LinearAttentionMetadata
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.linear_attention import chunk_kernel_options
 from torchtitan.models.common.attn_gym import (
     causal_conv1d_decode,
@@ -57,10 +57,10 @@ from torchtitan.rl.generator.vllm.linear_attention import (
 )
 
 
-class VLLMInnerGatedDeltaNet(Module, MambaBase):
+class VLLMInnerGDN(InnerAttention, MambaBase):
     """Paged-cache inner GDN implementation.
 
-    The enclosing ``common.attention.gdn.GatedDeltaNet`` owns all parameters. This
+    The enclosing ``common.attention.gdn.GDN`` owns all parameters. This
     module owns only vLLM cache plumbing and kernel dispatch.
 
     The enclosing module and vLLM cache are both head-sharded under tensor
@@ -68,7 +68,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         layer_idx: int
         num_k_heads: int
         num_v_heads: int
@@ -220,7 +220,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         assert isinstance(gdn_metadata, TorchTitanLinearAttentionMetadata)
         assert (
             gdn_metadata.spec_sequence_masks is None
-        ), "VLLMInnerGatedDeltaNet does not support speculative decoding"
+        ), "VLLMInnerGDN does not support speculative decoding"
 
         num_actual_tokens = gdn_metadata.num_actual_tokens
         if num_actual_tokens == 0:
@@ -419,7 +419,7 @@ def maybe_configure_gdn_hybrid_model(
                 gdn_config.conv_kernel_size,
             )
             for layer in model_config.layers
-            if (gdn_config := getattr(layer, "delta_net", None)) is not None
+            if isinstance(gdn_config := layer.attention, GDN.Config)
         ),
     )
     if state_shape is None:
