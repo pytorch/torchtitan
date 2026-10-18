@@ -29,6 +29,8 @@ BOTH prefill and decode. Combine is handle-driven and mode-agnostic.
   host sync, so the MoE forward is CUDA-graph-capturable. Per-expert offsets come from the
   device-side ``handle.psum_num_recv_tokens_per_expert`` (no CPU sync). Inference-only: the
   expanding layout "must not be backward" per the DeepEP kernels.
+- ``dispatch_routes`` (inference, for experts that read the routes): compact without the
+  host sync, a worst-case receive buffer; see its docstring.
 
 Routing scores are applied to expert outputs in plain PyTorch (in ``combine_tokens``,
 before the pure-reduction combine op), so autograd handles the score gradient, the custom
@@ -666,4 +668,76 @@ def combine_tokens(
     )(hidden_states, state.handle_id, will_backward)
     # The caller consumes this output outside another remat region.
     remat.recompute_needs_tensor(combined)
+    return combined
+
+
+def dispatch_routes(
+    hidden_states: torch.Tensor,
+    selected_experts_indices: torch.Tensor,
+    top_scores: torch.Tensor,
+    *,
+    num_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, object]:
+    """Inference-only dispatch for experts that read each received token's routes.
+
+    The compact layout without the host sync: each token goes once to each rank that holds
+    one of its experts, with its expert ids local to that rank (-1 elsewhere). The receive
+    buffer has the worst-case R = EP x T rows, so the call is CUDA-graph safe; rows past
+    the received count are never written, and their ids are set to -1 here.
+
+    Example (EP = 2, 2 experts per rank, top-2; rank 0's tokens only, row order not fixed):
+        rank 0 sends t0 -> experts (1, 2), t1 -> experts (0, 1)
+        rank 0 receives  [t0: (1, -1), t1: (0, 1), unwritten: (-1, -1), ...]
+        rank 1 receives  [t0: (-1, 0), unwritten: (-1, -1), ...]
+
+    Args:
+        hidden_states: Local tokens ``[T, hidden]``, padded to the same T on every EP rank.
+        selected_experts_indices: Global expert ids ``[T, top_k]``.
+        top_scores: Routing scores ``[T, top_k]``; a zero score is not sent.
+        num_experts: Number of experts across all ranks.
+
+    Returns:
+        ``(recv_x [R, hidden], recv_scores [R, top_k] fp32, recv_ids [R, top_k], handle)``;
+        pass ``handle`` to ``combine_routes``.
+    """
+    if torch.is_grad_enabled():
+        raise RuntimeError("dispatch_routes is inference-only; it has no backward.")
+    buffer = _buffer
+    if buffer is None:
+        raise RuntimeError("Buffer must be initialized before dispatch")
+    num_tokens = hidden_states.shape[0]
+    if num_tokens > buffer.num_max_tokens_per_rank:
+        raise ValueError(
+            f"DeepEP token count {num_tokens} exceeds the preallocated capacity of "
+            f"{buffer.num_max_tokens_per_rank}."
+        )
+    ids = selected_experts_indices.contiguous().masked_fill(top_scores == 0, -1)
+    recv_x, recv_ids, recv_scores, handle, _event = buffer.dispatch(
+        hidden_states,
+        topk_idx=ids,
+        topk_weights=top_scores.float().contiguous(),
+        num_experts=num_experts,
+        num_max_tokens_per_rank=num_tokens,
+        num_sms=_resolve_dispatch_num_sms(buffer, num_experts, ids.shape[1]),
+        do_expand=False,
+        do_cpu_sync=False,
+    )
+    # The received count stays on the device (no host sync).
+    num_recv = handle.psum_num_recv_tokens_per_scaleup_rank[-1]
+    rows_R1 = torch.arange(recv_ids.shape[0], device=recv_ids.device).unsqueeze(1)
+    recv_ids.masked_fill_(rows_R1 >= num_recv, -1)
+    return recv_x, recv_scores, recv_ids, handle
+
+
+def combine_routes(hidden_states: torch.Tensor, handle: object) -> torch.Tensor:
+    """Sum each token's rows from every rank back into the token (``dispatch_routes``'s pair).
+
+    The rows already carry the routing scores, so the combine only adds them.
+    """
+    buffer = _buffer
+    if buffer is None:
+        raise RuntimeError("Buffer must be initialized before combine")
+    combined, _weights, _event = buffer.combine(
+        hidden_states, handle=handle, topk_weights=None
+    )
     return combined
