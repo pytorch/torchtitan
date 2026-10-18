@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import torch
 
-import torchtitan.models.common.token_dispatcher as token_dispatcher
-from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
+import torchtitan.models.common.moe.token_dispatcher as token_dispatcher
+from torchtitan.models.common.moe.token_dispatcher import LocalTokenDispatcher
 
 
 class TestLocalTokenDispatcherInference(unittest.TestCase):
