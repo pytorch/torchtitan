@@ -84,8 +84,8 @@ class LocalTokenDispatcher(Module):
             topk_scores_experts_sorted_N: ``(N,)`` scores in expert-sorted order
         """
         # Reorder the token indices to match the order of the experts where N = T*K
-        token_indices_experts_sorted_N = torch.argsort(
-            topk_expert_ids_TK.view(-1), stable=True
+        token_indices_experts_sorted_N = _argsort_expert_ids(
+            topk_expert_ids_TK.view(-1), self.num_experts
         )
         topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
             token_indices_experts_sorted_N
@@ -252,6 +252,22 @@ class LocalTokenDispatcher(Module):
         )
 
 
+def _argsort_expert_ids(expert_ids_N: torch.Tensor, num_experts: int) -> torch.Tensor:
+    """``torch.argsort(expert_ids_N, stable=True)``, sorted on the narrowest integer type
+    that holds the expert ids.
+
+    The CUDA radix sort makes one pass per key byte, so int64 ids take 8 passes and
+    uint8 ids 1. Same order. GB300, 32,768 routes: 69 us as int64, 24 as uint8.
+    """
+    # num_experts is a Python int fixed by the model config, so compile resolves this
+    # branch once: no graph break, and the same dtype in training and inference.
+    if num_experts <= 256:
+        expert_ids_N = expert_ids_N.to(torch.uint8)
+    elif num_experts <= 2**15:
+        expert_ids_N = expert_ids_N.to(torch.int16)
+    return torch.argsort(expert_ids_N, stable=True)
+
+
 # The one-hot is (N, E); above this many elements the cumsum costs more than a radix
 # sort (Qwen3.5-35B-A3B, E=256, GB300: faster up to 2048 tokens x top-8, slower at 4096).
 _MAX_COUNTING_SORT_ONE_HOT_ELEMENTS = 16384 * 256
@@ -339,7 +355,7 @@ def _sort_routes(
             expert_ids_N.numel(), device=expert_ids_N.device
         )
         return expert_sort_N, row_of_route_N
-    expert_sort_N = torch.argsort(expert_ids_N, stable=True)
+    expert_sort_N = _argsort_expert_ids(expert_ids_N, num_experts)
     row_of_route_N = None
     if compiling:
         row_of_route_N = torch.empty_like(expert_sort_N)
