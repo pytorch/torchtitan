@@ -37,6 +37,7 @@ from torchtitan.components.optim import (
     Optim,
     OptimizersContainer,
 )
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
@@ -57,10 +58,10 @@ from torchtitan.models.common.attention import (
     SlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
-    KVAllGatherCPSlidingWindowFlexInnerAttention,
-    UlyssesCPFlexInnerAttention,
-    UlyssesCPSlidingWindowFlexInnerAttention,
+    AllGatherKVFlexInnerAttention,
+    AllGatherKVSlidingWindowFlexInnerAttention,
+    UlyssesFlexInnerAttention,
+    UlyssesSlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.moe import (
@@ -101,8 +102,8 @@ _MUSE_SPARK_SCALE_LOCAL_COMPILE_REGIONS = [
 def _muse_spark_context_parallel_transform() -> ContextParallelTransform:
     return ContextParallelTransform(
         inner_attention_map={
-            FlexInnerAttention: UlyssesCPFlexInnerAttention,
-            SlidingWindowFlexInnerAttention: (UlyssesCPSlidingWindowFlexInnerAttention),
+            FlexInnerAttention: UlyssesFlexInnerAttention,
+            SlidingWindowFlexInnerAttention: (UlyssesSlidingWindowFlexInnerAttention),
         },
     )
 
@@ -110,9 +111,9 @@ def _muse_spark_context_parallel_transform() -> ContextParallelTransform:
 def _muse_spark_kv_all_gather_context_parallel_transform() -> ContextParallelTransform:
     return ContextParallelTransform(
         inner_attention_map={
-            FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+            FlexInnerAttention: AllGatherKVFlexInnerAttention,
             SlidingWindowFlexInnerAttention: (
-                KVAllGatherCPSlidingWindowFlexInnerAttention
+                AllGatherKVSlidingWindowFlexInnerAttention
             ),
         },
     )
@@ -214,8 +215,8 @@ def _use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
             (
                 FlexInnerAttention.Config,
                 SlidingWindowFlexInnerAttention.Config,
-                KVAllGatherCPFlexInnerAttention.Config,
-                KVAllGatherCPSlidingWindowFlexInnerAttention.Config,
+                AllGatherKVFlexInnerAttention.Config,
+                AllGatherKVSlidingWindowFlexInnerAttention.Config,
             ),
         ):
             raise TypeError("Muse Spark scale recipes require Flex Attention")
@@ -506,7 +507,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     # Non-deferred reduction makes every outer-accumulation group identical.
     # Capture one group and replay it instead of unrolling all eight groups into
     # one graph; persistent sharded gradients accumulate across those replays.
-    config.training.cuda_graph_per_accumulation_group = True
+    config.training.cuda_graph_per_microbatch_group = True
 
     p = config.parallelism
     p.data_parallel_replicate_degree = 1
@@ -532,6 +533,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     )
     if fake_backend:
         config.hf_assets_path = "./tests/assets/tokenizer"
+        config.tokenizer = HuggingFaceTokenizer.Config()
         config.dataloader = GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,

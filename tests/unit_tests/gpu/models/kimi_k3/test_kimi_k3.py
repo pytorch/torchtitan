@@ -14,8 +14,9 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import LinearAttentionMetadata
 from torchtitan.models.common.attention.kda import KDA, KDAKernel
 from torchtitan.models.common.feed_forward import DenseFeedForward
+from torchtitan.models.kimi_k3.attention import KimiMLAAttention
 from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
-from torchtitan.models.kimi_k3.model import KimiK3Model, KimiMLAAttention
+from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan_recipes.tests.models.kimi_k3 import _dist_muon_optimizer

@@ -15,7 +15,6 @@ import logging
 import math
 from collections import deque
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -27,14 +26,12 @@ from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import RolloutGroup
+from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch, RegisterRDMAMicrobatch
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
     TrainingSampleBuilder,
     TrainingSampleGroup,
 )
-
-if TYPE_CHECKING:
-    from torchtitan.rl.trainer.rdma_microbatch import MonarchRDMAMicrobatch
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +74,8 @@ class TrainerStepBatch:
         # global_routing_token_counts = per-depth non-padding token counts
     """
 
-    # [num_microbatches][dp_degree]; MonarchRDMAMicrobatches when `rdma_min_tensor_bytes` is set
-    microbatches: list[list[TrainingMicrobatch]] | list[list["MonarchRDMAMicrobatch"]]
+    # [num_microbatches][dp_degree]; RDMAMicrobatches when `rdma_min_tensor_bytes` is set
+    microbatches: list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
     global_loss_token_counts: torch.Tensor
     global_routing_token_counts: torch.Tensor
     metrics: list[m.Metric]
@@ -176,6 +173,10 @@ class Batcher(Configurable):
         batch, _ = batcher.add_training_samples(training_sample_group=group1)
         # pending is None; batch.microbatches: [num_microbatches][2 ranks]; each
         # TrainingMicrobatch.input: [256 tokens]
+
+    With `rdma_min_tensor_bytes` set, it returns `RDMAMicrobatch`es registered with
+    `register_rdma_microbatch`, the actor system's RDMA registration (e.g.
+    `MonarchRDMAMicrobatch.register`), which is then required.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -193,11 +194,13 @@ class Batcher(Configurable):
         CUDA-graph-safe metadata bound without imposing a tighter packing cap.
         """
         rdma_min_tensor_bytes: int | None = None
-        """Send microbatch tensors of at least this many bytes as Monarch RDMA buffers, not in the RPC message:
+        """Send microbatch tensors of at least this many bytes as RDMA buffers (the actor system's
+        `RDMAMicrobatch`), not in the RPC message:
             None (default): every tensor in the message.
             e.g. 1024: tensors >= 1 KiB stay in the batcher; token counts (8 B) and empty tensors go in the message.
-        Monarch uses ibverbs where the host has it, else TCP; a host that lists unusable ibverbs devices
-        fails instead. MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process, weight sync included."""
+        The Monarch actor system uses ibverbs where the host has it, else TCP; a host that lists unusable
+        ibverbs devices fails instead. MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process, weight sync
+        included."""
         training_sample_builder: TrainingSampleBuilder.Config = field(
             default_factory=TrainingSampleBuilder.Config
         )
@@ -226,7 +229,16 @@ class Batcher(Configurable):
         dp_degree: int,
         pad_id: int,
         temperature: float,
+        register_rdma_microbatch: RegisterRDMAMicrobatch | None = None,
     ) -> None:
+        if (
+            config.rdma_min_tensor_bytes is not None
+            and register_rdma_microbatch is None
+        ):
+            raise ValueError(
+                "rdma_min_tensor_bytes is set, but no register_rdma_microbatch was given: "
+                "the batcher must run in an actor system that provides RDMA."
+            )
         self._training_sample_builder = config.training_sample_builder.build()
         self.seq_len = max_context_length
         self._num_rows_per_microbatch, remainder = divmod(
@@ -249,8 +261,9 @@ class Batcher(Configurable):
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
         self._num_consecutive_zero_output_groups = 0
         self._rdma_min_tensor_bytes = config.rdma_min_tensor_bytes
+        self._register_rdma_microbatch = register_rdma_microbatch
         # Batches that trainer ranks may still read, oldest first; each buffer keeps its tensor alive until drop().
-        self._batches_being_read: deque[list[list[MonarchRDMAMicrobatch]]] = deque()
+        self._batches_being_read: deque[list[list[RDMAMicrobatch]]] = deque()
         self._num_batches_registered = 0
 
     def _record_untrainable_groups(self, *, group_is_trainable: bool) -> None:
@@ -364,13 +377,12 @@ class Batcher(Configurable):
         batch = self._pack_one_training_batch()
         if self._rdma_min_tensor_bytes is None:
             return batch, group_is_trainable
-        # Import lazily to avoid a circular import: rdma_microbatch imports TrainingMicrobatch.
-        from torchtitan.rl.trainer.rdma_microbatch import MonarchRDMAMicrobatch
+        assert self._register_rdma_microbatch is not None
 
         # Trainer ranks read these tensors from this process.
         rdma_microbatches = [
             [
-                MonarchRDMAMicrobatch.register(
+                self._register_rdma_microbatch(
                     microbatch,
                     min_bytes=self._rdma_min_tensor_bytes,
                     batch_index=self._num_batches_registered,

@@ -1846,7 +1846,7 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.common.linear import Linear
         from torchtitan.models.common.nn_modules import RMSNorm
         from torchtitan.models.common.rope import ComplexRoPE
-        from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
+        from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
         dim = 64
         n_heads = 4

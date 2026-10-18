@@ -192,7 +192,6 @@ class MuseSparkRMSNorm(RMSNorm):
             return None
         return self.weight + self.gain_center
 
-    # pyrefly: ignore[bad-param-name-override]
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input_dtype = input.dtype
         effective_weight_D = self._get_effective_weight()

@@ -34,12 +34,13 @@ from .attention import (
 
 __all__ = [
     "CPInnerAttention",
-    "KVAllGatherCPFlexInnerAttention",
-    "KVAllGatherCPSlidingWindowFlexInnerAttention",
-    "UlyssesCPInnerAttention",
-    "UlyssesCPFlexInnerAttention",
-    "UlyssesCPSlidingWindowFlexInnerAttention",
-    "UlyssesCPVarlenInnerAttention",
+    "AllGatherKVFlex",
+    "AllGatherKVFlexInnerAttention",
+    "AllGatherKVSlidingWindowFlexInnerAttention",
+    "UlyssesInnerAttention",
+    "UlyssesFlexInnerAttention",
+    "UlyssesSlidingWindowFlexInnerAttention",
+    "UlyssesVarlenInnerAttention",
 ]
 
 _TOKEN_DIM = 0
@@ -75,12 +76,10 @@ class CPInnerAttention(
         raise NotImplementedError
 
 
-class _KVAllGatherCPFlexBase(
-    CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata]
-):
+class AllGatherKVFlex(CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata]):
     """Share K/V all-gather CP logic across the FlexAttention variants.
 
-    This private base handles BlockMask sharding and K/V redistribution for
+    This base handles BlockMask sharding and K/V redistribution for
     the full and sliding-window FlexAttention backends. It is not a standalone
     attention backend.
     """
@@ -224,15 +223,15 @@ class _KVAllGatherCPFlexBase(
         return FlexInnerAttention.forward(self, q_THK, k_THK, v_THV, **kwargs)
 
 
-class KVAllGatherCPFlexInnerAttention(
-    _KVAllGatherCPFlexBase,
+class AllGatherKVFlexInnerAttention(
+    AllGatherKVFlex,
     FlexInnerAttention,
 ):
     """FlexInnerAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(
-        _KVAllGatherCPFlexBase.Config,
+        AllGatherKVFlex.Config,
         FlexInnerAttention.Config,
     ):
         reduce_dtype: Literal["float32", "bfloat16"] = "float32"
@@ -243,14 +242,14 @@ class KVAllGatherCPFlexInnerAttention(
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
 
-class KVAllGatherCPSlidingWindowFlexInnerAttention(
-    _KVAllGatherCPFlexBase, SlidingWindowFlexInnerAttention
+class AllGatherKVSlidingWindowFlexInnerAttention(
+    AllGatherKVFlex, SlidingWindowFlexInnerAttention
 ):
     """SlidingWindowFlexInnerAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(
-        _KVAllGatherCPFlexBase.Config,
+        AllGatherKVFlex.Config,
         SlidingWindowFlexInnerAttention.Config,
     ):
         reduce_dtype: Literal["float32", "bfloat16"] = "float32"
@@ -261,7 +260,7 @@ class KVAllGatherCPSlidingWindowFlexInnerAttention(
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
 
-class UlyssesCPInnerAttention(
+class UlyssesInnerAttention(
     CPInnerAttention[_GlobalAttentionMetadataT, _GlobalAttentionMetadataT]
 ):
     """Move CP sharding from tokens to heads while keeping metadata global."""
@@ -312,34 +311,34 @@ class UlyssesCPInnerAttention(
         )
 
 
-class UlyssesCPFlexInnerAttention(
-    UlyssesCPInnerAttention[FlexAttentionMetadata], FlexInnerAttention
+class UlyssesFlexInnerAttention(
+    UlyssesInnerAttention[FlexAttentionMetadata], FlexInnerAttention
 ):
     """FlexInnerAttention under Ulysses CP."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(UlyssesCPInnerAttention.Config, FlexInnerAttention.Config):
+    class Config(UlyssesInnerAttention.Config, FlexInnerAttention.Config):
         pass
 
 
-class UlyssesCPSlidingWindowFlexInnerAttention(
-    UlyssesCPInnerAttention[FlexAttentionMetadata], SlidingWindowFlexInnerAttention
+class UlyssesSlidingWindowFlexInnerAttention(
+    UlyssesInnerAttention[FlexAttentionMetadata], SlidingWindowFlexInnerAttention
 ):
     """SlidingWindowFlexInnerAttention under Ulysses CP."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(
-        UlyssesCPInnerAttention.Config,
+        UlyssesInnerAttention.Config,
         SlidingWindowFlexInnerAttention.Config,
     ):
         pass
 
 
-class UlyssesCPVarlenInnerAttention(
-    UlyssesCPInnerAttention[VarlenAttentionMetadata], VarlenInnerAttention
+class UlyssesVarlenInnerAttention(
+    UlyssesInnerAttention[VarlenAttentionMetadata], VarlenInnerAttention
 ):
     """VarlenInnerAttention under Ulysses CP."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(UlyssesCPInnerAttention.Config, VarlenInnerAttention.Config):
+    class Config(UlyssesInnerAttention.Config, VarlenInnerAttention.Config):
         pass
