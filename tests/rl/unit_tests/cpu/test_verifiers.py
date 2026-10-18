@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from types import SimpleNamespace
 from typing import cast
@@ -20,6 +21,7 @@ pytest.importorskip("verifiers")
 
 from aiohttp import ClientSession
 
+from torchtitan.rl.actors.system import ActorSystem
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
 from torchtitan.rl.examples.verifiers.generation_server import (
     _parse_sampling_config,
@@ -32,8 +34,9 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     verifiers_rollout_logs,
     VerifiersRollouter,
 )
-from torchtitan.rl.generator.generator import SamplingConfig
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import Completion, RolloutStatus
 from verifiers.v1.errors import model_error, OverlongPromptError
 
@@ -250,6 +253,7 @@ def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> 
 
     asyncio.run(
         rollouter.setup_async(
+            actor_system=cast(ActorSystem, None),
             tokenizer_config=cast(HuggingFaceTokenizer.Config, None),
             renderer_config=config,
             hf_assets_path="muse-checkpoint",
@@ -261,6 +265,13 @@ def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> 
     assert sent.renderer == renderers_config
     assert sent.renderer_model_name == "muse-checkpoint"
     asyncio.run(rollouter.close())
+
+
+def test_setup_async_takes_the_base_rollouter_arguments() -> None:
+    """The controller calls `setup_async` with `Rollouter.setup_async`'s arguments."""
+    assert inspect.signature(VerifiersRollouter.setup_async).parameters.keys() == (
+        inspect.signature(Rollouter.setup_async).parameters.keys()
+    )
 
 
 def test_trainable_token_spans() -> None:
