@@ -17,6 +17,7 @@ import torchstore as ts
 from monarch.actor import ProcMesh
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
 from torchtitan.rl.actors.monarch.generator import GeneratorActor
 from torchtitan.rl.actors.monarch.provisioning import (
@@ -178,6 +179,9 @@ class MonarchActorSystem(ActorSystem):
             RolloutWorkerActor,
             worker_config=config,
             num_threads=num_threads,
+            # None when structured logging is off. Else each worker calls it with its own source and rank,
+            # so it writes its own JSONL next to the controller's.
+            structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
         )
 
     async def stop_rollout_workers(self) -> None:
