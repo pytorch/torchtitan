@@ -27,6 +27,8 @@ def test_kimi_k3_enables_attention_residual_local_compile() -> None:
         "fused_binary_activation",
         "fp32_to_bf16_split",
         "attention_residual",
+        "moe_dispatch",
+        "moe_combine",
     ]
 
 
