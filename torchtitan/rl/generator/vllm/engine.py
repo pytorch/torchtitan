@@ -142,6 +142,19 @@ class VLLMEngine(GenerationEngine):
                 "batch_invariant): vLLM cannot reset the prefix cache while blocks are held or "
                 "a request waits on a CPU load"
             )
+        # Offload needs DP=1: vLLM pins a separate size_gib region per DP rank, and each rank
+        # fills only its own share, so DP=2 pins 2 x size_gib and leaves half of it unused.
+        # TODO: one vLLM engine_id per generator (e.g. f"torchtitan-{MASTER_ADDR}-{MASTER_PORT}")
+        # would let its DP ranks on one host share one region. Not done: relies on vLLM's private memory layout.
+        if (
+            config.session_kv_holder is not None
+            and config.session_kv_holder.cpu_kv_offload is not None
+            and parallelism.data_parallel_degree > 1
+        ):
+            raise ValueError(
+                "session_kv_holder.cpu_kv_offload needs parallelism.data_parallel_degree=1, got "
+                f"{parallelism.data_parallel_degree}: vLLM pins size_gib once per DP rank"
+            )
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
