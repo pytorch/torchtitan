@@ -31,6 +31,8 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+
 
 class LinearAttentionExecutionPath(Enum):
     SINGLE_TOKEN = auto()
@@ -72,8 +74,16 @@ class TorchTitanLinearAttentionMetadataBuilder(
         cls, vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec
     ) -> AttentionCGSupport:
         parallel = vllm_config.parallel_config
-        # DP>1 keeps FULL: TorchTitanCudagraphDispatcher.dispatch handles padded decode ranks.
-        if parallel.use_ubatching or parallel.enable_dbo:
+        # DP>1 keeps FULL: TorchTitanCudagraphDispatcher.dispatch replays the mixed graph for padded
+        # decode ranks. Not in batch-invariant mode: packed GDN/KDA kernels with initial state don't
+        # match the decode kernels bitwise.
+        # TODO: once they match, drop the batch-invariant clause here and in
+        # TorchTitanCudagraphDispatcher.dispatch together; dropping only this one fails padded decode ranks.
+        if (
+            (parallel.data_parallel_size != 1 and is_in_batch_invariant_mode())
+            or parallel.use_ubatching
+            or parallel.enable_dbo
+        ):
             return AttentionCGSupport.UNIFORM_BATCH
         return AttentionCGSupport.ALWAYS
 
