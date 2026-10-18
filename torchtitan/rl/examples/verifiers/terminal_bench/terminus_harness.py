@@ -115,8 +115,8 @@ async def main() -> None:
         agent._llm.call = call_with_system_prompt
     environment = LocalEnvironment()
     await agent.setup(environment)
-    # Harbor's default recording (`asciinema rec`) nests the agent's shell, so an
-    # `exit` ends only the recording. Recording is off here: nest a shell the same way.
+    # Start a nested bash shell, as `harbor run`'s terminal recording does, so an agent's `exit`
+    # closes only this shell. Closing the tmux session would make Terminus-2 exit 1 and end the rollout.
     await agent._session.send_keys(keys=["bash", "Enter"], min_timeout_sec=1.0)
     await agent._session.send_keys(keys=["clear", "Enter"])
     await agent.run(task, environment, AgentContext())

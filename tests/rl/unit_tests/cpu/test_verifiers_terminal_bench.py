@@ -179,7 +179,7 @@ def test_prompts_reach_terminus2_outside_its_argv(tmp_path, monkeypatch) -> None
 
 
 def test_agent_shell_runs_inside_the_login_shell(tmp_path, monkeypatch) -> None:
-    """As under Harbor's terminal recording, an ``exit`` ends only the inner shell."""
+    """After setup, the program types ``bash`` and ``clear``, as Harbor's terminal recording does."""
     assert _run_terminus_program(tmp_path, monkeypatch).calls == [
         ("setup",),
         ("send_keys", ["bash", "Enter"], 1.0),

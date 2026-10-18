@@ -89,9 +89,9 @@ class TerminalBenchTerminusHarness(Harness[TerminalBenchTerminusHarnessConfig]):
         if prompt is None:
             raise ValueError("Terminus 2 requires a task prompt")
         tmux_dir = f"/tmp/vf-terminus-2-{trace.id}"
-        # A file, not argv or env: the agent's `pkill -f` matches argv, and some sandbox
-        # runtimes copy the env into a wrapper's argv. Outside tmux_dir, so the program
-        # still creates that dir with mode 0700.
+        # Prompts go in a file, not argv or env vars: an agent's `pkill -f <word from the task>`
+        # kills any process with that word on its command line (some runtimes copy env vars there).
+        # Next to tmux_dir, not inside it: the program creates tmux_dir itself, private (mode 0700).
         prompts_path = f"{tmux_dir}.prompts.json"
         await runtime.write(
             prompts_path,
@@ -122,7 +122,8 @@ class TerminalBenchTerminusHarness(Harness[TerminalBenchTerminusHarnessConfig]):
         running, as under ``harbor run``."""
         # Harbor normally destroys its whole sandbox; this adapter borrows the
         # Verifiers runtime, so clean up Terminus-2's detached tmux server ourselves.
-        # Bounded: nothing above cleanup times out, and a stopped tmux server never exits.
+        # 30 s cap: Verifiers awaits cleanup with no timeout, so a hung
+        # `tmux kill-server` would hold this rollout, and its group, forever.
         await asyncio.wait_for(
             runtime.run(
                 [
