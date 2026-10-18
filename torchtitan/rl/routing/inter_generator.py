@@ -310,6 +310,16 @@ class InterGeneratorRouter(Configurable):
         if pinned is not None:
             await pinned.rank0_actor.release_sessions.call_one([routing_session_id])
 
+    async def abort_generation(self, request_id: str) -> None:
+        """Stop a `generate` call so its generator frees the KV. No-op if it already finished.
+
+        An abort is one small message per generator, so the router keeps no request -> generator map.
+        """
+        # TODO(hot_swap=False): a call parked in `_route` behind a drain reaches its generator after
+        # this abort and still decodes to the end. Send the abort again once the drain ends; not done
+        # now because no recipe sets hot_swap=False.
+        await self._fanout("abort_generation", request_id)
+
     async def release_groups(self, group_ids: list[int]) -> None:
         """Tell every generator that these rollout groups are finished."""
         await self._fanout("release_groups", group_ids)

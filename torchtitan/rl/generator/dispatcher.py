@@ -262,7 +262,12 @@ class RequestDispatcher:
             inflight_requests_at_completion = float(
                 len(self._rank0_outstanding_generations)
             )
-            generation = self._rank0_outstanding_generations.pop(finished.request_id)
+            generation = self._rank0_outstanding_generations.pop(
+                finished.request_id, None
+            )
+            if generation is None:
+                # Aborted while a peer DP rank was sending its completion; the abort answered it.
+                continue
             metrics_prefix = generation.metrics_prefix
 
             metrics = _prepare_generation_request_metrics(
@@ -293,12 +298,41 @@ class RequestDispatcher:
             if self._rank0_dp_router is not None:
                 self._rank0_dp_router.release(finished.request_id)
 
+    def rank0_abort_generation(
+        self, request_id: str, *, policy_version: int, routed: bool
+    ) -> None:
+        """RANK 0: answer an aborted `generate` call with an empty "abort" `Completion`.
+
+        generation finished, or never seen   no-op
+        routed                               reply, then free its DP-rank reservation
+        not routed                           reply only (`release` raises on an id never reserved)
+        """
+        generation = self._rank0_outstanding_generations.pop(request_id, None)
+        if generation is None:
+            return
+        generation.reply.set_result(
+            Completion(
+                min_policy_version=policy_version,
+                max_policy_version=policy_version,
+                request_id=request_id,
+                token_ids=[],
+                token_logprobs=[],
+                finish_reason="abort",
+            )
+        )
+        if routed and self._rank0_dp_router is not None:
+            self._rank0_dp_router.release(request_id)
+
     def _rank0_fail_generations(
         self, rejected_requests: list[tuple[str, Exception]]
     ) -> None:
         """RANK 0: fail the reply of each rejected request with its error."""
         for request_id, exc in rejected_requests:
-            self._rank0_outstanding_generations.pop(request_id).reply.set_exception(exc)
+            generation = self._rank0_outstanding_generations.pop(request_id, None)
+            if generation is None:
+                # Aborted while a peer DP rank was sending its rejection; the abort answered it.
+                continue
+            generation.reply.set_exception(exc)
             if self._rank0_dp_router is not None:
                 self._rank0_dp_router.release(request_id)
 

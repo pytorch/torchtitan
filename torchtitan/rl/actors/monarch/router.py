@@ -68,6 +68,10 @@ class _InterGeneratorRouterActorEndpoints:
         await super().release_session(routing_session_id)
 
     @concurrent_endpoint
+    async def abort_generation(self, request_id: str) -> None:
+        await super().abort_generation(request_id)
+
+    @concurrent_endpoint
     async def release_groups(self, group_ids: list[int]) -> None:
         await super().release_groups(group_ids)
 

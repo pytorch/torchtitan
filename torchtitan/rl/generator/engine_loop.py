@@ -221,6 +221,11 @@ class EngineLoop:
         if self._holds_session_kv and self._rank == 0:
             self._queue.put(SessionReleaseMessage(session_ids=session_ids))
 
+    def abort_generation(self, request_id: str) -> None:
+        """RANK 0: queue an abort of one `generate` call; raises once the loop is closed."""
+        if self._rank == 0:
+            self._queue.put(GenerationAbortMessage(request_id=request_id))
+
     def log_engine_stats(self, step: int) -> None:
         """Log the engine's per-step stats, if it has any (rank 0)."""
         engine = self._engine
@@ -331,6 +336,9 @@ class EngineLoop:
                 self._engine.release_sessions(
                     decision.released_session_ids, decision.released_group_ids
                 )
+                # The engine skips ids it doesn't hold (another DP rank's, or finished).
+                if decision.abort_request_ids:
+                    self._engine.abort_requests(decision.abort_request_ids)
 
                 if decision.action is LoopAction.LOAD_MODEL_STATE_DICT:
                     await self._load_model_state_dict(decision.load_version)
@@ -391,7 +399,9 @@ class EngineLoop:
         await asyncio.sleep(0)
         while not self._queue.empty():
             message = self._queue.get_nowait()
-            if isinstance(message, (CloseMessage, SessionReleaseMessage)):
+            if isinstance(
+                message, (CloseMessage, SessionReleaseMessage, GenerationAbortMessage)
+            ):
                 continue
             if message.reply.set_running_or_notify_cancel():
                 message.reply.set_exception(exc)
@@ -429,6 +439,7 @@ class EngineLoop:
 
         released_session_ids: list[str] = []
         released_group_ids: list[int] = []
+        abort_request_ids: list[str] = []
         for message in messages:
             if isinstance(message, CloseMessage):
                 # Drops nothing: the queue rejects puts once closed, so the `CloseMessage` is the last message.
@@ -436,6 +447,21 @@ class EngineLoop:
             if isinstance(message, SessionReleaseMessage):
                 released_session_ids.extend(message.session_ids)
                 released_group_ids.extend(message.group_ids)
+                continue
+            if isinstance(message, GenerationAbortMessage):
+                pending_ids = [
+                    request.request_id for request in pending_engine_requests
+                ]
+                # Routed unless still pending (same batch, or held back by a load): those never reached the engine.
+                routed = message.request_id not in pending_ids
+                if not routed:
+                    pending_engine_requests.pop(pending_ids.index(message.request_id))
+                self._request_dispatcher.rank0_abort_generation(
+                    message.request_id,
+                    policy_version=self.policy_version,
+                    routed=routed,
+                )
+                abort_request_ids.append(message.request_id)
                 continue
             # Skip a call its caller already cancelled; once running, the reply ignores cancellation, so only
             # the loop resolves it.
@@ -482,6 +508,7 @@ class EngineLoop:
             )
         decision.released_session_ids = released_session_ids
         decision.released_group_ids = released_group_ids
+        decision.abort_request_ids = abort_request_ids
         return decision
 
     @sl.log_trace_span("load_model_state_dict_copy")
@@ -559,8 +586,19 @@ class SessionReleaseMessage:
     group_ids: list[int] = field(default_factory=list)
 
 
+@dataclass(kw_only=True, slots=True)
+class GenerationAbortMessage:
+    """The `generate` call whose caller gave up; the engine loop aborts it; no reply."""
+
+    request_id: str
+
+
 EngineLoopMessage = (
-    GenerationMessage | ModelStateDictLoadMessage | CloseMessage | SessionReleaseMessage
+    GenerationMessage
+    | ModelStateDictLoadMessage
+    | CloseMessage
+    | SessionReleaseMessage
+    | GenerationAbortMessage
 )
 
 
@@ -647,3 +685,6 @@ class LoopDecision:
     released_session_ids: list[str] = field(default_factory=list)
     released_group_ids: list[int] = field(default_factory=list)
     # sessions (and groups) whose held KV every rank releases before acting (session_kv_holder)
+
+    abort_request_ids: list[str] = field(default_factory=list)
+    # requests every rank aborts in the engine before acting

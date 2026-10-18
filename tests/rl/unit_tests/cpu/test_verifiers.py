@@ -689,6 +689,48 @@ def test_generation_server_rejects_aborted_generation() -> None:
     asyncio.run(run_test())
 
 
+def test_generation_server_cancels_generation_when_client_disconnects() -> None:
+    async def run_test() -> None:
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def generate_fn(prompt_token_ids, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        server.set_generate_fn(generate_fn)
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                post = asyncio.create_task(
+                    session.post(
+                        f"http://{server.host}:{server.port}/inference/v1/generate",
+                        headers={"X-Session-ID": "group=1/rollout=2"},
+                        json={
+                            "token_ids": [10, 11],
+                            "sampling_params": {
+                                "torchtitan_group_id": 1,
+                                "stop_token_ids": [99],
+                            },
+                        },
+                    )
+                )
+                await asyncio.wait_for(started.wait(), 5)
+                # Drops the connection mid-call, as a cancelled Verifiers model call does.
+                post.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await post
+            await asyncio.wait_for(cancelled.wait(), 5)
+        finally:
+            await server.close()
+
+    asyncio.run(run_test())
+
+
 def test_generation_server_requires_group_id() -> None:
     async def run_test() -> None:
         async def generate_fn(*args, **kwargs):

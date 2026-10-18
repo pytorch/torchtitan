@@ -415,6 +415,15 @@ class Generator(Configurable):
         """
         self._engine_loop.release_sessions(session_ids)
 
+    async def abort_generation(self, request_id: str) -> None:
+        """Stop one `generate` call so the engine frees its KV. No-op if it already finished; raises
+        once the generator is closed (callers fire and forget, so the error is dropped).
+
+        Args:
+            request_id: The `generate` call whose caller gave up.
+        """
+        self._engine_loop.abort_generation(request_id)
+
     async def initialize_torchstore_client(self, requester_index: int) -> None:
         """Initialize this process as a TorchStore routing requester.
 

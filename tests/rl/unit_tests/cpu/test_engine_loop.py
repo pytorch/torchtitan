@@ -38,6 +38,7 @@ from torchtitan.rl.generator.engine_loop import (
     EngineLoopMessage,
     EngineLoopQueue,
     EngineLoopThread,
+    GenerationAbortMessage,
     GenerationMessage,
     LoopAction,
     LoopDecision,
@@ -147,6 +148,10 @@ def _message(engine_request: EngineRequest) -> GenerationMessage:
 
 def _load(version: int) -> ModelStateDictLoadMessage:
     return ModelStateDictLoadMessage(version=version, reply=concurrent.futures.Future())
+
+
+def _abort(request_id: str) -> GenerationAbortMessage:
+    return GenerationAbortMessage(request_id=request_id)
 
 
 async def _put(
@@ -533,6 +538,63 @@ def test_release_groups_drops_pins(runner) -> None:
     )
 
 
+def test_abort_in_the_same_batch_as_its_generate_never_reaches_the_engine(
+    runner,
+) -> None:
+    engine_loop = _bare_loop(event_loop=runner.get_loop(), dp_size=2)
+    message = _message(_request("r0"))
+
+    decision = _decide(runner, engine_loop, [], message, _abort("r0"))
+
+    # r0 is answered without being routed: no DP rank reserved, nothing admitted.
+    assert decision.requests_per_dp_rank == [[], []]
+    assert message.reply.result(timeout=_TIMEOUT_S).finish_reason == "abort"
+    dispatcher = engine_loop._request_dispatcher
+    assert dispatcher._rank0_outstanding_generations == {}
+    assert [h.reserved_load for h in dispatcher._rank0_dp_router._handles] == [0, 0]
+
+
+def test_abort_frees_the_dp_rank_and_ignores_a_late_reply(runner) -> None:
+    engine_loop = _bare_loop(event_loop=runner.get_loop(), dp_size=2)
+    dispatcher = engine_loop._request_dispatcher
+
+    def loads() -> list[int]:
+        return [h.reserved_load for h in dispatcher._rank0_dp_router._handles]
+
+    message = _message(_request("r0"))
+    _decide(runner, engine_loop, [], message)
+    assert loads() == [1, 0]
+
+    decision = _decide(runner, engine_loop, [], _abort("r0"))
+    assert decision.abort_request_ids == ["r0"]
+    assert message.reply.result(timeout=_TIMEOUT_S).finish_reason == "abort"
+    assert loads() == [0, 0]
+
+    # A peer DP rank's completion or rejection of r0, sent before the abort reached it, is skipped.
+    dispatcher._rank0_resolve_generations([_finished("r0")], 0)
+    dispatcher._rank0_fail_generations([("r0", ValueError("prompt too long"))])
+    assert message.reply.result(timeout=_TIMEOUT_S).finish_reason == "abort"
+    assert loads() == [0, 0]
+
+    # A second abort of r0 is a no-op, like the aborts the router sends to generators without r0.
+    _decide(runner, engine_loop, [], _abort("r0"))
+    assert loads() == [0, 0]
+
+
+def test_abort_rides_a_load_decision(runner) -> None:
+    engine_loop = _bare_loop(event_loop=runner.get_loop(), dp_size=2)
+    pending: list[EngineRequest] = []
+    message = _message(_request("r0"))
+
+    decision = _decide(runner, engine_loop, pending, message, _load(3), _abort("r0"))
+
+    # A load holds r0 back; every rank still aborts it before applying the load.
+    assert decision.action is LoopAction.LOAD_MODEL_STATE_DICT
+    assert decision.abort_request_ids == ["r0"]
+    assert pending == []
+    assert message.reply.result(timeout=_TIMEOUT_S).finish_reason == "abort"
+
+
 # --- engine loop thread ---
 
 
@@ -569,9 +631,14 @@ class _FakeEngine:
         self.threads: set[threading.Thread] = set()
         self.shutdowns: list[threading.Thread] = []
         self.released_sessions: list[tuple[list[str], list[int]]] = []
+        self.aborted: list[str] = []
 
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
         self.released_sessions.append((session_ids, group_ids))
+
+    def abort_requests(self, request_ids: list[str]) -> None:
+        self.aborted.extend(request_ids)
+        self.running = [r for r in self.running if r not in request_ids]
 
     def add_requests(
         self, requests: list[EngineRequest]
@@ -967,8 +1034,9 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
         failing_load = asyncio.create_task(engine_loop.load_model_state_dict(3))
         assert await asyncio.to_thread(reading.wait, _TIMEOUT_S)
 
-        # A session release (no reply) queued ahead of the calls must not stop them from failing.
+        # A session release or an abort (no reply) queued ahead of the calls must not stop them from failing.
         engine_loop._queue.put(SessionReleaseMessage(session_ids=["s"]))
+        engine_loop._queue.put(GenerationAbortMessage(request_id="x"))
         queued = [
             _generate(engine_loop, "r0"),
             asyncio.create_task(engine_loop.load_model_state_dict(4)),
@@ -1079,6 +1147,31 @@ def test_request_rejected_at_admission_fails_alone(engine_thread) -> None:
     asyncio.run(run())
 
 
+def test_abort_generation_stops_only_that_request(engine_thread) -> None:
+    engine = _HeldEngine()
+
+    async def run() -> None:
+        engine_loop = engine_thread(engine)
+        engine_loop.start()
+        aborted, kept = _generate(engine_loop, "r0"), _generate(engine_loop, "r1")
+        while len(await _on_engine_loop(engine_loop, lambda: engine.running)) < 2:
+            await asyncio.sleep(0.01)
+
+        engine_loop.abort_generation("r0")
+        completion = await asyncio.wait_for(aborted, _TIMEOUT_S)
+        assert completion.finish_reason == "abort" and completion.token_ids == []
+        assert not kept.done()
+
+        engine.finish.set()
+        assert (await asyncio.wait_for(kept, _TIMEOUT_S)).finish_reason == "stop"
+        assert engine.aborted == ["r0"]
+        assert engine_loop._request_dispatcher._rank0_outstanding_generations == {}
+
+        await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
 def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None:
     gate = _StepGate()
 
@@ -1144,6 +1237,7 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
                 load_version=4,
                 released_session_ids=["s0"],
                 released_group_ids=[3],
+                abort_request_ids=["r1"],
             ),
             LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[]),
         ]
@@ -1158,12 +1252,16 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
         engine_loop_module.dist, "broadcast_object_list", broadcast_object_list
     )
     reads: list[threading.Thread] = []
+    aborted_before_load: list[list[str]] = []
+    engines: list[_FakeEngine] = []
 
     async def load_pre_hook():
         reads.append(threading.current_thread())
+        aborted_before_load.append(list(engines[0].aborted))
 
     async def run() -> None:
         engine = _loading_engine(monkeypatch, load_pre_hook)
+        engines.append(engine)
         stepped: list[list[str]] = []
         engine.step_hook = lambda: stepped.append(list(engine.running))
         # TP rank 1 of a DP=1, TP=2 generator.
@@ -1180,6 +1278,8 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
         assert engine_loop.policy_version == 4
         # Every rank releases the sessions rank 0 decided, before acting on the decision.
         assert engine.released_sessions == [([], []), (["s0"], [3])]
+        assert engine.aborted == ["r1"]
+        assert aborted_before_load == [["r1"]]  # the abort lands before the load
 
     asyncio.run(run())
 

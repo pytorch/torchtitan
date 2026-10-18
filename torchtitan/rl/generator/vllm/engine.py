@@ -408,6 +408,10 @@ class VLLMEngine(GenerationEngine):
         if self._session_kv_holder is not None:
             self._session_kv_holder.release(session_ids, group_ids)
 
+    def abort_requests(self, request_ids: list[str]) -> None:
+        # vLLM skips ids it doesn't hold (another DP rank's, or finished).
+        self._engine.abort_request(request_ids)
+
     def log_stats(self, step: int) -> None:
         if self._session_kv_holder is not None:
             logger.info(

@@ -847,3 +847,33 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
         RuntimeError, match="generator_wait_engine_loop exited unexpectedly"
     ):
         _run_with_generator_watcher(exited)
+
+
+def test_cancelled_generate_fn_aborts_its_call_but_a_finished_one_does_not() -> None:
+    async def run() -> None:
+        started = asyncio.Event()
+        aborted: list[str] = []
+
+        async def generate_call_one(prompt_token_ids, *, request_id, **kwargs):
+            if request_id == "finished":
+                return "completion"
+            started.set()
+            await asyncio.Event().wait()
+
+        controller = object.__new__(Controller)
+        controller.generator_router = SimpleNamespace(
+            generate=SimpleNamespace(call_one=generate_call_one),
+            abort_generation=SimpleNamespace(broadcast=aborted.append),
+        )
+        generate_fn = controller._make_generate_fn(metrics_prefix="generator")
+
+        assert await generate_fn([1], request_id="finished", group_id=0) == "completion"
+        cancelled = asyncio.create_task(generate_fn([1], request_id="r1", group_id=0))
+        await started.wait()
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        assert aborted == ["r1"]
+
+    asyncio.run(run())

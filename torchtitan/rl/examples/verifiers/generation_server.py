@@ -115,7 +115,9 @@ class GenerationServer(Configurable):
         app.router.add_get("/healthz", self._handle_health_request)
         app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
-        runner = web.AppRunner(app)
+        # Cancel the handler when its client disconnects, so the GenerateFn aborts the vLLM request
+        # instead of decoding to max_tokens. aiohttp's default lets the handler run on.
+        runner = web.AppRunner(app, handler_cancellation=True)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.requested_port)
         await site.start()

@@ -99,6 +99,10 @@ class GenerationEngine(Configurable, abc.ABC):
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
         """Release the held KV of ``session_ids`` and of every session of ``group_ids``."""
 
+    @abc.abstractmethod
+    def abort_requests(self, request_ids: list[str]) -> None:
+        """Stop ``request_ids`` so the engine frees their KV; ids it doesn't hold are skipped."""
+
     def log_stats(self, step: int) -> None:
         """Log the engine's own per-step stats, if any."""
 
