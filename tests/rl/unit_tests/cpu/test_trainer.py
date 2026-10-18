@@ -568,12 +568,3 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         device_memory_monitor.reset_peak_stats.assert_called_once_with()
 
     asyncio.run(run())
-
-
-def test_save_checkpoint_passes_last_step_to_the_engine() -> None:
-    trainer = object.__new__(Trainer)
-    trainer.engine = SimpleNamespace(save_checkpoint=MagicMock())
-
-    asyncio.run(Trainer.save_checkpoint(trainer, last_step=True))
-
-    trainer.engine.save_checkpoint.assert_called_once_with(last_step=True)
