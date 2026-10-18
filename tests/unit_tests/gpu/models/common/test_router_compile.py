@@ -5,12 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from functools import partial
 
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.local_compile import apply_local_compile
-from torchtitan.models import deepseek_v3, kimi_k2_7, muse_spark
+from torchtitan.models import deepseek_v3, kimi_k2_7, muse_spark, qwen3_5
 from torchtitan.models.common.activation import Softmax
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import BatchWiseLoadBalanceLoss, TokenChoiceTopKRouter
@@ -187,6 +188,41 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                         outputs[n], outputs[16384], strict=True
                     ):
                         self.assertTrue(torch.equal(actual, expected[:n]))
+
+    def test_mask_padded_routes_matches_masking_the_outputs(self):
+        """Compiled, masking padded routes in the region equals masking its outputs, bitwise."""
+        # With 8 experts, scores recomputed in the region's last kernel rounded differently.
+        qwen35 = qwen3_5.build_model_config(
+            "debugmodel_moe", parallelism=ParallelismConfig()
+        )
+        routers = {**FLAVOR_ROUTERS, "Qwen3.5 debug": lambda: _flavor_router(qwen35)}
+        apply_local_compile(["moe_router_topk"])
+        for flavor, build_router in routers.items():
+            with self.subTest(flavor), torch.no_grad():
+                torch.manual_seed(0)
+                router = build_router().eval()
+                x_TD = torch.randn(TOKENS, router.gate.weight.shape[1], device="cuda")
+                expert_bias_E = 1e-3 * torch.randn(router.num_experts, device="cuda")
+                padding_mask_T = torch.arange(TOKENS, device="cuda") >= TOKENS - 5
+                route = partial(
+                    router,
+                    x_TD.bfloat16(),
+                    expert_bias_E,
+                    padding_mask_T=padding_mask_T,
+                )
+                scores_TK, ids_TK, _ = route()
+                router.mask_padded_routes = True
+                masked_scores_TK, masked_ids_TK, routing_map_TE = route()
+                torch._dynamo.reset()
+
+                mask_TK = padding_mask_T.unsqueeze(-1)
+                self.assertIsNone(routing_map_TE)
+                self.assertTrue(
+                    torch.equal(masked_ids_TK, ids_TK.masked_fill(mask_TK, -1))
+                )
+                self.assertTrue(
+                    torch.equal(masked_scores_TK, scores_TK.masked_fill(mask_TK, 0))
+                )
 
 
 if __name__ == "__main__":

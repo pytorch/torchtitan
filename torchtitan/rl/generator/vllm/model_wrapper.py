@@ -46,7 +46,7 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
-from torchtitan.models.common.moe import TokenChoiceTopKRouter
+from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
@@ -566,9 +566,16 @@ class VLLMModelWrapper(Module):
             )
         # An inference context rejects any operand carrying requires_grad, and
         # it tests the attribute rather than whether grad is enabled.
+        # Each MoE's router masks its padded routes (inside its region when compiled), so
+        # its Dist-MoE experts skip their own mask.
         for module in self.model.modules():
             if isinstance(module, DistMoeRoutedExperts):
                 module.requires_grad_(False)
+            elif isinstance(module, MoE) and isinstance(
+                module.router, TokenChoiceTopKRouter
+            ):
+                module.router.mask_padded_routes = True
+                module.routed_experts.router_masks_padded_routes = True
         self._dist_moe_runtime = runtime_config.build(
             model_parts=[self.model],
             parallelism_context=self.parallelism_context,

@@ -141,6 +141,8 @@ class DistMoeRoutedExperts(Module):
         self.activation = config.activation
         self.swiglu_alpha = config.swiglu_alpha
         self.swiglu_limit = config.swiglu_limit
+        # The vLLM generator sets it with the router's mask_padded_routes.
+        self.router_masks_padded_routes = False
         self._runtime: DistMoeRuntime | None = None
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
@@ -216,7 +218,7 @@ class DistMoeRoutedExperts(Module):
         runtime = self._runtime
         if runtime is None:
             raise RuntimeError("Dist-MoE context is not initialized")
-        if padding_mask_T is not None:
+        if padding_mask_T is not None and not self.router_masks_padded_routes:
             topk_expert_ids_TK, topk_scores_TK = _mask_padded_routes(
                 topk_expert_ids_TK, topk_scores_TK, padding_mask_T
             )

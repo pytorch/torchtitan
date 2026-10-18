@@ -124,7 +124,9 @@ class MuseSparkMoE(MoE):
             routed_expert_ids_TK=routed_expert_ids_TK,
             **router_kwargs,
         )
-        remat.recompute_needs_tensor(routing_map_TE)
+        # None when the router masks padded routes.
+        if routing_map_TE is not None:
+            remat.recompute_needs_tensor(routing_map_TE)
         num_local_tokens_per_expert_E = self.routed_experts.count_tokens(routing_map_TE)
 
         expert_input_TC = self.pooler(x_TD)

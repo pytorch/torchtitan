@@ -6,6 +6,7 @@
 
 import unittest
 from dataclasses import replace
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import call, patch
@@ -97,7 +98,7 @@ def _forward_with_routed_mask(
         router=lambda x, bias, padding_mask_T=None, **kwargs: (
             torch.zeros(x.shape[0], 2),
             torch.zeros(x.shape[0], 2, dtype=torch.int64),
-            torch.zeros(x.shape[0], 4, dtype=torch.bool),
+            None,  # a router that masks padded routes returns no routing map
         ),
         expert_bias_E=None,
         routed_experts=experts,
@@ -475,6 +476,29 @@ class TestMoE(unittest.TestCase):
                     moe_cls, experts, torch.zeros(4, dtype=torch.bool)
                 )
                 self.assertIsNone(experts.counts_E)
+
+    def test_router_masks_padded_routes(self):
+        router = make_router_config(
+            dim=4,
+            num_experts=4,
+            score_func=Softmax.Config(),
+            gate_param_init={"weight": nn.init.normal_},
+            top_k=2,
+        ).build()
+        router.init_states()
+        router.eval()
+        padding_mask_T = torch.tensor([False, True, False, True])
+        route = partial(router, torch.randn(4, 4), padding_mask_T=padding_mask_T)
+        scores_TK, ids_TK, _ = route()
+        router.mask_padded_routes = True
+        masked_scores_TK, masked_ids_TK, routing_map_TE = route()
+
+        mask_TK = padding_mask_T.unsqueeze(-1)
+        self.assertIsNone(routing_map_TE)
+        self.assertTrue(torch.equal(masked_ids_TK, ids_TK.masked_fill(mask_TK, -1)))
+        self.assertTrue(
+            torch.equal(masked_scores_TK, scores_TK.masked_fill(mask_TK, 0))
+        )
 
     def test_router_masks_padding_only_for_aux_loss(self):
         router = make_router_config(

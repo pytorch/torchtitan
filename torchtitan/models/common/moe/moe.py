@@ -216,6 +216,9 @@ class TokenChoiceTopKRouter(Module):
         self.gate = config.gate.build()
         if config.freeze_gate:
             self.gate.requires_grad_(False)
+        # The vLLM generator sets it for Dist-MoE experts: padded rows go to expert -1 at
+        # score 0, and the routing map is skipped.
+        self.mask_padded_routes = False
         self.num_experts = config.num_experts
         self.top_k = config.top_k
         self.score_func = config.score_func.build()
@@ -264,7 +267,7 @@ class TokenChoiceTopKRouter(Module):
         aux_loss_denominator: torch.Tensor | None = None,
         routed_expert_ids_TK: torch.Tensor | None = None,
         **router_kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """
         Args:
             x_TD: Input ``(T, D)``.
@@ -277,7 +280,8 @@ class TokenChoiceTopKRouter(Module):
         Returns:
             topk_scores_TK: Routing scores ``(T, K)``.
             topk_expert_ids_TK: Expert indices ``(T, K)``.
-            routing_map_TE: One-hot boolean routing map ``(T, E)``.
+            routing_map_TE: One-hot boolean routing map ``(T, E)``; ``None`` with
+                ``mask_padded_routes``.
         """
         # HiMidLoLinear returns FP32, so configured scoring runs in FP32.
         gate_TE = self.gate(x_TD)
@@ -351,11 +355,11 @@ class TokenChoiceTopKRouter(Module):
         padding_mask_T: torch.Tensor | None,
         routed_expert_ids_TK: torch.Tensor | None = None,
         **router_kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Score the gate output and pick each token's experts.
 
-            gate -> [score, top-k, gather, normalize, routing map] -> counts, aux loss
-            eager    this region                                      eager
+            gate -> [score, top-k, gather, normalize, routing map | padding mask] -> counts, aux loss
+            eager    this region                                                     eager
 
         Outside the region:
         - gate: ``HiMidLoLinear`` raises when traced with ``inplace_wgrad_accum=True`` (the
@@ -368,7 +372,8 @@ class TokenChoiceTopKRouter(Module):
             scores_TE: Router scores ``(T, E)`` in FP32.
             topk_scores_TK: Routing scores ``(T, K)``.
             topk_expert_ids_TK: Expert indices ``(T, K)``.
-            routing_map_TE: One-hot boolean routing map ``(T, E)``.
+            routing_map_TE: One-hot boolean routing map ``(T, E)``; ``None`` with
+                ``mask_padded_routes``.
         """
         scores_TE = self.score_func(gate_TE)
         topk_expert_ids_TK = remat.region(
@@ -404,6 +409,17 @@ class TokenChoiceTopKRouter(Module):
             )
             topk_scores_TK = topk_scores_TK / denominator_T1
         topk_scores_TK = topk_scores_TK * self.route_scale
+
+        if self.mask_padded_routes:
+            # A -1 id has no column in the one-hot map, and Dist-MoE doesn't read the map.
+            # With moe_router_topk compiled, the mask fuses into the region's last kernel.
+            if padding_mask_T is not None:
+                padding_mask_TK = padding_mask_T.unsqueeze(-1)
+                topk_expert_ids_TK = topk_expert_ids_TK.masked_fill(padding_mask_TK, -1)
+                topk_scores_TK = topk_scores_TK.masked_fill(padding_mask_TK, 0.0)
+            # Keep returning scores_TE: without it, Inductor recomputes the scores in the last
+            # kernel, and with 8 experts some round 1-2 ulp off the unmasked generator path.
+            return scores_TE, topk_scores_TK, topk_expert_ids_TK, None
 
         # Build a one-hot boolean routing map (T, E) marking the experts each
         # token is routed to. Under TP/SP the router outputs are sharded on the
@@ -466,7 +482,7 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
         *,
         padding_mask_T: torch.Tensor | None,
         **router_kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Run the base method (compiled when ``moe_router_topk`` is on), then update the
         histogram in eager, as ``forward`` does for its counts."""
         if expert_bias_E is None:

@@ -17,6 +17,10 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform.dist_moe import DistMoeTransform
+from torchtitan.models import qwen3_5
+from torchtitan.models.common.moe import MoE
 from torchtitan.rl.generator.vllm.model_wrapper import VLLMModelWrapper
 from torchtitan.rl.generator.vllm.worker import TorchTitanGPUModelRunner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -143,6 +147,29 @@ def test_forward_without_dist_moe_passes_no_padding_mask():
     (kwargs,) = wrapper.model.seen
     assert kwargs == {}
     wrapper.set_num_valid_tokens(2)  # a no-op, not an error
+
+
+def test_generator_flags_each_router_with_its_dist_moe_experts():
+    """Both flags or neither: Dist-MoE skips its mask only where its router masks."""
+    config = qwen3_5.build_model_config(
+        "debugmodel_moe", parallelism=ParallelismConfig()
+    )
+    with torch.device("meta"):
+        model = DistMoeTransform().transform(config).build()
+    wrapper = cast(Any, object.__new__(VLLMModelWrapper))
+    torch.nn.Module.__init__(wrapper)
+    wrapper.model, wrapper.parallelism_context = model, None
+    runtime_config = SimpleNamespace(inference=True, build=lambda **kwargs: None)
+
+    VLLMModelWrapper._initialize_dist_moe_runtime(
+        wrapper, runtime_config, 64, torch.device("cpu")
+    )
+
+    moes = [module for module in model.modules() if isinstance(module, MoE)]
+    assert moes
+    for moe in moes:
+        assert moe.router.mask_padded_routes
+        assert moe.routed_experts.router_masks_padded_routes
 
 
 class _Model:

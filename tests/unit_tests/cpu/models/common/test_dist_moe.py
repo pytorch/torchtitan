@@ -820,6 +820,21 @@ def test_training_drops_masked_routes_without_padding_the_call() -> None:
     assert out_TD.shape == (2, 32)
 
 
+def test_skips_its_mask_when_the_router_masked() -> None:
+    """With ``router_masks_padded_routes``, the ids reach the annex unmasked."""
+    module = cast(
+        DistMoeRoutedExperts, DistMoeTransform().transform(_stock_config()).build()
+    )
+    module._runtime = _runtime()
+    module.router_masks_padded_routes = True
+
+    _, execute = _run_forward_with_padding(
+        module, num_tokens=2, padding_mask_T=torch.tensor([True, False])
+    )
+
+    assert torch.equal(execute.call_args.args[1], torch.tensor([[0, 1], [2, 3]]))
+
+
 def test_callback_postprocess_zeroes_inputs_only_with_minus_one_routes() -> None:
     """A Python callback reads zeroed -1 rows; unpadded calls skip the zeroing."""
     stock = _stock_config()
