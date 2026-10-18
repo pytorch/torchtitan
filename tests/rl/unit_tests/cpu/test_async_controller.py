@@ -821,7 +821,6 @@ def _run_with_generator_watcher(watcher) -> None:
         patch.multiple(
             Controller,
             _validate_and_log=AsyncMock(return_value={}),
-            _make_generate_fn=lambda self, metrics_prefix: None,
             _data_input_loop=_block_forever,
             _rollout_loop=_block_forever,
             _batcher_loop=_block_forever,

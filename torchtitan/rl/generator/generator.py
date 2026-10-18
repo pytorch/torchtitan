@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import time
@@ -30,6 +31,10 @@ from torchtitan.observability.logging import init_logger
 from torchtitan.rl.generator.dispatcher import RequestDispatcher
 from torchtitan.rl.generator.engine import GenerationEngine
 from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
+from torchtitan.rl.generator.generation_server import (
+    GenerationServer,
+    VerifiersGenerationMetadata,
+)
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
 from torchtitan.rl.rollout.types import Completion
@@ -294,6 +299,8 @@ class Generator(Configurable):
             max_engine_steps_between_decisions=config.max_engine_steps_between_decisions,
             reset_kv_cache_on_model_state_dict_load=config.reset_kv_cache_on_model_state_dict_load,
         )
+        # Rank 0 serves `generate` over HTTP once its engine loop runs; None elsewhere.
+        self._generation_server: GenerationServer | None = None
 
         logger.info("Generator initialized")
 
@@ -326,8 +333,23 @@ class Generator(Configurable):
         self._engine_loop.log_engine_stats(step)
 
     async def start_engine_loop(self) -> None:
-        """Start the background engine loop on every rank (one-time, idempotent)."""
+        """Start the background engine loop on every rank, and rank 0's HTTP server (one-time,
+        idempotent)."""
         self._engine_loop.start()
+        if self._rank == 0 and self._generation_server is None:
+            server = GenerationServer(
+                # Not `self.generate`: on the Monarch actor, that name is the endpoint object.
+                generate=functools.partial(Generator.generate, self),
+                max_context_length=self.config.model.max_context_length,
+            )
+            await server.start()
+            self._generation_server = server
+
+    async def http_url(self) -> str:
+        """Base URL of rank 0's `GenerationServer`, e.g. `"http://host-3.example.com:41233"`."""
+        if self._generation_server is None:
+            raise RuntimeError("call start_engine_loop on rank 0 before http_url")
+        return self._generation_server.url
 
     async def wait_engine_loop(self) -> None:
         """Wait until this rank's engine loop exits, raising whatever crashed it.
@@ -399,21 +421,33 @@ class Generator(Configurable):
         )
 
     async def release_groups(self, group_ids: list[int]) -> None:
-        """Drop the pinned cache salts and the held KV of finished rollout groups.
+        """Drop the pinned cache salts, the held KV and the folded session metadata of finished
+        rollout groups.
 
         Args:
             group_ids: Groups with no more generation calls.
         """
         self._engine_loop.release_groups(group_ids)
+        if self._generation_server is not None:
+            self._generation_server.drop_generation_metadata(group_ids)
 
-    async def release_sessions(self, session_ids: list[str]) -> None:
+    async def release_sessions(
+        self, session_ids: list[str]
+    ) -> dict[str, VerifiersGenerationMetadata]:
         """Release the held KV of sessions whose rollout ended (rank 0; a no-op unless the
-        engine holds session KV).
+        engine holds session KV), and return the metadata their requests folded.
 
         Args:
             session_ids: Routing session ids with no more generation calls.
+
+        Returns:
+            Session id -> folded metadata, for sessions whose requests asked the server's default
+            (Verifiers) format; see `GenerationServer.pop_generation_metadata`.
         """
         self._engine_loop.release_sessions(session_ids)
+        if self._generation_server is None:
+            return {}
+        return self._generation_server.pop_generation_metadata(session_ids)
 
     async def initialize_torchstore_client(self, requester_index: int) -> None:
         """Initialize this process as a TorchStore routing requester.
@@ -452,5 +486,10 @@ class Generator(Configurable):
         )
 
     async def close(self) -> None:
-        """Stop the engine loop, which releases the dispatcher and the engine on exit."""
+        """Stop the engine loop, which releases the dispatcher and the engine on exit, then the HTTP
+        server."""
+        # Engine loop first: it fails every in-flight `generate`, so the server's handlers return at
+        # once. aiohttp's cleanup otherwise waits up to 60 s for them to finish.
         await self._engine_loop.close()
+        if self._generation_server is not None:
+            await self._generation_server.close()

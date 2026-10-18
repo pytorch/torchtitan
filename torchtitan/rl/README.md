@@ -51,7 +51,7 @@ The pipeline has three layers.
 
 **2. Controller and dataflow.** Independent loops load data, produce rollouts, pack batches, and update the policy. `RolloutGroupWorkBuffer` connects them: `target_offpolicy_steps` sets its depth and so the mean policy age, `windowed_fifo_batches` bounds how far one slow group may exceed it (`None`, the default, leaves it unbounded; `1` is FIFO by batch; see [controller/WINDOWED_FIFO.md](controller/WINDOWED_FIFO.md)). Set `target_offpolicy_steps=0` for synchronous execution.
 
-**3. Distributed execution.** A router sends requests to one or more vLLM generator replicas. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
+**3. Distributed execution.** A router places each request on one of the vLLM generator replicas, and the caller sends it to that replica over HTTP. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
 
 Core and RL each expose a workflow-specific `Trainer`. Both compose the shared
 `torchtitan.training_engine.TrainingEngine`, which owns distributed model execution,
