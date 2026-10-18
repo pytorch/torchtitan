@@ -210,8 +210,29 @@ The annex allocates four distinct regions:
 Without PP there is one activation slot containing all local MoE layers. With
 eager PP, PyTorch analyzes the final schedule before warmup and assigns every
 live `(stage, microbatch)` interval to a reusable slot. The default
-`"stage_microbatch"` policy sizes each slot for the largest local stage and
-reuses it after that stage's backward releases the saved state. The
+`"stage_microbatch"` policy compares exactly two layouts before warmup:
+
+1. The existing shared pool, with every slot sized for the deepest local MoE stage.
+2. Separate reusable pools for stage-depth classes, with a different capacity
+   for each class. This can require more physical slots but fewer saved bytes.
+
+Dist-MoE's `plan_memory` sizes both candidates using the configured minimum,
+balanced-capacity factor or exact scalar-byte budget. TorchTitan selects the
+lower `total_activation_bytes`; uniform wins a tie. This minimizes planned
+saved bytes among these two layouts, not total allocator reservation, context
+metadata, or training step time. Scratch stays one shared frame in either case.
+For example, if a shallow class needs two slots and a deep class needs one:
+
+```text
+Uniform shared pool:      [4b][4b]       = 8b saved bytes
+Heterogeneous pools:      [ b][ b][4b]   = 6b saved bytes
+Each also has:            [one shared scratch S]
+```
+
+Here `b` is the provider-planned per-layer saved budget; the example is
+analytical, not a measured model result. Actual depths count transformed
+Dist-MoE modules, including MoE-bearing MTP modules, not all decoder layers.
+Stages without Dist-MoE do not acquire slots. The
 `"microbatch"` policy keeps one slot across all local stages for a microbatch
 and therefore sizes each slot for their combined MoE depth.
 
@@ -227,10 +248,23 @@ recomputation up to the planner's logged maximum useful per-slot budget.
 PyTorch calls each eager pipeline stage's registered forward context with its
 stage and microbatch indices. `DistMoeRuntime` uses the precomputed assignment
 to select the annex activation slot before model execution. Every slot is
-planned for `max_moe_layers_per_activation_slot`, so only the slot ID varies.
-This does not add model kwargs or require a custom pipeline-stage subclass.
+planned for its declared depth limit, while selection supplies the actual
+owner depth. Stage-microbatch owners use their stage depth; whole-microbatch
+owners use the aggregate depth across local stages. Capacities and assignments
+are immutable through warmup, capture and replay, and corresponding EP peers
+must use compatible layouts. Different PP ranks can use different layouts
+when they belong to separate EP groups. This does not add model kwargs,
+per-forward allocations or a custom pipeline-stage subclass.
 
-GraphPP reuses the same runtime-owned slot resolver without entering the eager
+Heterogeneous sizing requires a Dist-MoE version accepting per-slot depth
+tuples and reporting per-slot `MemoryPlan` bytes. A missing provider contract
+fails during planning instead of silently discarding the optimization.
+Exact scalar-byte requests remain the same for every slot, never redistributed.
+
+GraphPP retains the uniform layout until its capture path supplies each
+stage's static owner depth together with its runtime physical slot input.
+That stage-depth capture integration is GraphTrainer-owned TODO work.
+Its existing behavior reuses the runtime-owned slot resolver without entering the eager
 stage context. During tracing, TorchTitan supplies one explicit
 `activation_slot_id_1` input and rewrites the exact Dist-MoE forward operations
 to consume it. At execution, the forward-bearing schedule action resolves its

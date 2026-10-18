@@ -70,14 +70,17 @@ class _DistMoePipelineActivationPlan:
         max_live_activation_slots: Number of physical slots required by the
             schedule.
         max_moe_layers_per_activation_slot: Maximum local MoE-layer depth that
-            can append saved state to one slot.
+            can append saved state to one slot, or per-slot limits.
         activation_slot_id_by_stage_and_microbatch: Physical slot ID for every
             global stage and microbatch pair.
+        num_moe_layers_in_slot_by_stage: Actual owner depth supplied when each
+            stage selects its slot. Whole-microbatch owners span local stages.
     """
 
     max_live_activation_slots: int
-    max_moe_layers_per_activation_slot: int
+    max_moe_layers_per_activation_slot: int | tuple[int, ...]
     activation_slot_id_by_stage_and_microbatch: dict[tuple[int, int], int]
+    num_moe_layers_in_slot_by_stage: dict[int, int]
 
 
 class _DistMoeForwardContext:
@@ -97,7 +100,7 @@ class _DistMoeForwardContext:
         active_stage_indices: frozenset[int],
         activation_slot_id_by_stage_and_microbatch: dict[tuple[int, int], int],
         activation_slot_ids_S: torch.Tensor,
-        max_moe_layers_per_activation_slot: int,
+        num_moe_layers_in_slot_by_stage: dict[int, int],
     ) -> None:
         self._context = context
         self._active_stage_indices = active_stage_indices
@@ -105,7 +108,7 @@ class _DistMoeForwardContext:
             activation_slot_id_by_stage_and_microbatch
         )
         self._activation_slot_ids_S = activation_slot_ids_S
-        self._max_moe_layers_per_activation_slot = max_moe_layers_per_activation_slot
+        self._num_moe_layers_in_slot_by_stage = num_moe_layers_in_slot_by_stage
 
     def _slot_id(self, info: PipelineStageInfo) -> int | None:
         if info.stage_index not in self._active_stage_indices:
@@ -138,7 +141,7 @@ class _DistMoeForwardContext:
         if slot_id is not None:
             self._context.select_activation_slot(
                 slot_id,
-                self._max_moe_layers_per_activation_slot,
+                self._num_moe_layers_in_slot_by_stage[info.stage_index],
             )
         yield
 
@@ -320,6 +323,7 @@ class DistMoeRuntime(Configurable):
         max_live_activation_slots = 1
         max_moe_layers_per_activation_slot = len(self._modules)
         active_stage_indices = frozenset({0})
+        num_moe_layers_in_slot_by_stage = {0: len(self._modules)}
         activation_slot_id_by_stage_and_microbatch: dict[tuple[int, int], int] = {}
         if parallelism_context.pp_enabled:
             if pp_schedule is None:
@@ -335,6 +339,9 @@ class DistMoeRuntime(Configurable):
                 pp_schedule,
                 pp_rank=pp_mesh.get_local_rank(),
                 model_parts=model_parts,
+                max_num_local_input_tokens=max_num_local_input_tokens,
+                ep_size=ep_mesh.size(),
+                wgrad_dtype=wgrad_dtype,
             )
             max_live_activation_slots = plan.max_live_activation_slots
             max_moe_layers_per_activation_slot = plan.max_moe_layers_per_activation_slot
@@ -345,8 +352,9 @@ class DistMoeRuntime(Configurable):
             activation_slot_id_by_stage_and_microbatch = (
                 plan.activation_slot_id_by_stage_and_microbatch
             )
+            num_moe_layers_in_slot_by_stage = plan.num_moe_layers_in_slot_by_stage
             logger.info(
-                "Dist-MoE PP activation slots: policy=%s slots=%d depth=%d",
+                "Dist-MoE PP activation slots: policy=%s slots=%d depth=%s",
                 config.pp_activation_slot_policy,
                 max_live_activation_slots,
                 max_moe_layers_per_activation_slot,
@@ -389,7 +397,7 @@ class DistMoeRuntime(Configurable):
                 activation_slot_id_by_stage_and_microbatch
             ),
             activation_slot_ids_S=activation_slot_ids_S,
-            max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
+            num_moe_layers_in_slot_by_stage=num_moe_layers_in_slot_by_stage,
         )
         try:
             if pp_schedule is not None:
@@ -427,7 +435,7 @@ class DistMoeRuntime(Configurable):
         *,
         max_num_local_input_tokens: int,
         max_live_activation_slots: int,
-        max_moe_layers_per_activation_slot: int,
+        max_moe_layers_per_activation_slot: int | tuple[int, ...],
         wgrad_dtype: torch.dtype | None = None,
     ) -> dist_moe.Config:
         """Build the annex context configuration for one local expert module."""
@@ -485,8 +493,17 @@ class DistMoeRuntime(Configurable):
         *,
         pp_rank: int,
         model_parts: Sequence[torch.nn.Module],
+        max_num_local_input_tokens: int,
+        ep_size: int,
+        wgrad_dtype: torch.dtype | None = None,
     ) -> _DistMoePipelineActivationPlan:
-        """Derive immutable Dist-MoE slot assignments from the PP schedule."""
+        """Choose the cheaper uniform or equal-depth-class activation layout.
+
+        Reuse PyTorch's inclusive forward-to-complete-backward lifetimes for
+        both layouts. Annex owns byte sizing and scratch; the objective is
+        planned activation bytes, not a globally optimal allocation or TPS.
+        Uniform wins a tie and preserves the existing physical assignments.
+        """
         from .routed_experts import DistMoeRoutedExperts
 
         if len(schedule._stages) != len(model_parts):
@@ -512,14 +529,18 @@ class DistMoeRuntime(Configurable):
             stage_indices=stage_indices,
             granularity=self.config.pp_activation_slot_policy,
         )
+        stage_depths = {
+            stage_index: len(modules)
+            for stage_index, modules in modules_by_stage.items()
+        }
         if self.config.pp_activation_slot_policy == "microbatch":
-            max_moe_layers_per_activation_slot = sum(
-                len(modules) for modules in modules_by_stage.values()
+            max_moe_layers_per_activation_slot = sum(stage_depths.values())
+            owner_depths = dict.fromkeys(
+                stage_indices, max_moe_layers_per_activation_slot
             )
         else:
-            max_moe_layers_per_activation_slot = max(
-                len(modules) for modules in modules_by_stage.values()
-            )
+            max_moe_layers_per_activation_slot = max(stage_depths.values())
+            owner_depths = stage_depths
         activation_slot_id_by_stage_and_microbatch = {
             (stage_index, microbatch_index): liveness.slot_for(
                 stage_index,
@@ -528,13 +549,79 @@ class DistMoeRuntime(Configurable):
             for stage_index in stage_indices
             for microbatch_index in range(liveness.num_microbatches)
         }
-        return _DistMoePipelineActivationPlan(
+        uniform = _DistMoePipelineActivationPlan(
             max_live_activation_slots=liveness.num_slots,
             max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
             activation_slot_id_by_stage_and_microbatch=(
                 activation_slot_id_by_stage_and_microbatch
             ),
+            num_moe_layers_in_slot_by_stage=owner_depths,
         )
+        # Graph runtimes must first wire each stage's static owner depth into
+        # capture; retain their current uniform layout until then.
+        if (
+            self.config.inference
+            or self._set_forward_context is not None
+            or self.config.pp_activation_slot_policy == "microbatch"
+            or len(set(stage_depths.values())) == 1
+        ):
+            return uniform
+
+        # Depth classes may require more slots but avoid padding shallow owners
+        # to the deepest stage. Each class reuses the same liveness utility.
+        assignment: dict[tuple[int, int], int] = {}
+        slot_depths: list[int] = []
+        for depth in sorted(set(stage_depths.values())):
+            stages = tuple(
+                stage for stage in stage_indices if stage_depths[stage] == depth
+            )
+            grouped = analyze_pipeline_activation_liveness(
+                schedule,
+                pp_rank=pp_rank,
+                stage_indices=stages,
+                granularity="stage_microbatch",
+            )
+            slot_offset = len(slot_depths)
+            assignment.update(
+                (key, slot_offset + slot)
+                for key, slot in grouped.slot_by_stage_and_microbatch.items()
+            )
+            slot_depths.extend([depth] * grouped.num_slots)
+        heterogeneous = _DistMoePipelineActivationPlan(
+            max_live_activation_slots=len(slot_depths),
+            max_moe_layers_per_activation_slot=tuple(slot_depths),
+            activation_slot_id_by_stage_and_microbatch=assignment,
+            num_moe_layers_in_slot_by_stage=owner_depths,
+        )
+        uniform_bytes = self._activation_plan_bytes(
+            uniform, max_num_local_input_tokens, ep_size, wgrad_dtype
+        )
+        heterogeneous_bytes = self._activation_plan_bytes(
+            heterogeneous, max_num_local_input_tokens, ep_size, wgrad_dtype
+        )
+        logger.info(
+            "Dist-MoE PP layout comparison: uniform=%d heterogeneous=%d saved bytes",
+            uniform_bytes,
+            heterogeneous_bytes,
+        )
+        return heterogeneous if heterogeneous_bytes < uniform_bytes else uniform
+
+    def _activation_plan_bytes(
+        self,
+        plan: _DistMoePipelineActivationPlan,
+        max_num_local_input_tokens: int,
+        ep_size: int,
+        wgrad_dtype: torch.dtype | None,
+    ) -> int:
+        """Ask Annex for one candidate's saved bytes without allocating a context."""
+        config = self._resolve_context_config(
+            self._modules[0],
+            max_num_local_input_tokens=max_num_local_input_tokens,
+            max_live_activation_slots=plan.max_live_activation_slots,
+            max_moe_layers_per_activation_slot=plan.max_moe_layers_per_activation_slot,
+            wgrad_dtype=wgrad_dtype,
+        )
+        return dist_moe.plan_memory(config, ep_size=ep_size).total_activation_bytes
 
     def set_num_local_input_tokens_per_call(self, num_tokens: int) -> None:
         """Set the row count every EP rank passes to the annex in this step.
