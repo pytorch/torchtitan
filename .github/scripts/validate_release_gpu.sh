@@ -22,7 +22,7 @@ for var in "${required_env_vars[@]}"; do
 done
 
 case "${VALIDATION_SUITE}" in
-  core|graph-trainer|graph-trainer-h100|h100|torchft|transformers-modeling-backend) ;;
+  core|graph-trainer|graph-trainer-h100|h100|b200|torchft|transformers-modeling-backend) ;;
   *)
     echo "Unknown validation suite: ${VALIDATION_SUITE}" >&2
     exit 1
@@ -37,8 +37,14 @@ if [[ "${RC_VERSION}" != *rc* ]]; then
 fi
 export RC_VERSION VALIDATION_SUITE TORCH_VERSION TORCHVISION_VERSION TORCHAO_VERSION
 
-eval "$(conda shell.bash hook)"
-conda activate "$(conda env list --json | jq -r '.envs[-1]')"
+if [[ "${VALIDATION_SUITE}" == "b200" ]]; then
+  # The B200 CUDA container has no Conda environment.
+  uv venv --seed --python 3.12 "${RUNNER_TEMP}/validate-release-b200-venv"
+  source "${RUNNER_TEMP}/validate-release-b200-venv/bin/activate"
+else
+  eval "$(conda shell.bash hook)"
+  conda activate "$(conda env list --json | jq -r '.envs[-1]')"
+fi
 
 export HF_HOME="${RUNNER_TEMP}/hf_home"
 export HF_DATASETS_CACHE="${HF_HOME}/datasets"
@@ -75,6 +81,13 @@ install_release_candidate() {
 }
 install_release_candidate
 
+if [[ "${VALIDATION_SUITE}" == "b200" ]]; then
+  python -m pip install \
+    "pytest==7.3.2" "expecttest>=0.2.0" \
+    "flash-attn-4[cu13]>=4.0.0b31" \
+    "git+https://github.com/meta-pytorch/dist_moe.git@main"
+fi
+
 ARTIFACTS="${RUNNER_TEMP}/artifacts-to-be-uploaded"
 VALIDATION_ROOT="${RUNNER_TEMP}/validate-release-gpu"
 mkdir -p \
@@ -88,6 +101,7 @@ mkdir -p \
 cp "${REPO_ROOT}/run_train.sh" "${VALIDATION_ROOT}/run_train.sh"
 cp "${REPO_ROOT}/scripts/loss_compare.py" "${VALIDATION_ROOT}/scripts/loss_compare.py"
 cp -R "${REPO_ROOT}/tests" "${VALIDATION_ROOT}/tests"
+cp "${REPO_ROOT}/pyproject.toml" "${VALIDATION_ROOT}/pyproject.toml"
 cp \
   "${REPO_ROOT}/torchtitan/models/flux/inference/prompts.txt" \
   "${VALIDATION_ROOT}/torchtitan/models/flux/inference/prompts.txt"
@@ -115,6 +129,12 @@ assert torchao.__version__.split("+")[0] == os.environ["TORCHAO_VERSION"]
 assert torch.version.cuda == "13.0"
 assert torch.cuda.is_available()
 assert torch.cuda.device_count() >= 8
+if os.environ["VALIDATION_SUITE"] == "b200":
+    capability = torch.cuda.get_device_capability()
+    if capability not in ((10, 0), (10, 3)):
+        raise ValueError(
+            f"B200 validation requires SM100 or SM103, got SM{capability[0]}{capability[1]}"
+        )
 print(f"torchtitan={torchtitan.__version__} ({torchtitan.__file__})")
 print(f"torch={torch.__version__} ({torch.version.git_version})")
 print(f"torchvision={torchvision.__version__}")
@@ -228,8 +248,9 @@ run_h100_tests() {
     python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \
-    --exclude qwen3_fsdp+deepep,deepseek_v3_fsdp+hybridep+compile \
+    --exclude qwen3_fsdp+deepep,deepseek_v3_fsdp+hybridep \
     --gpu_arch_type cuda \
+    --gpu_arch h100 \
     --ngpu 8 \
     "${ARTIFACTS}/h100/base"; then
     status=1
@@ -237,11 +258,17 @@ run_h100_tests() {
 
   bash "${REPO_ROOT}/.github/scripts/install_deepep_v2.sh"
   if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 EP_DISABLE_GIN=1 \
+    python -m pytest \
+    tests/unit_tests/gpu/distributed/test_deepep_activation_checkpoint.py -v; then
+    status=1
+  fi
+  if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 EP_DISABLE_GIN=1 \
     TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \
     --test_name qwen3_fsdp+deepep \
     --gpu_arch_type cuda \
+    --gpu_arch h100 \
     --ngpu 8 \
     "${ARTIFACTS}/h100/deepep_v2"; then
     status=1
@@ -251,8 +278,9 @@ run_h100_tests() {
   if ! python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \
-    --test_name deepseek_v3_fsdp+hybridep+compile \
+    --test_name deepseek_v3_fsdp+hybridep \
     --gpu_arch_type cuda \
+    --gpu_arch h100 \
     --ngpu 8 \
     "${ARTIFACTS}/h100/hybrid_ep"; then
     status=1
@@ -279,6 +307,23 @@ run_graph_trainer_h100_tests() {
   python -m pytest "${tests_root}/test_bitwise_deterministic.py" -v
 }
 
+run_b200_tests() {
+  NCCL_NVLS_ENABLE=0 python -m pytest \
+    tests/unit_tests/cpu/models/common/test_dist_moe.py \
+    tests/unit_tests/gpu/models/common/test_dist_moe.py \
+    tests/unit_tests/gpu/quantization/test_mxfp8_fsdp.py \
+    -v
+
+  CUDA_HOME=/usr/local/cuda TORCH_SHOW_CPP_STACKTRACES=1 \
+    python -m tests.integration_tests.run_tests \
+    "${ARTIFACTS}/b200" \
+    --test_suite b200 \
+    --execution_mode real_pg \
+    --gpu_arch_type cuda \
+    --gpu_arch b200 \
+    --ngpu 8
+}
+
 # Run the selected suite without letting `set -e` abort the script on
 # failure: we still need to prune checkpoint directories from the artifacts
 # below and report the correct exit code afterwards. The subshell re-enables
@@ -294,6 +339,7 @@ set +e
     graph-trainer) run_graph_trainer_tests ;;
     graph-trainer-h100) run_graph_trainer_h100_tests ;;
     h100) run_h100_tests ;;
+    b200) run_b200_tests ;;
     torchft) run_torchft_tests ;;
     transformers-modeling-backend) run_transformers_modeling_backend_tests ;;
   esac

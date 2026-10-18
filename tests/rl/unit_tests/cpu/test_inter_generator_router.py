@@ -5,16 +5,22 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import inspect
 
 import pytest
 
-from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.distributed.routing.strategies import (
+from torchtitan.rl.actors.monarch.router import (
+    _InterGeneratorRouterActorEndpoints,
+    InterGeneratorRouterActor,
+)
+from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
     RoundRobinRoutingStrategy,
     StickySessionRoutingStrategy,
 )
-from torchtitan.rl.distributed.routing.types import RoutingContext
+from torchtitan.rl.routing.types import RoutingContext
 
 
 class _Endpoint:
@@ -53,13 +59,8 @@ class _Actor:
     ):
         self.generate = _Endpoint(name, wait=wait_generate)
         self.prefetch_model_state_dict = _Endpoint(wait=wait_prefetch)
-        self.pull_model_state_dict = _Endpoint(None, wait=wait_pull, raises=raises_pull)
-
-    def flatten(self, *args, **kwargs):
-        return self
-
-    def slice(self, **kwargs):
-        return self
+        self.load_model_state_dict = _Endpoint(None, wait=wait_pull, raises=raises_pull)
+        self.release_sessions = _Endpoint()
 
     def __len__(self):
         return 1
@@ -71,7 +72,7 @@ def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
             strategy=strategy or LeastLoadedRoutingStrategy.Config(),
             hot_swap=hot_swap,
         ),
-        generators=actors,
+        generators=[ServiceHandle(all_ranks=actor, rank0=actor) for actor in actors],
     )
 
 
@@ -127,7 +128,7 @@ def test_least_loaded_tie_break_spreads_over_a_changing_candidate_set():
         actors = [_Actor(f"gen{i}") for i in range(4)]
         router = _router(actors)
 
-        # gen1 drains for a weight sync on every other request, so the candidate
+        # gen1 drains for a model state dict load on every other request, so the candidate
         # set alternates between four and three generators. Each route finishes
         # before the next starts, so the survivors are always tied at zero load
         # and only the tie-break decides.
@@ -179,7 +180,9 @@ def test_sticky_session_reuses_generator_for_same_session():
             _Actor("gen0", wait_generate=True),
             _Actor("gen1", wait_generate=True),
         ]
-        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
+        router = _router(
+            actors, strategy=StickySessionRoutingStrategy.Config(repin_load_ratio=None)
+        )
 
         first = asyncio.create_task(
             router._route(
@@ -236,7 +239,7 @@ def test_sticky_session_waits_for_its_syncing_generator():
             == "gen0"
         )
 
-        # gen0 drains for a weight sync: s0's next turn waits instead of moving to gen1.
+        # gen0 drains for a model state dict load: s0's next turn waits instead of moving to gen1.
         router._set_serving(router._generators[0], False)
         turn = asyncio.create_task(
             router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
@@ -253,6 +256,33 @@ def test_sticky_session_waits_for_its_syncing_generator():
         router._set_serving(router._generators[0], True)
         assert await turn == "gen0"
         assert len(actors[0].generate.calls) == 2
+
+    asyncio.run(_run())
+
+
+def test_sticky_session_repins_off_an_overloaded_generator():
+    async def _run():
+        actors = [_Actor("gen0"), _Actor("gen1")]
+        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
+
+        assert (
+            await router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
+            == "gen0"
+        )
+
+        # gen0 piles up 3 in-flight calls vs 0 on gen1: 3 > default ratio 1.5 * mean load 1.5.
+        router._generators[0].reserved_load = 3
+        assert (
+            await router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
+            == "gen1"
+        )
+
+        # The move is a re-pin: s0 stays on gen1 once gen0 recovers.
+        router._generators[0].reserved_load = 0
+        assert (
+            await router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
+            == "gen1"
+        )
 
     asyncio.run(_run())
 
@@ -350,7 +380,7 @@ def test_sticky_session_release_drops_its_assignment():
         first = asyncio.create_task(_generate(router, group_id=0, session_id="s0"))
         await actors[0].generate.started.wait()
 
-        router._release_session(session_id="s0")
+        await router.release_session("s0")
         # Released, s0 is a new session: least-loaded picks idle gen1 over busy gen0.
         assert await _generate(router, group_id=0, session_id="s0") == "gen1"
 
@@ -360,9 +390,30 @@ def test_sticky_session_release_drops_its_assignment():
     asyncio.run(_run())
 
 
+def test_session_release_reaches_only_its_pinned_generator():
+    """The generator a session is pinned to releases its held KV."""
+
+    async def _run():
+        actors = [_Actor("gen0"), _Actor("gen1")]
+        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
+        assert await _generate(router, group_id=0, session_id="s0") == "gen0"
+
+        await router.release_session("s0")
+
+        assert actors[0].release_sessions.calls == [((["s0"],), {})]
+        assert actors[1].release_sessions.calls == []
+
+    asyncio.run(_run())
+
+
 def test_sticky_session_rejects_non_positive_max_sessions():
     with pytest.raises(ValueError, match="max_sessions must be positive"):
         StickySessionRoutingStrategy.Config(max_sessions=0).build()
+
+
+def test_sticky_session_rejects_repin_load_ratio_at_most_one():
+    with pytest.raises(ValueError, match="repin_load_ratio must be > 1"):
+        StickySessionRoutingStrategy.Config(repin_load_ratio=1.0)
 
 
 def test_drain_excludes_syncing_generator_from_routes():
@@ -373,16 +424,16 @@ def test_drain_excludes_syncing_generator_from_routes():
         ]
         router = _router(actors)
 
-        pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=1))
-        await actors[0].pull_model_state_dict.started.wait()
+        pull_task = asyncio.create_task(router.pull_model_state_dict(1))
+        await actors[0].load_model_state_dict.started.wait()
 
         assert not router._generators[0].serving.is_set()
         assert await router._route("generate", routing_ctx=RoutingContext()) == "gen1"
 
-        actors[0].pull_model_state_dict.release.set()
+        actors[0].load_model_state_dict.release.set()
         await pull_task
         assert [h.serving.is_set() for h in router._generators] == [True, True]
-        assert [actor.pull_model_state_dict.calls for actor in actors] == [
+        assert [actor.load_model_state_dict.calls for actor in actors] == [
             [((1,), {})],
             [((1,), {})],
         ]
@@ -405,18 +456,18 @@ def test_drain_pulls_idle_generators_while_busy_generator_drains():
         )
         await actors[0].generate.started.wait()
 
-        pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=2))
+        pull_task = asyncio.create_task(router.pull_model_state_dict(2))
         await asyncio.wait_for(
-            actors[1].pull_model_state_dict.started.wait(), timeout=1.0
+            actors[1].load_model_state_dict.started.wait(), timeout=1.0
         )
 
         # Both are draining, but gen0's pull is still waiting for its in-flight
         # route to drain, so only gen1 (idle) has started pulling.
         assert [h.serving.is_set() for h in router._generators] == [False, False]
-        assert actors[0].pull_model_state_dict.calls == []
+        assert actors[0].load_model_state_dict.calls == []
 
         # gen1 finishes pulling and is routable again while gen0 still drains.
-        actors[1].pull_model_state_dict.release.set()
+        actors[1].load_model_state_dict.release.set()
         assert (
             await asyncio.wait_for(
                 router._route("generate", routing_ctx=RoutingContext()),
@@ -429,7 +480,7 @@ def test_drain_pulls_idle_generators_while_busy_generator_drains():
         actors[0].generate.release.set()
         assert await route_task == "gen0"
         await pull_task
-        assert [actor.pull_model_state_dict.calls for actor in actors] == [
+        assert [actor.load_model_state_dict.calls for actor in actors] == [
             [((2,), {})],
             [((2,), {})],
         ]
@@ -442,16 +493,16 @@ def test_hot_swap_keeps_generators_serving_during_pull():
         actor = _Actor("gen0", wait_pull=True)
         router = _router([actor], hot_swap=True)
 
-        pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=3))
-        await actor.pull_model_state_dict.started.wait()
+        pull_task = asyncio.create_task(router.pull_model_state_dict(3))
+        await actor.load_model_state_dict.started.wait()
 
         # Hot swap does not quiesce the generator, so it keeps serving.
         assert router._generators[0].serving.is_set()
         assert await router._route("generate", routing_ctx=RoutingContext()) == "gen0"
 
-        actor.pull_model_state_dict.release.set()
+        actor.load_model_state_dict.release.set()
         await pull_task
-        assert actor.pull_model_state_dict.calls == [((3,), {})]
+        assert actor.load_model_state_dict.calls == [((3,), {})]
 
     asyncio.run(_run())
 
@@ -461,12 +512,12 @@ def test_prefetch_keeps_generator_serving_before_drain():
         actor = _Actor("gen0", wait_prefetch=True)
         router = _router([actor])
 
-        pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=3))
+        pull_task = asyncio.create_task(router.pull_model_state_dict(3))
         await actor.prefetch_model_state_dict.started.wait()
 
         assert router._generators[0].serving.is_set()
         assert await router._route("generate", routing_ctx=RoutingContext()) == "gen0"
-        assert actor.pull_model_state_dict.calls == []
+        assert actor.load_model_state_dict.calls == []
 
         actor.prefetch_model_state_dict.release.set()
         await pull_task
@@ -480,8 +531,8 @@ def test_single_generator_blocks_routes_while_draining():
         actor = _Actor("gen0", wait_pull=True)
         router = _router([actor])
 
-        pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=1))
-        await actor.pull_model_state_dict.started.wait()
+        pull_task = asyncio.create_task(router.pull_model_state_dict(1))
+        await actor.load_model_state_dict.started.wait()
 
         route_task = asyncio.create_task(
             router._route("generate", routing_ctx=RoutingContext())
@@ -490,7 +541,7 @@ def test_single_generator_blocks_routes_while_draining():
         assert not route_task.done()
         assert actor.generate.calls == []
 
-        actor.pull_model_state_dict.release.set()
+        actor.load_model_state_dict.release.set()
         await pull_task
 
         assert await route_task == "gen0"
@@ -504,7 +555,7 @@ def test_drain_restores_serving_on_pull_failure():
         router = _router([actor])
 
         with pytest.raises(RuntimeError, match="endpoint failed"):
-            await router._pull_model_state_dict(policy_version=1)
+            await router.pull_model_state_dict(1)
 
         assert router._generators[0].serving.is_set()
         assert await router._route("generate", routing_ctx=RoutingContext()) == "gen0"
@@ -517,10 +568,10 @@ def test_pull_model_state_dict_pulls_every_generator():
         actors = [_Actor("gen0"), _Actor("gen1")]
         router = _router(actors)
 
-        await router._pull_model_state_dict(policy_version=7)
+        await router.pull_model_state_dict(7)
 
         assert all(len(actor.prefetch_model_state_dict.calls) == 1 for actor in actors)
-        assert [actor.pull_model_state_dict.calls for actor in actors] == [
+        assert [actor.load_model_state_dict.calls for actor in actors] == [
             [((7,), {})],
             [((7,), {})],
         ]
@@ -555,7 +606,7 @@ def test_wait_engine_loop_raises_when_one_rank_crashes_while_its_peer_hangs():
         router = _router([crashing, healthy])
 
         with pytest.raises(RuntimeError, match="engine loop crashed"):
-            await asyncio.wait_for(router._wait_engine_loop(), timeout=5)
+            await asyncio.wait_for(router.wait_engine_loop(), timeout=5)
 
     asyncio.run(_run())
 
@@ -570,6 +621,20 @@ def test_wait_engine_loop_returns_once_every_rank_exits():
             actor.wait_engine_loop = _StreamEndpoint(exited, exited)
         router = _router(actors)
 
-        await asyncio.wait_for(router._wait_engine_loop(), timeout=5)
+        await asyncio.wait_for(router.wait_engine_loop(), timeout=5)
 
     asyncio.run(_run())
+
+
+def test_router_actor_exposes_every_public_router_method():
+    public_methods = {
+        name
+        for name, method in vars(InterGeneratorRouter).items()
+        if inspect.iscoroutinefunction(method) and not name.startswith("_")
+    }
+    assert issubclass(InterGeneratorRouterActor, InterGeneratorRouter)
+    assert public_methods == {
+        name
+        for name in vars(_InterGeneratorRouterActorEndpoints)
+        if not name.startswith("_")
+    }

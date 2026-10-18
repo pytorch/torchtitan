@@ -13,7 +13,8 @@ import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor
 
-from torchtitan.models.common.moe_state_dict_adapter import MoEStateDictAdapter
+from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
 
 from torchtitan.models.common.rope import ComplexRoPE
 
@@ -49,14 +50,14 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE Module
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.routed_experts.w1_EFD",
-            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.routed_experts.w3_EFD",
-            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.routed_experts.w2.weight",
-            "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
-            "model.layers.{}.mlp.shared_experts.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
-            "model.layers.{}.mlp.shared_experts.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
-            "model.layers.{}.mlp.shared_experts.down_proj.weight": "layers.{}.moe.shared_experts.w2.weight",
-            "model.layers.{}.mlp.gate.e_score_correction_bias": "layers.{}.moe.expert_bias_E",
+            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.feed_forward.routed_experts.w1_EFD",
+            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.feed_forward.routed_experts.w3_EFD",
+            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.feed_forward.routed_experts.w2.weight",
+            "model.layers.{}.mlp.gate.weight": "layers.{}.feed_forward.router.gate.weight",
+            "model.layers.{}.mlp.shared_experts.gate_proj.weight": "layers.{}.feed_forward.shared_experts.w1.weight",
+            "model.layers.{}.mlp.shared_experts.up_proj.weight": "layers.{}.feed_forward.shared_experts.w3.weight",
+            "model.layers.{}.mlp.shared_experts.down_proj.weight": "layers.{}.feed_forward.shared_experts.w2.weight",
+            "model.layers.{}.mlp.gate.e_score_correction_bias": "layers.{}.feed_forward.expert_bias_E",
             # MTP Module
             "model.layers.{}.enorm.weight": "layers.{}.enorm.weight",
             "model.layers.{}.hnorm.weight": "layers.{}.hnorm.weight",
@@ -156,7 +157,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             )
         return super().get_hf_storage_reader(path, thread_count=thread_count)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
         2. Split grouped-linear weights into individual expert weights.
@@ -197,14 +200,14 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                     moe_layer = next(
                         l
                         for l in self.model_config.layers  # pyrefly: ignore [missing-attribute]
-                        if l.moe is not None
+                        if isinstance(l.feed_forward, MoE.Config)
                     )
                     split_values = self._split_experts_weights(
                         value,
-                        moe_layer.moe.num_experts,
+                        moe_layer.feed_forward.num_experts,
                     )
 
-                    for expert_num in range(0, moe_layer.moe.num_experts):
+                    for expert_num in range(0, moe_layer.feed_forward.num_experts):
                         new_key = new_abstract_key.format(layer_num, expert_num)
                         hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
@@ -219,7 +222,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """
         1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
         2. Convert between the HF shape and the torchtitan shape.
@@ -267,8 +272,8 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                         next(
                             l
                             for l in self.model_config.layers  # pyrefly: ignore [missing-attribute]
-                            if l.moe is not None
-                        ).moe.num_experts,
+                            if isinstance(l.feed_forward, MoE.Config)
+                        ).feed_forward.num_experts,
                     )
 
                 if stacked_value is not None:

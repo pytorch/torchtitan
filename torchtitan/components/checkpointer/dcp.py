@@ -385,14 +385,18 @@ class CheckpointManager(BaseCheckpointManager):
                 "but sd_adapter is not provided."
             )
 
-            hf_state_dict = self.sd_adapter.to_hf(state_dict)
+            hf_state_dict = self.sd_adapter.to_hf(
+                state_dict, to_quantized_layout=from_quantized
+            )
             hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
                 checkpoint_id, from_quantized
             )
 
             dcp.load(hf_state_dict, storage_reader=hf_storage_reader)
 
-            state_dict = self.sd_adapter.from_hf(hf_state_dict)
+            state_dict = self.sd_adapter.from_hf(
+                hf_state_dict, is_quantized_layout=from_quantized
+            )
             states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
@@ -401,13 +405,6 @@ class CheckpointManager(BaseCheckpointManager):
             # manually call load_state_dict() for the model. Need to fix this.
             if MODEL in states:
                 states[MODEL].load_state_dict(state_dict)
-
-        # Reseed EMA from the just-loaded weights if it wasn't itself restored
-        # (excluded, or a model_only load). MODEL is never excludable, so its
-        # presence rules out torchft's per-replica dataloader-only load, which
-        # also calls _load_checkpoint but never includes MODEL.
-        if MODEL in states and EMA in self.states and EMA not in states:
-            self.states[EMA].load_state_dict({})
 
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.

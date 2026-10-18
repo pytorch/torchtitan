@@ -23,7 +23,6 @@ from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 from torchtitan.components.renderer import RendererConfig, RenderersConfigAdapter
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.examples.verifiers.data import (
     VerifiersTaskDataset,
     VerifiersTaskSample,
@@ -35,6 +34,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
     VerifiersGenerationMetadata,
 )
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
+from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
@@ -49,7 +49,8 @@ from torchtitan.rl.rollout.types import (
 )
 
 if TYPE_CHECKING:
-    from torchtitan.rl.generator import SamplingConfig
+    from torchtitan.rl.actors.system import ActorSystem
+    from torchtitan.rl.generator.types import SamplingConfig
 
 
 logger = logging.getLogger(__name__)
@@ -168,12 +169,17 @@ class VerifiersRollouter(Rollouter):
     async def setup_async(
         self,
         *,
+        actor_system: ActorSystem,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
     ) -> None:
-        """Start the EnvServer and connect it to TorchTitan generation."""
-        del tokenizer_config
+        """Start the EnvServer and connect it to TorchTitan generation.
+
+        Rollouts run in the EnvServer, so no rollout worker pool is spawned through
+        ``actor_system``.
+        """
+        del actor_system, tokenizer_config
         if self._verifiers_env_client is not None:
             return
         if not isinstance(renderer_config, RenderersConfigAdapter):
@@ -201,7 +207,7 @@ class VerifiersRollouter(Rollouter):
                 # The local endpoint does not authenticate. An empty environment
                 # variable name makes Verifiers send its required "EMPTY" value.
                 api_key_var="",
-                renderer=renderer_config.renderers_config,
+                renderer=renderer_config.get_renderers_config(),
                 multiplex=self._verifiers_config.renderer_multiplex,
                 renderer_model_name=hf_assets_path,
             )

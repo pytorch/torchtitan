@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from torchtitan.rl.observability.vllm import (
+from torchtitan.rl.generator.vllm.stat_logger import (
     _extract_step_stats,
     StatLoggerContext,
     VllmOtelStatLogger,

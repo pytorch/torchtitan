@@ -766,6 +766,7 @@ class _RedistributionBucketPlan(Generic[_ItemT]):
     storage_to_compute_schedule: _PackedAllToAllSchedule
     compute_to_storage_schedule: _PackedAllToAllSchedule
     dtype: torch.dtype
+    compute_dtype: torch.dtype
     device: torch.device
 
 
@@ -1069,6 +1070,7 @@ def _build_bucket_plans(
         [tuple[_BucketPlanningContext[_ItemT], ...]],
         Sequence[Sequence[_RedistributionPlan | None]],
     ],
+    get_compute_dtype: Callable[[_ItemT], torch.dtype],
 ) -> _BucketPlanningResult[_ItemT]:
     """Build ordered optimizer bucket plans with and without redistribution.
 
@@ -1183,6 +1185,9 @@ def _build_bucket_plans(
             tensor.dtype != dtype or tensor.device != device for tensor in local_tensors
         ):
             raise ValueError(f"bucket {context.name!r} mixes dtype or device")
+        compute_dtypes = {get_compute_dtype(item) for item in redistributed_items}
+        if len(compute_dtypes) != 1:
+            raise ValueError(f"bucket {context.name!r} mixes compute dtypes")
 
         redistribution_plans_tuple = tuple(redistribution_plans)
         plans.append(
@@ -1204,6 +1209,7 @@ def _build_bucket_plans(
                     local_participant=group.local_participant,
                 ),
                 dtype=dtype,
+                compute_dtype=next(iter(compute_dtypes)),
                 device=device,
             )
         )
@@ -1231,6 +1237,7 @@ def _validate_bucket_plans_across_ranks(
             continue
         description = (
             str(plan.dtype),
+            str(plan.compute_dtype),
             plan.device.type,
             tuple(
                 _redistribution_plan_key(redistribution_plan)

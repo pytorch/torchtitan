@@ -170,6 +170,40 @@ class TestProfilerEnabledPaths(unittest.TestCase):
             with profiler:
                 self.assertIsNotNone(profiler.torch_profiler)
 
+    def test_neuron_adds_privateuse1_activity_and_stacks(self):
+        import tempfile
+
+        import torch
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch("torch.cuda.is_available", return_value=False),
+            mock.patch("torch.xpu.is_available", return_value=False),
+            mock.patch("torchtitan.observability.profiler.device_type", "neuron"),
+            mock.patch("torch.profiler.profile") as profile,
+        ):
+            profiler = Profiler(
+                Profiler.Config(
+                    enable_profiling=True,
+                    profile_freq=4,
+                    profiler_warmup=1,
+                    profiler_active=1,
+                ),
+                global_step=0,
+                base_folder=tmpdir,
+            )
+            profiler.build_torch_profiler(
+                global_step=0, base_folder=tmpdir, leaf_folder=""
+            )
+        self.assertEqual(
+            profile.call_args.kwargs["activities"],
+            [
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.PrivateUse1,
+            ],
+        )
+        self.assertTrue(profile.call_args.kwargs["with_stack"])
+
     def test_memory_snapshot_frequency_is_independent(self):
         import tempfile
 
