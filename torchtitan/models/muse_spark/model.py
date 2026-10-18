@@ -171,7 +171,7 @@ class MuseSparkAttention(GQAttention):
         output_TD = self.wo(output_TO)
         return output_TD
 
-    @local_compile("muse_spark_attention_qk_norm", batch_invariant=True)
+    @local_compile("muse_spark_attention_qk_norm", batch_invariant=False)
     def _norm_query_and_key(
         self,
         query_TNH: torch.Tensor,
@@ -182,7 +182,7 @@ class MuseSparkAttention(GQAttention):
             raise ValueError("MuseSparkAttention needs both q_norm and k_norm.")
         return self.q_norm(query_TNH) * self.scale_query_by, self.k_norm(key_TKH)
 
-    @local_compile("muse_spark_attention_output", batch_invariant=True)
+    @local_compile("muse_spark_attention_output", batch_invariant=False)
     def _flatten_attention_output(
         self,
         output_TNH: torch.Tensor,
