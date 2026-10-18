@@ -101,5 +101,104 @@ class TestArgsortExpertIds(unittest.TestCase):
             )
 
 
+def _compiled_regions():
+    """Run the dispatcher's regions under torch.compile (eager backend)."""
+    names = (
+        "_sort_routes_and_gather",
+        "_sort_routes_for_training",
+        "_gather_weighted_sum",
+        "_sum_routes_per_token",
+        "_gather_weighted_sum_backward",
+    )
+    return patch.multiple(
+        token_dispatcher,
+        **{
+            name: torch.compile(getattr(token_dispatcher, name), backend="eager")
+            for name in names
+        },
+    )
+
+
+class TestLocalTokenDispatcherTraining(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(0)
+        self.T, self.K, self.E, self.D = 37, 4, 8, 32
+        self.dispatcher = LocalTokenDispatcher(
+            LocalTokenDispatcher.Config(num_experts=self.E, top_k=self.K)
+        )
+        self.ids_TK = torch.stack(
+            [torch.randperm(self.E)[: self.K] for _ in range(self.T)]
+        )
+
+    def _forward(self, x_TD, scores_TK, weight_D):
+        routed_ND, _, metadata = self.dispatcher.dispatch(
+            x_TD, scores_TK, self.ids_TK, None
+        )
+        return self.dispatcher.combine(routed_ND * weight_D, metadata, x_TD)
+
+    def _scatter_path(self, x_TD, scores_TK, weight_D):
+        routed_ND, tokens_N, scores_N = self.dispatcher._local_reorder(
+            x_TD, scores_TK, self.ids_TK
+        )
+        return LocalTokenDispatcher._score_and_scatter_add(
+            routed_ND * weight_D, scores_N, tokens_N, x_TD
+        )
+
+    def _inputs(self, dtype):
+        x_TD = torch.randn(self.T, self.D, dtype=dtype, requires_grad=True)
+        scores_TK = torch.rand(self.T, self.K, requires_grad=True)
+        return x_TD, scores_TK, torch.randn(self.D, dtype=dtype)
+
+    def test_compiled_training_combine_matches_inference_bitwise(self):
+        # Trainer and generator sum a token's routes the same way (float32, one rounding).
+        x_TD, scores_TK, weight_D = self._inputs(torch.bfloat16)
+        with _compiled_regions():
+            training_TD = self._forward(x_TD, scores_TK, weight_D)
+            with torch.no_grad():
+                inference_TD = self._forward(x_TD, scores_TK, weight_D)
+        torch.testing.assert_close(training_TD, inference_TD, rtol=0, atol=0)
+
+    def test_compiled_training_grads_match_float64_reference(self):
+        x_TD, scores_TK, weight_D = self._inputs(torch.float32)
+        grad_TD = torch.randn(self.T, self.D)
+        with _compiled_regions():
+            out_TD = self._forward(x_TD, scores_TK, weight_D)
+            grads = torch.autograd.grad(out_TD, (x_TD, scores_TK), grad_TD)
+        # Each route carries x * weight, so out = sum_k score_k * x * weight.
+        x64 = x_TD.detach().double().requires_grad_()
+        scores64 = scores_TK.detach().double().requires_grad_()
+        out64 = scores64.sum(1, keepdim=True) * x64 * weight_D.double()
+        ref_grads = torch.autograd.grad(out64, (x64, scores64), grad_TD.double())
+        for grad, ref in zip(grads, ref_grads, strict=True):
+            torch.testing.assert_close(grad.double(), ref, rtol=1e-5, atol=1e-5)
+
+    def test_compiled_training_without_score_grads(self):
+        # Detached scores skip the score-gradient work; grad_x is unchanged.
+        x_TD, scores_TK, weight_D = self._inputs(torch.float32)
+        grad_TD = torch.randn(self.T, self.D)
+        with _compiled_regions():
+            (expected_grad_x,) = torch.autograd.grad(
+                self._forward(x_TD, scores_TK, weight_D), (x_TD,), grad_TD
+            )
+            (grad_x,) = torch.autograd.grad(
+                self._forward(x_TD, scores_TK.detach(), weight_D), (x_TD,), grad_TD
+            )
+        torch.testing.assert_close(grad_x, expected_grad_x, rtol=0, atol=0)
+
+    def test_eager_training_matches_the_scatter_path(self):
+        # Uncompiled, dispatch and combine keep the scatter-add forward and backward.
+        x_TD, scores_TK, weight_D = self._inputs(torch.bfloat16)
+        grad_TD = torch.randn(self.T, self.D, dtype=torch.bfloat16)
+        actual = self._forward(x_TD, scores_TK, weight_D)
+        expected = self._scatter_path(x_TD, scores_TK, weight_D)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for a, e in zip(
+            torch.autograd.grad(actual, (x_TD, scores_TK), grad_TD),
+            torch.autograd.grad(expected, (x_TD, scores_TK), grad_TD),
+            strict=True,
+        ):
+            torch.testing.assert_close(a, e, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     unittest.main()

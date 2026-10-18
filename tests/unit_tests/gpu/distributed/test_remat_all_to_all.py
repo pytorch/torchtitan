@@ -24,6 +24,7 @@ from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
     DefaultActivationRematConfig,
 )
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import SwiGLU
@@ -31,6 +32,7 @@ from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
+    LocalTokenDispatcher,
     TorchAOTokenDispatcher,
 )
 
@@ -80,15 +82,14 @@ class _AllToAllBlock(Module):
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         num_tokens = x_TD.shape[0]
+        top_k = self.routed_experts.token_dispatcher.top_k
+        # Stride 3: with top_k > 1, a token's routes span ranks and come out of
+        # expert order, so the expert sort is not its own inverse.
         expert_ids_TK = (
-            torch.arange(num_tokens, device=x_TD.device) % self.num_experts
-        ).unsqueeze(-1)
-        routing_scores_TK = torch.ones(
-            num_tokens,
-            1,
-            device=x_TD.device,
-            dtype=x_TD.dtype,
-        )
+            torch.arange(num_tokens * top_k, device=x_TD.device) * 3 % self.num_experts
+        ).view(num_tokens, top_k)
+        # Scores from the input, so backward also computes the score gradient.
+        routing_scores_TK = torch.sigmoid(x_TD[:, :top_k])
         num_tokens_per_expert_E = torch.bincount(
             expert_ids_TK.flatten(), minlength=self.num_experts
         )
@@ -286,6 +287,59 @@ class TestAllToAllRematRegions(DTensorTestBase):
                 torch.testing.assert_close(
                     parameter.grad, expected_grad, rtol=0, atol=0
                 )
+
+    @with_comms
+    def test_compiled_gather_sum_matches_eager(self):
+        # Compiled moe_dispatch/moe_combine sort and sum each token's routes with gathers
+        # around the all-to-alls, instead of the scatter-add. They must match eager, and
+        # a remat replay must reproduce them bitwise.
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("ep",),
+        )
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=mesh,
+            dense_sp_enabled=False,
+        )
+        num_experts = 2 * self.world_size
+        dispatcher_config = AllToAllTokenDispatcher.Config(
+            num_experts=num_experts, top_k=2
+        )
+
+        def run(save_regions=None):
+            torch.manual_seed(42)
+            model = _Model(_AllToAllBlock(num_experts, dispatcher_config))
+            model = model.to(self.device_type)
+            if save_regions is not None:
+                ActivationRematConfig(save_regions=save_regions).apply(model)
+            return _run_forward_backward(model, x_TD)
+
+        with (
+            torch.autograd.set_multithreading_enabled(False),
+            set_current_spmd_mesh(mesh),
+        ):
+            x_TD = torch.randn(8, _MODEL_DIM, device=self.device_type)
+            eager = run()
+            apply_local_compile(["moe_dispatch", "moe_combine"])
+            try:
+                with patch.object(
+                    LocalTokenDispatcher,
+                    "_score_and_scatter_add",
+                    side_effect=AssertionError("compiled combine scatter-added"),
+                ):
+                    compiled = run()
+                    for save_regions in ([], ["routed_experts.*"]):
+                        with self.subTest(save_regions=save_regions):
+                            self._assert_results_equal(compiled, run(save_regions))
+            finally:
+                apply_local_compile([])
+
+        torch.testing.assert_close(compiled[0], eager[0])
+        torch.testing.assert_close(compiled[1], eager[1])
+        for compiled_grad, eager_grad in zip(compiled[2], eager[2], strict=True):
+            torch.testing.assert_close(compiled_grad, eager_grad)
 
     @with_comms
     def test_torchao_padded_dispatch_matches_unpadded(self):
