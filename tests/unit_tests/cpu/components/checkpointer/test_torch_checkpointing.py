@@ -1165,6 +1165,73 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             self.assertEqual({MODEL}, set(backend_manager.load_calls[0][1]))
             manager.close()
 
+    def test_model_only_load_reseeds_ema_from_loaded_weights(self) -> None:
+        # Same contract as the DCP CheckpointManager: an EMA that was not
+        # restored is reseeded from the weights that were.
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_id = os.path.join(base_folder, "checkpoint", "step-0")
+            os.makedirs(checkpoint_id)
+            with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb"):
+                pass
+            # initial_load_model_only only applies to initial_load_path; the
+            # step-0 seed checkpoint is loaded model-only regardless.
+            config = TorchCheckpointingManager.Config(
+                folder="checkpoint",
+                keep_latest_k=0,
+                initial_load_model_only=False,
+                load_only=True,
+            )
+            ema = mock.create_autospec(Stateful, instance=True)
+            ema.state_dict.return_value = {}
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+                ema=ema,
+            )
+
+            self.assertTrue(manager.load())
+
+            self.assertEqual({MODEL}, set(backend_manager.load_calls[0][1]))
+            ema.load_state_dict.assert_called_once_with({})
+            manager.close()
+
+    def _resume_step_5_with_ema(self, **config_kwargs):
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_id = os.path.join(base_folder, "checkpoint", "step-5")
+            os.makedirs(checkpoint_id)
+            with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb"):
+                pass
+            config = TorchCheckpointingManager.Config(
+                folder="checkpoint",
+                keep_latest_k=0,
+                load_only=True,
+                **config_kwargs,
+            )
+            ema = mock.create_autospec(Stateful, instance=True)
+            # Non-empty, so restoring it is distinguishable from a reseed ({}).
+            ema.state_dict.return_value = {"num_updates": 5}
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+                ema=ema,
+            )
+            self.assertTrue(manager.load())
+            manager.close()
+            return set(backend_manager.load_calls[0][1]), ema
+
+    def test_ema_excluded_from_resume_is_reseeded(self) -> None:
+        loaded, ema = self._resume_step_5_with_ema(exclude_from_loading=["ema"])
+
+        self.assertNotIn(EMA, loaded)
+        ema.load_state_dict.assert_called_once_with({})
+
+    def test_full_resume_keeps_restored_ema(self) -> None:
+        # Reseeding here would wipe the EMA history restored with the checkpoint.
+        loaded, ema = self._resume_step_5_with_ema()
+
+        self.assertIn(EMA, loaded)
+        self.assertNotIn(mock.call({}), ema.load_state_dict.call_args_list)
+
     def test_load_latest_uses_configured_storage(self) -> None:
         # The backend Storage the adapter wraps: step-7 is a directory holding a
         # metadata.pkl file.

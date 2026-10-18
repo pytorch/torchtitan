@@ -46,7 +46,7 @@ class CPUKVOffload(Configurable):
         size_gib: float
         """Host RAM (GiB) per generator, split across its TP ranks. vLLM pins it in
         ``/dev/shm``, so the generators on one host must fit there together. Generator procs need
-        ``expandable_segments:False`` and ``PYTHONHASHSEED=0`` (``train.py`` sets both)."""
+        ``expandable_segments:False`` and ``PYTHONHASHSEED=0`` (``generator_launch_env`` sets both)."""
 
         def __post_init__(self):
             if self.size_gib <= 0:
@@ -117,7 +117,7 @@ class CPUKVOffload(Configurable):
         if sys.flags.hash_randomization:
             raise ValueError(
                 "session_kv_holder.cpu_kv_offload with tensor_parallel_degree > 1 needs "
-                "PYTHONHASHSEED=0 in generator procs (train.py sets it): TP ranks iterate the same "
+                "PYTHONHASHSEED=0 in generator procs (generator_launch_env sets it): TP ranks iterate the same "
                 "sets and must agree on the order"
             )
 

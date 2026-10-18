@@ -21,6 +21,7 @@ from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from torchtitan.models.common.moe import MoE
 from .state_dict_adapter import Qwen3StateDictAdapter
 
 
@@ -44,13 +45,7 @@ class Qwen3TransformerBlock(TransformerBlock):
 
         self.attention = config.attention.build()
 
-        self.moe_enabled = config.moe is not None
-        if self.moe_enabled:
-            assert config.moe is not None
-            self.moe = config.moe.build()
-        else:
-            assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build()
+        self.feed_forward = config.feed_forward.build()
 
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -69,8 +64,8 @@ class Qwen3TransformerBlock(TransformerBlock):
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
 
-        if self.moe_enabled:
-            ffn_out = self.moe(
+        if isinstance(self.feed_forward, MoE):
+            ffn_out = self.feed_forward(
                 self.ffn_norm(x),
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,

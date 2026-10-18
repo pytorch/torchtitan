@@ -14,6 +14,7 @@ import torch
 from monarch.actor import Actor, concurrent_endpoint
 
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
+from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch
 
 from torchtitan.rl.trainer.trainer import OptimizerStepOutput, Trainer
 
@@ -26,6 +27,10 @@ class _TrainerActorEndpoints:
     @concurrent_endpoint
     async def get_policy_version(self) -> int:
         return super().policy_version
+
+    @concurrent_endpoint
+    async def get_dp_rank(self) -> int:
+        return self.dp_rank
 
     @concurrent_endpoint
     async def get_controller_state(self) -> dict[str, Any] | None:
@@ -42,12 +47,12 @@ class _TrainerActorEndpoints:
     @concurrent_endpoint
     async def forward_backward(
         self,
-        training_data: list[list[TrainingMicrobatch]],
+        microbatches: list[TrainingMicrobatch] | list[RDMAMicrobatch],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         return await super().forward_backward(
-            training_data,
+            microbatches,
             global_loss_token_counts,
             global_routing_token_counts,
         )

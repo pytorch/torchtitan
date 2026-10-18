@@ -36,13 +36,12 @@ from torchtitan.models.base.model import BaseModel
 from torchtitan.models.base.module import ModuleDict, ModuleList
 from torchtitan.models.common.decoder import Decoder
 
-# These are the public entrypoints for model-specific PP setup. Helpers in this
-# module are implementation details and stay private.
 logger = logging.getLogger(__name__)
 
 
 __all__ = [
     "get_module_fqns_per_model_part",
+    "prepare_pipeline_schedule_for_cuda_graph",
     "pipeline_llm",
     "pipeline_with_first_last_stage_modules",
 ]
@@ -371,6 +370,34 @@ def _get_pipeline_metadata(
         stages_per_rank = 1 if is_single_stage_schedule else 2
         num_virtual_stages = parallelism_context.pp * stages_per_rank
     return num_virtual_stages, num_layers, input_weight, output_weight
+
+
+def prepare_pipeline_schedule_for_cuda_graph(
+    schedule: _PipelineSchedule,
+    *,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    target: torch.Tensor | None,
+    loss_kwargs: dict[str, Any],
+    for_eval: bool = False,
+) -> None:
+    """Prepare training or eval pipeline metadata outside CUDA graph capture."""
+    # TODO: Use a public pipeline schedule initialization API.
+    if isinstance(schedule, PipelineScheduleSingle):
+        stages = [schedule._stage]
+        initialize = schedule._initialize_stage
+    else:
+        assert isinstance(schedule, PipelineScheduleMulti)
+        stages = schedule._stages
+        initialize = schedule._initialize_stages
+    has_backward = schedule._has_backward
+    schedule._has_backward = has_backward and not for_eval
+    try:
+        for stage in stages:
+            stage.has_backward = schedule._has_backward
+        initialize(args, kwargs, target, loss_kwargs=loss_kwargs)
+    finally:
+        schedule._has_backward = has_backward
 
 
 def _build_pipeline_schedule(

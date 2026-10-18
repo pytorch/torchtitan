@@ -210,7 +210,7 @@ def test_full_metadata_and_native_dispatch_variants():
 
 @pytest.mark.parametrize("decode", [False, True])
 def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode):
-    layer = gdn.VLLMInnerGatedDeltaNet.__new__(gdn.VLLMInnerGatedDeltaNet)
+    layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
     layer.prefix, layer.kv_cache = "gdn", (torch.empty(0), torch.empty(0))
     extent = 4 if decode else 3

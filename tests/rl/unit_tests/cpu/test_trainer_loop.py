@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from torchtitan.rl.actors.system import TrainerHandle
 from torchtitan.rl.controller.controller import Controller
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
@@ -84,11 +85,15 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     )
     controller.start_step = 0
     controller._trainer_policy_version = 0
-    controller.trainer = SimpleNamespace(
+    trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
         forward_backward=_Endpoint(forward_backward),
         optim_step=_Endpoint(optim_step),
         push_model_state_dict=_Endpoint(push),
+    )
+    # DP degree 1: every trainer rank is at DP rank 0.
+    controller.trainer = TrainerHandle(
+        all_ranks=trainer, rank0=trainer, by_dp_rank=[trainer]
     )
 
     async def get_session_kv_metrics():
@@ -98,6 +103,10 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         sync_log_step=_Endpoint(),
         pull_model_state_dict=_Endpoint(pull),
         get_session_kv_metrics=_Endpoint(get_session_kv_metrics),
+    )
+    controller.batcher = SimpleNamespace(
+        sync_log_step=SimpleNamespace(broadcast=lambda step: None),
+        maybe_release_oldest_batch=SimpleNamespace(broadcast=lambda: None),
     )
 
     async def sync_log_step(step):
@@ -151,12 +160,13 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
     assert events == [
         "fwd_bwd 1",
         "optim 1",
-        # Step 1's push -> pull -> release starts in the background ...
-        "fwd_bwd 2",
+        # Step 1's push -> pull -> release starts in the background. The per-DP-rank
+        # forward_backward calls run as tasks, so with these instant fakes it finishes first ...
         "push start",
         "push end",
         "pull 1",
         "release 5 trained",
+        "fwd_bwd 2",
         # ... and lands before step 2's optimizer step.
         "optim 2",
         "push start",

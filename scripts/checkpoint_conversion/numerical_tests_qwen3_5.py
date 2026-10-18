@@ -324,7 +324,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
     # (unfused FlexInnerAttention without torch.compile has poor fp16 numerics).
     for layer in model.layers.values():
         if layer.full_attn:
-            layer.attn.inner_attention = _SDPA(is_causal=True)
+            layer.attention.inner_attention = _SDPA(is_causal=True)
 
     for blk in model.vision_encoder.layers.values():
         blk.attn.flex_attention = _SDPA(is_causal=False)
