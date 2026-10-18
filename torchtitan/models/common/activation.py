@@ -29,9 +29,8 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
         pass
 
     # recompile_limit=16: ~3 graphs per static F; DeepSeek-V3 at TP8 needs 10 (default 8).
-    # max_pointwise_cat_inputs=0: backward writes grad_gate_up [..., 2, F] with one
-    # store per half, instead of Inductor's pointwise stack, which computes every
-    # element of both halves behind a mask.
+    # Both cat options 0: backward writes grad_gate_up [..., 2, F] with one store per half, not one
+    # masked kernel over both halves. SwiGLU fwd+bwd -27% on GB300, bitwise.
     @local_compile(
         "fused_binary_activation",
         batch_invariant=True,
