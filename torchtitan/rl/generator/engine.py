@@ -104,7 +104,8 @@ class GenerationEngine(Configurable, abc.ABC):
         """Log the engine's own per-step stats, if any."""
 
     def session_kv_metrics(self) -> list[m.Metric]:
-        """The engine's session-KV metrics, if it holds session KV."""
+        """The engine's session-KV metrics, if it holds session KV.
+        Runs on the actor thread, as ``log_stats`` does: read only single values, no engine-owned containers."""
         return []
 
     @abc.abstractmethod

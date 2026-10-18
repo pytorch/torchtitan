@@ -434,6 +434,18 @@ class VLLMEngine(GenerationEngine):
         if self._session_kv_holder is not None:
             self._session_kv_holder.release(session_ids, group_ids)
 
+    def log_stats(self, step: int) -> None:
+        if (
+            self._session_kv_holder is not None
+            and self.config.session_kv_holder.hold_gpu_blocks
+        ):
+            logger.info(
+                "Session KV at step %d: %d sessions held, %d evicted so far",
+                step,
+                self._session_kv_holder.num_sessions,
+                self._session_kv_holder.num_evicted,
+            )
+
     def session_kv_metrics(self) -> list[m.Metric]:
         """This rank's session-KV metrics: levels now, counts since the last call.
 

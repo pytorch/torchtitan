@@ -417,7 +417,7 @@ class Generator(Configurable):
         self._engine_loop.release_sessions(session_ids)
 
     async def get_session_kv_metrics(self) -> list[m.Metric]:
-        """This rank's session-KV metrics: levels now, counts since the last call (rank 0)."""
+        """Rank 0's session-KV metrics: levels now, counts since the last call; [] on other ranks."""
         return self._engine_loop.session_kv_metrics()
 
     async def initialize_torchstore_client(self, requester_index: int) -> None:
