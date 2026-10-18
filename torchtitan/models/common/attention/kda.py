@@ -71,6 +71,7 @@ class KDAKernel(Module):
                 )
 
     def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
         require_attn_gym(chunk_kda, bound_gate, l2norm)
         super().__init__()
         self.lower_bound = config.lower_bound
@@ -173,6 +174,8 @@ class InnerKDA(InnerAttention):
             )
 
     def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(causal_conv1d)
         super().__init__()
         self.head_dim = config.head_dim
         self.kernel = config.kernel.build()

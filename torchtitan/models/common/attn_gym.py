@@ -11,7 +11,7 @@
 
 from importlib import import_module
 from types import ModuleType
-from typing import Any, cast, NoReturn, TYPE_CHECKING
+from typing import Any, NoReturn, TYPE_CHECKING, TypeGuard
 
 if TYPE_CHECKING:
     from attn_gym.linear import (
@@ -131,11 +131,8 @@ def _raise_for(error: ModuleNotFoundError | None) -> NoReturn:
     """Raise for a missing export.
 
     ``error`` is the backend error recorded for the export's module. Without
-    one, the first recorded backend error is used, and without any the
-    install hint for attn_gym itself.
+    one, attn_gym itself is not installed.
     """
-    if error is None:
-        error = next(iter(_BACKEND_ERRORS.values()), None)
     if error is not None:
         # A fresh exception each time: re-raising the recorded instance would
         # keep appending tracebacks to one shared object.
@@ -147,10 +144,6 @@ def _raise_for(error: ModuleNotFoundError | None) -> NoReturn:
         "Install it with: python -m pip install 'attn-gym[linear,cudnn]==0.0.16'.",
         name="attn_gym",
     )
-
-
-def _raise_missing(*args: Any, **kwargs: Any) -> NoReturn:
-    _raise_for(None)
 
 
 class _MissingKernel:
@@ -183,7 +176,7 @@ def _missing_backend_kernel(module_name: str) -> type[_MissingKernel]:
     kernel = _BACKEND_KERNELS.get(module_name)
     if kernel is None:
         kernel = type(
-            "_MissingKernel",
+            f"_MissingKernel[{module_name}]",
             (_MissingKernel,),
             {"__module__": __name__, "_error": _BACKEND_ERRORS[module_name]},
         )
@@ -191,7 +184,7 @@ def _missing_backend_kernel(module_name: str) -> type[_MissingKernel]:
     return kernel
 
 
-def is_missing_kernel(kernel: object) -> bool:
+def is_missing_kernel(kernel: object) -> TypeGuard[type[_MissingKernel]]:
     """Whether ``kernel`` is a placeholder for an export that did not import."""
     return isinstance(kernel, type) and issubclass(kernel, _MissingKernel)
 
@@ -228,14 +221,13 @@ def __getattr__(name: str) -> Any:
     return value
 
 
-def require_attn_gym(*kernels: object) -> None:
-    """Raise unless the given exports imported.
+def require_attn_gym(kernel: object, *kernels: object) -> None:
+    """Raise unless every given export imported.
 
-    With no arguments, raise if attn_gym is missing or any export accessed
-    so far failed on its backend.
+    A module calls this from ``__init__`` with every attn_gym export it
+    uses, so a missing backend fails at build, naming the backend that
+    module needs, rather than at the first forward.
     """
-    for kernel in kernels:
-        if is_missing_kernel(kernel):
-            _raise_for(cast(type[_MissingKernel], kernel)._error)
-    if not kernels and (_BACKEND_ERRORS or _load_module("attn_gym") is None):
-        _raise_missing()
+    for export in (kernel, *kernels):
+        if is_missing_kernel(export):
+            _raise_for(export._error)

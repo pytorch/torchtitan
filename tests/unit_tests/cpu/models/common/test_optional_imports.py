@@ -279,11 +279,7 @@ from torchtitan.models.common.attention import (
     gdn,
     kda,
 )
-from torchtitan.models.common.attn_gym import (
-    _MissingKernel,
-    is_missing_kernel,
-    require_attn_gym,
-)
+from torchtitan.models.common.attn_gym import _MissingKernel, is_missing_kernel
 from spmd_types._local_registration import _LOCAL_AUTOGRAD_FUNCTIONS
 
 assert _MissingKernel not in _LOCAL_AUTOGRAD_FUNCTIONS
@@ -296,7 +292,6 @@ for kernel in (
     cp_kda.context_parallel_kda,
     cp_gdn.context_parallel_gdn,
     cp_linear_attention.ContextParallelRouting.from_fragments,
-    require_attn_gym,
     kda.KDAKernel.Config().build,
     gdn.GDNKernel.Config().build,
 ):
@@ -419,6 +414,7 @@ assert call(facade._MissingKernel) not in register.call_args_list
 assert linear_attention._ShortConv is Kernel
 assert facade.is_missing_kernel(linear_attention._L2Norm)
 assert linear_attention._L2Norm is not facade._MissingKernel
+assert linear_attention._L2Norm.__name__ == "_MissingKernel[attn_gym.linear.kda.fwd.triton.l2norm_fwd]"
 assert set(facade._BACKEND_ERRORS) == {"attn_gym.linear.kda.fwd.triton.l2norm_fwd"}
 
 
@@ -438,10 +434,115 @@ assert backend_of(facade._ChunkKDA.apply) == "cutlass"
 assert backend_of(lambda: facade.require_attn_gym(facade._ChunkKDA)) == "cutlass"
 assert backend_of(lambda: facade.require_attn_gym(Kernel, linear_attention._L2Norm)) == "triton"
 facade.require_attn_gym(Kernel, OtherKernel)
-assert backend_of(facade.require_attn_gym) == "triton"
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "broken_modules, missing_backend",
+    [
+        (("attn_gym.linear.short_conv",), "cutlass"),
+        (
+            (
+                "attn_gym.linear.context_parallel",
+                "attn_gym.linear.gdn.context_parallel",
+                "attn_gym.linear.kda.context_parallel",
+            ),
+            "triton",
+        ),
+    ],
+    ids=["short_conv", "context_parallel"],
+)
+def test_attention_modules_report_their_own_backend_at_build(
+    broken_modules: tuple[str, ...], missing_backend: str
+) -> None:
+    """A module fails at build when an export it calls lacks its backend."""
+    script = r"""
+import importlib.abc
+import importlib.util
+import sys
+
+broken_modules = sys.argv[1].split(",")
+missing_backend = sys.argv[2]
+
+
+class FakeAttentionGym(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    # Every attn_gym module imports and exports a class under any name, except
+    # the broken ones, whose backend is missing.
+
+    def find_spec(self, fullname, path, target=None):
+        if fullname in broken_modules:
+            raise ModuleNotFoundError("blocked dependency", name=missing_backend)
+        if fullname == "attn_gym" or fullname.startswith("attn_gym."):
+            return importlib.util.spec_from_loader(fullname, self, is_package=True)
+        return None
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        def export(name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return type(name, (), {})
+
+        module.__getattr__ = export
+
+
+sys.meta_path.insert(0, FakeAttentionGym())
+
+from torchtitan.models.common.attention import cp_gdn, cp_kda, gdn, kda
+from torchtitan.models.common.attn_gym import is_missing_kernel
+
+kda_kernel = kda.KDAKernel.Config()
+gdn_kernel = gdn.GDNKernel.Config()
+inner_kda = kda.InnerKDA.Config(head_dim=128, conv_kernel_size=4, kernel=kda_kernel)
+inner_gdn = gdn.InnerGDN.Config(conv_kernel_size=4, kernel=gdn_kernel)
+cp_inner_kda = cp_kda.ContextParallelInnerKDA.Config(
+    head_dim=128, conv_kernel_size=4, kernel=kda_kernel
+)
+cp_inner_gdn = cp_gdn.ContextParallelInnerGDN.Config(
+    conv_kernel_size=4, kernel=gdn_kernel
+)
+
+
+def backend_of(config):
+    try:
+        config.build()
+    except ModuleNotFoundError as error:
+        assert str(error) == "blocked dependency", error
+        return error.name
+    return None
+
+
+# The kernels' own exports imported, so they build whichever module is broken.
+assert backend_of(kda_kernel) is None
+assert backend_of(gdn_kernel) is None
+
+if "attn_gym.linear.short_conv" in broken_modules:
+    # causal_conv1d is a placeholder: the inner modules that call it fail at
+    # build, and so do their CP variants, which build on them.
+    assert is_missing_kernel(kda.causal_conv1d)
+    for config in (inner_kda, inner_gdn, cp_inner_kda, cp_inner_gdn):
+        assert backend_of(config) == missing_backend, config
+else:
+    # Only the CP exports are placeholders: the inner modules build, and
+    # their CP variants fail with the CP modules' backend.
+    assert not is_missing_kernel(kda.causal_conv1d)
+    assert is_missing_kernel(cp_kda.context_parallel_kda)
+    assert backend_of(inner_kda) is None
+    assert backend_of(inner_gdn) is None
+    assert backend_of(cp_inner_kda) == missing_backend
+    assert backend_of(cp_inner_gdn) == missing_backend
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, ",".join(broken_modules), missing_backend],
         check=False,
         capture_output=True,
         text=True,

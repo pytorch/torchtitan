@@ -220,6 +220,7 @@ class GDNKernel(Module):
         pass
 
     def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
         require_attn_gym(chunk_gdn, recurrent_gdn, l2norm)
         super().__init__()
 
@@ -298,6 +299,8 @@ class InnerGDN(InnerAttention):
             )
 
     def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(causal_conv1d)
         super().__init__()
         self.kernel = config.kernel.build()
 
