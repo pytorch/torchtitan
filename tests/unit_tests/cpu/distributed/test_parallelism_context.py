@@ -10,11 +10,13 @@ import os
 import socket
 import tempfile
 import unittest
+from dataclasses import dataclass
 from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
+import torch.distributed._functional_collectives as funcol
 from spmd_types import SpmdType
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate
@@ -38,6 +40,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_validate_redistributions,
 )
 from torchtitan.models.base.sharding import resolve_placements, ShardingConfig
+from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     dense_activation_placement,
@@ -475,10 +478,30 @@ class TestSpmdLayout(DTensorTestBase):
                 mesh,
                 src,
                 dst,
+                async_op=False,
             )
 
         self.assertEqual(comm_mode.get_total_counts(), 1)
         self.assertTrue(torch.equal(result, torch.ones(8, 2, device=self.device_type)))
+
+    @with_comms
+    def test_spmd_redistribute_per_axis_async_op(self):
+        """async_op=True returns the forward collective's result unwaited."""
+        mesh = init_device_mesh(
+            self.device_type,
+            (1, 1, 4),
+            mesh_dim_names=("dp", "cp", "tp"),
+        )
+        x = torch.ones(2, 2, device=self.device_type)
+        src = dense_sequence_parallel_placement()
+        dst = dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+
+        waited = spmd_redistribute_per_axis(x, mesh, src, dst, async_op=False)
+        deferred = spmd_redistribute_per_axis(x, mesh, src, dst, async_op=True)
+
+        self.assertNotIsInstance(waited, funcol.AsyncCollectiveTensor)
+        self.assertIsInstance(deferred, funcol.AsyncCollectiveTensor)
+        self.assertTrue(torch.equal(deferred, waited))
 
     @with_comms
     def test_spmd_redistribute_per_axis_shards_token_ids(self):
@@ -500,7 +523,7 @@ class TestSpmdLayout(DTensorTestBase):
 
         comm_mode = CommDebugMode()
         with comm_mode:
-            result = spmd_redistribute_per_axis(x, mesh, src, dst)
+            result = spmd_redistribute_per_axis(x, mesh, src, dst, async_op=False)
 
         # convert(R, S(0)) is a local chunk, not a collective.
         self.assertEqual(comm_mode.get_total_counts(), 0)
@@ -1023,6 +1046,29 @@ class TestParallelismContextWorld8MeshOperations(DTensorTestBase):
             )  # tp * (cp * 2) = 2 * (1 * 2) = 2 * 2
 
 
+class _CausalAttentionReference(InnerAttention):
+    """Math-only causal attention for the CPU FSDP mixed-precision test."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(InnerAttention.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+
+    def forward(self, q_THK, k_THK, v_THV, *, scale=None, **kwargs):
+        num_repeats = q_THK.shape[1] // k_THK.shape[1]
+        k_THK = k_THK.repeat_interleave(num_repeats, dim=1)
+        v_THV = v_THV.repeat_interleave(num_repeats, dim=1)
+        scores_HTT = torch.einsum("thk,shk->hts", q_THK, k_THK)
+        scores_HTT = scores_HTT * (q_THK.shape[-1] ** -0.5 if scale is None else scale)
+        causal_TT = torch.ones(
+            q_THK.shape[0], k_THK.shape[0], device=q_THK.device, dtype=torch.bool
+        ).tril()
+        probs_HTT = scores_HTT.masked_fill(~causal_TT, -torch.inf).softmax(dim=-1)
+        return torch.einsum("hts,shv->thv", probs_HTT, v_THV)
+
+
 class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
     """Verify apply_fsdp on Llama3 debugmodel matches single-device reference.
 
@@ -1043,15 +1089,10 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
         """apply_fsdp with bf16 on Llama3 debugmodel matches manual bf16 reference on a single GPU."""
         torch.manual_seed(42)
 
-        model_config = build_model_config("debugmodel")
-
-        # This test runs forward+backward on self.device_type (CPU in the
-        # CPU CI job). The default FlexInnerAttention backend has no CPU backward,
-        # so use ScaledDotProductInnerAttention, which runs on CPU without a mask.
-        from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+        model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
 
         for layer in model_config.layers:
-            layer.attention.inner_attention = ScaledDotProductInnerAttention.Config()
+            layer.attention.inner_attention = _CausalAttentionReference.Config()
 
         with torch.device("meta"):
             model = model_config.build()

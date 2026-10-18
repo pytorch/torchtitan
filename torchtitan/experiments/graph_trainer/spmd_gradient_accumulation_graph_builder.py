@@ -713,7 +713,7 @@ def _compile_scheduled_fwd_bwd_graphs(
     stage: GraphPipelineStage,
     graphs: _ScheduledFwdBwdGraphs,
     *,
-    compile_config: GraphTrainerCompileConfig,
+    trainer_config: "GraphTrainer.Config",
 ) -> _ScheduledFwdBwdGraphs:
     """Compile the FX module of each schedule action."""
     callable_names = {
@@ -731,8 +731,9 @@ def _compile_scheduled_fwd_bwd_graphs(
             call_spec,
             module=_compile_graph_pp_module(
                 call_spec.module,
-                compile_config=compile_config,
+                compile_config=trainer_config.compile,
                 graph_name=f"stage_{stage.stage_index}_{callable_name}",
+                use_cuda_graph=not trainer_config.training.disable_cuda_graphs,
             ),
         )
 
@@ -777,7 +778,7 @@ def _build_scheduled_fwd_bwd_graphs(
     graphs = _compile_scheduled_fwd_bwd_graphs(
         stage,
         graphs,
-        compile_config=trainer_config.compile,
+        trainer_config=trainer_config,
     )
     return GraphTrainerScheduledFwdBwdStageGraphs(
         graphs=graphs,

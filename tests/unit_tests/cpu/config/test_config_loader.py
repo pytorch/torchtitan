@@ -203,14 +203,11 @@ def test_recipe_and_cli_overrides_are_applied_together() -> None:
     assert config.override.imports == ["pkg.recipe", "pkg.cli"]
 
 
-def test_cli_overrides_are_forwarded_to_both_rl_actors() -> None:
-    trainer = SimpleNamespace(override=OverrideConfig(imports=["pkg.trainer"]))
-    generator = SimpleNamespace(override=OverrideConfig(imports=["pkg.generator"]))
+def test_cli_overrides_extend_the_top_level_rl_config() -> None:
+    trainer = SimpleNamespace(comm=SimpleNamespace(backend="nccl"))
     config = SimpleNamespace(
+        override=OverrideConfig(imports=["pkg.recipe"]),
         trainer=trainer,
-        generator=generator,
-        parallelism=ParallelismConfig(),
-        comm=SimpleNamespace(backend="nccl"),
         dump_folder="outputs",
         hf_assets_path=None,
     )
@@ -228,5 +225,4 @@ def test_cli_overrides_are_forwarded_to_both_rl_actors() -> None:
             ]
         )
 
-    assert trainer.override.imports == ["pkg.trainer", "pkg.cli"]
-    assert generator.override.imports == ["pkg.generator", "pkg.cli"]
+    assert config.override.imports == ["pkg.recipe", "pkg.cli"]

@@ -13,6 +13,7 @@ Face adapters expose the logical ``wq`` / ``wk`` / ``wv`` projections.
 import unittest
 
 import torch
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import Linear
 
@@ -70,7 +71,11 @@ class TestQKVLinearCheckpointInterop(unittest.TestCase):
         from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
         build_config, max_context_length = LLAMA3_MODEL_FLAVORS["debugmodel"]
-        model_config = build_config(attn_backend="flex", seq_len=max_context_length)
+        model_config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         adapter = Llama3StateDictAdapter(model_config, hf_assets_path=None)
 
         adapter._split_qkv_linear(
@@ -132,7 +137,9 @@ class TestQKVLinearCheckpointInterop(unittest.TestCase):
             with self.subTest(model=config_name):
                 build_config, max_context_length = configs["debugmodel"]
                 model_config = build_config(
-                    attn_backend="flex", seq_len=max_context_length
+                    attn_backend="flex",
+                    seq_len=max_context_length,
+                    parallelism=ParallelismConfig(),
                 )
                 model = model_config.build()
                 model.eval()

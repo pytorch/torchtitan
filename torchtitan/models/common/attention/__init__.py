@@ -8,7 +8,7 @@ from collections.abc import Mapping
 
 from .attention import (  # noqa: F401
     __all__ as _attention_all,
-    BaseAttention,
+    Attention,
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexAttentionMetadata,
@@ -22,12 +22,11 @@ from .attention import (  # noqa: F401
     InnerAttention,
     local_head_split,
     QKVLinear,
-    ScaledDotProductInnerAttention,
     SlidingWindowFlexInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from .linear_attention import LinearAttentionMetadata
+from .linear_attention import LinearAttention, LinearAttentionMetadata
 
 AttentionMetadata = (
     FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata
@@ -38,5 +37,6 @@ __all__ = [
     *_attention_all,
     "AttentionMetadata",
     "AttentionMetadataMap",
+    "LinearAttention",
     "LinearAttentionMetadata",
 ]

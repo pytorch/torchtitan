@@ -12,7 +12,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchtitan.models.common.linear as linear_module
+import torchtitan.models.common.linear.linear as linear_module
 import torchtitan.models.common.vision_encoder as vision_encoder_module
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
@@ -29,7 +29,6 @@ from torchtitan.models.common.linear import (
     GroupedLinear,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 
@@ -192,46 +191,6 @@ class TestGroupedLinear(unittest.TestCase):
 
 
 class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
-    def test_shared_expert_row_parallel_output_follows_sp_state(self):
-        input = torch.randn(3, 4)
-        tp_group = object()
-        linear = SharedExpertRowParallelLinear.Config(
-            in_features=4,
-            out_features=2,
-            bias=True,
-        ).build()
-
-        for dense_sp_enabled in (False, True):
-            with (
-                self.subTest(dense_sp_enabled=dense_sp_enabled),
-                patch.object(linear_module, "spmd_mesh_group", return_value=tp_group),
-                patch.object(
-                    linear_module,
-                    "spmd_dense_sp_enabled",
-                    return_value=dense_sp_enabled,
-                ),
-                patch.object(
-                    linear_module.spmd,
-                    "convert",
-                    side_effect=lambda tensor, *_args, **_kwargs: tensor,
-                ) as convert,
-                patch.object(
-                    linear_module.spmd,
-                    "redistribute",
-                    side_effect=lambda tensor, *_args, **_kwargs: tensor,
-                ) as redistribute,
-            ):
-                output = linear(input)
-
-            self.assertEqual(output.shape, torch.Size([3, 2]))
-            self.assertEqual(convert.call_args.kwargs["src"], spmd.I)
-            self.assertEqual(convert.call_args.kwargs["dst"], spmd.P)
-            if dense_sp_enabled:
-                self.assertEqual(redistribute.call_args.kwargs["src"], spmd.P)
-                self.assertEqual(redistribute.call_args.kwargs["dst"], spmd.S(0))
-            else:
-                redistribute.assert_not_called()
-
     def test_collective_types_follow_dense_sp_state(self):
         input = torch.randn(3, 4)
         tp_group = object()

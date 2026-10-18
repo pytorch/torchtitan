@@ -13,7 +13,10 @@ from torch import nn
 
 pytest.importorskip("fla")
 
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.qwen3_5 import build_model_config, MODEL_FLAVORS, Qwen35Model
+from torchtitan.models.qwen3_5.model import Qwen35Attention
 from torchtitan.models.qwen3_8 import build_model_config as build_qwen3_8_model_config
 
 
@@ -26,17 +29,20 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     import spmd_types as spmd
     from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.distributed.spmd_types import _per_axis_types
-    from torchtitan.models.common.linear import Linear
+    from torchtitan.models.common.linear import Linear, RowParallelLinear
     from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
-    from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
     config = cast(
         Qwen35Model.Config,
         build_model_config(
             "debugmodel_moe",
+            parallelism=ParallelismConfig(
+                enable_sequence_parallel=enable_sp,
+                expert_parallel_degree=2 if enable_ep else 1,
+            ),
         ),
     )
-    moe = config.layers[0].moe
+    moe = config.layers[0].feed_forward
     assert moe is not None
     shared_experts = moe.shared_experts
     assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
@@ -44,9 +50,11 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     assert type(shared_experts.w13) is Linear.Config
     assert shared_experts.w13.num_linears == 2
     assert type(shared_experts.gate) is Linear.Config
-    assert type(shared_experts.w2) is SharedExpertRowParallelLinear.Config
+    # Without SP, a plain Linear keeps the TP-Partial output for the MoE combine.
+    assert type(shared_experts.w2) is (
+        RowParallelLinear.Config if enable_sp else Linear.Config
+    )
 
-    set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=enable_ep)
     assert shared_experts.sharding_config is not None
     assert shared_experts.sharding_config.in_src_shardings is not None
     assert shared_experts.sharding_config.in_dst_shardings is None
@@ -77,9 +85,11 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.linear import Linear
     from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
-    from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
-    config = cast(Qwen35Model.Config, build_model_config("debugmodel"))
+    config = cast(
+        Qwen35Model.Config,
+        build_model_config("debugmodel", parallelism=ParallelismConfig()),
+    )
     vision_encoder = config.vision_encoder
     assert vision_encoder is not None
 
@@ -89,7 +99,6 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     assert type(vision_encoder.merger.fc1) is Linear.Config
     assert type(vision_encoder.merger.fc2) is InvariantRowParallelLinear.Config
 
-    set_qwen35_sharding_config(config, enable_sp=True, enable_ep=False)
     for projection in (
         vision_encoder.block.mlp.fc2,
         vision_encoder.block.attn.proj,
@@ -108,18 +117,21 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
 def test_qwen35_attention_output_matches_row_parallel_projection(
     enable_sp: bool,
 ) -> None:
-    from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
-
-    config = cast(Qwen35Model.Config, build_model_config("debugmodel"))
-    set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=False)
+    config = cast(
+        Qwen35Model.Config,
+        build_model_config(
+            "debugmodel",
+            parallelism=ParallelismConfig(enable_sequence_parallel=enable_sp),
+        ),
+    )
 
     for layer in config.layers:
-        if layer.attention is not None:
+        if isinstance(layer.attention, Qwen35Attention.Config):
             attention = layer.attention
             output_projection = attention.wo
         else:
-            assert layer.delta_net is not None
-            attention = layer.delta_net
+            assert isinstance(layer.attention, GDN.Config)
+            attention = layer.attention
             output_projection = attention.out_proj
         assert attention.sharding_config is not None
         assert output_projection.sharding_config is not None
@@ -145,7 +157,10 @@ class _RecordingVisionEncoder(nn.Module):
 
 
 def _small_qwen35_model() -> Qwen35Model:
-    config = cast(Qwen35Model.Config, build_model_config("debugmodel", seq_len=8))
+    config = cast(
+        Qwen35Model.Config,
+        build_model_config("debugmodel", seq_len=8, parallelism=ParallelismConfig()),
+    )
     config = replace(
         config,
         vocab_size=8,
@@ -179,14 +194,16 @@ def test_qwen35_registry_keeps_released_flavors() -> None:
 
 @pytest.mark.parametrize("flavor", sorted(MODEL_FLAVORS))
 def test_qwen35_registry_builds_every_flavor(flavor: str) -> None:
-    config = build_model_config(flavor)
+    config = build_model_config(flavor, parallelism=ParallelismConfig())
 
     assert isinstance(config, Qwen35Model.Config)
 
 
 def test_qwen35_is_the_shared_model_implementation() -> None:
-    config = cast(Qwen35Model.Config, build_model_config("0.8B"))
-    qwen38_config = build_qwen3_8_model_config("27B")
+    config = cast(
+        Qwen35Model.Config, build_model_config("0.8B", parallelism=ParallelismConfig())
+    )
+    qwen38_config = build_qwen3_8_model_config("27B", parallelism=ParallelismConfig())
 
     assert config.dim == 1024
     assert len(config.layers) == 24
@@ -194,17 +211,19 @@ def test_qwen35_is_the_shared_model_implementation() -> None:
 
 
 def test_qwen35_keeps_small_dense_and_moe_models() -> None:
-    dense_config = cast(Qwen35Model.Config, build_model_config("0.8B"))
+    dense_config = cast(
+        Qwen35Model.Config, build_model_config("0.8B", parallelism=ParallelismConfig())
+    )
     moe_config = cast(
         Qwen35Model.Config,
-        build_model_config("35B-A3B"),
+        build_model_config("35B-A3B", parallelism=ParallelismConfig()),
     )
 
     assert dense_config.dim == 1024
     assert moe_config.dim == 2048
-    assert moe_config.layers[0].moe is not None
-    assert moe_config.layers[0].moe.router.num_experts == 256
-    assert moe_config.layers[0].moe.router.top_k == 8
+    assert moe_config.layers[0].feed_forward is not None
+    assert moe_config.layers[0].feed_forward.router.num_experts == 256
+    assert moe_config.layers[0].feed_forward.router.top_k == 8
 
 
 @pytest.mark.parametrize(

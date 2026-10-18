@@ -47,7 +47,7 @@ built in [`__init__.py`](./__init__.py).
 ## Multimodal (vision)
 
 The `*_mm` flavors make `MuseGlimmerModel` own a vision encoder + adapter
-([`vision_encoder.py`](./vision_encoder.py)) and run them inside `forward`,
+([shared Spark implementation](../muse_spark/vision_encoder.py)) and run them inside `forward`,
 building packed vision features and gathering them into token embeddings using
 bank indices prepared before token sharding. Multimodal fusion is TP-replicated;
 the first decoder layer restores the standard decoder layout (sequence-parallel

@@ -686,7 +686,7 @@ def _fake_experts_graph(*, fused_mxfp8: bool = False):
     reads: list[fx.Node] = []  # forward activations backward reads
 
     def add(name, node, shape=None, dtype=BF16, *, read=False, region=True):
-        custom: dict[str, Any] = {"module_fqn": "layers.0.moe.routed_experts"}
+        custom: dict[str, Any] = {"module_fqn": "layers.0.feed_forward.routed_experts"}
         if region:
             custom[PAGED_STASH_REGION] = True
         node.meta["custom"] = custom

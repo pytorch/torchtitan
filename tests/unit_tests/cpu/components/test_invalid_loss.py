@@ -42,7 +42,8 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.config = MagicMock()
         trainer.config.training.disable_cuda_graphs = True
         trainer.sdc_replayer = None
-        trainer._cuda_graph_per_accumulation_group_enabled = False
+        trainer._cuda_graph_per_microbatch_group_enabled = False
+        trainer.config.training.preprocess_microbatch_groups_lazily = False
         trainer.device = torch.device("cpu")
         trainer.num_completed_steps = 1
         trainer.ntokens_seen = 0
@@ -60,6 +61,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.parallelism_context = parallelism_context
 
         optim = object.__new__(Optim)
+        optim._is_first_step_call = True
         optim.config = SimpleNamespace(max_norm=1.0)
         optim.parallelism_context = parallelism_context
         optim.pp_has_last_stage = True

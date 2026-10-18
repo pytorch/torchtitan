@@ -33,7 +33,7 @@ from torchtitan.models.common.dist_moe import (  # noqa: E402
 )
 from torchtitan.models.common.linear import GroupedLinear  # noqa: E402
 from torchtitan.models.common.moe import RoutedExperts  # noqa: E402
-from torchtitan.models.common.token_dispatcher import (  # noqa: E402
+from torchtitan.models.common.moe.token_dispatcher import (  # noqa: E402
     AllToAllTokenDispatcher,
 )
 from torchtitan_recipes.overrides.fused_swiglu import FusedSwiGLU  # noqa: E402

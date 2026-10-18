@@ -12,6 +12,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 
@@ -158,6 +159,9 @@ class ComputeLayout:
     axes in storage-mesh order. Each named axis must declare ``Shard`` on that
     same tensor dimension, written as a non-negative index.
 
+    ``compute_dtype`` is the dtype the optimizer computes in for parameters
+    that are redistributed; ``None`` keeps the storage dtype.
+
     Examples:
         Shard a logical batch of matrices over EP first, then split each
         EP-local batch over ``edp_shard`` even though ``edp_shard`` precedes EP in the storage
@@ -191,8 +195,13 @@ class ComputeLayout:
 
     shardings_by_mesh_axis: Mapping[str, _ComputeSharding]
     shard_order_by_tensor_dim: Mapping[int, tuple[str, ...]] = _DEFAULT_SHARD_ORDER
+    compute_dtype: torch.dtype | None = None
 
     def __post_init__(self) -> None:
+        if self.compute_dtype is not None and not isinstance(
+            self.compute_dtype, torch.dtype
+        ):
+            raise ValueError("compute_dtype must be a torch.dtype or None")
         shardings_by_mesh_axis = dict(self.shardings_by_mesh_axis)
         if not shardings_by_mesh_axis:
             raise ValueError("ComputeLayout must declare a compute sharding")

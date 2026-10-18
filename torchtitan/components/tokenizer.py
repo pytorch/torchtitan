@@ -11,7 +11,7 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from tokenizers import AddedToken, Tokenizer
 from torchtitan.config import Configurable
@@ -543,9 +543,20 @@ class MultiModalTokenizer(HuggingFaceTokenizer):
         """Token string for padding."""
 
     # Config field prefixes that are validated and exposed as token and ID attributes.
-    TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end", "pad")
+    TOKEN_FIELDS: ClassVar[tuple[str, ...]] = (
+        "image",
+        "video",
+        "vision_start",
+        "vision_end",
+        "pad",
+    )
     # TOKEN_FIELDS subset whose occurrences as label targets do not contribute loss.
-    LOSS_MASK_TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end")
+    LOSS_MASK_TOKEN_FIELDS: ClassVar[tuple[str, ...]] = (
+        "image",
+        "video",
+        "vision_start",
+        "vision_end",
+    )
 
     def __init__(self, config: Config, *, tokenizer_path: str):
         super().__init__(config, tokenizer_path=tokenizer_path)

@@ -9,8 +9,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from types import SimpleNamespace
+from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,6 +21,8 @@ pytest.importorskip("verifiers")
 
 from aiohttp import ClientSession
 
+from torchtitan.rl.actors.system import ActorSystem
+from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
 from torchtitan.rl.examples.verifiers.generation_server import (
     _parse_sampling_config,
     GenerationServer,
@@ -29,8 +34,244 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     verifiers_rollout_logs,
     VerifiersRollouter,
 )
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.rollout.rollouter import Rollouter
+from torchtitan.rl.rollout.types import Completion, RolloutStatus
 from verifiers.v1.errors import model_error, OverlongPromptError
+
+
+def test_train_client_config_carries_an_in_tree_renderer() -> None:
+    """The renderer config reaches environment-server workers inside Verifiers' client
+    config; an in-tree renderer named by `CustomRendererConfig` survives that trip."""
+    from renderers import CustomRendererConfig
+    from verifiers.v1.configs.client import TrainClientConfig
+
+    from tests.unit_tests.cpu.components.test_renderer import IN_TREE_RENDERER_PATH
+
+    renderer = CustomRendererConfig(
+        import_path=IN_TREE_RENDERER_PATH, enable_thinking=False
+    )
+    sent = TrainClientConfig(
+        base_url="http://127.0.0.1:1",
+        api_key_var="",
+        renderer=renderer,
+        renderer_model_name="tests/assets/tokenizer",
+    )
+
+    received = TrainClientConfig.model_validate_json(sent.model_dump_json())
+
+    assert received.renderer == renderer
+
+
+def test_muse_glimmer_renderer_survives_verifiers_worker_config() -> None:
+    """An in-tree renderer produces the same tokens before and after transport."""
+    from renderers import create_renderer, CustomRendererConfig
+    from torchtitan.components.renderer import from_renderers
+    from torchtitan.components.tokenizer import HuggingFaceTokenizer
+    from torchtitan.models.muse_glimmer.atem import render_atem_tool_call
+
+    from torchtitan.models.muse_glimmer.renderer import (
+        EOM_ID,
+        EOM_STR,
+        EOT_ID,
+        EOT_STR,
+        MESSAGE_ID,
+        MESSAGE_STR,
+        MuseGlimmerRenderer,
+        MuseGlimmerRendererConfig,
+        START_ID,
+        START_STR,
+    )
+    from verifiers.v1.configs.client import TrainClientConfig
+
+    special_ids = {
+        START_STR: START_ID,
+        MESSAGE_STR: MESSAGE_ID,
+        EOM_STR: EOM_ID,
+        EOT_STR: EOT_ID,
+    }
+
+    class TokenizerBackend:
+        def token_to_id(self, token):
+            return special_ids.get(token)
+
+        def encode(self, text, add_special_tokens=False):
+            assert not add_special_tokens
+            return SimpleNamespace(ids=list(text.encode()))
+
+    class WorkerTokenizer:
+        bos_token = None
+        bos_token_id = None
+        name_or_path = "muse-tokenizer"
+
+        def convert_tokens_to_ids(self, token):
+            return special_ids.get(token)
+
+        def encode(self, text, add_special_tokens=False):
+            assert not add_special_tokens
+            return list(text.encode())
+
+        def decode(self, token_ids, skip_special_tokens=False):
+            assert not skip_special_tokens
+            special_tokens = {
+                token_id: token for token, token_id in special_ids.items()
+            }
+            return "".join(
+                special_tokens[token_id]
+                if token_id in special_tokens
+                else chr(token_id)
+                for token_id in token_ids
+            )
+
+    titan_tokenizer = SimpleNamespace(
+        tokenizer=TokenizerBackend(),
+        tokenizer_path="muse-tokenizer",
+        bos_token=None,
+        eos_token=None,
+        bos_id=None,
+        eos_id=None,
+    )
+    renderers_config = CustomRendererConfig(
+        import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
+        reasoning_strength="low",
+        knowledge_cutoff="2025-01-01",
+        current_date="2026-10-13",
+        retain_reasoning_in_history=False,
+        answer_from_reasoning_fallback=True,
+        thinking_retention="tool_cycle",
+    )
+    config = from_renderers(renderers_config)
+    sent = TrainClientConfig(
+        base_url="http://127.0.0.1:1",
+        api_key_var="",
+        renderer=renderers_config,
+        renderer_model_name="muse-tokenizer",
+    )
+    received = TrainClientConfig.model_validate_json(sent.model_dump_json())
+
+    trainer_renderer = config.build(
+        tokenizer=cast(HuggingFaceTokenizer, titan_tokenizer)
+    )
+    worker_renderer = create_renderer(WorkerTokenizer(), received.renderer)
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "reasoning_content": "think", "content": "hello"},
+    ]
+
+    assert isinstance(trainer_renderer, MuseGlimmerRenderer)
+    assert isinstance(worker_renderer, MuseGlimmerRenderer)
+    assert isinstance(worker_renderer._config, MuseGlimmerRendererConfig)
+    assert worker_renderer._config == trainer_renderer._config
+    assert worker_renderer.is_prefix_stable is False
+    assert worker_renderer.render_ids(
+        messages, add_generation_prompt=True
+    ) == trainer_renderer.render_ids(messages, add_generation_prompt=True)
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Find an answer",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    tool_messages = [
+        {"role": "user", "content": "find an answer"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {"name": "search", "arguments": {"query": "hello"}},
+                }
+            ],
+        },
+    ]
+    assert worker_renderer.render_ids(tool_messages, tools=tools) == (
+        trainer_renderer.render_ids(tool_messages, tools=tools)
+    )
+    completion_ids = (
+        list(" to=search".encode())
+        + [MESSAGE_ID]
+        + list(render_atem_tool_call("search", {"query": "hello"}).encode())
+        + [EOT_ID]
+    )
+    parsed = worker_renderer.parse_response(
+        completion_ids,
+        prompt_ids=worker_renderer.render_ids(
+            [{"role": "user", "content": "find an answer"}],
+            tools=tools,
+            add_generation_prompt=True,
+        ),
+        tools=tools,
+    )
+    assert parsed.tool_calls[0].name == "search"
+    assert parsed.tool_calls[0].arguments == {"query": "hello"}
+
+
+def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> None:
+    from renderers import CustomRendererConfig
+    from torchtitan.components.renderer import from_renderers
+    from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+    generation_server = SimpleNamespace(
+        start=AsyncMock(),
+        close=AsyncMock(),
+        base_url="http://127.0.0.1:2",
+    )
+    env_server = SimpleNamespace(
+        start=AsyncMock(return_value="http://127.0.0.1:1"),
+        close=AsyncMock(),
+    )
+    env_client = SimpleNamespace(wait_for_server_startup=AsyncMock(), close=AsyncMock())
+    monkeypatch.setattr(
+        "torchtitan.rl.examples.verifiers.rollouter.VerifiersEnvClient",
+        lambda _: env_client,
+    )
+
+    rollouter = object.__new__(VerifiersRollouter)
+    rollouter._verifiers_config = SimpleNamespace(
+        generation_server=SimpleNamespace(build=lambda: generation_server),
+        connection_timeout_sec=5.0,
+        renderer_multiplex=8,
+    )
+    rollouter._verifiers_env_server = env_server
+    rollouter._generation_server = None
+    rollouter._verifiers_env_client = None
+    rollouter._verifiers_train_client_config = None
+    renderers_config = CustomRendererConfig(
+        import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
+        reasoning_strength="low",
+    )
+    config = from_renderers(renderers_config)
+
+    asyncio.run(
+        rollouter.setup_async(
+            actor_system=cast(ActorSystem, None),
+            tokenizer_config=cast(HuggingFaceTokenizer.Config, None),
+            renderer_config=config,
+            hf_assets_path="muse-checkpoint",
+        )
+    )
+
+    sent = rollouter._verifiers_train_client_config
+    assert sent is not None
+    assert sent.renderer == renderers_config
+    assert sent.renderer_model_name == "muse-checkpoint"
+    asyncio.run(rollouter.close())
+
+
+def test_setup_async_takes_the_base_rollouter_arguments() -> None:
+    """The controller calls `setup_async` with `Rollouter.setup_async`'s arguments."""
+    assert inspect.signature(VerifiersRollouter.setup_async).parameters.keys() == (
+        inspect.signature(Rollouter.setup_async).parameters.keys()
+    )
 
 
 def test_trainable_token_spans() -> None:
@@ -71,9 +312,10 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
     )
 
     assert len(turns) == 1
-    assert turns[0].prompt_token_ids == [10, 11]
-    assert turns[0].completion_token_ids == [12, 13]
-    assert turns[0].completion_logprobs == [-0.2, -0.3]
+    assert turns[0].prompt_prefix_len == 0
+    assert turns[0].prompt_delta_token_ids.tolist() == [10, 11]
+    assert turns[0].completion_token_ids.tolist() == [12, 13]
+    assert turns[0].completion_logprobs.tolist() == pytest.approx([-0.2, -0.3])
     assert turns[0].completion_message == {
         "role": "assistant",
         "content": "Answer: $42$",
@@ -120,9 +362,61 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
 
     assert [turn.min_policy_version for turn in turns] == [3, 3]
     assert [turn.max_policy_version for turn in turns] == [8, 8]
-    assert [turn.prompt_token_ids for turn in turns] == [[10], [10, 11, 12]]
-    assert [turn.completion_token_ids for turn in turns] == [[11], [13]]
-    assert [turn.completion_logprobs for turn in turns] == [[-0.1], [-0.2]]
+    # turn 1's prompt [10, 11, 12] continues turn 0's [10] + [11], so it stores only [12]
+    stored = [
+        (turn.prompt_prefix_len, turn.prompt_delta_token_ids.tolist()) for turn in turns
+    ]
+    assert stored == [(0, [10]), (2, [12])]
+    assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13]]
+    assert [turn.completion_logprobs.tolist() for turn in turns] == [
+        pytest.approx([-0.1]),
+        pytest.approx([-0.2]),
+    ]
+
+
+def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> None:
+    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
+
+    def node(token_ids: list[int], content: str) -> SimpleNamespace:
+        message = VerifiersAssistantMessage(content=content)
+        return SimpleNamespace(
+            token_ids=token_ids, mask=[False, True], sampled=True, message=message
+        )
+
+    shared = node([10, 11], "a")
+    first_leaf = node([12, 13], "b")
+    second_leaf = node([14, 15], "c")
+    trace = SimpleNamespace(
+        nodes=[shared, first_leaf, second_leaf],
+        branches=[
+            SimpleNamespace(
+                nodes=[shared, first_leaf],
+                token_ids=[10, 11, 12, 13],
+                logprobs=[0.0, -0.1, 0.0, -0.2],
+            ),
+            SimpleNamespace(
+                nodes=[shared, second_leaf],
+                token_ids=[10, 11, 14, 15],
+                logprobs=[0.0, -0.1, 0.0, -0.3],
+            ),
+        ],
+    )
+    turns = VerifiersRollouter.trace_to_rollout_turns(
+        trace=trace,
+        generation_metadata=VerifiersGenerationMetadata(
+            min_policy_version=1, max_policy_version=1, metrics=[]
+        ),
+        group_id=5,
+        rollout_id=2,
+    )
+
+    # The shared node trains once; the second branch's prompt [10, 11, 14] keeps [10, 11] of the
+    # previous turn's [10, 11, 12, 13], so it stores (2, [14]) and the builder opens a new sample.
+    stored = [
+        (turn.prompt_prefix_len, turn.prompt_delta_token_ids.tolist()) for turn in turns
+    ]
+    assert stored == [(0, [10]), (2, [12]), (2, [14])]
+    assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13], [15]]
 
 
 def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
@@ -274,6 +568,10 @@ def test_generation_server_forwards_token_request() -> None:
                 token_ids=[31, 32],
                 token_logprobs=[-0.1, -0.2],
                 finish_reason="stop",
+                metrics=[
+                    m.Metric("generator/queue_time_ms", m.Mean(float(request_index))),
+                    m.Metric("generator/queue_time_ms", m.Max(float(request_index))),
+                ],
             )
 
         server = GenerationServer.Config(max_rollout_tokens=40960).build()
@@ -332,6 +630,12 @@ def test_generation_server_forwards_token_request() -> None:
         assert generation_metadata is not None
         assert generation_metadata.min_policy_version == 6
         assert generation_metadata.max_policy_version == 9
+        # Both generations folded into one Mean and one Max
+        assert len(generation_metadata.metrics) == 2
+        assert m.MetricsProcessor._aggregate_metrics(generation_metadata.metrics) == {
+            "generator/queue_time_ms/mean": 0.5,
+            "generator/queue_time_ms/max": 1.0,
+        }
 
     asyncio.run(run_test())
 
@@ -447,6 +751,49 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
         assert isinstance(model_error(errors[1]), OverlongPromptError)
 
     asyncio.run(run_test())
+
+
+def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
+    # Verifiers stops a rollout for context length before its first model call.
+    span = SimpleNamespace(duration=0.0)
+    trace = SimpleNamespace(
+        id="trace",
+        task=SimpleNamespace(key="huge-task"),
+        agent=SimpleNamespace(trainable=True),
+        ok=True,
+        is_truncated=True,
+        stop_condition="context_length",
+        errors=[],
+        timing=SimpleNamespace(
+            setup=span,
+            agent=SimpleNamespace(duration=0.0, model=span, harness=span),
+            scoring=span,
+        ),
+        calls=[],
+        nodes=[],
+        branches=[],
+    )
+    rollouter = object.__new__(VerifiersRollouter)
+    rollouter._generation_server = SimpleNamespace(
+        model_id="model", pop_generation_metadata=lambda trace_id: None
+    )
+    rollouter._verifiers_env_client = SimpleNamespace(
+        run=AsyncMock(return_value=SimpleNamespace(ok=True, errors=[], traces=[trace]))
+    )
+    rollouter._verifiers_train_client_config = object()
+
+    with caplog.at_level(logging.WARNING):
+        rollout = asyncio.run(
+            rollouter._run_single_rollout(
+                sample=VerifiersTaskSample(verifiers_task_data={"name": "huge-task"}),
+                sampling=SamplingConfig(),
+                group_id=1,
+                rollout_id=2,
+            )
+        )
+
+    assert rollout.status is RolloutStatus.ERROR
+    assert "first prompt of task huge-task does not fit" in caplog.text
 
 
 def test_parse_sampling_config_requires_stop_token_ids() -> None:

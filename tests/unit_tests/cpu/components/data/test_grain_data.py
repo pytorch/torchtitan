@@ -1596,6 +1596,32 @@ def test_configured_random_processor_is_deterministic():
     assert first == second
 
 
+def test_concat_children_draw_independent_processor_randomness():
+    # Repeating a child, as the data README suggests, must not repeat the
+    # child's random processor draws row for row.
+    child = SingleDatasetConfig(
+        source=RowsSourceConfig(rows=tuple({"id": index} for index in range(10))),
+        processor=AddRandomOffset.Config(maximum=1_000_000),
+    )
+    policy = dataset_iteration_policy(seed=7)
+    rows = list(
+        DatasetConcatConfig(datasets=(child, child)).build(
+            context=CONTEXT, dataset_iteration_policy=policy
+        )
+    )
+    first, second = rows[:10], rows[10:]
+
+    # The first child keeps the configured seed.
+    assert first == list(child.build(context=CONTEXT, dataset_iteration_policy=policy))
+    # The second child is seeded with seed + 1, like DatasetMixConfig children.
+    assert second == list(
+        child.build(
+            context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy(seed=8)
+        )
+    )
+    assert [row["offset"] for row in second] != [row["offset"] for row in first]
+
+
 class RandomTextSequence(SampleProcessor):
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):

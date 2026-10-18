@@ -12,8 +12,9 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.testing._internal.distributed.fake_pg import FakeStore
-
 from torchtitan.components.checkpointer.base import ModelWrapper
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.base.state_dict_adapter import StateDictAdapter
 from torchtitan.models.deepseek_v3 import MODEL_FLAVORS as DEEPSEEK_V3_MODEL_FLAVORS
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
@@ -22,14 +23,62 @@ from torchtitan.models.deepseek_v4 import (
 )
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan.models.deepseek_v4.state_dict_adapter import DeepSeekV4StateDictAdapter
+from torchtitan.models.flux import MODEL_FLAVORS as FLUX_MODEL_FLAVORS
+from torchtitan.models.flux.state_dict_adapter import FluxStateDictAdapter
 from torchtitan.models.gpt_oss import MODEL_FLAVORS as GPT_OSS_MODEL_FLAVORS
 from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
 from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
+from torchtitan.models.muse_glimmer import (
+    build_model_config as build_muse_glimmer_model_config,
+)
+from torchtitan.models.muse_glimmer.state_dict_adapter import (
+    MuseGlimmerStateDictAdapter,
+)
 from torchtitan.models.qwen3 import MODEL_FLAVORS as QWEN3_MODEL_FLAVORS
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
+
+
+class MuseGlimmerVisionStateDictAdapterTest(unittest.TestCase):
+    def test_hf_native_roundtrip_and_strict_load(self) -> None:
+        config = build_muse_glimmer_model_config(
+            "debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()
+        )
+        model = config.build()
+        model.init_states()
+        state = model.state_dict()
+        for key, tensor in state.items():
+            if key.startswith("vision_encoder.layers.") and key.endswith(
+                ("wq.bias", "wk.bias")
+            ):
+                tensor.copy_(torch.arange(tensor.numel(), dtype=tensor.dtype))
+        adapter = MuseGlimmerStateDictAdapter(config, hf_assets_path=None)
+        hf = adapter.to_hf(state)
+        assert config.vision_encoder is not None
+        heads = config.vision_encoder.num_heads
+        for projection, native in (("q", "wq"), ("k", "wk")):
+            for parameter in ("weight", "bias"):
+                value = state[f"vision_encoder.layers.0.attn.{native}.{parameter}"]
+                expected = (
+                    value.reshape(heads, -1, 2, *value.shape[1:])
+                    .transpose(1, 2)
+                    .reshape_as(value)
+                )
+                torch.testing.assert_close(
+                    hf[
+                        f"model.vision_tower.layers.0.attn.{projection}_proj.{parameter}"
+                    ],
+                    expected,
+                    rtol=0,
+                    atol=0,
+                )
+        restored = adapter.from_hf(hf)
+        self.assertEqual(restored.keys(), state.keys())
+        for key, tensor in state.items():
+            torch.testing.assert_close(restored[key], tensor, rtol=0, atol=0, msg=key)
+        config.build().load_state_dict(restored, strict=True)
 
 
 class HuggingFaceStorageReaderTest(unittest.TestCase):
@@ -39,15 +88,21 @@ class HuggingFaceStorageReaderTest(unittest.TestCase):
         gpt_oss_build_config, _ = GPT_OSS_MODEL_FLAVORS["debugmodel"]
         self.adapters = (
             Llama3StateDictAdapter(
-                llama_build_config(attn_backend="flex", seq_len=128),
+                llama_build_config(
+                    attn_backend="flex", seq_len=128, parallelism=ParallelismConfig()
+                ),
                 hf_assets_path=None,
             ),
             DeepSeekV3StateDictAdapter(
-                deepseek_build_config(attn_backend="flex", seq_len=128),
+                deepseek_build_config(
+                    attn_backend="flex", seq_len=128, parallelism=ParallelismConfig()
+                ),
                 hf_assets_path=None,
             ),
             GptOssStateDictAdapter(
-                gpt_oss_build_config(attn_backend="flex", seq_len=128),
+                gpt_oss_build_config(
+                    attn_backend="flex", seq_len=128, parallelism=ParallelismConfig()
+                ),
                 hf_assets_path=None,
             ),
         )
@@ -114,7 +169,11 @@ class NativeFusedLinearStateDictAdapterTest(unittest.TestCase):
 class Llama3FusedLinearStateDictAdapterTest(unittest.TestCase):
     def test_hf_roundtrip_converts_native_fused_feed_forward(self) -> None:
         build_config, max_context_length = LLAMA3_MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         model = Llama3Model(config)
         model.init_states()
         state_dict = model.state_dict()
@@ -148,7 +207,11 @@ class Llama3FusedLinearStateDictAdapterTest(unittest.TestCase):
 class Qwen3StateDictAdapterTest(unittest.TestCase):
     def test_hf_roundtrip_preserves_tied_embedding_shape(self) -> None:
         build_config, max_context_length = QWEN3_MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         model = Qwen3Model(config)
         model.init_states()
         state_dict = model.state_dict()
@@ -165,6 +228,33 @@ class Qwen3StateDictAdapterTest(unittest.TestCase):
         self.assertEqual(restored["tok_embeddings.weight"].ndim, 2)
         self.assertEqual(restored["lm_head.weight"].ndim, 2)
         model.load_state_dict(restored, strict=True)
+
+
+class UnsupportedQuantizedKeysTest(unittest.TestCase):
+    def test_adapters_without_quantized_loads_reject_quantized_layout(self) -> None:
+        adapters = [
+            FluxStateDictAdapter(
+                FLUX_MODEL_FLAVORS["flux-debug"](), hf_assets_path=None
+            )
+        ]
+        for flavors, adapter_cls in (
+            (LLAMA3_MODEL_FLAVORS, Llama3StateDictAdapter),
+            (QWEN3_MODEL_FLAVORS, Qwen3StateDictAdapter),
+        ):
+            build_config, max_context_length = flavors["debugmodel"]
+            config = build_config(
+                attn_backend="flex",
+                seq_len=max_context_length,
+                parallelism=ParallelismConfig(),
+            )
+            adapters.append(adapter_cls(config, hf_assets_path=None))
+
+        for adapter in adapters:
+            with self.subTest(adapter=type(adapter).__name__):
+                with self.assertRaisesRegex(ValueError, "does not support loading"):
+                    adapter.to_hf({}, to_quantized_layout=True)
+                with self.assertRaisesRegex(ValueError, "does not support loading"):
+                    adapter.from_hf({}, is_quantized_layout=True)
 
 
 class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
@@ -191,6 +281,7 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         config = build_config(
             attn_backend="flex",
             seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
         )
         adapter = DeepSeekV3StateDictAdapter(config, hf_assets_path=None)
         mesh = init_device_mesh(
@@ -209,7 +300,7 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         )
 
         hf_state_dict = adapter.to_hf(
-            {"layers.1.moe.routed_experts.w13.weight": grouped_expert_weight}
+            {"layers.1.feed_forward.routed_experts.w13.weight": grouped_expert_weight}
         )
 
         expected_keys = {
@@ -233,13 +324,14 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
             attn_backend="flex",
             seq_len=128,
             num_mtp_layers=1,
+            parallelism=ParallelismConfig(),
         )
         adapter = DeepSeekV3StateDictAdapter(config, hf_assets_path=None)
         mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("ep",))
         local_weight = torch.arange(8 * 2 * 2 * 3, dtype=torch.float32).reshape(
             8, 2, 2, 3
         )
-        key = "mtp_layers.0.moe.routed_experts.w13.weight"
+        key = "mtp_layers.0.feed_forward.routed_experts.w13.weight"
         for placement in (Shard(0), Shard(2)):
             with self.subTest(placement=placement):
                 weight = DTensor.from_local(
@@ -259,6 +351,7 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                     "debugmodel",
                     seq_len=128,
                     n_mtp_layers=num_mtp_layers,
+                    parallelism=ParallelismConfig(),
                 )
                 assert isinstance(config, DeepSeekV4Model.Config)
                 model = config.build()
@@ -319,15 +412,18 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                 )
             try:
                 config = build_deepseek_v4_model_config(
-                    "debugmodel", seq_len=128, n_mtp_layers=1
+                    "debugmodel",
+                    seq_len=128,
+                    n_mtp_layers=1,
+                    parallelism=ParallelismConfig(),
                 )
                 assert isinstance(config, DeepSeekV4Model.Config)
                 model = config.build()
                 model.init_states()
                 mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("ep",))
                 for key, value in model.state_dict().items():
-                    if ".moe.routed_experts.w13." in key or key.endswith(
-                        ".moe.routed_experts.w2.weight"
+                    if ".feed_forward.routed_experts.w13." in key or key.endswith(
+                        ".feed_forward.routed_experts.w2.weight"
                     ):
                         module_path, name = key.rsplit(".", 1)
                         weight = DTensor.from_local(
@@ -356,19 +452,24 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
 class GptOssStateDictAdapterTest(unittest.TestCase):
     def test_full_model_roundtrip_preserves_all_expert_weights(self) -> None:
         build_config, _ = GPT_OSS_MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=128)
+        config = build_config(
+            attn_backend="flex", seq_len=128, parallelism=ParallelismConfig()
+        )
         # Keep the real four-layer model structure while making expert tensors
         # small enough for a CPU unit test.
         for layer_config in config.layers:
-            assert layer_config.moe is not None
-            layer_config.moe.routed_experts.w13.out_features = 16
-            layer_config.moe.routed_experts.w2.in_features = 16
+            assert layer_config.feed_forward is not None
+            layer_config.feed_forward.routed_experts.w13.out_features = 16
+            layer_config.feed_forward.routed_experts.w2.in_features = 16
+            # The debug flavor uses the batch-wise aux loss without expert
+            # bias; enable the bias to cover its HF round trip.
+            layer_config.feed_forward.load_balance_coeff = 1e-3
 
         model = config.build()
         model.init_states()
         state_dict = model.state_dict()
         expert_bias_keys = {
-            key for key in state_dict if key.endswith(".moe.expert_bias_E")
+            key for key in state_dict if key.endswith(".feed_forward.expert_bias_E")
         }
         self.assertEqual(len(expert_bias_keys), len(config.layers))
         for key in expert_bias_keys:
@@ -430,7 +531,11 @@ class Llama3DTensorStateDictAdapterTest(unittest.TestCase):
         mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("dp",))
 
         build_config, max_context_length = LLAMA3_MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
 
         qkv_config = config.layers[0].attention.qkv_linear
@@ -467,7 +572,11 @@ class Llama3DTensorStateDictAdapterTest(unittest.TestCase):
             try:
                 mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("dp",))
                 build_config, max_context_length = LLAMA3_MODEL_FLAVORS["debugmodel"]
-                config = build_config(attn_backend="flex", seq_len=max_context_length)
+                config = build_config(
+                    attn_backend="flex",
+                    seq_len=max_context_length,
+                    parallelism=ParallelismConfig(),
+                )
                 adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
 
                 qkv_config = config.layers[0].attention.qkv_linear

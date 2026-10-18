@@ -22,7 +22,10 @@ from __future__ import annotations
 import os
 
 import pytest
+from pydantic import ValidationError
+from renderers import CustomRendererConfig
 
+from torchtitan.components.renderer import from_renderers
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.muse_glimmer.renderer import (
     EOM_ID,
@@ -34,6 +37,9 @@ from torchtitan.models.muse_glimmer.renderer import (
 )
 
 DEFAULT_TOKENIZER = "meta-models/Muse-Glimmer-30B"
+MUSE_GLIMMER_RENDERER_PATH = (
+    "torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
+)
 
 TOOLS = [
     {
@@ -229,38 +235,37 @@ def _renderer(tokenizer, **overrides):
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "error"),
+    "kwargs",
     [
-        ({"thinking_retention": "everything"}, ValueError),
-        ({"retain_reasoning_in_history": "false"}, TypeError),
-        ({"answer_from_reasoning_fallback": 1}, TypeError),
-        ({"reasoning_strength": 123}, TypeError),
+        {"thinking_retention": "everything"},
+        {"retain_reasoning_in_history": "false"},
+        {"answer_from_reasoning_fallback": 1},
+        {"reasoning_strength": 123},
     ],
 )
-def test_config_rejects_invalid_values(kwargs, error):
-    with pytest.raises(error):
+def test_config_rejects_invalid_values(kwargs):
+    with pytest.raises(ValidationError):
         MuseGlimmerRendererConfig(**kwargs)
 
 
-def test_build_snapshots_config():
-    path = os.environ.get("MUSE_GLIMMER_TOKENIZER", DEFAULT_TOKENIZER)
-    if not os.path.isdir(path):
-        pytest.skip("HuggingFaceTokenizer needs a local tokenizer directory")
+def test_config_is_immutable():
     config = MuseGlimmerRendererConfig(retain_reasoning_in_history=True)
-    renderer = config.build(tokenizer=HuggingFaceTokenizer(tokenizer_path=path))
-    config.retain_reasoning_in_history = False
-    assert renderer._config.retain_reasoning_in_history is True
-    assert renderer.effective_thinking_retention == "all"
+    field_name = "retain_reasoning_in_history"
+    with pytest.raises(ValidationError, match="frozen_instance"):
+        setattr(config, field_name, False)
 
 
 def test_config_build_matches_hf_tokenizer_path(tokenizer):
     path = os.environ.get("MUSE_GLIMMER_TOKENIZER", DEFAULT_TOKENIZER)
     if not os.path.isdir(path):
         pytest.skip("HuggingFaceTokenizer needs a local tokenizer directory")
-    titan = MuseGlimmerRendererConfig(reasoning_strength="low").build(
-        tokenizer=HuggingFaceTokenizer(tokenizer_path=path)
-    )
+    titan = from_renderers(
+        CustomRendererConfig(
+            import_path=MUSE_GLIMMER_RENDERER_PATH, reasoning_strength="low"
+        )
+    ).build(tokenizer=HuggingFaceTokenizer(tokenizer_path=path))
     assert isinstance(titan, MuseGlimmerRenderer)
+    assert titan._config == MuseGlimmerRendererConfig(reasoning_strength="low")
     hf = _renderer(tokenizer, reasoning_strength="low")
     messages = [{"role": "user", "content": "search for bob"}]
     assert titan.render_ids(
