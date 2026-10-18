@@ -57,7 +57,6 @@ from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
 from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
     TerminalTasksetConfig,
 )
-from torchtitan.rl.generator.generation_server import GenerationServer
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
@@ -89,15 +88,13 @@ def _terminal_bench_rollouter_config(
     train_dataset: str,
     validation_dataset: str,
     *,
-    max_context_length: int,
     max_turns: int,
     max_concurrent_rollouts: int,
 ) -> VerifiersRollouter.Config:
     """Select Harbor datasets by id.
 
-    ``max_context_length`` is the generator's sequence length; the generation
-    server caps each rollout at it. ``max_turns`` is the agent turn limit,
-    which Verifiers enforces. ``max_concurrent_rollouts`` sizes the env server;
+    `max_turns` is the agent turn limit, which Verifiers enforces.
+    `max_concurrent_rollouts` sizes the env server;
     set it to the number of rollouts the controller keeps in flight, or the
     excess queues in the env server and the generators idle.
     """
@@ -149,9 +146,6 @@ def _terminal_bench_rollouter_config(
             reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
             error_reward=0.0,
         ),
-        generation_server=GenerationServer.Config(
-            max_rollout_tokens=max_context_length
-        ),
         connection_timeout_sec=1800.0,
     )
 
@@ -199,7 +193,6 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         rollouter=_terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
-            max_context_length=max_context_length,
             max_turns=120,
             max_concurrent_rollouts=async_loop.max_active_rollout_groups
             * async_loop.num_samples_per_prompt,
@@ -344,7 +337,6 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         rollouter=_terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
-            max_context_length=max_context_length,
             max_turns=120,
             max_concurrent_rollouts=async_loop.max_active_rollout_groups
             * async_loop.num_samples_per_prompt,
@@ -466,7 +458,6 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
         rollouter=_terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
-            max_context_length=max_context_length,
             max_turns=8,
             max_concurrent_rollouts=async_loop.max_active_rollout_groups
             * async_loop.num_samples_per_prompt,

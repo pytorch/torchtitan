@@ -23,6 +23,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
+import aiohttp
 import pytest
 
 import torchtitan.rl.generator.engine_loop as engine_loop_module
@@ -774,6 +775,24 @@ async def _on_engine_loop(engine_loop: EngineLoop, fn: Callable[[], Any]) -> Any
     )
 
 
+def _bare_generator(
+    engine_loop: EngineLoop,
+    *,
+    sampling: SamplingConfig | None = None,
+    generator_class: type[Generator] = Generator,
+) -> Generator:
+    """The generator's endpoints around `engine_loop`, as rank 0, without building vLLM."""
+    generator = object.__new__(generator_class)
+    generator.config = SimpleNamespace(
+        sampling=sampling or SamplingConfig(),
+        model=SimpleNamespace(max_context_length=64),
+    )
+    generator._rank = 0
+    generator._engine_loop = engine_loop
+    generator._generation_server = None
+    return generator
+
+
 def test_call_on_engine_thread_runs_on_it_in_the_callers_context() -> None:
     caller_context = contextvars.ContextVar("caller_context", default=None)
     caller_context.set("caller")
@@ -898,9 +917,7 @@ def test_generate_endpoint_queues_a_request_with_the_default_sampling(
 
     async def run() -> None:
         # The generator's endpoints around the engine loop, without building vLLM.
-        generator = object.__new__(Generator)
-        generator.config = SimpleNamespace(sampling=sampling)
-        generator._engine_loop = engine_thread(engine)
+        generator = _bare_generator(engine_thread(engine), sampling=sampling)
         await generator.start_engine_loop()
         waiting = asyncio.create_task(generator.wait_engine_loop())
         with pytest.raises(AssertionError, match="stop_token_ids must be set"):
@@ -932,6 +949,71 @@ def test_generate_endpoint_queues_a_request_with_the_default_sampling(
     asyncio.run(run())
 
 
+def _post_generate(session: aiohttp.ClientSession, url: str):
+    """POST one request for at most 4 tokens to the generator server at `url`."""
+    return session.post(
+        f"{url}/inference/v1/generate",
+        headers={"X-Session-ID": "group=0/rollout=0"},
+        json={
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "max_tokens": 4,
+                "stop_token_ids": [9],
+                "torchtitan_group_id": 0,
+            },
+            "response_format": "torchtitan",
+        },
+    )
+
+
+def test_http_server_serves_generate_even_when_an_adapter_overrides_it(
+    engine_thread,
+) -> None:
+    class _EndpointAdapter(Generator):
+        # A Monarch actor adapter replaces `generate` with an endpoint object.
+        generate = None
+
+    async def run() -> None:
+        generator = _bare_generator(
+            engine_thread(_FakeEngine()), generator_class=_EndpointAdapter
+        )
+        await generator.start_engine_loop()
+        async with aiohttp.ClientSession() as session:
+            async with _post_generate(session, await generator.http_url()) as response:
+                assert response.status == 200, await response.text()
+                payload = await response.json()
+        assert payload["request_id"] == "group=0/rollout=0/http=0"
+        await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+def test_close_fails_a_running_http_call_at_once(engine_thread) -> None:
+    # Closing the server first would make aiohttp wait up to 60 s for the running call's handler.
+    stepping = threading.Event()
+
+    async def run() -> None:
+        generator = _bare_generator(engine_thread(_HeldEngine(stepping.set)))
+        await generator.start_engine_loop()
+        async with aiohttp.ClientSession() as session:
+
+            async def call() -> int:
+                async with _post_generate(
+                    session, await generator.http_url()
+                ) as response:
+                    return response.status
+
+            status = asyncio.create_task(call())
+            # Wait until the engine steps the request.
+            assert await asyncio.to_thread(stepping.wait, _TIMEOUT_S)
+            await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+            assert await asyncio.wait_for(status, _TIMEOUT_S) == 500
+
+    asyncio.run(run())
+
+
 def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
     engine_thread, monkeypatch
 ) -> None:
@@ -947,8 +1029,7 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
 
     async def run() -> None:
         # The generator's endpoints around the engine loop, without building vLLM.
-        generator = object.__new__(Generator)
-        generator._engine_loop = engine_thread(engine)
+        generator = _bare_generator(engine_thread(engine))
         generator._prefetched_model_state_dict = {}
         await generator.start_engine_loop()
         first = _generate(generator._engine_loop, "r0")

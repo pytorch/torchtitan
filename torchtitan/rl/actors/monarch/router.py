@@ -15,7 +15,11 @@ from typing import Any
 from monarch.actor import Actor, concurrent_endpoint, current_size
 
 from torchtitan.rl.actors.system import ServiceHandle
-from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.generator.generation_server import VerifiersGenerationMetadata
+from torchtitan.rl.routing.inter_generator import (
+    GeneratorEndpoint,
+    InterGeneratorRouter,
+)
 
 
 class _InterGeneratorRouterActorEndpoints:
@@ -32,23 +36,21 @@ class _InterGeneratorRouterActorEndpoints:
         super().__init__(config, generators=generators)
 
     @concurrent_endpoint
-    async def generate(
-        self,
-        prompt_token_ids: list[int],
-        *,
-        request_id: str,
-        group_id: int,
-        routing_session_id: str | None,
-        sampling_config: Any | None,
-        metrics_prefix: str,
-    ) -> Any:
-        return await super().generate(
-            prompt_token_ids,
-            request_id=request_id,
-            group_id=group_id,
-            routing_session_id=routing_session_id,
-            sampling_config=sampling_config,
-            metrics_prefix=metrics_prefix,
+    async def acquire(
+        self, session_id: str | None, *, group_id: int
+    ) -> GeneratorEndpoint:
+        return await super().acquire(session_id, group_id=group_id)
+
+    @concurrent_endpoint
+    async def release(self, index: int, *, group_id: int) -> None:
+        await super().release(index, group_id=group_id)
+
+    @concurrent_endpoint
+    async def release_rollout(
+        self, index: int, *, group_id: int, session_ids: list[str]
+    ) -> dict[str, VerifiersGenerationMetadata]:
+        return await super().release_rollout(
+            index, group_id=group_id, session_ids=session_ids
         )
 
     @concurrent_endpoint
