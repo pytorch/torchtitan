@@ -107,6 +107,7 @@ from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
+    compute_host_memory_metrics,
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     compute_rollout_metrics,
@@ -1200,6 +1201,11 @@ class Controller(Configurable):
             # rollout related metrics here, or move all of them to the rollouter.
             time_metrics = step_timer.flush()
             with sl.log_trace_span("metrics_log"):
+                # In a thread: ~60 ms of /proc reads per step at 620 processes, and reading a
+                # process's environ blocks while that process changes its memory mappings.
+                host_memory_metrics = await asyncio.to_thread(
+                    compute_host_memory_metrics
+                )
                 self.metrics_processor.log(
                     step=step,
                     is_validation=False,
@@ -1231,6 +1237,7 @@ class Controller(Configurable):
                             ),
                             time_metrics=time_metrics,
                         ),
+                        *host_memory_metrics,
                     ],
                 )
 
