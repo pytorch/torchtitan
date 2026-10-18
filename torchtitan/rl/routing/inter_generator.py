@@ -38,12 +38,6 @@ class _GeneratorHandle(RoutingCandidate):
     reserved_load: int = 0
     """Router-side estimate of in-flight routed generation work."""
 
-    idle: asyncio.Event = field(default_factory=asyncio.Event)
-    """Set when this generator has no reserved routed calls."""
-
-    serving: asyncio.Event = field(default_factory=asyncio.Event)
-    """Set while routable; cleared while it drains for a model state dict load (hot_swap=False only)."""
-
 
 class InterGeneratorRouter(Configurable):
     """Routes generation calls across generator meshes and pulls model's state dict.
@@ -53,11 +47,11 @@ class InterGeneratorRouter(Configurable):
     then routes the request across that mesh's data-parallel ranks.
 
     Singleton:
-        Routing decisions read and write mutable states such as ``_serving``,
-        ``_GeneratorHandle.serving``, and so on. These states are not backed by
-        shared storage, so if there are multiple router instances, they cannot
-        know each others' routing decisions. Instead of using shared storage,
-        we solve the problem by enforcing the singleton pattern:
+        Routing decisions read and write mutable states such as
+        ``_GeneratorHandle.reserved_load`` and the strategy's session pins. These
+        states are not backed by shared storage, so if there are multiple router
+        instances, they cannot know each others' routing decisions. Instead of
+        using shared storage, we solve the problem by enforcing the singleton pattern:
           * there should be only 1 router mesh in a training job;
           * this mesh should consists of only 1 actor.
 
@@ -86,14 +80,15 @@ class InterGeneratorRouter(Configurable):
 
         hot_swap: bool = True
         """When True, pulls model's state dict concurrently with in-flight
-        generation (no draining). When False, each generator is drained before
-        its pull.
+        generation (no draining). When False, each generator drains itself before
+        its load: it finishes the requests it already admitted, and holds new ones
+        until the load lands (`Generator.load_model_state_dict(drain=True)`).
 
-        Draining only waits for a generator's in-flight ``_route`` call (one
-        turn) to finish; between turns of a multi-turn rollout the generator is
-        idle, so a model state dict load may land mid-rollout and successive turns can run
-        under different policy versions. A turn whose session is pinned to a
-        draining generator waits for it instead of moving to another one."""
+        Draining only waits for the admitted requests (one turn each) to finish;
+        between turns of a multi-turn rollout the generator is idle, so a model state
+        dict load may land mid-rollout and successive turns can run under different
+        policy versions. A turn routed to a draining generator waits there instead of
+        moving to another one."""
 
     def __init__(
         self,
@@ -108,43 +103,14 @@ class InterGeneratorRouter(Configurable):
         ]
         if not self._generators:
             raise ValueError("InterGeneratorRouter requires at least one generator")
-        for h in self._generators:
-            h.idle.set()
-            h.serving.set()
 
         self._strategy = config.strategy.build()
-        self._serving = asyncio.Event()
-        self._refresh_serving_status()
-
-    def _candidates(self) -> list[_GeneratorHandle]:
-        """Return generator handles that are currently routable."""
-
-        return [h for h in self._generators if h.serving.is_set()]
-
-    def _refresh_serving_status(self) -> None:
-        """Update whether any generator can serve; only changes while draining (i.e. hot-swap is off)."""
-
-        if self._candidates():
-            self._serving.set()
-        else:
-            self._serving.clear()
-
-    def _set_serving(self, h: _GeneratorHandle, serving: bool) -> None:
-        """Take a generator out of routing while it drains for a model state dict load, or put it back."""
-
-        if serving:
-            h.serving.set()
-        else:
-            h.serving.clear()
-        self._refresh_serving_status()
 
     def _reserve(self, h: _GeneratorHandle, cost: int) -> None:
         """Reserve estimated generation work on a handle before dispatch."""
 
         if cost < 0:
             raise ValueError(f"route estimated_cost must be non-negative, got {cost}")
-        if h.reserved_load == 0:
-            h.idle.clear()
         h.reserved_load += cost
 
     def _release(self, h: _GeneratorHandle, cost: int) -> None:
@@ -154,8 +120,6 @@ class InterGeneratorRouter(Configurable):
         assert (
             h.reserved_load >= 0
         ), f"generator reserved_load went negative: {h.reserved_load}"
-        if h.reserved_load == 0:
-            h.idle.set()
 
     async def _route(
         self,
@@ -164,20 +128,10 @@ class InterGeneratorRouter(Configurable):
         routing_ctx: RoutingContext,
         **kwargs,
     ) -> Any:
-        """Dispatch one call to a strategy-chosen serving generator's rank 0;
+        """Dispatch one call to a strategy-chosen generator's rank 0;
         return its result.
         """
-        # TODO(pytorch/torchtitan#5253): drain inside the generator, so this wait goes away.
-        # A turn pinned to a draining generator waits for it: all generators drain in the same
-        # model state dict load (hot_swap=False), so re-pinning would pile those sessions onto whichever
-        # serves first.
-        pinned = self._strategy.pinned_candidate(routing_ctx)
-        if pinned is not None:
-            await pinned.serving.wait()
-        await self._serving.wait()
-        candidates = self._candidates()
-        assert candidates, "serving event was set with no serving generators"
-        h = self._strategy.choose(routing_ctx, candidates)
+        h = self._strategy.choose(routing_ctx, self._generators)
         self._reserve(h, routing_ctx.estimated_cost)
         try:
             return await getattr(h.rank0_actor, method).call_one(*args, **kwargs)
@@ -236,23 +190,11 @@ class InterGeneratorRouter(Configurable):
         async def _pull_one(h: _GeneratorHandle) -> None:
             # Transfer over RDMA while the generator remains available
             await h.actor.prefetch_model_state_dict.call()
-            if self._config.hot_swap:
-                # Hot swap: pull concurrently with in-flight generation, without
-                # draining. Whether the pull is genuinely concurrent and safe is
-                # up to the generator's implementation.
-                await h.rank0_actor.load_model_state_dict.call_one(policy_version)
-            else:
-                # Drain: stop routing to this generator and wait for in-flight
-                # work to finish before pulling, then re-admit it.
-                # Draining starts only for the local CPU-to-GPU apply rather
-                # than the network transfer
-                self._set_serving(h, serving=False)
-                try:
-                    with sl.log_trace_span("router_drain_wait"):
-                        await h.idle.wait()
-                    await h.rank0_actor.load_model_state_dict.call_one(policy_version)
-                finally:
-                    self._set_serving(h, serving=True)
+            # The generator drains itself (hot_swap=False) only for the local CPU-to-GPU
+            # apply, not for the network transfer above.
+            await h.rank0_actor.load_model_state_dict.call_one(
+                policy_version, drain=not self._config.hot_swap
+            )
 
         # Start the pulls in parallel. Technically we could do rolling sync to
         # maintain availability during model state dict loads, but that's not a priority
