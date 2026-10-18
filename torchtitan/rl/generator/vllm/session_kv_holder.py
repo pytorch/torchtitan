@@ -132,8 +132,9 @@ class VLLMSessionKVHolder(Configurable):
           request is still waiting is released too: its hold is all that keeps those blocks, and
           keeping it once memory is full stops every waiting request from starting.
         - Sessions whose request is running go last, oldest hold first. A release frees only the
-          blocks that request no longer references (the prompt-end GDN state, the duplicate block).
-          Skipping them under heavy pressure makes vLLM preempt running requests instead.
+          blocks that request no longer uses: its prompt-end GDN state (dropped once it decodes)
+          and the extra copy of a block that `_hold` may take. Skipping them under heavy pressure
+          makes vLLM preempt running requests instead.
         """
         running = self._scheduler.running
         # GRPO siblings decode in lockstep, so all running requests can cross a boundary together.
@@ -145,7 +146,8 @@ class VLLMSessionKVHolder(Configurable):
             for request in running
             if request.request_id in self._live
         }
-        # Stable sort: sessions with no running request first, both parts in `_held` order.
+        # False (no running request) sorts before True, and sorted() is stable: sessions with no
+        # running request go first, then running ones, each part in `_held` order.
         for session_id in sorted(self._held, key=running_sessions.__contains__):
             if self._block_pool.get_num_free_blocks() >= floor:
                 return
