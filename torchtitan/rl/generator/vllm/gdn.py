@@ -320,8 +320,12 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             impl="reference",
         )
         update_gate = torch.sigmoid(b).unsqueeze(0)
-        query = l2norm(query, cu_seqlens=cu_seqlens)
-        key = l2norm(key, cu_seqlens=cu_seqlens)
+        # Batch-invariant mode drops the offsets: decode offsets [0, 1, ..., N] select a
+        # decode-tuned L2Norm launch that rounds differently from the trainer's. The
+        # offsets only skip padding rows.
+        l2norm_offsets = None if is_in_batch_invariant_mode() else cu_seqlens
+        query = l2norm(query, cu_seqlens=l2norm_offsets)
+        key = l2norm(key, cu_seqlens=l2norm_offsets)
 
         if is_in_batch_invariant_mode():
             recurrent_output, _ = recurrent_gdn(
