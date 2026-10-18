@@ -21,6 +21,7 @@ from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
+from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.distributed.utils import get_local_tensor
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
@@ -71,6 +72,9 @@ class Trainer(Configurable):
         """Trainer model config, built for ``parallelism``."""
 
         def __post_init__(self) -> None:
+            # RL packs a different number of microbatches each step, and a whole-step CUDA graph can't replay that.
+            if not self.training.disable_cuda_graphs:
+                self.training.cuda_graph_per_microbatch_group = True
             TrainingEngine.Config.__post_init__(self)
             if self.parallelism.pipeline_parallel_degree > 1:
                 raise ValueError(
@@ -100,6 +104,18 @@ class Trainer(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        # Fail here, not at step 2: graphs turned on after the config was built skip __post_init__.
+        if (
+            not config.training.disable_cuda_graphs
+            and cuda_graphs_supported()
+            and not config.training.cuda_graph_per_microbatch_group
+        ):
+            raise ValueError(
+                "RL packs a different number of microbatch groups each step, so a "
+                "whole-step CUDA graph fails at step 2. Turn graphs on inside "
+                "TrainingConfig(...), or also set "
+                "training.cuda_graph_per_microbatch_group=True."
+            )
         validate_model_training_config(
             config.model,
             parallelism=config.parallelism,

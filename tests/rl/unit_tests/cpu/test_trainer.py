@@ -58,6 +58,21 @@ def test_rl_trainer_uses_training_engine_config_defaults() -> None:
     assert not Trainer.Config(model=MagicMock()).training.disable_cuda_graphs
 
 
+def test_rl_trainer_rejects_whole_step_cuda_graph(tmp_path) -> None:
+    config = Trainer.Config(model=MagicMock())
+    # The state a recipe reaches by turning graphs on after the build: graphs on, per-group off.
+    config.training.cuda_graph_per_microbatch_group = False
+
+    with (
+        patch(
+            "torchtitan.rl.trainer.trainer.cuda_graphs_supported",
+            return_value=True,
+        ),
+        pytest.raises(ValueError, match="cuda_graph_per_microbatch_group=True"),
+    ):
+        Trainer(config, max_num_documents=None, output_dir=str(tmp_path))
+
+
 def test_pipeline_parallelism_is_rejected_until_model_state_dict_push_supports_it() -> None:
     with pytest.raises(ValueError, match="TorchStore"):
         Trainer.Config(
