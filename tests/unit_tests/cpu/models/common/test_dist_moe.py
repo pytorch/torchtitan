@@ -42,6 +42,7 @@ from torchtitan.models.common.dist_moe import (
 )
 from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.lora import get_lora_dist_moe_routed_experts
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -316,6 +317,20 @@ def test_bf16_transform_preserves_parameter_layout() -> None:
     assert not hasattr(module, "activation_fn")
     for key, value in module.state_dict().items():
         torch.testing.assert_close(value, stock.state_dict()[key], rtol=0, atol=0)
+
+
+def test_count_tokens_skips_the_unused_count() -> None:
+    """Dist-MoE derives dispatch from the expert ids, so MoE skips the count."""
+    module = DistMoeTransform().transform(_stock_config()).build()
+    routing_map_TE = torch.ones(3, 4, dtype=torch.bool)
+    assert module.count_tokens(routing_map_TE) is None
+    # The SPMD typechecker needs a tensor at the forward boundary.
+    with patch("spmd_types.is_type_checking", return_value=True):
+        assert module.count_tokens(routing_map_TE).tolist() == [3, 3, 3, 3]
+    # The MXFP8 and LoRA variants inherit the hook.
+    assert MXFP8DistMoeRoutedExperts.count_tokens is DistMoeRoutedExperts.count_tokens
+    lora_cls = get_lora_dist_moe_routed_experts()
+    assert lora_cls.count_tokens is DistMoeRoutedExperts.count_tokens
 
 
 @pytest.mark.parametrize("expert_precision", ["bf16", "mxfp8"])
