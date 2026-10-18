@@ -23,6 +23,10 @@ them.
         |                                                     | 7. batch
         |    +---- controller process (torchtitan.rl.train) --|--------+
         |    |  dataset -> VerifiersRollouter -> batcher               |
+        |    +--------------------|-----------------^------------------+
+        |                  group  v                 | finished group
+        |    +---- rollout worker processes (VerifiersRolloutWorker) --+
+        |    |  one group per call: send tasks, convert traces         |
         |    +----------------------------|------^---------------------+
         | 4. token ids            1. task |      | 6. trace, reward
 +-------|---------------------------------v------|-----------------------+
@@ -38,7 +42,8 @@ them.
 +------------------------------------------------------------------------+
 ```
 
-1. **Task.** `VerifiersRollouter` sends the sampled task to the env server once per
+1. **Task.** The controller sends each group to a rollout worker process
+   (`VerifiersRolloutWorker`), which sends the sampled task to the env server once per
    rollout in the group.
 2. **Agent.** The env server starts a container from the task's `docker_image` and runs
    Terminus-2 in it ([`harness.py`](./harness.py)). The agent types commands into a
@@ -46,11 +51,12 @@ them.
 3. **Model call.** Each agent turn is a chat request to Verifiers' interception server,
    which records the turn in the rollout's trace.
 4. **Generation.** The request goes as token ids straight to the HTTP server of the
-   generator the rollouter picked for this rollout, which serves it with vLLM.
+   generator the router picked for this rollout, which serves it with vLLM.
 5. **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the
    container and reads the reward file it writes.
-6. **Trace.** `VerifiersRollouter` turns the trace into rollout turns, with the exact
-   tokens the generators sampled, and computes group advantages.
+6. **Trace.** The rollout worker turns the trace into rollout turns, with the exact
+   tokens the generators sampled, computes group advantages and returns the finished
+   group to the controller.
 7. **Training.** The batcher feeds the trainer, and the generators load the new weights
    after each step.
 
