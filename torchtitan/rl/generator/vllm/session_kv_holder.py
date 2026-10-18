@@ -114,8 +114,8 @@ class VLLMSessionKVHolder(Configurable):
 
         # Nothing runs and requests wait: with an empty batch vLLM skips the watermark, so it refused
         # the head for lack of blocks (or the batch just drained: one cheap extra release).
-        scheduler = self._scheduler
-        if not scheduler.running and (scheduler.waiting or scheduler.skipped_waiting):
+        num_running, num_waiting = self._scheduler.get_request_counts()
+        if not num_running and num_waiting:
             free_before = self._block_pool.get_num_free_blocks()
             for session_id in list(self._held):
                 self._release(session_id)

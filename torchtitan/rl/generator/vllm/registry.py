@@ -176,15 +176,10 @@ def register_to_vllm(
         # be contiguous in vLLM's convolution state cache.
         os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
 
+    from transformers import PreTrainedConfig
     from vllm.logger import init_logger
     from vllm.model_executor.models.registry import ModelRegistry
-
-    # Pull ``PretrainedConfig`` through vLLM's transformers re-export rather
-    # than from ``transformers`` directly. vLLM already depends on
-    # transformers internally, so this keeps torchtitan free of a direct
-    # ``transformers`` import — when vLLM eventually drops it, this path
-    # disappears with it.
-    from vllm.transformers_utils.config import PretrainedConfig, register_config_parser
+    from vllm.transformers_utils.config import register_config_parser
     from vllm.transformers_utils.config_parser_base import ConfigParserBase
 
     from torchtitan.rl.generator.vllm.model_wrapper import VLLMModelWrapper
@@ -231,7 +226,7 @@ def register_to_vllm(
             **kwargs,
         ):
             config_dict = model_config_to_hf_config_dict(model_config)
-            return config_dict, PretrainedConfig.from_dict(config_dict)
+            return config_dict, PreTrainedConfig.from_dict(config_dict)
 
     logger.info(
         f"Registered {VLLM_MODEL_NAME} + ConfigParser({TORCHTITAN_CONFIG_FORMAT!r}) "

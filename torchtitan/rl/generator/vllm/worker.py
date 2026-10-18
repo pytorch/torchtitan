@@ -6,6 +6,7 @@
 
 """TorchTitan-owned vLLM worker and model runner customizations."""
 
+import dataclasses
 from collections.abc import Set
 from contextlib import nullcontext
 
@@ -94,31 +95,51 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
             self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
 
     def _determine_batch_execution_and_padding(self, num_tokens: int, *args, **kwargs):
-        """Tell the model how many of this step's tokens are real, before padding.
+        """Tell the model how many of this step's tokens are real, then pad the step.
 
         vLLM calls this once before every forward: from ``execute_model`` for a
         real step, and from ``_dummy_run`` for profiling, warm-up, CUDA-graph
         capture and an idle DP rank's dummy batch (whose rows all count as
-        real). ``num_tokens`` is the unpadded count; vLLM applies every padding
-        source inside this call (TP rounding, CUDA-graph capture size, DP
-        equalization). The model turns the count into a padding mask, which keeps
-        those rows off Dist-MoE's network; graph replay reads the value published
-        for the real step.
+        real). ``num_tokens`` is the unpadded count. The model turns it into a
+        padding mask, which keeps padded rows off Dist-MoE's network; graph replay
+        reads the value published for the real step.
+
+        Padding, in order:
+            1. vLLM: up to the CUDA-graph capture size, then DP equalization.
+            2. Here, only with expert parallelism at TP > 1: up to a multiple of TP,
+               because EP splits the routed tokens over the TP ranks.
+
+        Example (eager step, TP 4, DP ranks ran 5 and 3 tokens):
+
+            vLLM returns   batch_descriptor.num_tokens=5   num_tokens_across_dp=[5, 3]
+            we return      batch_descriptor.num_tokens=8   num_tokens_across_dp=[8, 4]
         """
         self.get_model().set_num_valid_tokens(num_tokens)
-        return super()._determine_batch_execution_and_padding(
-            num_tokens, *args, **kwargs
+        (
+            cudagraph_mode,
+            batch_descriptor,
+            should_ubatch,
+            num_tokens_across_dp,
+            cudagraph_stats,
+        ) = super()._determine_batch_execution_and_padding(num_tokens, *args, **kwargs)
+        parallel_config = self.vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        if parallel_config.enable_expert_parallel and tp_size > 1:
+            # Capture sizes are already TP multiples (VLLMCudaGraphConfig), so
+            # this only changes eager steps.
+            batch_descriptor = dataclasses.replace(
+                batch_descriptor,
+                num_tokens=round_up(batch_descriptor.num_tokens, tp_size),
+            )
+            if num_tokens_across_dp is not None:
+                num_tokens_across_dp = round_up(num_tokens_across_dp, tp_size)
+        return (
+            cudagraph_mode,
+            batch_descriptor,
+            should_ubatch,
+            num_tokens_across_dp,
+            cudagraph_stats,
         )
-
-    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        enable_dense_sp = self.compilation_config.pass_config.enable_sp and tp_size > 1
-        enable_expert_sp = (
-            self.vllm_config.parallel_config.enable_expert_parallel and tp_size > 1
-        )
-        if enable_dense_sp or enable_expert_sp:
-            return round_up(num_scheduled_tokens, tp_size)
-        return num_scheduled_tokens
 
 
 class TorchTitanGPUWorker(GPUWorker):
