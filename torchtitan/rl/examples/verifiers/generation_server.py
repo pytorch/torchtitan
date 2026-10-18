@@ -115,7 +115,8 @@ class GenerationServer(Configurable):
         app.router.add_get("/healthz", self._handle_health_request)
         app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
-        runner = web.AppRunner(app)
+        # aiohttp logs one INFO line per request: most of the controller's log lines.
+        runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.requested_port)
         await site.start()
