@@ -17,7 +17,6 @@ import copy
 import tempfile
 import unittest
 from collections.abc import Callable
-from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -28,7 +27,6 @@ from torch.nn.attention.flex_attention import flex_attention
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
-from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -259,7 +257,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.passes import (
             apply_graph_passes,
             compile_time_passes,
-            construct_default_graph_passes,
         )
         from torchtitan.experiments.graph_trainer.precompile import (
             flatten_runtime_inputs,
@@ -272,8 +269,16 @@ class BitwiseDeterministicBase(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 
         self.annotate_model(model)
-        loss_fn = CrossEntropyLoss.Config().build()
-        fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
+        trainer = build_minimal_trainer(
+            model,
+            self.model_config,
+            GraphTrainer,
+            compile_enable_passes=enable_passes,
+            parallelism_context=self.parallelism_context,
+            max_num_documents=BATCH_SIZE,
+        )
+        trainer.config.training.max_context_length = SEQ_LEN
+        fwd_bwd_fn = make_fwd_bwd_step(model, trainer.engine.loss_fn)
 
         global_loss_token_counts = torch.tensor(
             NUM_TOKENS, dtype=torch.float, device="cuda"
@@ -299,15 +304,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
         # Step 2: Apply compile-time passes (cleanup + regional_inductor)
         # before saving, so compiled Triton kernels are baked in
         if enable_passes:
-            config = SimpleNamespace(
-                model=self.model_config,
-                compile=GraphTrainerCompileConfig(),
-                parallelism=SimpleNamespace(
-                    pipeline_parallel_degree=1,
-                    fsdp_reshard_after_forward="default",
-                ),
+            passes = compile_time_passes(
+                traced_result,
+                trainer.config,
+                parallelism_context=self.parallelism_context,
             )
-            passes = compile_time_passes(traced_result, config)
             traced_result.gm = apply_graph_passes(
                 traced_result.gm,
                 traced_result.example_inputs,
@@ -328,21 +329,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 storage,
                 expected_fingerprint="",
                 example_inputs=example_inputs,
-            )
-
-        # Step 4: Apply load-time passes (CUDA graph)
-        if enable_passes:
-            load_config = SimpleNamespace(
-                model=self.model_config,
-                compile=GraphTrainerCompileConfig(
-                    precompile_artifact_dir="precompiled",
-                ),
-            )
-            passes = construct_default_graph_passes(loaded_result, load_config)
-            loaded_result.gm = apply_graph_passes(
-                loaded_result.gm,
-                loaded_result.example_inputs,
-                passes,
             )
 
         # Step 4: Run training steps using the loaded artifact
@@ -423,9 +409,6 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    @unittest.skip(
-        "Precompiled artifacts do not provide example inputs for CUDA graph setup"
-    )
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         if self.attn_backend == "flex":
@@ -609,7 +592,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
                     chunk_dim="seq",
-                    module_fqn="layers.*.moe",
+                    module_fqn="layers.*.feed_forward",
                 ),
             ),
         )
@@ -703,7 +686,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             GraphTrainer,
             compile_ep_overlap_enabled=True,
             compile_ep_overlap_chunk_dim="seq",
-            compile_ep_overlap_module_fqn="layers.*.moe",
+            compile_ep_overlap_module_fqn="layers.*.feed_forward",
         )
 
         self._assert_runs_match(

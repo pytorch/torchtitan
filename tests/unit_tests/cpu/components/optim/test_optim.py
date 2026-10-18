@@ -76,10 +76,12 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
         training_steps=10,
     )
     config.ema.build.assert_called_once_with(model_parts=[model])
+    assert optim._is_first_step_call
     if enable_cuda_graph:
         wrap.assert_called_once_with(
             optim._update,
             num_warmup_iterations=2,
+            name="optimizer",
         )
         assert optim._run_update is wrapped_update
     else:
@@ -127,9 +129,11 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
     assert "Optim CUDA graph is disabled" in caplog.text
 
 
-def test_optim_step_keeps_eager_state_outside_update() -> None:
+@pytest.mark.parametrize("cuda_initialized", [False, True])
+def test_optim_step_keeps_eager_state_outside_update(cuda_initialized: bool) -> None:
     events = []
     optim = object.__new__(Optim)
+    optim._is_first_step_call = True
     optim._run_update = lambda loss: (
         events.append("update"),
         torch.testing.assert_close(loss, torch.tensor(1.0)),
@@ -138,7 +142,27 @@ def test_optim_step_keeps_eager_state_outside_update() -> None:
     optim.lr_schedulers = SimpleNamespace(step=lambda: events.append("lr_scheduler"))
     optim.ema = SimpleNamespace(step=lambda step: events.append(f"ema_{step}"))
 
-    grad_norm = optim.step(torch.tensor(1.0), current_step=3)
+    with (
+        patch("torch.cuda.is_initialized", return_value=cuda_initialized),
+        patch(
+            "torch.cuda.synchronize", side_effect=lambda: events.append("synchronize")
+        ),
+        patch(
+            "torch.cuda.empty_cache", side_effect=lambda: events.append("empty_cache")
+        ) as empty_cache,
+    ):
+        grad_norm = optim.step(torch.tensor(1.0), current_step=3)
+        optim.step(torch.tensor(1.0), current_step=4)
+
+    empty_cache.assert_called_once_with()
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
-    assert events == ["update", "lr_scheduler", "ema_3"]
+    assert events == (["synchronize"] if cuda_initialized else []) + [
+        "empty_cache",
+        "update",
+        "lr_scheduler",
+        "ema_3",
+        "update",
+        "lr_scheduler",
+        "ema_4",
+    ]

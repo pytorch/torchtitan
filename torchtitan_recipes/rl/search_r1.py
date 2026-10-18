@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from renderers import Qwen3RendererConfig
+from renderers import CustomRendererConfig, Qwen3RendererConfig
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
@@ -32,28 +32,34 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.config import OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, TokenDispatcherTransform
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
-from torchtitan.models.muse_glimmer.renderer import MuseGlimmerRendererConfig
 from torchtitan.models.qwen3 import build_model_config
-from torchtitan.rl.components.data import IterableRLDataLoader
-from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.rl.controller.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
 from torchtitan.rl.examples.search_r1.data import SearchR1Dataset
 from torchtitan.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.rl.examples.search_r1.rubric import RewardExactMatch
-from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
-from torchtitan.rl.losses import DAPOLoss
+from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
+from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.trainer.losses import DAPOLoss
+from torchtitan.rl.trainer.trainer import Trainer
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -156,11 +162,11 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
@@ -210,7 +216,7 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
         ),
         parallelism=trainer_parallelism,
     )
-    # 0.6 (vs the 0.9 default) reserves room for the weight-sync memory spike, which
+    # 0.6 (vs the 0.9 default) reserves room for the model state dict load memory spike, which
     # OOMs the 8B generator otherwise.
     # TODO(@meetv18): the spike is likely GPU-Direct weight transfer being on by default;
     # make the transfer device configurable (CPU default) so this cap can be raised.
@@ -296,11 +302,11 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 global_vocab_size=decoder_vocab_size(trainer_model),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
             max_num_batched_tokens=max_num_batched_tokens,
@@ -359,8 +365,8 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
     * **Full activation checkpointing is required.** Adam's m/v are allocated on the
       *first* ``optimizer.step()``, so per-GPU memory jumps by roughly 8 bytes/param
       between step 1 and step 2 (~37 GB/GPU here, sharded 6 ways). With the default
-      ``SelectiveAC`` that jump OOMs at step 2; ``FullAC`` frees the activation
-      headroom it needs.
+      ``DefaultActivationRematConfig`` that jump OOMs at step 2;
+      ``FullActivationRematConfig`` frees the activation headroom it needs.
 
     varlen attention is used for both roles so the trainer and the vLLM generator run
     one model config. The state-dict adapter handles the HF checkpoint's Q/K RoPE layout
@@ -394,7 +400,11 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             validation=ValidationConfig(steps=500),
         ),
         rollouter=_search_r1_rollouter_config(),
-        renderer=MuseGlimmerRendererConfig(),
+        renderer=from_renderers(
+            CustomRendererConfig(
+                import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
+            )
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
             model=trainer_model,
@@ -411,7 +421,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=4096,
                 max_context_length=4096,
             ),
-            activation_checkpoint=FullAC.Config(),
+            activation_remat=FullActivationRematConfig(),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,  # first run loads HF; restarts resume from DCP
@@ -428,11 +438,11 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,

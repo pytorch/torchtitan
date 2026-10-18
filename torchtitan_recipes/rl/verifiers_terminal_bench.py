@@ -4,19 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Qwen3.5 terminal-agent recipes using Verifiers and TitanRL.
+"""Terminal-agent recipes using Verifiers and TitanRL.
 
-Both recipes train on ``local/tmax@v1``, the TMax tasks exported by
+The recipes train on ``local/tmax@v1``, the TMax tasks exported by
 ``prepare_tmax.py`` into ``~/.cache/harbor/local_tmax_v1``, and validate on the
 Terminal-Bench 2.1 Harbor dataset, which the ``harbor`` CLI downloads into
 ``~/.cache/harbor`` on first use. Edit the ids below to use other datasets.
+The Muse Glimmer example is capped at its model's 16K context length.
 """
 
 import math
 
 import verifiers.v1 as vf
 
-from renderers import Qwen35RendererConfig
+from renderers import CustomRendererConfig, Qwen35RendererConfig
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
@@ -29,16 +30,16 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.muse_glimmer import (
+    build_model_config as build_muse_glimmer_model_config,
+)
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.components.data import IterableRLDataLoader
-from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.distributed.routing.strategies import (
-    LeastLoadedRoutingStrategy,
-    StickySessionRoutingStrategy,
+from torchtitan.rl.controller.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
 )
 from torchtitan.rl.examples.verifiers.data import (
     register_local_taskset_alias,
@@ -57,15 +58,25 @@ from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
 from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
     TerminalTasksetConfig,
 )
-from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
-from torchtitan.rl.losses import GRPOLoss
+from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.observability.rollout_recorder import (
+from torchtitan.rl.rollout.data import IterableRLDataLoader
+from torchtitan.rl.rollout.recorder import (
     KeepExtremeRewardsFilter,
     RolloutSampleRecorder,
 )
 from torchtitan.rl.rollout.rubric import Rubric
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.routing.strategies import (
+    LeastLoadedRoutingStrategy,
+    StickySessionRoutingStrategy,
+)
+from torchtitan.rl.trainer.losses import GRPOLoss
+from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
 
@@ -237,7 +248,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
                 dtype="float32",
             ),
             parallelism=trainer_parallelism,
-            activation_checkpoint=FullAC.Config(),
+            activation_remat=FullActivationRematConfig(),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=20,
@@ -251,10 +262,12 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY"),
+            engine=VLLMEngine.Config(
+                cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
+            ),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -380,7 +393,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
                 dtype="float32",
             ),
             parallelism=trainer_parallelism,
-            activation_checkpoint=FullAC.Config(),
+            activation_remat=FullActivationRematConfig(),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=20,
@@ -394,10 +407,131 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
+            parallelism=generator_parallelism,
+            checkpointer=None,
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=1.0,
+                max_tokens=max_output_tokens,
+            ),
+        ),
+    )
+
+
+def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
+    """Muse Glimmer 30B: short-context TMax/Terminal-Bench example.
+
+    16 GPUs: 8 trainer (FSDP=4 x TP=2) and 4 generators (TP=2 each).
+    The 30B model flavor supports at most 16K tokens, so this caps the agent
+    at 8 turns. Long Terminal-Bench trajectories can still exceed that limit;
+    this is not a full 120-turn benchmark configuration.
+    """
+    max_context_length = 16384
+    max_output_tokens = 4096
+    async_loop = AsyncLoopConfig(
+        num_training_steps=100,
+        num_prompts_per_train_step=8,
+        num_samples_per_prompt=8,
+        validation=ValidationConfig(steps=89),
+    )
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=4,
+        tensor_parallel_degree=2,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=2,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_muse_glimmer_model_config,
+        "30B",
+        seq_len=max_context_length,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+        # Muse's SoftCappedLinear head cannot use LMHeadFP32OutputConverter.
+        fp32_lm_head=False,
+    )
+    return Controller.Config(
+        hf_assets_path="./assets/hf/Muse-Glimmer-30B",
+        dump_folder="outputs/rl/muse_glimmer_30b_terminal_bench",
+        rollout_recorder=RolloutSampleRecorder.Config(
+            filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
+        ),
+        async_loop=async_loop,
+        rollouter=_terminal_bench_rollouter_config(
+            train_dataset="local/tmax@v1",
+            validation_dataset="terminal-bench/terminal-bench-2-1",
+            max_context_length=max_context_length,
+            max_turns=8,
+            max_concurrent_rollouts=async_loop.max_active_rollout_groups
+            * async_loop.num_samples_per_prompt,
+        ),
+        renderer=from_renderers(
+            CustomRendererConfig(
+                import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
+                reasoning_strength="low",
+            )
+        ),
+        num_generators=4,
+        generator_router=InterGeneratorRouter.Config(
+            strategy=StickySessionRoutingStrategy.Config(
+                fallback_strategy=LeastLoadedRoutingStrategy.Config()
+            )
+        ),
+        metrics=MetricsProcessor.Config(
+            console_log_keys_validation=[
+                "validation_reward/_mean",
+                "validation_reward/_max",
+                "timing/validate",
+            ],
+        ),
+        trainer=Trainer.Config(
+            model=trainer_model,
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[
+                        AdamW.Config(
+                            pattern=r".*",
+                            lr=1e-6,
+                            betas=(0.9, 0.999),
+                            weight_decay=0.0,
+                        )
+                    ]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=0,
+                    min_lr_factor=1.0,
+                ),
+            ),
+            training=TrainingConfig(
+                disable_cuda_graphs=True,
+                num_tokens_per_microbatch_per_dp_rank=max_context_length,
+                max_context_length=max_context_length,
+            ),
+            parallelism=trainer_parallelism,
+            activation_remat=FullActivationRematConfig(),
+            checkpointer=CheckpointManager.Config(
+                initial_load_in_hf=True,
+                interval=20,
+                keep_latest_k=3,
+                async_mode="async",
+            ),
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=GRPOLoss.Config(
+                    global_vocab_size=decoder_vocab_size(trainer_model)
+                ),
+            ),
+        ),
+        generator=Generator.Config(
+            model=generator_model,
+            model_dtype="bfloat16",
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(

@@ -13,7 +13,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 - ``memory_policy.py`` - SAC and min-cut policy tagging and dispatch
 - ``decompositions.py`` — standalone graph decomposition
 - ``inductor_passes.py`` — regional and full Inductor compilation
-- ``CUDA graph.py`` — CUDA graph wrapping and kernel annotations
+- ``cuda_graph.py`` — opt-in CUDA graph wrapping and kernel annotations
 - ``fsdp_passes.py`` — FSDP bucketing and resharding
 - ``remove_noop_passes.py`` — mandatory gradient-marker cleanup plus graph
   cleanup bundled as ``canonicalize_graph_pass`` (detach, identity view/slice,
@@ -46,7 +46,6 @@ from torchtitan.experiments.graph_trainer.configs import (
 
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cuda_graph import (
-    cuda_graph_pass,
     insert_kernel_annotations_pass,
 )
 from torchtitan.experiments.graph_trainer.debug_utils import (
@@ -93,6 +92,8 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
+
+from torchtitan.models.common.moe import MoE
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +148,6 @@ def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
     *,
-    use_cuda_graph: bool = False,
     parallelism_context=None,
     include_inductor: bool = True,
     include_mandatory_normalization: bool = True,
@@ -158,8 +158,10 @@ def compile_time_passes(
     that compiled Triton kernels are baked into the artifact. Otherwise
     they run at trace time via ``construct_default_graph_passes``.
 
-    CUDA graph is excluded because it needs to re-capture the graph into
-    an in-memory CUDA graph at runtime.
+    The graph-level capture pass in ``cuda_graph.py`` is not part of this list.
+    The kernel annotation pass remains enabled when the trainer owns CUDA graph
+    capture. Custom callers can use ``construct_cuda_graph_passes`` to apply
+    both passes explicitly at runtime.
 
     ``reassign_collective_pgs_pass`` runs just before bucketing to place
     collectives on dedicated process groups / streams (bucketing then inherits
@@ -187,7 +189,7 @@ def compile_time_passes(
     moe_layer_ids = frozenset(
         i
         for i, layer_cfg in enumerate(config.model.layers)
-        if getattr(layer_cfg, "moe", None) is not None
+        if isinstance(layer_cfg.feed_forward, MoE.Config)
     )
     ep_overlap_enabled = config.compile.ep_overlap.enabled
     if parallelism_context is not None and hasattr(
@@ -374,7 +376,7 @@ def compile_time_passes(
     passes.extend(
         final_inductor_compile_passes(
             config.compile,
-            use_cuda_graph=use_cuda_graph,
+            use_cuda_graph=not config.training.disable_cuda_graphs,
         )
     )
     return passes
@@ -391,8 +393,9 @@ def final_inductor_compile_passes(
     GraphTrainer applies these to the full train-step graph. GraphPP applies
     the same pass list to each extracted stage callable after its PP-specific
     partitioning has chosen the callable boundary. Terminal Inductor selection
-    only depends on compile config; model- and parallelism-aware rewrites stay
-    in ``compile_time_passes``.
+    depends on compile config, while kernel annotation selection follows the
+    trainer's CUDA graph setting. Model- and parallelism-aware rewrites stay in
+    ``compile_time_passes``.
     """
     from torchtitan.models.common.attention import FlexInnerAttention
 
@@ -447,36 +450,22 @@ def construct_default_graph_passes(
     """Build the pass list for the aot_fx_trace path.
 
     When ``precompile_artifact_dir`` is unset, returns the full list: cleanup,
-    FlexInnerAttention annotation, regional_inductor, and CUDA graph.
+    FlexInnerAttention annotation, and regional_inductor.
 
     When ``precompile_artifact_dir`` is set, the artifact has graph
-    transformed during precompile phase, so only CUDA graph is returned.
+    transformed during precompile phase, so no passes are returned.
+
+    This default list never includes ``cuda_graph_pass``. GraphTrainer uses
+    client-owned outer capture, while custom callers can use
+    ``construct_cuda_graph_passes`` from ``cuda_graph.py`` themselves.
     """
-    want_cuda_graph = "cuda_graph_pass" not in config.compile.disable_passes
-
-    has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
-
-    passes: list[Callable] = []
-    if not has_precompile_artifact:
-        passes.extend(
-            compile_time_passes(
-                traced_result,
-                config,
-                use_cuda_graph=want_cuda_graph,
-                parallelism_context=parallelism_context,
-            )
-        )
-
-    if want_cuda_graph:
-        static_input_indices = list(range(traced_result.num_static_inputs))
-        passes.append(
-            functools.partial(
-                cuda_graph_pass,
-                static_input_indices=static_input_indices,
-                tensor_input_indices=traced_result.tensor_input_indices,
-            )
-        )
-    return passes
+    if config.compile.precompile_artifact_dir:
+        return []
+    return compile_time_passes(
+        traced_result,
+        config,
+        parallelism_context=parallelism_context,
+    )
 
 
 def _get_pass_name(pass_fn: Callable) -> str:

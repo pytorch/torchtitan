@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components import validator as validator_module
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.validator import Validator
@@ -34,8 +35,8 @@ class _ClosableLoader:
 
 
 class _EchoModel(nn.Module):
-    def preprocess_inputs(self, input_dict, *, parallelism_context, parallelism):
-        del parallelism_context, parallelism
+    def preprocess_inputs(self, input_dict, **kwargs):
+        del kwargs
         return input_dict["input"], input_dict["labels"], {}
 
     def forward(self, inputs, **kwargs):
@@ -57,13 +58,17 @@ class _FluxModel(nn.Module):
 def _generic_validator(loader):
     validator = object.__new__(Validator)
     validator.config = SimpleNamespace(steps=1)
+    validator._cuda_graph_enabled = False
+    validator._run_eval = None
     validator.parallelism_context = SimpleNamespace(
         dp_enabled=False,
         pp_enabled=False,
         dp_cp_enabled=False,
         activate_spmd=lambda **kwargs: nullcontext(),
     )
-    validator.dl_config = SimpleNamespace(build=mock.Mock(return_value=loader))
+    validator.dl_config = SimpleNamespace(
+        build=mock.Mock(return_value=loader), max_num_documents=None
+    )
     validator.dp_world_size = 1
     validator.dp_rank = 0
     validator.tokenizer = mock.Mock()
@@ -77,6 +82,91 @@ def _generic_validator(loader):
     validator.loss_fn = lambda predictions, labels: (predictions.sum(), None)
     validator.parallelism = SimpleNamespace()
     return validator
+
+
+@pytest.mark.parametrize("num_groups", [1, 2])
+def test_eval_wrapper_returns_each_real_run(monkeypatch, num_groups):
+    from torchtitan.distributed.cuda_graph import cuda_graph_manager
+
+    row = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 1),
+        labels=torch.ones(1, 1, dtype=torch.long),
+        positions=torch.zeros(1, 1, dtype=torch.long),
+        padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+        loss_token_counts=torch.tensor(1),
+        routing_token_counts=torch.tensor([1]),
+    )
+    loader = _ClosableLoader([row] * num_groups)
+    validator = _generic_validator(loader)
+    validator.config.steps = num_groups
+    validator._cuda_graph_enabled = True
+    cuda_graph_manager.capture_allowed = False
+    model = _EchoModel()
+    model.register_buffer("counter", torch.tensor(0))
+    calls = []
+
+    def forward(inputs):
+        assert not model.training
+        assert not torch.is_grad_enabled()
+        calls.append(inputs)
+        model.counter.add_(1)
+        torch.rand(())
+        return inputs * model.counter
+
+    monkeypatch.setattr(model, "forward", forward)
+    wrap = mock.Mock(side_effect=lambda fn, **kwargs: fn)
+    monkeypatch.setattr(validator_module, "wrap_with_cuda_graph", wrap)
+    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
+    rng_before = torch.random.get_rng_state()
+    validator.validate([model], step=1)
+    assert len(calls) == num_groups
+    validator.metrics_processor.log_validation.assert_called_once_with(
+        loss=(num_groups + 1) / 2, step=1
+    )
+    assert not cuda_graph_manager.capture_allowed
+    validator.validate([model], step=2)
+    assert len(calls) == 2 * num_groups
+    validator.metrics_processor.log_validation.assert_called_with(
+        loss=(3 * num_groups + 1) / 2, step=2
+    )
+    torch.testing.assert_close(calls[-1], row.input, rtol=0, atol=0)
+    assert model.training
+    assert model.counter.item() == 2 * num_groups
+    assert loader.closed
+    assert not torch.equal(torch.random.get_rng_state(), rng_before)
+    wrap.assert_called_once()
+    assert wrap.call_args.kwargs == {
+        "num_warmup_iterations": 1,
+        "prepare_for_capture": None,
+        "name": "validation",
+    }
+    cuda_graph_manager.capture_allowed = True
+
+
+def test_validation_preprocessing_uses_validation_document_limit(monkeypatch):
+    row = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 1),
+        labels=torch.ones(1, 1, dtype=torch.long),
+        positions=torch.zeros(1, 1, dtype=torch.long),
+        padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+        loss_token_counts=torch.tensor(1),
+        routing_token_counts=torch.tensor([1]),
+    )
+    validator = _generic_validator(_ClosableLoader([row]))
+    validator.dl_config.max_num_documents = 4
+    model = _EchoModel()
+    preprocess = mock.Mock(wraps=model.preprocess_inputs)
+    monkeypatch.setattr(model, "preprocess_inputs", preprocess)
+    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
+    validator.validate([model], step=1)
+    preprocess.assert_called_once()
+    assert preprocess.call_args.kwargs == {
+        "parallelism_context": validator.parallelism_context,
+        "parallelism": validator.parallelism,
+        "max_num_documents": 4,
+        "max_context_length": validator.seq_len,
+    }
+    torch.testing.assert_close(preprocess.call_args.args[0]["input"], row.input)
 
 
 @pytest.mark.parametrize("raises", [False, True])
@@ -94,6 +184,9 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
     loader = _ClosableLoader([microbatch(), microbatch()])
     validator = _generic_validator(loader)
     model = _FailingModel() if raises else _EchoModel()
+    model.add_module("dropout", nn.Dropout())
+    model.dropout.eval()
+    modes = [module.training for module in model.modules()]
     monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
     if raises:
         with pytest.raises(RuntimeError, match="validation failed"):
@@ -102,7 +195,35 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
         validator.validate([model], step=1)
 
     assert loader.closed
+    assert [module.training for module in model.modules()] == modes
     validator.metrics_processor.reset.assert_called_once()
+
+
+@pytest.mark.parametrize("cuda_graph_enabled", [False, True])
+def test_flux_validator_keeps_eager_validation_schedule(cuda_graph_enabled, caplog):
+    from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
+
+    config = FluxValidator.Config(
+        dataloader=GrainDataLoader.Config(dataset=mock.Mock()), steps=1, freq=10
+    )
+    validator = FluxValidator(
+        config,
+        parallelism=mock.Mock(),
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=mock.Mock(spec=FluxTokenizerContainer),
+        parallelism_context=mock.Mock(),
+        loss_fn=mock.Mock(),
+        seq_len=4,
+        num_tokens_per_microbatch=4,
+        cuda_graph_enabled=cuda_graph_enabled,
+    )
+    assert validator.should_validate(1)
+    assert not validator.should_validate(2)
+    assert validator.should_validate(10)
+    assert not validator._cuda_graph_enabled
+    warned = "Flux validation runs without CUDA graphs" in caplog.text
+    assert warned == cuda_graph_enabled
 
 
 def _flux_validator(loader):
@@ -312,7 +433,9 @@ def test_pipeline_validator_does_not_keep_outputs(monkeypatch):
     assert validator.pp_schedule.eval.call_args.kwargs.get("return_outputs") is False
 
 
-def _validator_from_init(*, steps: int, dp_world_size: int) -> Validator:
+def _validator_from_init(
+    *, steps: int, dp_world_size: int, cuda_graph_enabled: bool = False
+) -> Validator:
     return Validator(
         Validator.Config(steps=steps),
         parallelism=mock.Mock(),
@@ -325,7 +448,22 @@ def _validator_from_init(*, steps: int, dp_world_size: int) -> Validator:
         metrics_processor=mock.Mock(),
         seq_len=4,
         num_tokens_per_microbatch=4,
+        cuda_graph_enabled=cuda_graph_enabled,
     )
+
+
+@pytest.mark.parametrize("cuda_graph_enabled", [False, True])
+def test_validator_uses_training_capture_mode(cuda_graph_enabled, monkeypatch):
+    from torchtitan.distributed.cuda_graph import cuda_graph_manager
+
+    monkeypatch.setattr(validator_module, "cuda_graphs_supported", lambda: True)
+    monkeypatch.setattr(cuda_graph_manager, "capture_allowed", True)
+    validator = _validator_from_init(
+        steps=1, dp_world_size=1, cuda_graph_enabled=cuda_graph_enabled
+    )
+    assert validator._cuda_graph_enabled == cuda_graph_enabled
+    assert cuda_graph_manager.capture_allowed != cuda_graph_enabled
+    assert validator.should_validate(2) == cuda_graph_enabled
 
 
 def test_validator_rejects_steps_neg1_when_dp_gt_1():

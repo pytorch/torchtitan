@@ -43,8 +43,8 @@ from torchtitan.models.common.dist_moe import (
 from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
@@ -235,11 +235,12 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
         dist_moe_runtime=runtime_config,
         sdc_replayer=None,
         training=SimpleNamespace(
-            cuda_graph_per_accumulation_group=False,
+            cuda_graph_per_microbatch_group=False,
             disable_cuda_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
+            preprocess_microbatch_groups_lazily=False,
         ),
         parallelism=SimpleNamespace(
             fsdp_defer_gradient_reduction=False,
@@ -1051,7 +1052,7 @@ def test_dist_moe_671b_recipe_topology(factory, dp_degree, num_microbatches) -> 
     assert config.training.dtype == "float32"
     assert config.training.mixed_precision_param == "bfloat16"
     assert config.training.mixed_precision_reduce == "bfloat16"
-    assert config.activation_checkpoint is None
+    assert config.activation_remat is None
     assert isinstance(config.loss, CrossEntropyLoss.Config)
     assert config.override.imports == [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",

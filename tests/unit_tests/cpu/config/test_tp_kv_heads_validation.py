@@ -13,6 +13,7 @@ early ValueError while validating the complete trainer config.
 """
 
 import unittest
+from unittest.mock import patch
 
 try:
     import sys
@@ -54,7 +55,7 @@ def _validate(config: "Llama3Model.Config", tp: int) -> None:
             disable_cuda_graphs=True,
         ),
         debug=DebugConfig(),
-        activation_checkpoint=None,
+        activation_remat=None,
         max_num_documents=None,
     )
 
@@ -154,6 +155,23 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         """tp=1 -> valid GQA head counts do not raise."""
         cfg = _make_llama3_config(n_heads=8, n_kv_heads=2)
         _validate(cfg, tp=1)
+
+    def test_checks_full_attention_after_sliding_attention(self):
+        from torchtitan.models.common.attention import SlidingWindowFlexInnerAttention
+
+        cfg = _make_llama3_config(n_heads=8, n_kv_heads=8)
+        cfg.layers[
+            0
+        ].attention.inner_attention = SlidingWindowFlexInnerAttention.Config(
+            window_size=128
+        )
+        cfg.layers[1].attention.n_heads = 3
+
+        with self.assertRaisesRegex(ValueError, r"n_heads \(3\)"):
+            _validate(cfg, tp=2)
+        with patch("torchtitan.distributed.spmd_types.spmd_mesh_size", return_value=2):
+            with self.assertRaisesRegex(ValueError, r"n_heads \(3\)"):
+                cfg.build()
 
 
 if __name__ == "__main__":

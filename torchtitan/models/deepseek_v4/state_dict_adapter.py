@@ -45,14 +45,14 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             "layers.{}.attn_norm.weight": "layers.{}.attention_norm.weight",
             "layers.{}.ffn_norm.weight": "layers.{}.ffn_norm.weight",
             # MoE
-            "layers.{}.ffn.experts.{}.w1.weight": "layers.{}.moe.routed_experts.w1_EFD",
-            "layers.{}.ffn.experts.{}.w3.weight": "layers.{}.moe.routed_experts.w3_EFD",
-            "layers.{}.ffn.experts.{}.w2.weight": "layers.{}.moe.routed_experts.w2.weight",
-            "layers.{}.ffn.gate.weight": "layers.{}.moe.router.gate.weight",
-            "layers.{}.ffn.gate.bias": "layers.{}.moe.expert_bias_E",
-            "layers.{}.ffn.shared_experts.w1.weight": "layers.{}.moe.shared_experts.w1.weight",
-            "layers.{}.ffn.shared_experts.w3.weight": "layers.{}.moe.shared_experts.w3.weight",
-            "layers.{}.ffn.shared_experts.w2.weight": "layers.{}.moe.shared_experts.w2.weight",
+            "layers.{}.ffn.experts.{}.w1.weight": "layers.{}.feed_forward.routed_experts.w1_EFD",
+            "layers.{}.ffn.experts.{}.w3.weight": "layers.{}.feed_forward.routed_experts.w3_EFD",
+            "layers.{}.ffn.experts.{}.w2.weight": "layers.{}.feed_forward.routed_experts.w2.weight",
+            "layers.{}.ffn.gate.weight": "layers.{}.feed_forward.router.gate.weight",
+            "layers.{}.ffn.gate.bias": "layers.{}.feed_forward.expert_bias_E",
+            "layers.{}.ffn.shared_experts.w1.weight": "layers.{}.feed_forward.shared_experts.w1.weight",
+            "layers.{}.ffn.shared_experts.w3.weight": "layers.{}.feed_forward.shared_experts.w3.weight",
+            "layers.{}.ffn.shared_experts.w2.weight": "layers.{}.feed_forward.shared_experts.w2.weight",
             # mHC
             "layers.{}.hc_attn_base": "layers.{}.hc_attn_pre.hc_base",
             "layers.{}.hc_attn_fn": "layers.{}.hc_attn_pre.hc_fn",
@@ -121,10 +121,10 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                         ),
                     }
                 )
-            if layer_id < model_config.layers[0].moe.router.n_hash_layers:
+            if layer_id < model_config.layers[0].feed_forward.router.n_hash_layers:
                 self.from_hf_map.update(
                     {
-                        f"layers.{layer_id}.ffn.gate.tid2eid": f"layers.{layer_id}.moe.router.tid2eid",
+                        f"layers.{layer_id}.ffn.gate.tid2eid": f"layers.{layer_id}.feed_forward.router.tid2eid",
                     }
                 )
 
@@ -169,7 +169,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             return self._abstract_key(key, count=count) in self.from_hf_map
         return False
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         state_dict = self._native_fused_linears_to_hf(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
@@ -190,7 +192,11 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                 hf_state_dict[key] = value
 
         if delegated_state_dict:
-            hf_state_dict.update(super().to_hf(delegated_state_dict))
+            hf_state_dict.update(
+                super().to_hf(
+                    delegated_state_dict, to_quantized_layout=to_quantized_layout
+                )
+            )
         # The shared V3 conversion numbers MTP layers after the main layers.
         for key in list(hf_state_dict):
             if key.startswith("layers."):
@@ -204,7 +210,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                     hf_state_dict[mtp_key] = hf_state_dict.pop(key)
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         state_dict = {}
         delegated_hf_state_dict = {}
 
@@ -232,5 +240,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                 state_dict[key] = value
 
         if delegated_hf_state_dict:
-            state_dict.update(super().from_hf(delegated_hf_state_dict))
+            state_dict.update(
+                super().from_hf(
+                    delegated_hf_state_dict, is_quantized_layout=is_quantized_layout
+                )
+            )
         return self._native_fused_linears_from_hf(state_dict)

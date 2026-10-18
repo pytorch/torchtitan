@@ -244,6 +244,39 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertFalse(manager._is_purge_exempt(3))
         manager.close()
 
+    @mock.patch("torchtitan.components.checkpointer.dcp.dcp.load")
+    def test_quantized_hf_load_requests_quantized_names(self, mock_load):
+        sd_adapter = mock.Mock()
+        sd_adapter.from_hf.return_value = self.model_part.state_dict()
+        manager = CheckpointManager(
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
+            extra_states=self.states,
+            config=self.trainer_config.checkpointer,
+            sd_adapter=sd_adapter,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        manager._load_checkpoint(
+            {MODEL: manager.states[MODEL]},
+            "/hf",
+            from_hf=True,
+            from_quantized=True,
+        )
+
+        sd_adapter.to_hf.assert_called_once_with(mock.ANY, to_quantized_layout=True)
+        sd_adapter.from_hf.assert_called_once_with(
+            sd_adapter.to_hf.return_value, is_quantized_layout=True
+        )
+        sd_adapter.get_hf_storage_reader.assert_called_once_with("/hf", True)
+        mock_load.assert_called_once_with(
+            sd_adapter.to_hf.return_value,
+            storage_reader=sd_adapter.get_hf_storage_reader.return_value,
+        )
+        manager.close()
+
     def test_legacy_import_path(self):
         from torchtitan.components.checkpointer import (
             CheckpointManager as LegacyCheckpointManager,
@@ -1352,6 +1385,7 @@ class TestBaseCheckpointManagerTracing(unittest.TestCase):
         manager.initial_load_path = None
         manager.initial_load_in_hf = False
         manager.initial_load_in_hf_quantized = False
+        manager.states = {}
         manager._storage = mock.Mock()
         manager._storage.isdir.return_value = True
         manager._create_checkpoint_id.return_value = "/checkpoint/step-10"
@@ -1667,7 +1701,7 @@ class TestModelWrapper(unittest.TestCase):
     def test_hook_tensor_storage_stable_and_refreshed(self):
         class HookedModule(nn.Module):
             # Slice a non-leading dim so .contiguous() allocates new storage
-            # disconnected from the parameter, mirroring FeedForward's split.
+            # disconnected from the parameter, mirroring DenseFeedForward's split.
             def __init__(self):
                 super().__init__()
                 self.w = nn.Parameter(torch.zeros(4, 2, 3))

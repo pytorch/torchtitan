@@ -15,15 +15,18 @@ from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
-from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
+from torchtitan.distributed.activation_remat import (
+    ActivationRematConfig,
+    DefaultActivationRematConfig,
+)
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     SlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
-    KVAllGatherCPSlidingWindowFlexInnerAttention,
+    AllGatherKVFlexInnerAttention,
+    AllGatherKVSlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.moe import MoE
 from torchtitan.trainer import Trainer
@@ -77,9 +80,7 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -87,7 +88,7 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
 
 def llama3_debugmodel_region_ac_fsdp2_tp2_cp2() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_tp2_cp2()
-    config.activation_checkpoint = RegionAC.Config(
+    config.activation_remat = ActivationRematConfig(
         save_regions=[
             "attention.qkv_linear.wqkv.linear",
             "attention.inner_attention",
@@ -140,9 +141,7 @@ def deepseek_v3_debugmodel_mtp_cp2(
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -184,9 +183,7 @@ def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -210,9 +207,7 @@ def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -281,9 +276,7 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -310,9 +303,7 @@ def qwen3_debugmodel_fsdp2_tp2_cp2(
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -363,7 +354,7 @@ def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
     config = qwen35_debugmodel_varlen_attn(seq_len=512)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
-    config.activation_checkpoint = SelectiveAC.Config()
+    config.activation_remat = DefaultActivationRematConfig()
     _set_spmd_typechecking(config, typechecking=False)
     config.training.disable_cuda_graphs = True
     set_rank_conditional_image_presence(config)
@@ -416,7 +407,7 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.training.num_tokens_per_microbatch_per_dp_rank = 1024
-    config.activation_checkpoint = SelectiveAC.Config()
+    config.activation_remat = DefaultActivationRematConfig()
     config.training.disable_cuda_graphs = True
     config.training.steps = 10
     return apply_transforms(
@@ -424,9 +415,9 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                    FlexInnerAttention: AllGatherKVFlexInnerAttention,
                     SlidingWindowFlexInnerAttention: (
-                        KVAllGatherCPSlidingWindowFlexInnerAttention
+                        AllGatherKVSlidingWindowFlexInnerAttention
                     ),
                 }
             )
@@ -445,7 +436,7 @@ def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-    config.activation_checkpoint = SelectiveAC.Config()
+    config.activation_remat = DefaultActivationRematConfig()
     config.training.disable_cuda_graphs = True
     return config
 
@@ -521,9 +512,9 @@ def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                    FlexInnerAttention: AllGatherKVFlexInnerAttention,
                     SlidingWindowFlexInnerAttention: (
-                        KVAllGatherCPSlidingWindowFlexInnerAttention
+                        AllGatherKVSlidingWindowFlexInnerAttention
                     ),
                 }
             )
@@ -563,14 +554,66 @@ def muse_glimmer_debugmodel_mm_tp2_cp2_pp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                    FlexInnerAttention: AllGatherKVFlexInnerAttention,
                     SlidingWindowFlexInnerAttention: (
-                        KVAllGatherCPSlidingWindowFlexInnerAttention
+                        AllGatherKVSlidingWindowFlexInnerAttention
                     ),
                 }
             )
         ],
     )
+
+
+def muse_spark_debugmodel_fsdp2_cp2_ep4() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.muse_spark import muse_spark_debugmodel
+
+    config = muse_spark_debugmodel(
+        seq_len=512,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2,
+            expert_parallel_degree=4,
+        ),
+    )
+    config.parallelism.context_parallel_degree = 2
+    config.override.imports = []
+    _set_spmd_typechecking(config, typechecking=True)
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    FlexInnerAttention: AllGatherKVFlexInnerAttention,
+                    SlidingWindowFlexInnerAttention: (
+                        AllGatherKVSlidingWindowFlexInnerAttention
+                    ),
+                }
+            )
+        ],
+    )
+
+
+def muse_spark_debugmodel_mm_fsdp2_tp2_cp2_ep4() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.muse_spark import muse_spark_debugmodel_mm
+
+    config = muse_spark_debugmodel_mm(
+        seq_len=512,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=4,
+        ),
+        context_parallel_transform=ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: AllGatherKVFlexInnerAttention,
+                SlidingWindowFlexInnerAttention: (
+                    AllGatherKVSlidingWindowFlexInnerAttention
+                ),
+            }
+        ),
+    )
+    config.override.imports = []
+    _set_spmd_typechecking(config, typechecking=True)
+    return config
 
 
 def build_model_tests_list() -> list[IntegrationTestDefinition]:
@@ -593,7 +636,7 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_region_ac_fsdp2_tp2_cp2],
-            test_descr="Llama 3 FSDP+TP+CP+RegionAC",
+            test_descr="Llama 3 FSDP+TP+CP+ActivationRematConfig",
             test_name="llama3_fsdp+tp+cp+region_ac",
             ngpu=8,
             golden_numerics_path=(
@@ -785,6 +828,21 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="Muse Glimmer multimodal TP+CP+PP+SP",
             test_name="muse_glimmer_mm_tp+cp+pp+sp",
             ngpu=8,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[muse_spark_debugmodel_fsdp2_cp2_ep4],
+            test_descr="Muse Spark FSDP+CP+EP with SPMD typechecking",
+            test_name="muse_spark_fsdp+cp+ep",
+            ngpu=4,
+        ),
+        IntegrationTestDefinition(
+            configs=[muse_spark_debugmodel_mm_fsdp2_tp2_cp2_ep4],
+            test_descr="Muse Spark multimodal FSDP+TP+CP+EP+SP with SPMD typechecking",
+            test_name="muse_spark_mm_fsdp+tp+cp+ep+sp",
+            ngpu=8,
+            # Fake TP cannot supply embeddings from the other vocabulary shard.
+            # Zero token rows overflow during RMSNorm backward across the blocks.
             use_real_pg=True,
         ),
     ]

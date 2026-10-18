@@ -17,7 +17,7 @@ from torch import nn
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
@@ -27,16 +27,16 @@ from torchtitan.distributed.spmd_types import (
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
+    Attention,
     AttentionMetadata,
     AttentionMetadataMap,
-    BaseAttention,
     FlexAttentionMetadata,
     LinearAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.attention.gdn import GatedDeltaNet
-from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.attention.gdn import GDN
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
@@ -47,6 +47,7 @@ from torchtitan.models.common.flops import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.linear import maybe_gather_tp_input
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -86,28 +87,30 @@ class OffsetRMSNorm(Module):
         self.weight = nn.Parameter(torch.empty(config.dim))
 
     @local_compile("offset_rmsnorm", batch_invariant=False, recompile_limit=16)
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Upcast to float32 for numerical stability in pow/rsqrt
-        input_dtype = x.dtype
-        x = x.float()
-        variance = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        return ((1.0 + self.weight.float()) * x).to(input_dtype)
+        input_dtype = input.dtype
+        input = input.float()
+        variance = input.pow(2).mean(-1, keepdim=True)
+        input = input * torch.rsqrt(variance + self.eps)
+        return ((1.0 + self.weight.float()) * input).to(input_dtype)
 
 
 @local_compile(
-    "residual_norm",
+    "residual_add_norm",
     batch_invariant=False,
-    # The separate add rounds the sum to the residual dtype before the norm reads it.
+    # Round x + h to its dtype before the norm reads it, as the separate add does:
+    # keeps the forward bitwise equal to the eager ops.
     options={"emulate_precision_casts": True},
 )
 def _residual_add_norm(
     x_TD: torch.Tensor, h_TD: torch.Tensor, norm: OffsetRMSNorm
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return ``x + h`` and ``norm(x + h)``: one kernel compiled, the separate ops in eager.
+    """Return ``x + h`` and ``norm(x + h)``: one kernel compiled, two in eager.
 
-    Shared by training and generation. Compiled, the two gradients of ``x + h`` are
-    summed in FP32 and rounded once (eager rounds each): within one BF16 ulp of eager.
+    Backward adds the gradients from the sum's two uses (the residual and the norm).
+    Compiled, it adds them in fp32 and rounds once; eager rounds each to bf16 first,
+    so grads can differ from eager by one bf16 step.
 
     Example:
         >>> x_TD, normed_TD = _residual_add_norm(x_TD, attn_out_TD, block.ffn_norm)
@@ -116,7 +119,7 @@ def _residual_add_norm(
     return x_TD, norm(x_TD)
 
 
-class Qwen35Attention(BaseAttention):
+class Qwen35Attention(Attention):
     """Full attention with output gating and partial RoPE for Qwen3.5.
 
     Differences from GQAttention:
@@ -126,13 +129,12 @@ class Qwen35Attention(BaseAttention):
     - QK norm uses OffsetRMSNorm
 
     Uses separate ``wq``/``wk``/``wv`` instead of the common fused ``qkv_linear``
-    (so this subclasses ``BaseAttention``, not ``GQAttention``): the 2x-wide,
+    (so this subclasses ``Attention``, not ``GQAttention``): the 2x-wide,
     gated ``wq`` doesn't fit a fused QKV projection that TP-shards by head.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
-        n_heads: int
+    class Config(Attention.Config):
         n_kv_heads: int
         head_dim: int
         rotary_dim: int
@@ -143,7 +145,6 @@ class Qwen35Attention(BaseAttention):
         wo: Linear.Config
         q_norm: OffsetRMSNorm.Config
         k_norm: OffsetRMSNorm.Config
-        inner_attention: Module.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -239,42 +240,24 @@ class Qwen35Attention(BaseAttention):
         return xq_THK, xk_THK
 
 
-class Qwen35TransformerBlock(Module):
+class Qwen35TransformerBlock(TransformerBlock):
     """Hybrid transformer block for Qwen3.5.
 
     Each layer uses either full attention (Qwen35Attention) or linear
-    attention (GatedDeltaNet), determined by which config is provided.
+    attention (GDN), determined by the attention config type.
     Both types share the same FFN/MoE structure.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        attention: Qwen35Attention.Config | None = None
-        delta_net: GatedDeltaNet.Config | None = None
-        feed_forward: Module.Config | None = None
-        moe: Module.Config | None = None
-        attention_norm: OffsetRMSNorm.Config
-        ffn_norm: OffsetRMSNorm.Config
+    class Config(TransformerBlock.Config):
+        pass
 
     def __init__(self, config: Config):
         super().__init__()
-        self.full_attn = config.attention is not None
+        self.full_attn = isinstance(config.attention, Qwen35Attention.Config)
+        self.attention = config.attention.build()
 
-        if self.full_attn:
-            self.attn = config.attention.build()  # pyrefly: ignore [missing-attribute]
-            self.attention_metadata_key = type(self.attn.inner_attention)
-        else:
-            assert config.delta_net is not None
-            self.attn = config.delta_net.build()
-            self.attention_metadata_key = type(self.attn.inner_gated_delta_net)
-
-        self.moe_enabled = config.moe is not None
-        if self.moe_enabled:
-            # pyrefly: ignore [missing-attribute]
-            self.moe = config.moe.build()
-        else:
-            assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build()
+        self.feed_forward = config.feed_forward.build()
 
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -290,14 +273,14 @@ class Qwen35TransformerBlock(Module):
     ) -> torch.Tensor:
         h_TD = self.attention_norm(x_TD)
         if self.full_attn:
-            h_TD = self.attn(h_TD, attention_metadata, positions)
+            h_TD = self.attention(h_TD, attention_metadata, positions)
         else:
-            h_TD = self.attn(h_TD, attention_metadata)
+            h_TD = self.attention(h_TD, attention_metadata)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(h_TD)
         x_TD, h_TD = _residual_add_norm(x_TD, h_TD, self.ffn_norm)
-        if self.moe_enabled:
-            h_TD = self.moe(
+        if isinstance(self.feed_forward, MoE):
+            h_TD = self.feed_forward(
                 h_TD,
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
@@ -378,13 +361,10 @@ class Qwen35Model(MultimodalModel):
                 "fused_binary_activation",
                 "gated_rmsnorm",
                 "offset_rmsnorm",
+                "residual_add_norm",
                 "partial_rope",
                 "shared_expert_gate",
                 "fp32_to_bf16_split",
-                "moe_dispatch",
-                "moe_combine",
-                "expert_counts",
-                "residual_norm",
             ]
         )
 
@@ -408,8 +388,8 @@ class Qwen35Model(MultimodalModel):
                         v_head_dim=attention.head_dim,
                         seq_len=seq_len,
                     )
-                elif isinstance(layer.delta_net, GatedDeltaNet.Config):
-                    delta_net = layer.delta_net
+                elif isinstance(layer.attention, GDN.Config):
+                    delta_net = layer.attention
                     num_value_heads = (
                         delta_net.in_proj_v.out_features // delta_net.value_head_dim
                     )
@@ -426,7 +406,11 @@ class Qwen35Model(MultimodalModel):
         tp = spmd_mesh_size("tp")
         if tp > 1:
             delta_net = next(
-                (layer.delta_net for layer in config.layers if layer.delta_net),
+                (
+                    layer.attention
+                    for layer in config.layers
+                    if isinstance(layer.attention, GDN.Config)
+                ),
                 None,
             )
             if delta_net is not None:
@@ -460,7 +444,7 @@ class Qwen35Model(MultimodalModel):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         local_compile_regions: list[str],
-        ac_config: ActivationCheckpointingConfig | None,
+        activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> Qwen35Model:
         return super().parallelize(
@@ -468,7 +452,7 @@ class Qwen35Model(MultimodalModel):
             training=training,
             parallelism=parallelism,
             local_compile_regions=local_compile_regions,
-            ac_config=ac_config,
+            activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
 
@@ -480,6 +464,7 @@ class Qwen35Model(MultimodalModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return."""
@@ -576,8 +561,10 @@ class Qwen35Model(MultimodalModel):
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
-        if any(layer.moe is not None for layer in self.config.layers):
-            input_dict["aux_loss_denominators"] = None
+        if any(
+            isinstance(layer.feed_forward, MoE.Config) for layer in self.config.layers
+        ):
+            input_dict["aux_loss_denominators"] = global_routing_token_counts
         return inputs, labels, input_dict
 
     def _get_vision_embeds(
@@ -758,9 +745,7 @@ class Qwen35Model(MultimodalModel):
             x = layer(
                 x,
                 (
-                    attention_metadata.get(
-                        cast(Qwen35TransformerBlock, layer).attention_metadata_key
-                    )
+                    attention_metadata.get(type(layer.attention.inner_attention))
                     if attention_metadata is not None
                     else None
                 ),

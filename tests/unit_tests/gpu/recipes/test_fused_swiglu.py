@@ -6,7 +6,7 @@
 
 """Tests for the fused-activation SwiGLU override.
 
-The override replaces ``FeedForward.activation_fn`` while preserving the module
+The override replaces ``DenseFeedForward.activation_fn`` while preserving the module
 and its physical ``w13`` projection. These tests run on CPU unless marked CUDA.
 
 ``TestFusedSwiGLUDistGemmComposition`` covers stacking the override on the
@@ -21,12 +21,12 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import AsyncTensorParallelTransform
 
 from torchtitan.models.common.activation import SwiGLU
-from torchtitan.models.common.async_linear import (
+from torchtitan.models.common.feed_forward import DenseFeedForward
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
@@ -42,7 +42,7 @@ class _ConvertedLinear(Linear):
         pass
 
 
-def _build_fused() -> FeedForward:
+def _build_fused() -> DenseFeedForward:
     fused = _feed_forward_config()
     fused.activation_fn = fused_swiglu(fused.activation_fn)
     fused = fused.build()
@@ -52,18 +52,18 @@ def _build_fused() -> FeedForward:
     return fused
 
 
-def _logical_w13(feed_forward: FeedForward) -> torch.Tensor:
+def _logical_w13(feed_forward: DenseFeedForward) -> torch.Tensor:
     return feed_forward.w13.weight
 
 
-def _feed_forward_config() -> FeedForward.Config:
-    return FeedForward.Config(
+def _feed_forward_config() -> DenseFeedForward.Config:
+    return DenseFeedForward.Config(
         w13=Linear.Config(in_features=_DIM, out_features=_HIDDEN, num_linears=2),
         w2=Linear.Config(in_features=_HIDDEN, out_features=_DIM),
     )
 
 
-def _build_native() -> FeedForward:
+def _build_native() -> DenseFeedForward:
     native = _feed_forward_config().build()
     with torch.no_grad():
         for p in native.parameters():
@@ -87,7 +87,7 @@ class TestFusedSwiGLU(unittest.TestCase):
         )
 
     def test_preserves_converted_linear_config(self):
-        cfg = FeedForward.Config(
+        cfg = DenseFeedForward.Config(
             w13=_ConvertedLinear.Config(
                 in_features=_DIM, out_features=_HIDDEN, num_linears=2
             ),
@@ -217,7 +217,7 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
         model = Llama3Model(config)
         model.init_states()
         ffn = model.get_submodule("layers.0.feed_forward")
-        self.assertIsInstance(ffn, FeedForward)
+        self.assertIsInstance(ffn, DenseFeedForward)
         self.assertIsInstance(ffn.activation_fn, FusedSwiGLU)
 
         sd = model.state_dict()

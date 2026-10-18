@@ -33,18 +33,25 @@ from torchtitan.config.transform import (
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_config
 from torchtitan.models.qwen3 import build_model_config
-from torchtitan.rl.components.batcher import Batcher
-from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
-from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
-from torchtitan.rl.losses import GRPOLoss
+from torchtitan.rl.controller.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
+from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.losses import GRPOLoss
+from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 from torchtitan_recipes.rl.alphabet_sort import (
     _alphabet_sort_rollouter_config,
@@ -95,8 +102,10 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
-            training_sample_builder=TrainingSampleBuilder.Config(
-                drop_zero_std_reward_groups=False,
+            batcher=Batcher.Config(
+                training_sample_builder=TrainingSampleBuilder.Config(
+                    drop_zero_std_reward_groups=False,
+                ),
             ),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
@@ -130,7 +139,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -197,8 +206,10 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
-            training_sample_builder=TrainingSampleBuilder.Config(
-                drop_zero_std_reward_groups=False,
+            batcher=Batcher.Config(
+                training_sample_builder=TrainingSampleBuilder.Config(
+                    drop_zero_std_reward_groups=False,
+                ),
             ),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
@@ -235,20 +246,20 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
             # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
             # distributed MoE token dispatcher is enabled for GPT-OSS.
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 max_tokens=50,
             ),
             debug=batch_invariant_config,
-            reset_kv_cache_on_weight_sync=True,
+            reset_kv_cache_on_model_state_dict_load=True,
         ),
     )
 
@@ -288,8 +299,10 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
-            training_sample_builder=TrainingSampleBuilder.Config(
-                drop_zero_std_reward_groups=False,
+            batcher=Batcher.Config(
+                training_sample_builder=TrainingSampleBuilder.Config(
+                    drop_zero_std_reward_groups=False,
+                ),
             ),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
@@ -320,12 +333,12 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             # Disable torch.compile + CUDA graph capture: the EP all-to-all
             # path issues an unpinned D2H copy of split sizes that the
             # piecewise/full graph capture rejects.
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -354,7 +367,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     config.override = OverrideConfig(
         imports=["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
     )
-    config.generator.cuda_graph = VLLMCudaGraphConfig(mode="FULL")
+    config.generator.engine.cuda_graph = VLLMCudaGraphConfig(mode="FULL")
     # vLLM's per-step token budget; it sizes the generator's DeepEP buffers.
     max_num_batched_tokens = 2048
     config.generator.max_num_batched_tokens = max_num_batched_tokens
@@ -442,8 +455,10 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
-            training_sample_builder=TrainingSampleBuilder.Config(
-                drop_zero_std_reward_groups=False,
+            batcher=Batcher.Config(
+                training_sample_builder=TrainingSampleBuilder.Config(
+                    drop_zero_std_reward_groups=False,
+                ),
             ),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
@@ -477,10 +492,10 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -488,7 +503,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
                 max_tokens=50,
             ),
             debug=_BATCH_INVARIANT_DEBUG,
-            reset_kv_cache_on_weight_sync=True,
+            reset_kv_cache_on_model_state_dict_load=True,
         ),
     )
 
@@ -519,8 +534,10 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
-            training_sample_builder=TrainingSampleBuilder.Config(
-                drop_zero_std_reward_groups=False,
+            batcher=Batcher.Config(
+                training_sample_builder=TrainingSampleBuilder.Config(
+                    drop_zero_std_reward_groups=False,
+                ),
             ),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
@@ -552,13 +569,13 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             # vLLM models FULL-graph capture warmup as one sequence, so keep
             # its synthetic sequence within the GDN model's context length.
             max_num_batched_tokens=seq_len,
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -586,7 +603,7 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_weight_sync=True,
+        reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
         "debugmodel",
@@ -649,11 +666,13 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_training_steps=5,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            batcher=Batcher.Config(max_num_documents=32),
-            validation=ValidationConfig(steps=20),
-            training_sample_builder=TrainingSampleBuilder.Config(
-                drop_zero_std_reward_groups=False,
+            batcher=Batcher.Config(
+                max_num_documents=32,
+                training_sample_builder=TrainingSampleBuilder.Config(
+                    drop_zero_std_reward_groups=False,
+                ),
             ),
+            validation=ValidationConfig(steps=20),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -685,10 +704,12 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY"),
+            engine=VLLMEngine.Config(
+                cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
+            ),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -717,7 +738,7 @@ def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_weight_sync=True,
+        reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _kimi_k3_rl_model_configs(
         "debugmodel",
@@ -745,7 +766,9 @@ def _configure_ci(
 ) -> Controller.Config:
     config.async_loop.num_training_steps = steps
     config.async_loop.num_samples_per_prompt = 2
-    config.async_loop.training_sample_builder.drop_zero_std_reward_groups = False
+    config.async_loop.batcher.training_sample_builder.drop_zero_std_reward_groups = (
+        False
+    )
     config.trainer.training.num_tokens_per_microbatch_per_dp_rank = (
         num_tokens_per_microbatch
     )
@@ -814,7 +837,7 @@ def rl_grpo_moe_debug_tp4_ep4() -> Controller.Config:
         model_config.local_compile_regions = []
     # TODO: use FULL CUDA graphs once GPT-OSS CI enables a
     # CUDA-graph-compatible distributed MoE token dispatcher.
-    config.generator.cuda_graph.mode = "NONE"
+    config.generator.engine.cuda_graph.mode = "NONE"
     return _configure_ci(
         config,
         steps=5,
@@ -924,20 +947,20 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
 
     _require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
-    from torchtitan.distributed.activation_checkpoint import RegionAC
+    from torchtitan.distributed.activation_remat import ActivationRematConfig
     from torchtitan.models.common.dist_moe import DistMoeRuntime
 
     config = rl_grpo_qwen3_moe_debug_varlen()
     # Full activation checkpointing would replay dist_moe's forward in backward and
-    # corrupt its activation planner; RegionAC with no saved regions does not.
-    config.trainer.activation_checkpoint = RegionAC.Config(save_regions=[])
+    # corrupt its activation planner; ActivationRematConfig with no saved regions does not.
+    config.trainer.activation_remat = ActivationRematConfig(save_regions=[])
     config.trainer.dist_moe_runtime = DistMoeRuntime.Config(scratch_capacity_factor=4.0)
     config.generator.dist_moe_runtime = DistMoeRuntime.Config(
         scratch_capacity_factor=4.0, inference=True
     )
     # The standard MoE dispatcher cannot be captured in a CUDA graph; Dist-MoE can,
     # prefill and decode steps alike.
-    config.generator.cuda_graph.mode = "FULL"
+    config.generator.engine.cuda_graph.mode = "FULL"
     config = _configure_ci(
         config,
         steps=3,
