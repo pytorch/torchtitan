@@ -16,7 +16,7 @@ from torchtitan.components.renderer import from_renderers
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
-from torchtitan.rl.generator.generator import SamplingConfig
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout import RolloutStatus
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.rollouter import RolloutWorker

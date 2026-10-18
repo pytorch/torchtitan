@@ -48,7 +48,8 @@ from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.attention.kda import InnerKDA, KDA
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.kimi_k3 import build_model_config
-from torchtitan.models.kimi_k3.model import KimiK3Model, KimiMLAAttention
+from torchtitan.models.kimi_k3.attention import KimiMLAAttention
+from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor

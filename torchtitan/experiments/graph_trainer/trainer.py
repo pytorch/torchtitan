@@ -16,7 +16,6 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.cuda_graph import (
-    cuda_graph_teardown,
     cuda_graphs_supported,
     NUM_CUDA_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_cuda_graph,
@@ -350,8 +349,6 @@ class GraphTrainingEngine(TrainingEngine):
 
         super().close()
 
-        cuda_graph_teardown()
-
         # Free the stash buffers, now that no CUDA graph points into them, and
         # leave any later trainer in this process a fresh manager.
         if self._paged_stash_runner is not None:
@@ -369,7 +366,7 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
-            if self.training.cuda_graph_per_accumulation_group:
+            if self.training.cuda_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."
                 )
@@ -398,6 +395,8 @@ class GraphTrainer(Trainer):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
+        if config.validator is not None and not config.training.disable_cuda_graphs:
+            logger.warning("GraphTrainer validation runs without CUDA graphs.")
         if (
             not self.engine.parallelism_context.pp_enabled
             and self.engine.pp_schedule.num_microbatches > 1
