@@ -31,6 +31,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
 from torchtitan.rl.examples.verifiers.rollouter import (
     _trainable_token_spans,
     log_failed_rollout,
+    VERIFIERS_REWARD_KEY,
     verifiers_rollout_logs,
     VerifiersRollouter,
 )
@@ -38,7 +39,6 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import Completion, RolloutStatus
-from verifiers.v1.errors import model_error, OverlongPromptError
 
 
 def test_train_client_config_carries_an_in_tree_renderer() -> None:
@@ -747,29 +747,37 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
 
         assert prompt_lengths == [7]
         assert statuses == [500, 400, 400]
-        # Verifiers ends the rollout as context_length on OverlongPromptError.
-        assert isinstance(model_error(errors[1]), OverlongPromptError)
+        # vLLM's own wording, which Verifiers matches as a context overflow.
+        assert "maximum context length" in errors[1]
 
     asyncio.run(run_test())
 
 
 def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
-    # Verifiers stops a rollout for context length before its first model call.
+    # The first model call fails for context length, so the rollout has no turns.
     span = SimpleNamespace(duration=0.0)
     trace = SimpleNamespace(
         id="trace",
         task=SimpleNamespace(key="huge-task"),
         agent=SimpleNamespace(trainable=True),
         ok=True,
-        is_truncated=True,
-        stop_condition="context_length",
+        is_truncated=False,
+        is_timeout=False,
+        stop_condition="agent_completed",
         errors=[],
         timing=SimpleNamespace(
             setup=span,
             agent=SimpleNamespace(duration=0.0, model=span, harness=span),
             scoring=span,
         ),
-        calls=[],
+        calls=[
+            SimpleNamespace(
+                time=span,
+                error=SimpleNamespace(
+                    message="Prompt length (9) exceeds maximum context length (8)."
+                ),
+            )
+        ],
         nodes=[],
         branches=[],
     )
@@ -794,6 +802,86 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
 
     assert rollout.status is RolloutStatus.ERROR
     assert "first prompt of task huge-task does not fit" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "ok, is_timeout, expected",
+    [
+        (True, True, RolloutStatus.ERROR_TIMEOUT),
+        (False, True, RolloutStatus.ERROR_TIMEOUT),
+        (False, False, RolloutStatus.ERROR),
+        (True, False, RolloutStatus.COMPLETED),
+    ],
+)
+def test_rollout_status_maps_timeouts_to_error_timeout(
+    ok: bool, is_timeout: bool, expected: RolloutStatus
+) -> None:
+    trace = SimpleNamespace(ok=ok, is_timeout=is_timeout, is_truncated=False)
+
+    status = VerifiersRollouter.rollout_status(
+        verifiers_episode=SimpleNamespace(ok=True), trace=trace
+    )
+
+    assert status is expected
+
+
+def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
+    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
+
+    # The agent stage timed out, but Verifiers kept ok=True and still graded the reply.
+    node = SimpleNamespace(
+        token_ids=[10, 11],
+        mask=[False, True],
+        sampled=True,
+        message=VerifiersAssistantMessage(content="answer"),
+    )
+    span = SimpleNamespace(duration=0.0)
+    trace = SimpleNamespace(
+        id="trace",
+        task=SimpleNamespace(key="slow-task"),
+        agent=SimpleNamespace(trainable=True),
+        ok=True,
+        is_timeout=True,
+        is_truncated=False,
+        stop_condition="agent_timeout",
+        reward=1.0,
+        errors=[],
+        timing=SimpleNamespace(
+            setup=span,
+            agent=SimpleNamespace(duration=0.0, model=span, harness=span),
+            scoring=span,
+        ),
+        calls=[],
+        nodes=[node],
+        branches=[
+            SimpleNamespace(nodes=[node], token_ids=[10, 11], logprobs=[0.0, -0.1])
+        ],
+    )
+    rollouter = object.__new__(VerifiersRollouter)
+    rollouter._generation_server = SimpleNamespace(
+        model_id="model",
+        pop_generation_metadata=lambda trace_id: VerifiersGenerationMetadata(
+            min_policy_version=0, max_policy_version=0, metrics=[]
+        ),
+    )
+    rollouter._verifiers_env_client = SimpleNamespace(
+        run=AsyncMock(return_value=SimpleNamespace(ok=True, errors=[], traces=[trace]))
+    )
+    rollouter._verifiers_train_client_config = object()
+
+    with caplog.at_level(logging.WARNING):
+        rollout = asyncio.run(
+            rollouter._run_single_rollout(
+                sample=VerifiersTaskSample(verifiers_task_data={"name": "slow-task"}),
+                sampling=SamplingConfig(),
+                group_id=1,
+                rollout_id=2,
+            )
+        )
+
+    assert rollout.status is RolloutStatus.ERROR_TIMEOUT
+    assert "Verifiers rollout failed: trace=trace" in caplog.text
+    assert VERIFIERS_REWARD_KEY not in rollout.turns[-1].env_rewards
 
 
 def test_parse_sampling_config_requires_stop_token_ids() -> None:
