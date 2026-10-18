@@ -475,11 +475,7 @@ class Controller(Configurable):
             except Exception:
                 logger.exception("trainer.close failed")
 
-        try:
-            await self._rollouter.close()
-        except Exception:
-            logger.exception("rollouter.close failed")
-
+        # Close generators before the rollouter, so in-flight rollout groups fail fast; see `Rollouter.close`.
         if self.generator_router is not None:
             try:
                 close_results = await self.generator_router.close_generators.call_one()
@@ -497,6 +493,11 @@ class Controller(Configurable):
                         )
             except Exception:
                 logger.exception("generator_router.close_generators failed")
+
+        try:
+            await self._rollouter.close()
+        except Exception:
+            logger.exception("rollouter.close failed")
 
         try:
             self.metrics_processor.close()
