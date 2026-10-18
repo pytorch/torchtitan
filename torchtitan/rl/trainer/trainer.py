@@ -333,6 +333,8 @@ class Trainer(Configurable):
 
         # For MFU. Plain ints, so an RDMA microbatch carries them by value in `.fields`.
         # The controller logs DP rank 0's metrics, so every rank keeps the mean over DP ranks.
+        # TODO: only MonarchRDMAMicrobatch has `fields`; declare these two counts on RDMAMicrobatch
+        # when another actor system implements it.
         local_counts = torch.tensor(
             [
                 sum(
