@@ -840,7 +840,14 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         controls whether that step finishes FSDP gradient reduction. Returns
         the group loss and one loss metrics dict per microbatch.
         """
+        # Each microbatch's loss fills its own metrics dict.
         loss_metrics: list[dict[str, torch.Tensor]] = [{} for _ in loss_kwargs]
+        loss_kwarg_mbs = [
+            {**mb_loss_kwargs, "loss_metrics": mb_loss_metrics}
+            for mb_loss_kwargs, mb_loss_metrics in zip(
+                loss_kwargs, loss_metrics, strict=True
+            )
+        ]
         with self.parallelism_context.activate_spmd(
             typechecking=self.config.debug.spmd_typechecking,
         ):
@@ -850,7 +857,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 kwarg_mbs=model_kwargs,
                 target_mbs=labels,
                 losses=losses,
-                **self._pp_schedule_loss_kwargs(loss_kwargs, loss_metrics),
+                loss_kwarg_mbs=loss_kwarg_mbs,
                 return_outputs=False,
                 finalize_gradients=finalize_gradients,
             )
@@ -861,25 +868,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             losses.clear()
             return torch.sum(torch.stack(detached_losses)).to(self.device), loss_metrics
         return self._pp_loss_sentinel_on_non_last_stage, loss_metrics
-
-    def _pp_schedule_loss_kwargs(
-        self,
-        loss_kwargs: list[dict[str, Any]],
-        loss_metrics: list[dict[str, torch.Tensor]],
-    ) -> dict[str, Any]:
-        """Return the pipeline schedule ``step`` arguments for the loss.
-
-        Each microbatch's loss receives its own loss arguments and fills its
-        own ``loss_metrics`` dict.
-        """
-        return {
-            "loss_kwarg_mbs": [
-                {**mb_loss_kwargs, "loss_metrics": mb_loss_metrics}
-                for mb_loss_kwargs, mb_loss_metrics in zip(
-                    loss_kwargs, loss_metrics, strict=True
-                )
-            ]
-        }
 
     @sl.log_trace_span("optim_step")
     def optim_step(self) -> torch.Tensor:

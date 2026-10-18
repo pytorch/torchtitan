@@ -7,7 +7,6 @@
 import contextlib
 import subprocess
 import sys
-import types
 import weakref
 from functools import partial
 from types import SimpleNamespace
@@ -192,9 +191,6 @@ def test_pp_forward_backward_microbatch_group_returns_sentinel_without_last_stag
             _pp_loss_sentinel_on_non_last_stage=sentinel,
         ),
     )
-    trainer._pp_schedule_loss_kwargs = types.MethodType(
-        TrainingEngine._pp_schedule_loss_kwargs, trainer
-    )
     loss, loss_metrics = TrainingEngine._pp_forward_backward_microbatch_group(
         trainer,
         inputs=None,
@@ -245,9 +241,6 @@ def test_pp_forward_backward_microbatch_group_releases_consumed_loss_graphs(
             ),
             device=torch.device("cpu"),
         ),
-    )
-    trainer._pp_schedule_loss_kwargs = types.MethodType(
-        TrainingEngine._pp_schedule_loss_kwargs, trainer
     )
     reporting_loss, loss_metrics = TrainingEngine._pp_forward_backward_microbatch_group(
         trainer,

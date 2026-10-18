@@ -306,6 +306,39 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             )
         assert call.kwargs["finalize_gradients"]
 
+    def test_graph_runtime_receives_shared_loss_kwargs(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+
+        engine = object.__new__(GraphTrainingEngine)
+        engine.config = SimpleNamespace(debug=SimpleNamespace(spmd_typechecking=False))
+        engine.parallelism_context = SimpleNamespace(
+            activate_spmd=lambda **kwargs: contextlib.nullcontext()
+        )
+        engine.pp_has_last_stage = True
+        engine.device = torch.device("cpu")
+
+        def step(**kwargs):
+            kwargs["losses"].extend([torch.tensor(1.0), torch.tensor(2.0)])
+
+        engine.pp_schedule = SimpleNamespace(step=MagicMock(side_effect=step))
+        loss_kwargs = {"global_loss_token_counts": torch.tensor(2)}
+
+        loss, loss_metrics = engine._pp_forward_backward_microbatch_group(
+            inputs=[(torch.ones(1),), (torch.ones(1),)],
+            labels=[torch.ones(1), torch.ones(1)],
+            model_kwargs=[{}, {}],
+            loss_kwargs=[loss_kwargs, loss_kwargs],
+        )
+
+        call = engine.pp_schedule.step.call_args
+        assert call.kwargs["loss_kwargs"] is loss_kwargs
+        assert "loss_kwarg_mbs" not in call.kwargs
+        torch.testing.assert_close(loss, torch.tensor(3.0))
+        assert loss_metrics == [{}, {}]
+
     def test_aot_fx_preserves_tuple_model_inputs(self):
         from types import SimpleNamespace
         from unittest.mock import MagicMock

@@ -308,18 +308,43 @@ class GraphTrainingEngine(TrainingEngine):
         assert accumulated_loss is not None
         return ForwardBackwardResult(accumulated_loss, loss_metrics)
 
-    def _pp_schedule_loss_kwargs(
+    def _pp_forward_backward_microbatch_group(
         self,
+        *,
+        inputs: list[tuple[torch.Tensor, ...]] | None,
+        labels: list[torch.Tensor] | None,
+        model_kwargs: list[dict[str, Any]],
         loss_kwargs: list[dict[str, Any]],
-        loss_metrics: list[dict[str, torch.Tensor]],
-    ) -> dict[str, Any]:
-        """Pass the loss arguments shared by every microbatch.
+        finalize_gradients: bool = True,
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        """Run one microbatch group through the graph runtime.
 
-        GraphRuntime traces the loss with one set of loss arguments and reports
-        no loss metrics. Preprocessing rejects per-microbatch loss arguments,
-        so every microbatch carries the same ones.
+        The traced loss takes one set of loss arguments shared by every
+        microbatch and reports no loss metrics. Preprocessing rejects
+        per-microbatch loss arguments, so every microbatch carries the same
+        ones.
         """
-        return {"loss_kwargs": loss_kwargs[0]}
+        with self.parallelism_context.activate_spmd(
+            typechecking=self.config.debug.spmd_typechecking,
+        ):
+            losses = [] if self.pp_has_last_stage else None
+            self.pp_schedule.step(
+                arg_mbs=inputs,
+                kwarg_mbs=model_kwargs,
+                target_mbs=labels,
+                losses=losses,
+                loss_kwargs=loss_kwargs[0],
+                return_outputs=False,
+                finalize_gradients=finalize_gradients,
+            )
+
+        loss_metrics: list[dict[str, torch.Tensor]] = [{} for _ in loss_kwargs]
+        if self.pp_has_last_stage:
+            assert losses is not None
+            detached_losses = [loss.detach() for loss in losses]
+            losses.clear()
+            return torch.sum(torch.stack(detached_losses)).to(self.device), loss_metrics
+        return self._pp_loss_sentinel_on_non_last_stage, loss_metrics
 
     def _page_stashed_forward_backward_body(
         self,
