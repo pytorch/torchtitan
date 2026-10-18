@@ -72,22 +72,6 @@ class HiMidLoLinear(Linear):
         return output if bias is None else output + bias.flatten().float()
 
 
-def hi_mid_lo_linear(
-    input: torch.Tensor, weight: torch.Tensor, *, num_pieces: int = 2
-) -> torch.Tensor:
-    """``input @ weight.T`` in fp32 with bf16 GEMMs, as ``HiMidLoLinear`` computes it.
-
-    For a projection that is not a ``HiMidLoLinear`` module (e.g. a raw weight
-    parameter). ``num_pieces`` is 2 ("hi_mid") or 3 ("hi_mid_lo").
-    """
-    # torch.mm takes 2D inputs, so flatten the input: [B, S, D] -> [B * S, D]. The weight is a
-    # plain 2D parameter here, so its gradient goes through autograd (no in-place WGRAD).
-    output = _HiMidLoLinearFunction.apply(
-        input.reshape(-1, input.shape[-1]), weight, num_pieces, False
-    )
-    return output.reshape(*input.shape[:-1], -1)
-
-
 @spmd.register_local_autograd_function
 class _HiMidLoLinearFunction(torch.autograd.Function):
     """``output = input @ weight.T`` in fp32, with bf16 GEMMs. See ``HiMidLoLinear``."""

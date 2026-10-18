@@ -178,11 +178,6 @@ class DeepSeekV4Model(Decoder):
                 "loss",
                 "fused_binary_activation",
                 "fp32_to_bf16_split",
-                "mhc",
-                "complex_rope",
-                "q_norm_rope",
-                "partial_rope",
-                "compressor",
             ]
         )
         hc_mult: int = 4

@@ -4,16 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import functools
-import operator
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.linear.hi_mid_lo_linear import hi_mid_lo_linear
 
 
 class HcSplitSinkhorn(Module):
@@ -61,8 +58,6 @@ class HcSplitSinkhorn(Module):
         comb = comb * hc_scale[2] + hc_base[2 * hc_mult :].view(
             *([1] * (comb.ndim - 2)), hc_mult, hc_mult
         )
-        if torch.compiler.is_compiling():
-            return pre, post, self._sinkhorn_per_entry(comb)
 
         row_max = comb.max(dim=-1, keepdim=True).values
         comb = torch.exp(comb - row_max)
@@ -72,33 +67,6 @@ class HcSplitSinkhorn(Module):
             comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)
             comb = comb / (comb.sum(dim=-2, keepdim=True) + self.eps)
         return pre, post, comb
-
-    def _sinkhorn_per_entry(self, comb: torch.Tensor) -> torch.Tensor:
-        """``forward``'s softmax + Sinkhorn on ``comb`` ``[..., hc, hc]``, one tensor per entry.
-
-        Compiled, the ``[..., hc, hc]`` form costs one kernel per normalization step:
-        each column sum reads the previous step at transposed indices, so Inductor
-        cannot fuse consecutive steps. With each entry a separate ``[...]`` tensor,
-        every read is at the same index and the whole loop fuses.
-
-        Example:
-            comb [T, 4, 4] -> 16 tensors [T] -> 20 row + column passes -> [T, 4, 4]
-        """
-        n = self.hc_mult
-        entries = [[comb[..., i, j] for j in range(n)] for i in range(n)]
-        row_max = [functools.reduce(torch.maximum, row) for row in entries]
-        entries = [[torch.exp(x - m) for x in row] for row, m in zip(entries, row_max)]
-        # forward runs one row + column pass, then sinkhorn_iters - 1 more.
-        for _ in range(max(self.sinkhorn_iters, 1)):
-            row_sums = [
-                functools.reduce(operator.add, row) + self.eps for row in entries
-            ]
-            entries = [[x / s for x in row] for row, s in zip(entries, row_sums)]
-            col_sums = [
-                functools.reduce(operator.add, col) + self.eps for col in zip(*entries)
-            ]
-            entries = [[x / s for x, s in zip(row, col_sums)] for row in entries]
-        return torch.stack([torch.stack(row, dim=-1) for row in entries], dim=-2)
 
 
 class HcPre(Module):
@@ -128,7 +96,6 @@ class HcPre(Module):
             eps=config.eps,
         ).build()
 
-    @local_compile("mhc", batch_invariant=False)
     def forward(self, x):
         """Project multi-branch hidden states into a single branch.
 
@@ -140,12 +107,9 @@ class HcPre(Module):
             ``post``/``comb`` are consumed by ``HcPost``.
         """
         shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(-2)
-        x = x_flat.float()
+        x = x.flatten(-2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        # bf16 operands (FSDP mixed precision) take a bf16 GEMM with fp32 output
-        # instead of an fp32 GEMM on upcast copies; fp32 operands fall back to fp32.
-        mixes = hi_mid_lo_linear(x_flat, self.hc_fn) * rsqrt
+        mixes = F.linear(x, self.hc_fn.float()) * rsqrt
         pre, post, comb = self.sinkhorn(
             mixes.float(), self.hc_scale.float(), self.hc_base.float()
         )
@@ -163,7 +127,6 @@ class HcPost(Module):
     def __init__(self, config: Config):
         super().__init__()
 
-    @local_compile("mhc", batch_invariant=False)
     def forward(self, x, residual, post, comb):
         """Apply HC post mixing.
 
@@ -206,7 +169,6 @@ class HcHead(Module):
         self.hc_base = nn.Parameter(torch.empty(config.hc_mult, dtype=torch.float32))
         self.hc_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
-    @local_compile("mhc", batch_invariant=False)
     def forward(self, x):
         """Merge HC branches.
 
@@ -217,12 +179,9 @@ class HcHead(Module):
             Hidden states of shape ``[T, D]``.
         """
         shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(-2)
-        x = x_flat.float()
+        x = x.flatten(-2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        # bf16 operands (FSDP mixed precision) take a bf16 GEMM with fp32 output
-        # instead of an fp32 GEMM on upcast copies; fp32 operands fall back to fp32.
-        mixes = hi_mid_lo_linear(x_flat, self.hc_fn) * rsqrt
+        mixes = F.linear(x, self.hc_fn.float()) * rsqrt
         pre = torch.sigmoid(mixes * self.hc_scale + self.hc_base) + self.eps
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=-2)
         return y.to(dtype)

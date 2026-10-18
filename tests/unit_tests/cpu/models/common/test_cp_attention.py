@@ -34,13 +34,13 @@ from torchtitan.models.common.attention import (
     VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
+    AllGatherKVFlexInnerAttention,
+    AllGatherKVSlidingWindowFlexInnerAttention,
     CPInnerAttention,
-    KVAllGatherCPFlexInnerAttention,
-    KVAllGatherCPSlidingWindowFlexInnerAttention,
-    UlyssesCPFlexInnerAttention,
-    UlyssesCPInnerAttention,
-    UlyssesCPSlidingWindowFlexInnerAttention,
-    UlyssesCPVarlenInnerAttention,
+    UlyssesFlexInnerAttention,
+    UlyssesInnerAttention,
+    UlyssesSlidingWindowFlexInnerAttention,
+    UlyssesVarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.decoder import Decoder
@@ -53,16 +53,16 @@ class TestKernelSelection(unittest.TestCase):
         self.assertTrue(issubclass(CPInnerAttention.Config, InnerAttention.Config))
 
     def test_cp_kernel_is_a_flex_kernel(self):
-        config = KVAllGatherCPFlexInnerAttention.Config()
+        config = AllGatherKVFlexInnerAttention.Config()
         self.assertIsInstance(config, CPInnerAttention.Config)
         self.assertIsInstance(config, FlexInnerAttention.Config)
 
     def test_cp_kernel_inherits_flex_fields(self):
-        config = KVAllGatherCPFlexInnerAttention.Config(block_size=256)
+        config = AllGatherKVFlexInnerAttention.Config(block_size=256)
         self.assertEqual(config.block_size, 256)
 
     def test_sliding_cp_kernel_is_a_sliding_flex_kernel(self):
-        config = KVAllGatherCPSlidingWindowFlexInnerAttention.Config(window_size=128)
+        config = AllGatherKVSlidingWindowFlexInnerAttention.Config(window_size=128)
         self.assertIsInstance(config, CPInnerAttention.Config)
         self.assertIsInstance(config, SlidingWindowFlexInnerAttention.Config)
 
@@ -75,21 +75,21 @@ class TestKernelSelection(unittest.TestCase):
 
     def test_all_gather_backends_share_metadata_preparation(self):
         self.assertIs(
-            KVAllGatherCPSlidingWindowFlexInnerAttention.prepare_cp_metadata,
-            KVAllGatherCPFlexInnerAttention.prepare_cp_metadata,
+            AllGatherKVSlidingWindowFlexInnerAttention.prepare_cp_metadata,
+            AllGatherKVFlexInnerAttention.prepare_cp_metadata,
         )
 
     def test_cp_configs_build_wrapped_backend_metadata(self):
         positions = torch.arange(8)
-        full_metadata = KVAllGatherCPFlexInnerAttention.Config(
+        full_metadata = AllGatherKVFlexInnerAttention.Config(
             block_size=4
         ).build_attention_metadata(positions)
-        sliding_metadata = KVAllGatherCPSlidingWindowFlexInnerAttention.Config(
+        sliding_metadata = AllGatherKVSlidingWindowFlexInnerAttention.Config(
             block_size=4,
             window_size=4,
         ).build_attention_metadata(positions)
-        varlen_metadata = (
-            UlyssesCPVarlenInnerAttention.Config().build_attention_metadata(positions)
+        varlen_metadata = UlyssesVarlenInnerAttention.Config().build_attention_metadata(
+            positions
         )
 
         self.assertIsInstance(full_metadata, BlockMask)
@@ -119,8 +119,8 @@ class TestDecoderCpSharding(unittest.TestCase):
         *,
         attention_metadata,
         expected_metadata,
-        sliding_type=KVAllGatherCPSlidingWindowFlexInnerAttention,
-        full_type=KVAllGatherCPFlexInnerAttention,
+        sliding_type=AllGatherKVSlidingWindowFlexInnerAttention,
+        full_type=AllGatherKVFlexInnerAttention,
     ):
         sliding_attention = mock.Mock(
             spec=Attention.Config,
@@ -166,11 +166,11 @@ class TestDecoderCpSharding(unittest.TestCase):
             "shard_tensors",
             return_value=input_dict,
         ), mock.patch.object(
-            KVAllGatherCPFlexInnerAttention,
+            AllGatherKVFlexInnerAttention,
             "prepare_cp_metadata",
             side_effect=lambda metadata, **_kwargs: metadata,
         ), mock.patch.object(
-            KVAllGatherCPSlidingWindowFlexInnerAttention,
+            AllGatherKVSlidingWindowFlexInnerAttention,
             "prepare_cp_metadata",
             side_effect=lambda metadata, **_kwargs: metadata,
         ):
@@ -193,7 +193,7 @@ class TestDecoderCpSharding(unittest.TestCase):
 
         model = SimpleNamespace(config=SimpleNamespace(first_full_attention=None))
         for inner_attention in (
-            KVAllGatherCPSlidingWindowFlexInnerAttention,
+            AllGatherKVSlidingWindowFlexInnerAttention,
             ContextParallelInnerGDN,
             ContextParallelInnerKDA,
         ):
@@ -244,8 +244,8 @@ class TestDecoderCpSharding(unittest.TestCase):
 
         self._assert_selected_ptrr_metadata(
             attention_metadata={
-                KVAllGatherCPFlexInnerAttention: full_metadata,
-                KVAllGatherCPSlidingWindowFlexInnerAttention: sliding_metadata,
+                AllGatherKVFlexInnerAttention: full_metadata,
+                AllGatherKVSlidingWindowFlexInnerAttention: sliding_metadata,
             },
             expected_metadata=full_metadata,
         )
@@ -255,12 +255,12 @@ class TestDecoderCpSharding(unittest.TestCase):
         sliding_metadata = object.__new__(BlockMask)
         self._assert_selected_ptrr_metadata(
             attention_metadata={
-                UlyssesCPSlidingWindowFlexInnerAttention: sliding_metadata,
-                UlyssesCPFlexInnerAttention: full_metadata,
+                UlyssesSlidingWindowFlexInnerAttention: sliding_metadata,
+                UlyssesFlexInnerAttention: full_metadata,
             },
             expected_metadata=full_metadata,
-            sliding_type=UlyssesCPSlidingWindowFlexInnerAttention,
-            full_type=UlyssesCPFlexInnerAttention,
+            sliding_type=UlyssesSlidingWindowFlexInnerAttention,
+            full_type=UlyssesFlexInnerAttention,
         )
 
     def test_config_builds_selected_load_balancer(self):
@@ -490,7 +490,7 @@ class TestCpGroup(unittest.TestCase):
 
     @staticmethod
     def _kernel():
-        return KVAllGatherCPFlexInnerAttention(KVAllGatherCPFlexInnerAttention.Config())
+        return AllGatherKVFlexInnerAttention(AllGatherKVFlexInnerAttention.Config())
 
     def test_cp_axis_above_one_yields_its_group(self):
         with _in_mesh(8):
@@ -539,8 +539,8 @@ class TestAllGather(unittest.TestCase):
         ), mock.patch.object(
             FlexInnerAttention, "forward", lambda self, q, *a, **kw: q
         ):
-            KVAllGatherCPFlexInnerAttention(
-                KVAllGatherCPFlexInnerAttention.Config()
+            AllGatherKVFlexInnerAttention(
+                AllGatherKVFlexInnerAttention.Config()
             ).forward(q, k, v)
 
         self.assertEqual(2, len(calls))
@@ -567,15 +567,15 @@ class TestAllGather(unittest.TestCase):
         ), mock.patch.object(
             FlexInnerAttention, "forward", lambda self, q, *a, **kw: q
         ):
-            KVAllGatherCPFlexInnerAttention(config).forward(q, k, v)
+            AllGatherKVFlexInnerAttention(config).forward(q, k, v)
         return seen
 
     def test_reduces_in_float32_by_default(self):
-        config = KVAllGatherCPFlexInnerAttention.Config()
+        config = AllGatherKVFlexInnerAttention.Config()
         self.assertEqual([torch.float32] * 2, self._reduce_dtypes(config))
 
     def test_reduce_dtype_can_use_bfloat16(self):
-        config = KVAllGatherCPFlexInnerAttention.Config(reduce_dtype="bfloat16")
+        config = AllGatherKVFlexInnerAttention.Config(reduce_dtype="bfloat16")
         self.assertEqual([torch.bfloat16] * 2, self._reduce_dtypes(config))
 
 
@@ -603,9 +603,7 @@ class TestAllGatherCollective(unittest.TestCase):
 
     def _gather_and_backward(self, dtype):
         """Pair each of K and V with the gradient the gather returns to it."""
-        kernel = KVAllGatherCPFlexInnerAttention(
-            KVAllGatherCPFlexInnerAttention.Config()
-        )
+        kernel = AllGatherKVFlexInnerAttention(AllGatherKVFlexInnerAttention.Config())
         q, k, v = (
             torch.randn(4, 2, 8, dtype=dtype, requires_grad=True) for _ in range(3)
         )
@@ -632,8 +630,8 @@ class TestAllGatherCollective(unittest.TestCase):
 
 class TestUlysses(unittest.TestCase):
     def test_is_still_a_flex_kernel(self):
-        config = UlyssesCPFlexInnerAttention.Config()
-        self.assertIsInstance(config, UlyssesCPInnerAttention.Config)
+        config = UlyssesFlexInnerAttention.Config()
+        self.assertIsInstance(config, UlyssesInnerAttention.Config)
         self.assertIsInstance(config, FlexInnerAttention.Config)
 
     def test_is_not_an_attention_backend(self):
@@ -648,7 +646,7 @@ class TestUlysses(unittest.TestCase):
             calls.append((x, group, src, dst))
             return x
 
-        kernel = UlyssesCPFlexInnerAttention(UlyssesCPFlexInnerAttention.Config())
+        kernel = UlyssesFlexInnerAttention(UlyssesFlexInnerAttention.Config())
         with _in_mesh(2), mock.patch.object(
             spmd, "redistribute", record
         ), mock.patch.object(
@@ -669,14 +667,14 @@ class TestUlysses(unittest.TestCase):
 
 class TestUlyssesVarlen(unittest.TestCase):
     def test_is_still_a_varlen_kernel(self):
-        config = UlyssesCPVarlenInnerAttention.Config()
-        self.assertIsInstance(config, UlyssesCPInnerAttention.Config)
+        config = UlyssesVarlenInnerAttention.Config()
+        self.assertIsInstance(config, UlyssesInnerAttention.Config)
         self.assertIsInstance(config, VarlenInnerAttention.Config)
 
     def test_dispatches_to_varlen_inner_attention(self):
         q, k, v = (torch.randn(8, 4, 16) for _ in range(3))
         mask = object()
-        kernel = UlyssesCPVarlenInnerAttention(UlyssesCPVarlenInnerAttention.Config())
+        kernel = UlyssesVarlenInnerAttention(UlyssesVarlenInnerAttention.Config())
 
         with _in_mesh(2), mock.patch.object(
             spmd,
