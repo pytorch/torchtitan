@@ -328,7 +328,12 @@ class TokenChoiceTopKRouter(Module):
             routing_map_TE,
         )
 
-    @local_compile("moe_router_topk", batch_invariant=False)
+    # options: Inductor's batch_invariant fixes each reduction's launch config, so a token's
+    # scores don't depend on the batch size (the 1-token graph would otherwise pick another).
+    # batch_invariant=False: torchtitan's batch-invariant mode still rejects this region.
+    @local_compile(
+        "moe_router_topk", batch_invariant=False, options={"batch_invariant": True}
+    )
     def _score_and_select_experts(
         self,
         gate_TE: torch.Tensor,
