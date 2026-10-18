@@ -125,6 +125,11 @@ class RequestDispatcher:
             reply=reply, metrics_prefix=metrics_prefix
         )
 
+    def rank0_num_outstanding_generations(self) -> int:
+        """RANK 0: how many generations are outstanding, including ones taken off the queue but not
+        admitted yet."""
+        return len(self._rank0_outstanding_generations)
+
     def rank0_has_outstanding_generations(self) -> bool:
         """RANK 0: whether any generation is outstanding (reply unresolved).
 
