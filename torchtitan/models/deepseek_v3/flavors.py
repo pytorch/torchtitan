@@ -61,7 +61,8 @@ from torchtitan.models.common.moe.sharding import (
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 
-from .model import DeepSeekMLAAttention, DeepSeekV3Model, DeepSeekV3TransformerBlock
+from .attention import DeepSeekMLAAttention
+from .model import DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
 from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
 from .sharding import (

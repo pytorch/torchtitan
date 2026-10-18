@@ -48,9 +48,12 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from .state_dict_adapter import MuseGlimmerStateDictAdapter
 
-from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
+from torchtitan.models.muse_spark.vision_encoder import (
+    MuseSparkNaViTAdapter,
+    NaViTEncoder,
+)
+from .state_dict_adapter import MuseGlimmerStateDictAdapter
 
 
 class RMSGainCenterNorm(RMSNorm):
@@ -69,9 +72,9 @@ class RMSGainCenterNorm(RMSNorm):
         super().__init__(config)
         self.gain_center = config.gain_center
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         w: torch.Tensor = self.weight + self.gain_center
-        return F.rms_norm(x, self.normalized_shape, w, self.eps)
+        return F.rms_norm(input, self.normalized_shape, w, self.eps)
 
 
 class Attention(GQAttention):
@@ -306,8 +309,8 @@ class MuseGlimmerModel(MultimodalModel):
         # ``pixel_values`` + ``grid_thw``), mirroring qwen3_5's
         # ``Qwen35Model.vision_encoder``. The adapter output dim must match
         # ``vision_projection`` in_features. Both default to None (text-only model).
-        vision_encoder: MuseGlimmerVisionEncoder.Config | None = None
-        vision_adapter: MuseGlimmerVisionAdapter.Config | None = None
+        vision_encoder: NaViTEncoder.Config | None = None
+        vision_adapter: MuseSparkNaViTAdapter.Config | None = None
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -372,9 +375,12 @@ class MuseGlimmerModel(MultimodalModel):
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> MuseGlimmerModel:
-        if self.vision_encoder is not None and parallelism_context.tp_enabled:
-            assert self.vision_encoder.num_heads % parallelism_context.tp == 0, (
-                f"vision num_heads ({self.vision_encoder.num_heads}) must be "
+        vision_encoder_config = cast(
+            MuseGlimmerModel.Config, self.config
+        ).vision_encoder
+        if vision_encoder_config is not None and parallelism_context.tp_enabled:
+            assert vision_encoder_config.num_heads % parallelism_context.tp == 0, (
+                f"vision num_heads ({vision_encoder_config.num_heads}) must be "
                 f"divisible by TP degree ({parallelism_context.tp})"
             )
 
@@ -493,6 +499,15 @@ class MuseGlimmerModel(MultimodalModel):
         assert self.vision_projection is not None
         assert self.perception_emb_norm is not None
         assert pixel_values is not None and grid_thw is not None
+        image_grids = grid_thw.tolist()
+        if any(temporal != 1 for temporal, _, _ in image_grids):
+            raise ValueError("Muse Glimmer image inputs require grid_thw[:, 0] == 1")
+        num_patches = sum(grid_h * grid_w for _, grid_h, grid_w in image_grids)
+        if num_patches != pixel_values.shape[0]:
+            raise ValueError(
+                f"grid_thw describes {num_patches} patches, but pixel_values contains "
+                f"{pixel_values.shape[0]}"
+            )
         vision_features_VD = self.vision_adapter(
             self.vision_encoder(pixel_values, grid_thw=grid_thw)
         )

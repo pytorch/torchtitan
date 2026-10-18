@@ -171,7 +171,7 @@ class MuseSparkAttention(GQAttention):
         output_TD = self.wo(output_TO)
         return output_TD
 
-    @local_compile("muse_spark_attention_qk_norm", batch_invariant=True)
+    @local_compile("muse_spark_attention_qk_norm", batch_invariant=False)
     def _norm_query_and_key(
         self,
         query_TNH: torch.Tensor,
@@ -182,7 +182,7 @@ class MuseSparkAttention(GQAttention):
             raise ValueError("MuseSparkAttention needs both q_norm and k_norm.")
         return self.q_norm(query_TNH) * self.scale_query_by, self.k_norm(key_TKH)
 
-    @local_compile("muse_spark_attention_output", batch_invariant=True)
+    @local_compile("muse_spark_attention_output", batch_invariant=False)
     def _flatten_attention_output(
         self,
         output_TNH: torch.Tensor,
@@ -217,9 +217,8 @@ class MuseSparkRMSNorm(RMSNorm):
         input_dtype = input.dtype
         effective_weight_D = self._get_effective_weight()
         if effective_weight_D is not None:
-            # F.rms_norm runs its fused kernel only when the weight matches the
-            # input dtype. The fp32 residual stream with bf16 parameters would
-            # otherwise take the composite path (~20 kernels).
+            # F.rms_norm runs one fused kernel only when weight and input dtypes match.
+            # Without the cast, an fp32 stream with a bf16 FSDP weight runs ~20 small kernels.
             effective_weight_D = effective_weight_D.to(input_dtype)
         output_TD = F.rms_norm(
             input,
