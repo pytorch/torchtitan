@@ -396,6 +396,51 @@ class TestMoE(unittest.TestCase):
             training_counts,
         )
 
+    def test_cpu_no_grad_forward_never_asks_cuda_about_graph_capture(self):
+        # The capture query raises when no CUDA device is visible.
+        dim, hidden_dim = 64, 128  # grouped_mm needs 16-byte strides
+        moe = make_moe_config(
+            num_experts=2,
+            router=make_router_config(
+                dim=dim,
+                num_experts=2,
+                gate_param_init={},
+                score_func=Sigmoid.Config(),
+                top_k=1,
+            ),
+            routed_experts=make_routed_experts_config(
+                dim=dim,
+                hidden_dim=hidden_dim,
+                num_experts=2,
+                top_k=1,
+                param_init={},
+                enable_ep=False,
+            ),
+            shared_experts=make_shared_expert_ffn_config(
+                dim=dim,
+                hidden_dim=hidden_dim,
+                w13_param_init={},
+                w2_param_init={},
+                enable_sp=False,
+            ),
+            enable_sp=False,
+        ).build()
+        with torch.no_grad():
+            for p in moe.parameters():
+                p.normal_(std=0.02)
+        moe.eval()
+
+        with (
+            patch(
+                "torch.cuda.is_current_stream_capturing",
+                side_effect=RuntimeError("no CUDA-capable device is detected"),
+            ),
+            torch.no_grad(),
+        ):
+            out_TD = moe(torch.randn(6, dim))
+
+        self.assertEqual(out_TD.shape, (6, dim))
+
     def test_padding_is_excluded_from_counts_but_still_dispatched(self):
         moe = self._build_moe()
         x_TD = torch.randn(6, 4)
