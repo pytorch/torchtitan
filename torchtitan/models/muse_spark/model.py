@@ -218,7 +218,7 @@ class MuseSparkRMSNorm(RMSNorm):
         effective_weight_D = self._get_effective_weight()
         if effective_weight_D is not None:
             # F.rms_norm runs one fused kernel only when weight and input dtypes match.
-            # Without the cast, an fp32 stream with a bf16 FSDP weight runs ~20 small kernels.
+            # Without the cast, the fp32 stream and a bf16 weight run ~20 small kernels.
             effective_weight_D = effective_weight_D.to(input_dtype)
         output_TD = F.rms_norm(
             input,
