@@ -25,8 +25,8 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import Configurable, Function
+from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.observability import structured_logger as sl
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
 from torchtitan.tools.garbage_collector import GarbageCollector
 
@@ -326,12 +326,17 @@ class BaseCheckpointManager(Configurable, ABC):
 
             logger.info("Loading the checkpoint from %s.", checkpoint_id)
             begin = time.monotonic()
+            states = self._states_to_load(model_only)
             self._load_checkpoint(
-                self._states_to_load(model_only),
+                states,
                 checkpoint_id,
                 from_hf=from_hf,
                 from_quantized=from_quantized,
             )
+            # Reseed EMA from the just-loaded weights if it wasn't itself
+            # restored (excluded, or a model_only load).
+            if EMA in self.states and EMA not in states:
+                self.states[EMA].load_state_dict({})
             GarbageCollector.collect("GC collection for checkpoint loading.")
             logger.info(
                 "Finished loading the checkpoint in %.2f seconds.",

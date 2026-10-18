@@ -15,19 +15,21 @@ from pathlib import Path
 import pytest
 import torch
 from batch_invariant_ops import enable_batch_invariant_mode
-
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import OverrideConfig
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.model import gdn, vllm_registry as registry
-from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
-from torchtitan.rl.model.linear_attention_backend import (
-    GDNExecutionPath,
-    TorchTitanGDNAttentionMetadata,
+from torchtitan.rl.generator.vllm import gdn, registry
+from torchtitan.rl.generator.vllm.batch_invariance import (
+    force_logprobs_fn_for_batch_invariance,
+)
+from torchtitan.rl.generator.vllm.linear_attention import (
+    LinearAttentionExecutionPath,
+    TorchTitanLinearAttentionMetadata,
 )
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.forward_context import (
@@ -157,8 +159,8 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
     shapes = ((3, 6144), (16, 128, 128))
     state_indices = torch.zeros(4, device=device, dtype=torch.int32)
     has_initial_state = torch.zeros(4, device=device, dtype=torch.bool)
-    metadata = TorchTitanGDNAttentionMetadata(
-        execution_path=GDNExecutionPath.SINGLE_TOKEN,
+    metadata = TorchTitanLinearAttentionMetadata(
+        execution_path=LinearAttentionExecutionPath.SINGLE_TOKEN,
         num_prefills=0,
         num_prefill_tokens=0,
         num_decodes=4,
@@ -173,7 +175,7 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
     context = ForwardContext(
         no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
     )
-    layer = gdn.VLLMInnerGatedDeltaNet.__new__(gdn.VLLMInnerGatedDeltaNet)
+    layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
     layer.prefix = "gdn"
     layer.local_num_k_heads = layer.local_num_v_heads = 16
@@ -287,7 +289,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         metadata = next(
             metadata
             for metadata in get_forward_context().attn_metadata.values()
-            if isinstance(metadata, gdn.TorchTitanGDNAttentionMetadata)
+            if isinstance(metadata, gdn.TorchTitanLinearAttentionMetadata)
         )
         recurrent_calls.append(
             [torch.cuda.is_current_stream_capturing(), metadata.execution_path.name]
@@ -296,7 +298,9 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
 
     setattr(gdn, kernel_name, recurrent)
     model = os.environ[MODEL_ENV]
-    model_config = build_model_config("0.8B", seq_len=256, attn_backend="varlen")
+    model_config = build_model_config(
+        "0.8B", seq_len=256, attn_backend="varlen", parallelism=ParallelismConfig()
+    )
     model_config.local_compile_regions = []
     registry.register_to_vllm(
         model_config,
@@ -304,7 +308,6 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True, initial_load_path=model
         ),
-        override=OverrideConfig(),
     )
     engine = LLMEngine.from_engine_args(
         EngineArgs(
@@ -350,7 +353,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         layers = {
             name: layer
             for name, layer in runner.compilation_config.static_forward_context.items()
-            if isinstance(layer, gdn.VLLMInnerGatedDeltaNet)
+            if isinstance(layer, gdn.VLLMInnerGDN)
         }
         assert layers
         with torch.inference_mode():

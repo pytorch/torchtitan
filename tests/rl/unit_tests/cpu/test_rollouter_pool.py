@@ -9,9 +9,11 @@
 import asyncio
 from types import SimpleNamespace
 
-from torchtitan.rl.distributed.actors.rollout_worker import RolloutWorkerActor
+from torchtitan.rl.actors.monarch import provisioning
+from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
+from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 
-from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
+from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 
 
@@ -103,7 +105,7 @@ def _rollouter_without_datasets() -> Rollouter:
         num_threads_per_worker=2,
     )
     rollouter._worker_actors = None
-    rollouter._worker_mesh = None
+    rollouter._actor_system = None
     return rollouter
 
 
@@ -114,8 +116,9 @@ async def _setup(
 ) -> _WorkerMesh:
     worker_mesh = _WorkerMesh(actor_mesh)
     host = _ControllerHost(worker_mesh)
-    monkeypatch.setattr(rollouter_module, "this_host", lambda: host)
+    monkeypatch.setattr(provisioning, "this_host", lambda: host)
     await rollouter.setup_async(
+        actor_system=MonarchActorSystem(MonarchActorSystem.Config()),
         tokenizer_config="tokenizer_config",
         renderer_config="renderer_config",
         hf_assets_path="hf_assets_path",
@@ -127,10 +130,11 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
     async def run() -> None:
         worker_mesh = _WorkerMesh(_WorkerActorMesh())
         host = _ControllerHost(worker_mesh)
-        monkeypatch.setattr(rollouter_module, "this_host", lambda: host)
+        monkeypatch.setattr(provisioning, "this_host", lambda: host)
         rollouter = _rollouter_without_datasets()
 
         await rollouter.setup_async(
+            actor_system=MonarchActorSystem(MonarchActorSystem.Config()),
             tokenizer_config="tokenizer_config",
             renderer_config="renderer_config",
             hf_assets_path="hf_assets_path",
@@ -168,6 +172,7 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
         dispatch = asyncio.create_task(
             rollouter.run_group_rollouts(
                 generate_fn="generate_fn",
+                release_session_fn="release_session_fn",
                 sample="sample",
                 group_id=1,
                 group_size=2,
@@ -178,6 +183,7 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
         assert actor_mesh.run_group.calls == [
             {
                 "generate_fn": "generate_fn",
+                "release_session_fn": "release_session_fn",
                 "sample": "sample",
                 "group_id": 1,
                 "group_size": 2,

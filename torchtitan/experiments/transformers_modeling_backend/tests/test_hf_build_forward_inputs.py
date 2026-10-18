@@ -17,7 +17,7 @@ from torchtitan.experiments.transformers_modeling_backend.model import (
     HFTransformerModel,
 )
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
+    AllGatherKVFlexInnerAttention,
 )
 
 
@@ -52,6 +52,8 @@ def _run(
                 batch,
                 parallelism_context=pd,
                 parallelism=ParallelismConfig(),
+                # The training engine passes it to every model; this one has no aux loss.
+                global_routing_token_counts=torch.tensor([1]),
             ),
             B,
             S,
@@ -115,7 +117,7 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         shard_tensors,
     )
     monkeypatch.setattr(
-        KVAllGatherCPFlexInnerAttention,
+        AllGatherKVFlexInnerAttention,
         "prepare_cp_metadata",
         staticmethod(prepare_cp_metadata),
     )

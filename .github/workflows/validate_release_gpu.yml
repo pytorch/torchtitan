@@ -12,9 +12,12 @@ permissions:
 # - validate-standard-gpu: 8x A10G; GPU unit tests, features/models with
 #   integrated numerics guards, Flux, GraphTrainer, TorchFT, and the
 #   Transformers modeling backend.
-# - validate-h100: 8x H100; core H100 tests, DeepEP v2, and HybridEP.
+# - validate-h100: 8x H100; core H100 tests, DeepEP activation checkpoint
+#   numerics, DeepEP v2, and HybridEP.
 # - validate-graph-trainer-h100: 8x H100; GraphTrainer DeepSeek and Qwen3 MoE
 #   tests that require H100-class hardware.
+# - validate-b200: 8x B200; Dist-MoE and MXFP8 unit tests, Kimi K3,
+#   quantized linear layers, and Dist-MoE integration tests.
 jobs:
   validate-version:
     runs-on: ubuntu-latest
@@ -124,3 +127,40 @@ jobs:
         TORCHAO_VERSION="0.18.0" \
         PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
         bash .github/scripts/validate_release_gpu.sh
+
+  validate-b200:
+    name: Validate core B200 tests
+    needs:
+      - validate-version
+    runs-on: linux.dgx.b200.8
+    timeout-minutes: 180
+    container:
+      image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04
+      options: --gpus all
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Validate B200 release candidate
+        run: |
+          bash .ci/docker/common/install_base.sh
+
+          VALIDATION_SUITE="b200" \
+          TORCH_VERSION="2.14.0" \
+          TORCHVISION_VERSION="0.29.0" \
+          TORCHAO_VERSION="0.18.0" \
+          PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
+          bash .github/scripts/validate_release_gpu.sh
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: b200-release-outputs
+          path: ${{ runner.temp }}/artifacts-to-be-uploaded

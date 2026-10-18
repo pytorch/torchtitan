@@ -17,37 +17,42 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
-from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
-from attn_gym.linear.context_parallel import ContextParallelRouting
-from attn_gym.linear.gdn.impl.cudnn import ChunkGdnCudnnPacked
-from attn_gym.linear.gdn.ops import _ChunkGDN
-from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm
-from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.base.module import Module
+
+from torchtitan.models.common.attn_gym import (
+    _ChunkGDN,
+    _MissingKernel,
+    causal_conv1d,
+    chunk_gdn,
+    ChunkGdnCudnnPacked,
+    ContextParallelRouting,
+    l2norm,
+    recurrent_gdn,
+    require_attn_gym,
+)
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
-from torchtitan.protocols.module import Module
 from .attention import (
     create_varlen_metadata_for_document,
     InnerAttention,
     local_head_split,
 )
-from .kda import LinearAttentionMetadata
+from .linear_attention import (
+    chunk_kernel_options,
+    LinearAttention,
+    LinearAttentionMetadata,
+)
 
 # The Attention Gym kernels run on rank-local heads inside local SPMD regions.
 # ContextParallelInnerGDN handles cross-rank sequence dependencies
 # before invoking them.
-for _kernel_function in (
-    _ShortConv,
-    _ConfiguredShortConv,
-    _L2Norm,
-    _ChunkGDN,
-    ChunkGdnCudnnPacked,
-):
-    spmd.register_local_autograd_function(_kernel_function)
+for _kernel_function in (_ChunkGDN, ChunkGdnCudnnPacked):
+    if _kernel_function is not _MissingKernel:
+        spmd.register_local_autograd_function(_kernel_function)
 
 
 @spmd.local_map(
@@ -66,7 +71,7 @@ def _causal_conv1d_varlen(
     """Depthwise causal conv with per-document resets (CUDA-only).
 
     A pure-torch per-document reference lives in
-    ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
+    ``tests/unit_tests/gpu/models/qwen3_5/test_qwen3_5_deltanet.py``.
     """
     out_BTD = causal_conv1d(
         x_TD.unsqueeze(0),
@@ -207,7 +212,7 @@ class GDNKernel(Module):
 
     This module provides a local SPMD boundary for the sharding code. A
     pure-torch reference implementation lives in
-    ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
+    ``tests/unit_tests/gpu/models/qwen3_5/test_qwen3_5_deltanet.py``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -215,6 +220,7 @@ class GDNKernel(Module):
         pass
 
     def __init__(self, config: Config):
+        require_attn_gym()
         super().__init__()
 
     def forward(
@@ -254,6 +260,7 @@ class GDNKernel(Module):
             cu_seqlens=cu_seqlens,
             scale=xq_BTHK.shape[-1] ** -0.5,
             impl="fused",
+            kernel_options=chunk_kernel_options(xq_BTHK),
         )
         return output.squeeze(0)
 
@@ -452,7 +459,7 @@ class InnerGDN(InnerAttention):
         )
 
 
-class GatedDeltaNet(Module):
+class GDN(LinearAttention):
     """Gated DeltaNet linear attention.
 
     Uses recurrent state + gated delta rule instead of softmax attention.
@@ -463,7 +470,7 @@ class GatedDeltaNet(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(LinearAttention.Config):
         key_head_dim: int
         value_head_dim: int
         conv_kernel_size: int = 4
@@ -478,7 +485,6 @@ class GatedDeltaNet(Module):
         conv_q: Conv1d.Config
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
-        inner_gated_delta_net: Module.Config
         norm: GatedRMSNorm.Config
         out_proj: Linear.Config
 
@@ -486,7 +492,6 @@ class GatedDeltaNet(Module):
         super().__init__()
         self.key_head_dim = config.key_head_dim
         self.value_head_dim = config.value_head_dim
-        value_dim = config.in_proj_v.out_features
 
         self.in_proj_q = config.in_proj_q.build()
         self.in_proj_k = config.in_proj_k.build()
@@ -499,13 +504,12 @@ class GatedDeltaNet(Module):
         self.conv_k = config.conv_k.build()
         self.conv_v = config.conv_v.build()
 
-        n_value_heads = value_dim // config.value_head_dim
-        self.A_log = nn.Parameter(torch.empty(n_value_heads))
-        self.dt_bias = nn.Parameter(torch.empty(n_value_heads))
+        self.A_log = nn.Parameter(torch.empty(config.n_heads))
+        self.dt_bias = nn.Parameter(torch.empty(config.n_heads))
 
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
-        self.inner_gated_delta_net = config.inner_gated_delta_net.build()
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
@@ -525,7 +529,7 @@ class GatedDeltaNet(Module):
         b_TH = self.in_proj_b(x_TD)
 
         output_THV = remat.region(
-            self.inner_gated_delta_net,
+            self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(

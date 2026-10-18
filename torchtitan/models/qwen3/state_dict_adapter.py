@@ -20,8 +20,10 @@ from typing import Any, TYPE_CHECKING
 
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
+
 from torchtitan.models.common.rope import CosSinRoPE
-from torchtitan.models.utils import MoEStateDictAdapter
 
 if TYPE_CHECKING:
     from .model import Qwen3Model
@@ -49,19 +51,26 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.routed_experts.w1_EFD",
-            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.routed_experts.w3_EFD",
-            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.routed_experts.w2.weight",
-            "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
+            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.feed_forward.routed_experts.w1_EFD",
+            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.feed_forward.routed_experts.w3_EFD",
+            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.feed_forward.routed_experts.w2.weight",
+            "model.layers.{}.mlp.gate.weight": "layers.{}.feed_forward.router.gate.weight",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
         }
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
         2. Split grouped-linear weights into individual expert weights.
         """
+        if to_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         state_dict = self._native_fused_linears_to_hf(
             state_dict,
             split_routed_experts=True,
@@ -101,14 +110,14 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     moe_layer = next(
                         l
                         for l in self.model_config.layers  # pyrefly: ignore [missing-attribute]
-                        if l.moe is not None
+                        if isinstance(l.feed_forward, MoE.Config)
                     )
                     split_values = self._split_experts_weights(
                         value,
-                        moe_layer.moe.num_experts,
+                        moe_layer.feed_forward.num_experts,
                     )
 
-                    for expert_num in range(moe_layer.moe.num_experts):
+                    for expert_num in range(moe_layer.feed_forward.num_experts):
                         new_key = new_abstract_key.format(layer_num, expert_num)
                         hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
@@ -136,11 +145,18 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
         2. Concatenate individual expert weights into grouped-linear weights.
         """
+        if is_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         self._validate_hf_rope_config(CosSinRoPE.Config)
 
         state_dict = {}
@@ -187,8 +203,8 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                         next(
                             l
                             for l in self.model_config.layers  # pyrefly: ignore [missing-attribute]
-                            if l.moe is not None
-                        ).moe.num_experts,
+                            if isinstance(l.feed_forward, MoE.Config)
+                        ).feed_forward.num_experts,
                     )
 
                 if stacked_value is not None:

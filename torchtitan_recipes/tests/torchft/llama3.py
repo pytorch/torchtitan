@@ -7,10 +7,12 @@
 """Llama 3 TorchFT configurations used by tests."""
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW, LRSchedulersContainer
 from torchtitan.config import CommConfig, TrainingConfig
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 
 from torchtitan.experiments.torchft.llama3 import build_model_config
@@ -19,7 +21,6 @@ from torchtitan.experiments.torchft.optimizer import (
     TorchFTOptimizersContainer,
 )
 from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
-from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -27,11 +28,17 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 def llama3_torchft_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> FaultTolerantTrainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
+    )
+    num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
     return FaultTolerantTrainer.Config(
         loss=CrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
@@ -45,6 +52,7 @@ def llama3_torchft_debugmodel(
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
+        parallelism=parallelism,
         optim=TorchFTOptim.Config(
             optimizer=TorchFTOptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -57,15 +65,18 @@ def llama3_torchft_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=100,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
         comm=CommConfig(train_timeout_seconds=15),
         fault_tolerance=FaultTolerance(
             enable=True,

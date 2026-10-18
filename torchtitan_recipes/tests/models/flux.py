@@ -25,24 +25,23 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 
 from torchtitan.models.flux import build_model_config
-from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
-from torchtitan.models.flux.flux_datasets import (
+from torchtitan.models.flux.data import (
     DATASETS,
     FluxCollator,
     FluxSampleProcessor,
     FluxValidationDatasetConfig,
 )
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
-from torchtitan.models.flux.trainer import FluxTrainer
+from torchtitan.models.flux.trainer import FluxEncoderConfig, FluxTrainer, Inference
 from torchtitan.models.flux.utils import (
     IMAGE_LATENT_SIZE_RATIO,
     PATCH_HEIGHT,
     PATCH_WIDTH,
 )
-from torchtitan.models.flux.validate import FluxValidator
+from torchtitan.models.flux.validator import FluxValidator, SamplingConfig
 from torchtitan.observability.metrics import MetricsProcessor
 
 # NOTE: Flux needs `img_size` in both `dataset.processor` and to define the `seq_len` of the model
@@ -68,6 +67,9 @@ def flux_debugmodel() -> FluxTrainer.Config:
     img_size = 256
     max_t5_encoding_len = 256
     training_dataset = _flux_dataset("cc12m-test", img_size=img_size)
+    parallelism = ParallelismConfig(
+        context_parallel_degree=1,
+    )
     return FluxTrainer.Config(
         hf_assets_path=hf_assets_path,
         loss=MSELoss.Config(),
@@ -80,7 +82,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model=build_model_config("flux-debug"),
+        model=build_model_config("flux-debug", parallelism=parallelism),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -102,10 +104,8 @@ def flux_debugmodel() -> FluxTrainer.Config:
             collator=FluxCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
-        parallelism=ParallelismConfig(
-            context_parallel_degree=1,
-        ),
-        activation_checkpoint=FullAC.Config(),
+        parallelism=parallelism,
+        activation_remat=FullActivationRematConfig(),
         checkpointer=None,
         validator=None,
         inference=Inference(

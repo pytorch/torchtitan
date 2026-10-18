@@ -19,9 +19,9 @@ config = apply_transforms(
     [
         ContextParallelTransform(
             inner_attention_map={
-                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                FlexInnerAttention: AllGatherKVFlexInnerAttention,
                 SlidingWindowFlexInnerAttention: (
-                    KVAllGatherCPSlidingWindowFlexInnerAttention
+                    AllGatherKVSlidingWindowFlexInnerAttention
                 ),
             }
         )
@@ -51,11 +51,13 @@ linear modules.
 The async TP transform matches projection owner classes exactly. It converts
 `ColumnParallelLinear` and `RowParallelLinear`, but leaves arbitrary subclasses
 unchanged because replacing one with an async base class would discard its
-specialized forward behavior. `SharedExpertRowParallelLinear` is an explicit
-exception: async TP requires sequence parallelism, and in that mode its
-reduction is identical to `RowParallelLinear`, so it is safely converted to
-`AsyncRowParallelLinear`. With sequence parallelism disabled, constructing the
-async TP transform is an error before any conversion occurs.
+specialized forward behavior. With sequence parallelism disabled, constructing
+the async TP transform is an error before any conversion occurs.
+
+Transforms run on a model config that is already sharded for its parallelism
+(`build_model_config(..., parallelism=...)`). A transform that replaces a config
+keeps its `sharding_config`, or sets the sharding its replacement needs; it
+never re-derives sharding for the whole model.
 
 `apply_transforms` deep-copies the trainer config. It orders and applies the
 transforms, then validates the result. It returns the changed copy. The input
@@ -82,7 +84,9 @@ model config in place and returns the root. It does not copy or validate the
 config.
 
 ```python
-model_config = build_model_config("0.6B", attn_backend="varlen")
+model_config = build_model_config(
+    "0.6B", attn_backend="varlen", parallelism=ParallelismConfig()
+)
 model_config = transform_model_config_(
     model_config, [LoRATransform(handlers=(LinearLoRAHandler(),))]
 )
@@ -125,22 +129,12 @@ a different config only when replacing the root.
 ```python
 from dataclasses import dataclass
 
-from torchtitan.config.transform import (
-    ModelConfigTransform,
-    ModelConfigTransformContext,
-    TransformRelations,
-)
-from torchtitan.protocols.module import Module
+from torchtitan.config.transform import ModelConfigTransform, TransformRelations
+from torchtitan.models.base.module import Module
 
 
 class ExternalPrerequisiteTransform(ModelConfigTransform):
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
-        del context
+    def transform(self, model: Module.Config) -> Module.Config:
         return model
 
 
@@ -155,19 +149,16 @@ class MyTransform(ModelConfigTransform):
             after=cls,
         )
 
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
-        del context
+    def transform(self, model: Module.Config) -> Module.Config:
         ...
         return model
 ```
 
-A transform sees only the model config. Pass any required training or
-parallelism value to the transform.
+A transform sees only the model config. Pass any value that depends on how the
+model runs as a transform option, e.g. `TokenDispatcherTransform`'s
+`num_max_tokens_per_rank`, which a trainer derives from its microbatch and an
+inference engine from its per-step token budget. `apply_transforms(config, ...)`
+works on any config that owns a `model`, such as a trainer or RL generator config.
 
 Use `convert_config_type` to replace one config implementation with another.
 The replacement config must inherit from the current config type. This preserves
