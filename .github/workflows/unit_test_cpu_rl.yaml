@@ -70,10 +70,8 @@ jobs:
         pytest tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv
 
         # Cover the optional Verifiers example last, without installing it for all
-        # RL jobs. Verifiers 0.3.1 requires mcp<2 while current vLLM nightlies
-        # require mcp>=2, so resolving them together falls back to an old vLLM
-        # nightly that pins an old torch. Keep the nightlies installed above and
-        # let Verifiers downgrade its own dependencies (e.g. mcp) for these tests.
+        # RL jobs. Keep the nightlies installed above and let Verifiers move only its
+        # own pinned dependencies (e.g. mcp, openai) for these tests.
         python -c '
         from importlib.metadata import version
         for name in ("torch", "torchvision", "vllm"):

@@ -332,7 +332,14 @@ class VerifiersRollouter(Rollouter):
         )
         status = self.rollout_status(verifiers_episode=verifiers_episode, trace=trace)
         if not turns:
-            if trace.stop_condition == "context_length":
+            # Verifiers records an overlong first prompt as a failed model call; vLLM, the
+            # renderer and the generation server all word it "maximum context length".
+            first_prompt_too_long = any(
+                call.error is not None
+                and "maximum context length" in call.error.message
+                for call in trace.calls
+            )
+            if first_prompt_too_long:
                 # The harness builds the first prompt in the env server, so the dataset can't
                 # be filtered for it; flag it here as a data problem, not a policy one.
                 task = sample.verifiers_task_data.get(
@@ -347,7 +354,7 @@ class VerifiersRollouter(Rollouter):
                 )
             status = RolloutStatus.ERROR
         logs = verifiers_rollout_logs(verifiers_episode, trace)
-        if status == RolloutStatus.ERROR:
+        if status.is_error():
             log_failed_rollout(logs, group_id=group_id, rollout_id=rollout_id)
         else:
             turns[-1].env_rewards[VERIFIERS_REWARD_KEY] = trace.reward
@@ -361,6 +368,10 @@ class VerifiersRollouter(Rollouter):
 
     @staticmethod
     def rollout_status(*, verifiers_episode: Any, trace: Any) -> RolloutStatus:
+        # Verifiers flags an expired deadline with is_timeout: a stage's on its trace (which can keep
+        # ok=True), the whole episode's on the episode.
+        if trace.is_timeout or verifiers_episode.is_timeout:
+            return RolloutStatus.ERROR_TIMEOUT
         if not verifiers_episode.ok or not trace.ok:
             return RolloutStatus.ERROR
         if not trace.is_truncated:
@@ -483,9 +494,8 @@ def _local_taskset_module(taskset: VerifiersTasksetConfig) -> str | None:
 def verifiers_rollout_logs(verifiers_episode: Any, trace: Any) -> dict[str, Any]:
     """Summarize how a Verifiers rollout ended, for ``Rollout.logs``.
 
-    Verifiers' own "rollout done" line prints only the error class, so an agent
-    timeout, a crashed tool call and an unreachable model endpoint all read as
-    "HarnessError". This keeps the error messages and tracebacks (a failed
+    Verifiers' own "rollout done" line prints only the error type or stop
+    condition. This keeps the error messages and tracebacks (a failed
     harness's message ends with its stderr), per-phase wall time and model-call
     latency. For example, ``agent_sec=7200 model_sec=6900
     slowest_model_call_sec=1801`` on an agent timeout points at slow generation,
