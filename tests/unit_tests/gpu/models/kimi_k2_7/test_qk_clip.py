@@ -26,7 +26,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.distributed import ParallelismContext
-from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
+from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
 from torchtitan.models.kimi_k2_7.qk_clip import (
     qk_clip,

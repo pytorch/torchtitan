@@ -18,7 +18,7 @@ from torch.nn.attention.flex_attention import AuxRequest
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
+from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
 # Shape suffixes:
 # T = packed tokens, H = attention heads, D = projection rows per head,

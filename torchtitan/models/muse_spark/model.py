@@ -193,7 +193,7 @@ class MuseSparkAttention(GQAttention):
             query_TNH, key_TKH = self.rope(query_TNH, key_TKH, positions)
         return query_TNH, key_TKH
 
-    @local_compile("muse_spark_attention_output", batch_invariant=True)
+    @local_compile("muse_spark_attention_output", batch_invariant=False)
     def _flatten_attention_output(
         self,
         output_TNH: torch.Tensor,
@@ -223,14 +223,14 @@ class MuseSparkRMSNorm(RMSNorm):
             return None
         return self.weight + self.gain_center
 
+    # Limit 16, not the default 8: all residual-stream norms share this region and use 12 graphs.
     @local_compile("muse_spark_rmsnorm", batch_invariant=False, recompile_limit=16)
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input_dtype = input.dtype
         effective_weight_D = self._get_effective_weight()
         if effective_weight_D is not None:
-            # F.rms_norm runs its fused kernel only when the weight matches the
-            # input dtype. The fp32 residual stream with bf16 parameters would
-            # otherwise take the composite path (~20 kernels).
+            # F.rms_norm runs one fused kernel only when weight and input dtypes match.
+            # Without the cast, an fp32 stream with a bf16 FSDP weight runs ~20 small kernels.
             effective_weight_D = effective_weight_D.to(input_dtype)
         output_TD = F.rms_norm(
             input,
