@@ -185,6 +185,7 @@ def generate() -> None:
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = engine_config.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
+        max_model_len=model_config.max_context_length,
         max_num_batched_tokens=gen_config.max_num_batched_tokens,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,

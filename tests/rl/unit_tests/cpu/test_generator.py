@@ -732,6 +732,7 @@ def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):
 def test_cuda_graph_none_mode_preserves_sequence_parallel_config():
     compilation_config = VLLMCudaGraphConfig(mode="NONE").get_vllm_compilation_config(
         max_num_seqs=256,
+        max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=True,
     )
@@ -750,6 +751,7 @@ def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
         mode="FULL", capture_sizes=[1, 4, 5, 8]
     ).get_vllm_compilation_config(
         max_num_seqs=8,
+        max_model_len=4096,
         expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
         enable_sequence_parallel=False,
     )
@@ -760,6 +762,7 @@ def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
 def test_expert_sequence_parallel_padding_keeps_small_cuda_graph_batches():
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
         max_num_seqs=1,
+        max_model_len=4096,
         expert_sequence_parallel_size=8,
         enable_sequence_parallel=False,
     )
@@ -774,6 +777,7 @@ def test_expert_sequence_parallel_padding_rejects_no_valid_cuda_graph_sizes():
             mode="FULL", capture_sizes=[1, 2, 3]
         ).get_vllm_compilation_config(
             max_num_seqs=3,
+            max_model_len=4096,
             expert_sequence_parallel_size=4,
             enable_sequence_parallel=False,
         )
@@ -837,6 +841,7 @@ def test_only_weights_use_cumem_allocator(monkeypatch):
 def test_cuda_graph_default_mode_is_full():
     cfg = VLLMCudaGraphConfig().get_vllm_compilation_config(
         max_num_seqs=256,
+        max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
     )
@@ -848,6 +853,7 @@ def test_cuda_graph_full_mode_no_compile():
     # FULL captures the whole forward (incl. attention) with no inductor compile.
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
         max_num_seqs=256,
+        max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
     )
@@ -860,6 +866,7 @@ def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
     # max_num_seqs itself when not a power of 2).
     cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
         max_num_seqs=500,
+        max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
     )
@@ -871,6 +878,7 @@ def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
     # (max_num_batched_tokens, 2048) on top of max_num_seqs.
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
         max_num_seqs=500,
+        max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
     )
@@ -878,10 +886,36 @@ def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
     assert 500 in cfg.cudagraph_capture_sizes  # decode batch captured exactly
 
 
+def test_cuda_graph_full_mode_drops_sizes_above_max_model_len():
+    # A dummy request longer than max_model_len overruns its KV block table.
+    kwargs = dict(
+        max_num_seqs=8,
+        max_model_len=1000,
+        expert_sequence_parallel_size=1,
+        enable_sequence_parallel=False,
+    )
+    cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**kwargs)
+    assert cfg.cudagraph_capture_sizes[-2:] == [512, 1000]
+    cfg = VLLMCudaGraphConfig(
+        mode="FULL", capture_sizes=[512, 2048]
+    ).get_vllm_compilation_config(**kwargs)
+    assert cfg.cudagraph_capture_sizes == [512]
+    with pytest.raises(ValueError, match="max_model_len"):
+        VLLMCudaGraphConfig(
+            mode="FULL", capture_sizes=[2048]
+        ).get_vllm_compilation_config(**kwargs)
+    # FULL_DECODE_ONLY captures one-token requests, so a decode batch above max_model_len is fine.
+    cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
+        **{**kwargs, "max_num_seqs": 1500}
+    )
+    assert cfg.cudagraph_capture_sizes[-1] == 1500
+
+
 def test_cuda_graph_rejects_nonpositive_max_num_seqs():
     with pytest.raises(ValueError, match="max_num_seqs must be positive"):
         VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
             max_num_seqs=0,
+            max_model_len=4096,
             expert_sequence_parallel_size=1,
             enable_sequence_parallel=False,
         )
@@ -899,6 +933,7 @@ def test_inference_parallelism_propagates_dense_sequence_parallelism():
         mode="FULL", capture_sizes=[1, 4, 5, 8]
     ).get_vllm_compilation_config(
         max_num_seqs=8,
+        max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=parallelism.enable_sequence_parallel,
     )
