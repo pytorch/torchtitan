@@ -20,7 +20,7 @@ from monarch.actor import (
 )
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.rl._env import apply_env_defaults
+from torchtitan.rl._env import apply_env_defaults, RL_ROLE_ENV
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
 logger = logging.getLogger(__name__)
@@ -133,16 +133,19 @@ def _spawn_proc_mesh(
     role_world_size: int,
     provisioner: PerHostProvisioner,
     *,
+    process_role: str,
     bootstrap: Callable[[], None],
 ) -> ProcMesh:
     """Spawn one role's proc mesh on ``host_mesh``, splitting ``role_world_size``
-    evenly across the mesh's hosts.
+    evenly across the mesh's hosts. Each proc gets ``RL_ROLE_ENV=process_role``
+    (``trainer`` or ``generator``), which host memory metrics group by.
 
-    Assumes ``_check_gpus_per_host`` passed: the split is even and the GPUs fit.
+    With several hosts, assumes ``_check_gpus_per_host`` passed: the split is even and
+    the GPUs fit.
     """
     nodes = len(host_mesh)
     role_gpus_per_node = role_world_size // nodes
-    env = provisioner.allocate(role_gpus_per_node)
+    env = {**provisioner.allocate(role_gpus_per_node), RL_ROLE_ENV: process_role}
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
         bootstrap=bootstrap,
@@ -251,6 +254,7 @@ def spawn_proc_mesh(
             trainer_host_mesh,
             trainer_world_size,
             provisioners[id(trainer_host_mesh)],
+            process_role="trainer",
             bootstrap=_preimport_torch,
         )
         generator_meshes = [
@@ -258,6 +262,7 @@ def spawn_proc_mesh(
                 gen_host_mesh,
                 per_generator_world_size,
                 provisioners[id(gen_host_mesh)],
+                process_role="generator",
                 bootstrap=_bootstrap_generator,
             )
             for gen_host_mesh in generator_host_meshes
@@ -267,20 +272,20 @@ def spawn_proc_mesh(
         # CUDA_VISIBLE_DEVICES
         host_mesh = this_host()
         provisioner = PerHostProvisioner(total_gpus=total_gpus)
-        trainer_mesh = host_mesh.spawn_procs(
-            per_host={"gpus": trainer_world_size},
+        trainer_mesh = _spawn_proc_mesh(
+            host_mesh,
+            trainer_world_size,
+            provisioner,
+            process_role="trainer",
             bootstrap=_preimport_torch,
-            bootstrap_command=default_bootstrap_cmd().with_env(
-                provisioner.allocate(trainer_world_size)
-            ),
         )
         generator_meshes = [
-            host_mesh.spawn_procs(
-                per_host={"gpus": per_generator_world_size},
+            _spawn_proc_mesh(
+                host_mesh,
+                per_generator_world_size,
+                provisioner,
+                process_role="generator",
                 bootstrap=_bootstrap_generator,
-                bootstrap_command=default_bootstrap_cmd().with_env(
-                    provisioner.allocate(per_generator_world_size)
-                ),
             )
             for _ in range(num_generators)
         ]
