@@ -72,8 +72,8 @@ class Completion:
     #   RequestOutputKind.CUMULATIVE and record (start_token, version) boundaries; today we keep only
     #   the per-turn min (min_policy_version) / max (max_policy_version).
     request_id: str
-    """Echoes the id the caller passed to `generate`, so callers can validate
-    ordered completions or map by id."""
+    """The id `Generator.generate` received. Over HTTP, that is the caller's id plus the server's
+    `/http=<n>` suffix."""
     token_ids: list[int]
     token_logprobs: list[float]
     finish_reason: str | None = None
