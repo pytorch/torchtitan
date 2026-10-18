@@ -192,14 +192,12 @@ class MuseSparkRMSNorm(RMSNorm):
             return None
         return self.weight + self.gain_center
 
-    # pyrefly: ignore[bad-param-name-override]
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input_dtype = input.dtype
         effective_weight_D = self._get_effective_weight()
         if effective_weight_D is not None:
-            # F.rms_norm runs its fused kernel only when the weight matches the
-            # input dtype. The fp32 residual stream with bf16 parameters would
-            # otherwise take the composite path (~20 kernels).
+            # F.rms_norm runs one fused kernel only when weight and input dtypes match.
+            # Without the cast, an fp32 stream with a bf16 FSDP weight runs ~20 small kernels.
             effective_weight_D = effective_weight_D.to(input_dtype)
         output_TD = F.rms_norm(
             input,

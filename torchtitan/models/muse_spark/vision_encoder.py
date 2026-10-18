@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""NaViT encoder and adapter used by the Muse Spark Open vision tower.
+"""Shared NaViT encoder and adapter for Muse Spark and Muse Glimmer.
 
 Shape suffixes:
 - T = packed visual tokens
@@ -17,7 +17,6 @@ Shape suffixes:
 - M = merged visual tokens
 - O = adapter output dim
 
-TODO: replace Muse Glimmer vision encoder with this
 """
 
 import math
@@ -119,8 +118,12 @@ class VisionRopeFreq(Module):
 
     def _compute(self, *, device: torch.device | None = None) -> torch.Tensor:
         half_dim = self.head_dim // 2
-        return self.rope_theta ** (
-            -torch.arange(0, half_dim, 2, dtype=torch.float32, device=device) / half_dim
+        return 1.0 / (
+            self.rope_theta
+            ** (
+                torch.arange(0, half_dim, 2, dtype=torch.float32, device=device)
+                / half_dim
+            )
         )
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

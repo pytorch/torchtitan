@@ -40,9 +40,9 @@ from torchtitan.distributed.activation_remat import (
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
-    UlyssesCPFlexInnerAttention,
-    UlyssesCPVarlenInnerAttention,
+    AllGatherKVFlexInnerAttention,
+    UlyssesFlexInnerAttention,
+    UlyssesVarlenInnerAttention,
 )
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
@@ -485,9 +485,7 @@ def llama3_debugmodel_cp4() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -504,7 +502,7 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: UlyssesCPFlexInnerAttention}
+                inner_attention_map={FlexInnerAttention: UlyssesFlexInnerAttention}
             )
         ],
     )
@@ -522,9 +520,7 @@ def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    VarlenInnerAttention: UlyssesCPVarlenInnerAttention
-                }
+                inner_attention_map={VarlenInnerAttention: UlyssesVarlenInnerAttention}
             )
         ],
     )
@@ -558,9 +554,7 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -576,9 +570,7 @@ def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -594,9 +586,7 @@ def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -660,7 +650,7 @@ def muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph() -> Trainer.Config:
     config = muse_glimmer_debugmodel(seq_len=2048)
     config.debug.deterministic = True
     config.debug.seed = 42
-    config.training.cuda_graph_per_accumulation_group = True
+    config.training.cuda_graph_per_microbatch_group = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.training.num_tokens_per_train_step = 98304
     config.parallelism.data_parallel_shard_degree = 2
@@ -673,6 +663,21 @@ def muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction() -> Trainer.Confi
     config.parallelism.fsdp_defer_gradient_reduction = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.training.num_tokens_per_train_step = 65536
+    return config
+
+
+def muse_glimmer_debugmodel_shared_eval_cuda_graph() -> Trainer.Config:
+    """Train and validate with shared graph workspace on two FSDP ranks."""
+    config = muse_glimmer_debugmodel(seq_len=128)
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.parallelism.data_parallel_shard_degree = 2
+    config.optim.enable_cuda_graph = True
+    config.validator = Validator.Config(
+        freq=2,
+        steps=1,
+        dataloader=replace(config.dataloader),
+    )
     return config
 
 
@@ -695,9 +700,7 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -1062,6 +1065,13 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             configs=[muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph],
             test_descr="Per-group CUDA graph replay with FSDP accumulation",
             test_name="fsdp_per_group_cuda_graph",
+            ngpu=2,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[muse_glimmer_debugmodel_shared_eval_cuda_graph],
+            test_descr="Shared train and eval CUDA graphs with FSDP",
+            test_name="shared_eval_cuda_graph",
             ngpu=2,
             skip_rocm_test=True,
         ),
