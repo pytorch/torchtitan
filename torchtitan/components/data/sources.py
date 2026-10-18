@@ -239,8 +239,10 @@ class _HuggingFaceCursorIterator(grain.DatasetIterator):
         self._epoch = 0
         self._initial_state = dataset.state_dict()
         self._iterator = iter(dataset)
+        self._pending_hf_state: bytes | None = None
 
     def __next__(self) -> dict[str, Any]:
+        self._pending_hf_state = None
         try:
             return next(self._iterator)
         except StopIteration:
@@ -261,7 +263,11 @@ class _HuggingFaceCursorIterator(grain.DatasetIterator):
         # surrounding Grain tree stays structured for other sources.
         return {
             "epoch": self._epoch,
-            "hf": pickle.dumps(self._dataset.state_dict()),
+            "hf": (
+                self._pending_hf_state
+                if self._pending_hf_state is not None
+                else pickle.dumps(self._dataset.state_dict())
+            ),
         }
 
     def set_state(self, state: dict[str, Any]) -> None:
@@ -275,3 +281,6 @@ class _HuggingFaceCursorIterator(grain.DatasetIterator):
             )
         self._dataset.load_state_dict(pickle.loads(hf_state))
         self._iterator = iter(self._dataset)
+        # HF applies the restored cursor lazily on the next read. Packers can
+        # checkpoint before that read to reconstruct a partially consumed row.
+        self._pending_hf_state = hf_state
