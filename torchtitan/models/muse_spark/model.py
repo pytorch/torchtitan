@@ -168,6 +168,7 @@ class MuseSparkAttention(GQAttention):
         if output_gate_TO is not None:
             remat.recompute_needs_tensor(output_gate_TO)
         output_TO = self._flatten_attention_output(output_TNH, output_gate_TO)
+        # Not in the compiled region: wo runs the TP reduce and its own remat regions.
         output_TD = self.wo(output_TO)
         return output_TD
 
