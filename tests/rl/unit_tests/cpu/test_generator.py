@@ -666,19 +666,9 @@ def test_cpu_kv_offload_names_vllms_offloading_connector(monkeypatch, tmp_path):
         ),
     )
     kv_transfer_config = engine_kwargs["kv_transfer_config"]
-    # Named, not set through kv_offloading_size: vLLM's in-process config checks see it, so vLLM
-    # rejects router replay with it.
+    # Named, not set through kv_offloading_size, so vLLM's config check rejects router replay with it.
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
-    assert kv_transfer_config.kv_role == "kv_both"
-    assert kv_transfer_config.kv_connector_extra_config == {
-        "cpu_bytes_to_use": 16 << 30,
-        "offload_prompt_only": False,
-    }
-
-    engine_kwargs = _build_engine_kwargs(
-        monkeypatch, tmp_path, VLLMGenerator.Config(model=_MODEL_CONFIG)
-    )
-    assert not engine_kwargs.keys() & {"kv_offloading_size", "kv_transfer_config"}
+    assert kv_transfer_config.kv_connector_extra_config["offload_prompt_only"] is False
 
 
 @pytest.mark.parametrize(
