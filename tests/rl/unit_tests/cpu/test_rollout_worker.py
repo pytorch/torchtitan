@@ -132,6 +132,7 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             message_env=_MessageEnvConfig(),
             token_env=token_env_config,
             advantage=_Config(_AdvantageEstimator()),
+            rollout_timeout_s=None,
         )
         worker = _CustomWorker(worker_config)
         released = []
@@ -261,6 +262,7 @@ def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage() -> None:
                 message_env=_MessageEnvConfig(),
                 token_env=_TokenEnvConfig(),
                 advantage=AdvantageEstimator.Config(),
+                rollout_timeout_s=None,
             )
         )
         await worker.setup_async(
@@ -311,6 +313,7 @@ def test_cancelled_group_waits_for_every_sibling_release() -> None:
                 message_env=_MessageEnvConfig(),
                 token_env=_TokenEnvConfig(),
                 advantage=_Config(_AdvantageEstimator()),
+                rollout_timeout_s=None,
             )
         )
         await worker.setup_async(
@@ -348,6 +351,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             message_env=None,
             token_env=None,
             advantage=_Config(None),
+            rollout_timeout_s=None,
         )
     )
     builder = TrainingSampleBuilder.Config().build()
@@ -403,13 +407,14 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
     asyncio.run(run())
 
 
-def _bare_worker() -> RolloutWorker:
+def _bare_worker(rollout_timeout_s: float | None = None) -> RolloutWorker:
     return RolloutWorker(
         SimpleNamespace(
             rubric=_Config(None),
             message_env=None,
             token_env=None,
             advantage=_Config(None),
+            rollout_timeout_s=rollout_timeout_s,
         )
     )
 
@@ -432,9 +437,52 @@ def test_failing_session_release_does_not_fail_the_rollout() -> None:
     assert rollout.status == RolloutStatus.COMPLETED
 
 
-def test_stopped_rollout_cancels_its_call_and_releases_lease_and_session() -> None:
-    """A rollout cancelled mid-call closes its HTTP call (the server cancels the handler), gives the
-    lease back and releases its routing session."""
+async def _hang(prompt_token_ids, **kwargs) -> Completion:
+    await asyncio.Event().wait()
+
+
+async def _connect_timeout(prompt_token_ids, **kwargs) -> Completion:
+    raise TimeoutError("connect timed out")
+
+
+@pytest.mark.parametrize(
+    "generate_fn, expected_status",
+    [
+        # Past rollout_timeout_s: the rollout ends as ERROR_TIMEOUT.
+        (_hang, RolloutStatus.ERROR_TIMEOUT),
+        # A TimeoutError raised inside the turn (e.g. a connect timeout) is an error of the code,
+        # not of the policy.
+        (_connect_timeout, RolloutStatus.ERROR_SYSTEM),
+    ],
+)
+def test_rollout_timeout(generate_fn, expected_status) -> None:
+    released = []
+
+    async def release_session_fn(**kwargs) -> None:
+        released.append(kwargs)
+
+    rollout = asyncio.run(
+        asyncio.wait_for(
+            _bare_worker(rollout_timeout_s=0.1)._run_single_rollout(
+                generate_fn=generate_fn,
+                release_session_fn=release_session_fn,
+                env=_TokenEnv(),
+                sampling=SamplingConfig(),
+                group_id=7,
+                rollout_id=0,
+            ),
+            timeout=10,
+        )
+    )
+
+    assert rollout.status == expected_status
+    assert released == [{"routing_session_id": "group=7/rollout=0"}]
+
+
+@pytest.mark.parametrize("stop", ["cancel", "timeout"])
+def test_stopped_rollout_cancels_its_call_and_releases_lease_and_session(stop) -> None:
+    """A rollout cancelled from outside, or past `rollout_timeout_s`, mid-call closes its HTTP call
+    (the server cancels the handler), gives the lease back and releases its routing session."""
 
     async def run() -> None:
         started, server_call_cancelled = asyncio.Event(), asyncio.Event()
@@ -467,7 +515,9 @@ def test_stopped_rollout_cancels_its_call_and_releases_lease_and_session() -> No
         )
         try:
             rollout = asyncio.create_task(
-                _bare_worker()._run_single_rollout(
+                _bare_worker(
+                    rollout_timeout_s=0.5 if stop == "timeout" else None
+                )._run_single_rollout(
                     generate_fn=GeneratorClient(router=router),
                     release_session_fn=release_session_fn,
                     env=_TokenEnv(),
@@ -477,9 +527,13 @@ def test_stopped_rollout_cancels_its_call_and_releases_lease_and_session() -> No
                 )
             )
             await asyncio.wait_for(started.wait(), timeout=10)
-            rollout.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await rollout
+            if stop == "cancel":
+                rollout.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await rollout
+            else:
+                result = await asyncio.wait_for(rollout, timeout=10)
+                assert result.status == RolloutStatus.ERROR_TIMEOUT
             await asyncio.wait_for(server_call_cancelled.wait(), timeout=10)
         finally:
             await server.close()
