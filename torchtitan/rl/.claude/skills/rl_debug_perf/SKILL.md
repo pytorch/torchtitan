@@ -38,7 +38,7 @@ Every lever in section 3 moves G, W or L.
 0. Are rollouts erroring?        status mix of rollout_samples.jsonl, "marking ERROR" in the job log
                                  (no metric counts errored rollouts)
      yes -> section 4 first
-1. Does the trainer wait?        perf/trainer/step_time_ratio/batch
+1. Does the trainer wait?        perf/trainer/step_time_ratio/wait_for_training_batch
      near 0              -> trainer-bound: trainer/mfu_percent, memory; add trainer GPUs
      over half the step  -> rollouts are the bottleneck, go to 2
 2. Are the engines full?         generator/inflight_requests_at_completion/max vs max_num_seqs x generator DP,
@@ -71,7 +71,7 @@ Every other key: [references/metrics.md](references/metrics.md).
 
 A bigger batch raises the groups needed per step (G) as much as the groups in flight (L), so it doesn't shorten the step by itself; it helps through trainer utilization and group choice. Rule of thumb: if the trainer waits over half the step, doubling the batch still fits. Worked example A projects both levers.
 
-- **`target_offpolicy_steps`** (L up). Costs: older samples (watch `train_batch/policy_age/*`, `bit_wise/logprob_diff/*`) and more KV per engine. Age is unbounded with `windowed_fifo_batches=None` (default); a window bounds it but can stall on the oldest group ([windowed FIFO](../../../docs/windowed_fifo.md)).
+- **`target_offpolicy_steps`** (L up). Costs: older samples (watch `train_batch/policy_age/*`, `bit_wise/logprob_diff/*`) and more KV per engine. Age is unbounded with `windowed_fifo_batches=None` (default); a window bounds it but can stall on the oldest group ([windowed FIFO](../../../controller/WINDOWED_FIFO.md)).
 - **`num_prompts_per_train_step`** (G and L up, trainer busier). Costs: fewer optimizer steps for the same data, so recheck the learning rate, and more KV per engine. Both levers raise `max_num_seqs`, which stops at 512.
 - **Many microbatches per DP rank** (check `train_batch/num_microbatches`, which is per rank, and `train_batch/padding_frac`). Every rank runs as many microbatches as the busiest one, and the last is partly empty: padding ≈ half a microbatch / microbatches per rank. So aim for ~8+ per rank. With few, padding grows and each GPU's step is short, so fixed per-step costs (weight sync, controller, optimizer) and waits take a bigger share and the trainer idles more. More GPUs at the same batch shrink the per-rank share. Raise `num_prompts_per_train_step`, or lower `num_tokens_per_microbatch_per_dp_rank` (it also cuts activation memory).
   ```text
@@ -88,12 +88,11 @@ A bigger batch raises the groups needed per step (G) as much as the groups in fl
 
 Errors hide from the curves. An error before the first completion drops its whole group as untrainable. A later error usually scores 0 and, in a mixed group, gets a negative advantage it did not earn. In one agentic run errors went from 0.3% to 59% in two steps: a tool failed to install in the sandbox.
 
-1. **Record every rollout.** The default `KeepExtremeRewardsFilter` (`k=1`) keeps each group's best and worst only, so most errors are never written. Set `rollout_recorder.filter.k = num_samples_per_prompt`.
+1. **Record every rollout.** The default `KeepExtremeRewardsFilter` (`k=1`) keeps each group's best and worst only, so most errors are never written. Set `rollout_recorder.filter.k = num_samples_per_prompt`, or at least `rollout_recorder.filter.keep_errors = True` to keep every errored rollout.
 2. **Count statuses per step** in `<dump_folder>/rollout_samples.jsonl`.
 3. **Find each error's final exception**, not the wrapper type: the last `Type: message` line of the traceback.
    - Native rollouter: `grep -A 30 "marking ERROR" <job log>`.
-   - Verifiers: the `rollout done: ... stop=<stop>` line gives only the error class.
-   - If your checkout has `Rollout.logs` and `KeepExtremeRewardsFilter.Config.keep_errors`, the JSONL carries the traceback.
+   - Verifiers: `grep "Verifiers rollout failed" <job log>`: one line per errored rollout, with its error type, message and last traceback lines. Recorded Verifiers rollouts also carry the full traceback in the JSONL's `logs["errors"]`.
 4. **Then the silent zeros:** groups that scored 0 in every rollout with no error status. Read their grader output: a `ModuleNotFoundError` in the tests is a dataset bug.
 5. **Read 2-3 examples of each class** ([scripts](references/rollout_inspection.md)).
 
@@ -123,8 +122,8 @@ Rules:
 
 Confirmation steps and fixes: [references/common_bugs.md](references/common_bugs.md).
 
-- **The run stops without crashing:** a reward fn runs CPU-bound code inside `async def`, and one input holds the GIL in a C call. `RewardMathVerify` does this (`examples/dapo_math/rubric.py:58-64`); its `ThreadTimeout` can't interrupt it. Grade in a killable process.
-- **`engine loop crashed`, then `generator is closed`:** vLLM rejected one request, e.g. a prompt with no room for an output token. The router keeps feeding the dead generator and the next weight sync crashes the job. Keep every prompt cap below `max_model_len`.
+- **The run stops without crashing:** a reward fn runs CPU-bound code inside `async def`, and one input holds the GIL in a C call that no thread timeout can interrupt. Grade in a process you can kill, as `MathVerifyPool` does (`examples/dapo_math/math_verify_pool.py`).
+- **The run fails with `engine loop crashed`:** a generator's engine loop raised, e.g. vLLM rejected a request. Read the traceback in that generator's log.
 - **`rollout/branches_per_rollout/mean` > 1** without intended history edits: a turn's prompt did not extend the previous turn. Find the first diverging token.
 - **Reward about 0 from step 1:** read 10 completions; check stop tokens, the `max_tokens` budget and the renderer.
 - **`RuntimeError: N consecutive untrainable batches`:** prompts all solved or all failed, with zero-std groups dropped. Fix the data; keeping zero-std groups dilutes the update.

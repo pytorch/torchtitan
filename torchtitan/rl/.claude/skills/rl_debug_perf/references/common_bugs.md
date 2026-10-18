@@ -7,20 +7,14 @@ Each entry expands one bullet of section 5 in [SKILL.md](../SKILL.md): symptom, 
 - **Symptom:** the trainer waits forever and a rollout worker goes quiet. Nothing raises, so the job never exits.
 - **Confirm:** `py-spy dump --pid <rollout worker pid>` shows the event-loop thread inside the reward fn.
 - **Cause:** a reward fn runs CPU-bound code (sympy, Math-Verify) inside `async def` on the rollout worker's event loop. One answer like `\boxed{2000^{2000^{2000}}}` makes sympy compute `2000 ** (2000 ** 2000)`, a single C call that holds the GIL. Every group on that worker freezes and holds its slot; once the slots are gone, the trainer starves.
-- **Why the timeout doesn't help:** `RewardMathVerify` wraps Math-Verify in `ThreadTimeout` (`examples/dapo_math/rubric.py:58-64`). A thread timeout is delivered only between bytecodes, so it cannot interrupt a C call, and SIGALRM only works on the main thread.
-- **Fix:** grade in a separate process with a hard timeout; kill and replace the process on timeout.
+- **Why a thread timeout doesn't help:** it is delivered only between bytecodes, so it cannot interrupt a C call, and SIGALRM only works on the main thread.
+- **Fix:** grade in a separate process with a hard timeout; kill and replace the process on timeout. `MathVerifyPool` does this for DAPO-Math (`examples/dapo_math/math_verify_pool.py`).
 
 ## A generator's engine loop crashes
 
-- **Symptom:** one generator logs `engine loop crashed; failing all outstanding replies`, then `generator is closed; cannot call generate`, and errors jump.
-- **Cause:** vLLM rejected one request, e.g. a prompt of exactly `max_model_len` tokens with no room to generate. The exception reached the engine loop's catch-all and killed it.
-- **What follows:**
-  1. The router keeps the dead generator as a candidate. It has zero load, so least-loaded routing sends it most new work (61 of 64 rollouts in a simulation with 1 of 4 generators dead).
-  2. Those groups fail before their first completion and are dropped as untrainable, so the trainer starves.
-  3. If the run reaches the next weight sync, it crashes with `generator is closed; cannot call pull_model_state_dict`. Restart from the last checkpoint.
-- **Fix the trigger:** every prompt cap must leave room for one output token.
-  - `TokenEnv.Config.max_rollout_tokens` (default None, no cap) rejects `prompt_len >= cap`, so it is safe at `max_model_len`.
-  - The Verifiers `GenerationServer.Config.max_rollout_tokens` is inclusive, so set it to at most `max_model_len - 1`.
+- **Symptom:** one generator logs `engine loop crashed; failing all outstanding replies`. During training the controller stops the run: it watches every engine loop (`Controller._generator_loop`). During the validation before or after training, it shows up as failed validation rollouts instead.
+- **Cause:** an exception reached the engine loop's catch-all, e.g. vLLM rejected one request. The traceback in that generator's log names it.
+- **Known trigger:** a prompt with no room for an output token. Both prompt caps reject `prompt_len >= cap`, so set each to `max_model_len`: `TokenEnv.Config.max_rollout_tokens` (default None: no cap, so no guard; only some recipes set it) and the Verifiers `GenerationServer.Config.max_rollout_tokens` (required).
 
 ## `rollout/branches_per_rollout/mean` > 1
 
@@ -58,7 +52,7 @@ Read 10 completions end to end.
 - **Symptom:** `bit_wise/logprob_diff/mean` leaves its baseline, or `bit_wise/logprob_diff/max` trends up.
 - **Cause:** usually the trainer and generator compute different math: a different attention kernel, MoE routing, a bf16 vs fp32 lm head.
 - **Not staleness:** at small learning rates staleness barely moves it. In one 35B run at lr 1e-6, each step of policy age added ~0.1% of the baseline gap.
-- [Bitwise parity](../../../../docs/bitwise_parity.md) makes the gap exactly 0 for on-policy samples.
+- [Bitwise parity](../../../../BITWISE_PARITY.md) makes the gap exactly 0 for on-policy samples.
 
 ## The attention kernel is not the one you think
 

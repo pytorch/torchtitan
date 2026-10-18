@@ -32,7 +32,7 @@ for status, rewards in sorted(rewards_by_status.items()):
 
 ## Errored rollouts: the final exception
 
-The JSONL has each rollout's status but not its exception; the job log has it. Read the last `Type: message` line of each traceback: wrapper errors often share one type, and the last line (usually with the tool's stderr) names the cause.
+For the native rollouter, the JSONL has each rollout's status but not its exception; the job log has it. Read the last `Type: message` line of each traceback: wrapper errors often share one type, and the last line (usually with the tool's stderr) names the cause.
 
 ```bash
 # Native rollouter: one traceback per errored rollout.
@@ -55,9 +55,9 @@ grep -E "Consecutive untrainable batches|Batcher dropped|older than target_offpo
 
 Retried attempts get their own `rollout done` line, so retried sandbox errors show up here but not in the JSONL.
 
-### Once `Rollout.logs` lands
+### Verifiers: the exception in `Rollout.logs`
 
-Checkouts with `Rollout.logs` save each failure in the JSONL as `logs["errors"]`, a list of `{type, message, traceback}`, and `KeepExtremeRewardsFilter.Config.keep_errors=True` records every errored rollout. The Verifiers rollouter there also logs one line per failed rollout, joinable on `logs["verifiers_trace_id"]`:
+The Verifiers rollouter saves each failure in the JSONL as `logs["errors"]`, a list of `{type, message, traceback}`, and `KeepExtremeRewardsFilter.Config.keep_errors=True` records every errored rollout. It also logs one line per failed rollout, joinable on `logs["verifiers_trace_id"]`:
 
 ```text
 Verifiers rollout failed: trace=<id> group=<g> rollout=<r> task=<task> stop=<stop> error=<Type>: <message> | setup=<s>s agent=<s>s (model=<s>s harness=<s>s) scoring=<s>s | model_calls=<n> failed_calls=<n> slowest_call=<s>s | <traceback tail>
@@ -133,7 +133,7 @@ print(f"{len(silent_zero_groups)} of {len(groups)} groups scored 0 in every roll
 
 def failure_class(row: dict) -> str:
     if row["status"].startswith("error"):
-        return "error"  # with Rollout.logs: error_class(row)
+        return "error"  # Verifiers rollouts: error_class(row)
     if row["status"].startswith("truncated"):
         return row["status"]
     return "reward_0" if row["reward"] <= 0 else "success"
@@ -154,39 +154,31 @@ for version, counts in sorted(by_version.items()):
 
 `rollout/branches_per_rollout/mean > 1` in an env that does not edit history on purpose means a turn's prompt did not extend the previous prompt plus completion. Find the first token that differs and decode around it. This needs `log_tensors=True`.
 
+Each recorded turn stores `prompt_prefix_len` (how many leading tokens it shares with the previous turn's prompt + completion) and the rest of its prompt as `prompt_delta_token_ids`. A turn diverges where its shared prefix ends early:
+
 ```python
 from transformers import AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained("<hf_assets_path>")
 
-
-def first_divergence(prev_turn: dict, turn: dict) -> int | None:
-    """Index of the first prompt token that does not extend the previous prompt + completion."""
-    expected = prev_turn["prompt_token_ids"] + prev_turn["completion_token_ids"]
-    prompt = turn["prompt_token_ids"]
-    for index, (want, got) in enumerate(zip(expected, prompt)):
-        if want != got:
-            return index
-    return None if len(prompt) >= len(expected) else len(prompt)
-
-
 for row in train:
-    for prev_turn, turn in zip(row["turns"], row["turns"][1:]):
-        index = first_divergence(prev_turn, turn)
-        if index is None:
-            continue
-        expected = prev_turn["prompt_token_ids"] + prev_turn["completion_token_ids"]
-        start = max(index - 20, 0)
-        print(row["group_id"], row["rollout_id"], "turn", turn["turn_id"], "diverges at token", index)
-        print("  expected:", repr(tokenizer.decode(expected[start : index + 20])))
-        print("  got:     ", repr(tokenizer.decode(turn["prompt_token_ids"][start : index + 20])))
+    previous = []  # the previous turn's prompt + completion
+    for turn in row["turns"]:
+        index = turn["prompt_prefix_len"]
+        prompt = previous[:index] + turn["prompt_delta_token_ids"]
+        if index < len(previous):
+            start = max(index - 20, 0)
+            print(row["group_id"], row["rollout_id"], "turn", turn["turn_id"], "diverges at token", index)
+            print("  expected:", repr(tokenizer.decode(previous[start : index + 20])))
+            print("  got:     ", repr(tokenizer.decode(prompt[start : index + 20])))
+        previous = prompt + turn["completion_token_ids"]
 ```
 
 If the recorder never kept a branched rollout, reproduce it on CPU: run the env with its real libraries and a scripted generate function that returns the suspicious completion, e.g. one that hits `max_tokens` right after closing its thinking block.
 
 ## Same tasks across two runs
 
-A training group's `group_id` is its index in the dataset stream. With a seeded dataset order, the same `group_id` is the same prompt in both runs (198 of 198 shared groups in two same-seed runs), so compare reward per group instead of per step. This needs every rollout recorded. A resumed run restarts the stream at 0 and appends to the same JSONL, so split it at the restart first.
+A training group's `group_id` is its index in the dataset stream. With a seeded dataset order, the same `group_id` is the same prompt in both runs (198 of 198 shared groups in two same-seed runs), so compare reward per group instead of per step. This needs every rollout recorded. A run resumed from a checkpoint appends to the same JSONL and re-runs every group the checkpoint had not trained, under the same `group_id`, so keep only the last copy of each group.
 
 ```python
 import collections

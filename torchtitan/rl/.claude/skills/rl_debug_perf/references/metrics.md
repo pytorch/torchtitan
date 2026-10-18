@@ -4,10 +4,10 @@ What each metric means, grouped by where it comes from. The traps are in section
 
 ## Trainer
 
-- `perf/trainer/step_time_ratio/batch`: share of the step spent waiting for a batch.
-- `perf/trainer/step_time_ratio/fwd_bwd` (forward/backward plus optimizer), `/blocking_trainer_push_model_state_dict`, `/blocking_generator_pull_model_state_dict` and `/unaccounted` split the rest. Seconds are under `timing/step/*`.
+- `perf/trainer/step_time_ratio/wait_for_training_batch`: share of the step spent waiting for a batch.
+- One ratio per loop phase splits the rest: `/forward_backward`, `/optimizer`, `/save_checkpoint`, `/blocking_trainer_push_model_state_dict`, `/blocking_generator_pull_model_state_dict`, `/sync_log_step`, `/metrics_log` (the previous step's) and `/unaccounted`. Seconds are under `timing/step/<phase>`; the step is `timing/step/total`, the full loop period.
 - `timing/weight_sync/trainer_push_model_state_dict` and `timing/weight_sync/generator_pull_model_state_dict`: how long the background push and pull took. The pull holds `num_prompts_per_train_step` slots until it ends.
-- `trainer/mfu_percent`, `perf/trainer/tokens_per_second_fwd_bwd`.
+- `trainer/mfu_percent`, `perf/trainer/tokens_per_second_forward_backward` (forward/backward only, no optimizer step or checkpoint save).
 - `trainer/memory/max_reserved_percent`, `trainer/memory/num_alloc_retries`, `trainer/memory/num_ooms`.
 
 ## Rollout buffer
@@ -15,7 +15,8 @@ What each metric means, grouped by where it comes from. The traps are in section
 Sampled at the end of each step.
 - `rollout_buffer/available_active_slots`: normally 0, since the data loop refills freed slots at once. Nonzero means data loading lags.
 - `rollout_buffer/num_groups_inflight`: groups generating, L in `step_time ~= G * W / L`.
-- `rollout_buffer/num_groups_finalized`: finished, waiting for the batcher.
+- `rollout_buffer/num_groups_finalized`: finished, not yet taken by the batcher. Often 0: the batcher takes each finished group at once.
+- `rollout_buffer/num_groups_taken`: taken by the batcher, slot not freed yet (in the batcher, the batch queue or the trainer). The five gauges sum to the slot budget.
 - `rollout_buffer/num_groups_waiting`: admitted, not yet claimed by a rollout loop.
 
 ## Generator
