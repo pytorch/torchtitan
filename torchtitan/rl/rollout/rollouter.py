@@ -176,7 +176,8 @@ class Rollouter(Configurable):
             RolloutWorkerActor,
             worker_config=self._config.worker,
             num_threads=self._config.num_threads_per_worker,
-            # The controller's structured-log init fn, or None when off; workers override its source and rank.
+            # None when structured logging is off. Else each worker calls it with its own source and rank,
+            # so it writes its own JSONL next to the controller's.
             structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
         )
         await self._worker_actors.setup_async.call(
