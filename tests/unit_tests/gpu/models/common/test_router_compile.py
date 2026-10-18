@@ -81,6 +81,33 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
         for actual, expected in zip(compiled, eager, strict=True):
             torch.testing.assert_close(actual, expected)
 
+    def test_scores_do_not_depend_on_batch_size(self):
+        """A token's router outputs at 1 and 34 tokens equal its outputs in a 16k batch, bitwise."""
+        torch.manual_seed(0)
+        config = TokenChoiceTopKRouter.Config(
+            num_experts=256,
+            gate=HiMidLoLinear.Config(in_features=DIM, out_features=256),
+            score_func=Softmax.Config(),
+            top_k=8,
+            route_norm=True,
+        )
+        with torch.device("cuda"):
+            router = config.build().eval()
+        apply_local_compile(["moe_router_topk"])
+        gate_TE = torch.randn(16384, 256, device="cuda")
+        with torch.no_grad():
+            # The generator's compile order: 16384 (static), 14336 (T turns dynamic), then
+            # decode; Dynamo gives T=1 its own graph.
+            outputs = {
+                n: router._score_and_select_experts(
+                    gate_TE[:n].contiguous(), None, padding_mask_T=None
+                )
+                for n in (16384, 14336, 34, 1)
+            }
+        for n in (34, 1):
+            for actual, expected in zip(outputs[n], outputs[16384], strict=True):
+                self.assertTrue(torch.equal(actual, expected[:n]))
+
 
 if __name__ == "__main__":
     unittest.main()
