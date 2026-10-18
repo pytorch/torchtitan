@@ -9,7 +9,7 @@ import unittest
 import torch
 
 from torchtitan.distributed.local_compile import apply_local_compile
-from torchtitan.models.common.rope import CosSinRoPE
+from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE
 from torchtitan.models.qwen3_5.rope import MRoPE
 
 
@@ -239,6 +239,79 @@ class TestRoPELocalCompile(unittest.TestCase):
             strict=True,
         ):
             torch.testing.assert_close(compiled, eager, rtol=0, atol=0)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestComplexRoPELocalCompile(unittest.TestCase):
+    def tearDown(self):
+        apply_local_compile([])
+        torch._dynamo.reset()
+
+    def _run(self, rope, query, key, positions, inverse):
+        query = query.detach().clone().requires_grad_()
+        key = key.detach().clone().requires_grad_()
+        if inverse:
+            inputs = (query,)
+            outputs = (rope(query, positions=positions, inverse=True),)
+        else:
+            inputs = (query, key)
+            outputs = rope(query, key, positions)
+        generator = torch.Generator(device="cuda").manual_seed(1)
+        grad_outputs = [
+            torch.randn(out.shape, dtype=out.dtype, device="cuda", generator=generator)
+            for out in outputs
+        ]
+        grads = torch.autograd.grad(outputs, inputs, grad_outputs)
+        return outputs, grads
+
+    def test_compiled_matches_eager_complex(self):
+        torch.manual_seed(42)
+        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        query = torch.randn(64, 8, 64, device="cuda", dtype=torch.bfloat16)
+        key = torch.randn(64, 1, 64, device="cuda", dtype=torch.bfloat16)
+        positions = torch.randperm(128, device="cuda")[:64]
+
+        for inverse in (False, True):
+            apply_local_compile([])
+            eager_outputs, eager_grads = self._run(rope, query, key, positions, inverse)
+            apply_local_compile(["complex_rope"])
+            outputs, grads = self._run(rope, query, key, positions, inverse)
+            for compiled, eager in zip(
+                (*outputs, *grads), (*eager_outputs, *eager_grads), strict=True
+            ):
+                torch.testing.assert_close(compiled, eager)
+
+    def test_compiled_is_batch_invariant(self):
+        torch.manual_seed(42)
+        apply_local_compile(["complex_rope"])
+        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        query = torch.randn(64, 8, 64, device="cuda", dtype=torch.bfloat16)
+        key = torch.randn(64, 1, 64, device="cuda", dtype=torch.bfloat16)
+        positions = torch.randperm(128, device="cuda")[:64]
+        grad_query = torch.randn_like(query)
+        grad_key = torch.randn_like(key)
+
+        def run(query, key, positions, grad_query, grad_key):
+            query = query.detach().clone().requires_grad_()
+            key = key.detach().clone().requires_grad_()
+            outputs = rope(query, key, positions)
+            grads = torch.autograd.grad(outputs, (query, key), (grad_query, grad_key))
+            return (*outputs, *grads)
+
+        full = run(query, key, positions, grad_query, grad_key)
+        first, second = (
+            run(*inputs)
+            for inputs in zip(
+                query.chunk(2),
+                key.chunk(2),
+                positions.chunk(2),
+                grad_query.chunk(2),
+                grad_key.chunk(2),
+                strict=True,
+            )
+        )
+        for whole, *parts in zip(full, first, second, strict=True):
+            self.assertTrue(torch.equal(whole, torch.cat(parts)))
 
 
 if __name__ == "__main__":
