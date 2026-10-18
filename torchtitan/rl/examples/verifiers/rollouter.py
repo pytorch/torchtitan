@@ -28,7 +28,7 @@ from torchtitan.rl.examples.verifiers.data import (
     VerifiersTaskSample,
 )
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
-from torchtitan.rl.examples.verifiers.generation_server import (
+from torchtitan.rl.generator.generation_server import (
     GenerationServer,
     GROUP_ID_SAMPLING_PARAM,
     VerifiersGenerationMetadata,
