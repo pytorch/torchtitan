@@ -20,6 +20,11 @@ class GRPOLoss(DAPOLoss):
     just exposes a single ``clip_eps`` and reuses DAPOLoss's per-token surrogate.
     """
 
+    # TODO: Dr. GRPO (https://arxiv.org/abs/2503.20783, Sec. 3.2), as an opt-in field: divide
+    # by a constant (prompts x group size x max response tokens) instead of the loss-token
+    # count. Not done: no recipe uses it yet. Not the default: it changes every GRPO
+    # recipe's gradient scale.
+
     @dataclass(kw_only=True, slots=True)
     class Config(DAPOLoss.Config):
         clip_eps: float = 0.2
