@@ -36,6 +36,7 @@ from torch.distributed._functional_collectives import all_reduce
 
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.models.base.module import Module
 from torchtitan.tools.utils import device_type
@@ -162,6 +163,7 @@ class AuxLoss(Module):
         return partial_E
 
     @staticmethod
+    @local_compile("moe_aux_loss", batch_invariant=False)
     def _norm_sum_scores_over_tokens(
         scores_TE: torch.Tensor,
         padding_mask_T: torch.Tensor | None,
