@@ -299,7 +299,7 @@ def _validate_token_ids(value: object, *, field_name: str) -> list[int]:
 
 def _parse_sampling_config(value: object):
     """Convert Verifiers' vLLM sampling payload to TorchTitan config."""
-    from torchtitan.rl.generator.generator import SamplingConfig
+    from torchtitan.rl.generator.types import SamplingConfig
 
     if not isinstance(value, dict):
         raise ValueError("sampling_params must be an object")
