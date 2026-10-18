@@ -53,9 +53,10 @@ class VLLMCudaGraphConfig:
     capture_sizes: list[int] | None = None
     """Explicit CUDA graph capture batch sizes. When ``None`` (default), sizes are
     auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and the cap as
-    exact sizes. When set, these sizes are deduped and sorted. When expert
-    sequence parallelism is enabled, capture sizes that are not multiples of
-    its degree are removed."""
+    exact sizes. When set, these sizes are deduped and sorted (``FULL`` also drops
+    sizes above the model's ``max_context_length``). When expert sequence
+    parallelism is enabled, capture sizes that are not multiples of its degree
+    are removed."""
 
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
@@ -70,6 +71,7 @@ class VLLMCudaGraphConfig:
         self,
         *,
         max_num_seqs: int,
+        max_model_len: int,
         expert_sequence_parallel_size: int,
         enable_sequence_parallel: bool,
         max_num_batched_tokens: int | None = None,
@@ -84,7 +86,13 @@ class VLLMCudaGraphConfig:
         prefill, whose per-step token count is bounded by
         ``max_num_batched_tokens`` (the configured value, else
         ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it -- otherwise
-        prefill chunks larger than the cap fall back to eager.
+        prefill chunks larger than the cap fall back to eager. ``FULL`` also drops sizes
+        above ``max_model_len``: vLLM captures a size with dummy requests that long, and
+        one past ``max_model_len`` overruns its KV block table.
+
+            FULL, max_model_len=1000, auto sizes                 -> [1, 2, ..., 512, 1000]
+            FULL, max_model_len=1024, capture_sizes=[512, 2048]  -> [512]
+            FULL_DECODE_ONLY (one-token dummies)                 -> unchanged
 
         ``expert_sequence_parallel_size`` is the TP-axis shard count used by the
         internally sequence-sharded MoE path. A value greater than one removes
@@ -119,7 +127,7 @@ class VLLMCudaGraphConfig:
             _max_cuda_graph_capture_size = _DEFAULT_MAX_NUM_BATCHED_TOKENS
         cap = max_num_seqs
         if self.mode == "FULL":
-            cap = max(cap, _max_cuda_graph_capture_size)
+            cap = min(max(cap, _max_cuda_graph_capture_size), max_model_len)
         if self.capture_sizes is not None:
             if not self.capture_sizes or any(s <= 0 for s in self.capture_sizes):
                 raise ValueError(
@@ -137,6 +145,22 @@ class VLLMCudaGraphConfig:
             if cap not in sizes:
                 sizes.append(cap)
             sizes = sorted(sizes)
+
+        if self.mode == "FULL":
+            removed_sizes = [size for size in sizes if size > max_model_len]
+            if removed_sizes:
+                logger.warning(
+                    "CUDA graph capture sizes %s are removed because they exceed "
+                    "max_model_len %d",
+                    removed_sizes,
+                    max_model_len,
+                )
+            sizes = [size for size in sizes if size <= max_model_len]
+            if not sizes:
+                raise ValueError(
+                    f"No CUDA graph capture sizes are <= max_model_len {max_model_len}; "
+                    f"got capture_sizes {self.capture_sizes}"
+                )
 
         if expert_sequence_parallel_size > 1:
             removed_sizes = [
