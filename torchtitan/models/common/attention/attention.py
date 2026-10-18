@@ -105,6 +105,11 @@ class Attention(Module):
         n_heads: int
         inner_attention: InnerAttention.Config
 
+        @property
+        def softmax_scale(self) -> float | None:
+            """None selects the attention backend's default scale."""
+            return None
+
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
 

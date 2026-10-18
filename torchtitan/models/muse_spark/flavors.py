@@ -35,6 +35,7 @@ from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
     dense_sequence_parallel_placement,
     gqa_attention_sharding_config,
+    head_norm_sharding_config,
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
     norm_sharding_config,
@@ -103,7 +104,6 @@ from .sharding import (
     audio_wrapper_sharding_config,
     compressed_moe_linear_sharding_config,
     muse_spark_activation_placement,
-    per_head_norm_sharding_config,
     perception_norm_sharding_config,
     post_expert_norm_sharding_config,
     residual_gate_sharding_config,
@@ -161,7 +161,7 @@ def _audio_block_config(*, hidden_size: int, kernel_size: int) -> _AudioBlock.Co
         norm=RMSNorm.Config(
             normalized_shape=hidden_size,
             eps=_AUDIO_NORM_EPS,
-            sharding_config=audio_invariant_state_sharding_config(input_name="x"),
+            sharding_config=audio_invariant_state_sharding_config(),
         ),
         linear1=Linear.Config(
             in_features=hidden_size,
@@ -215,9 +215,7 @@ def muse_spark_audio_encoder_config(
                     norm=RMSNorm.Config(
                         normalized_shape=hidden_size,
                         eps=_AUDIO_NORM_EPS,
-                        sharding_config=audio_invariant_state_sharding_config(
-                            input_name="x"
-                        ),
+                        sharding_config=audio_invariant_state_sharding_config(),
                     ),
                     sharding_config=audio_wrapper_sharding_config("value_LC"),
                 ),
@@ -242,7 +240,7 @@ def muse_spark_audio_encoder_config(
         norm=RMSNorm.Config(
             normalized_shape=stage_input,
             eps=_AUDIO_NORM_EPS,
-            sharding_config=audio_invariant_state_sharding_config(input_name="x"),
+            sharding_config=audio_invariant_state_sharding_config(),
         ),
         o_proj=Linear.Config(
             in_features=stage_input,
@@ -253,7 +251,7 @@ def muse_spark_audio_encoder_config(
         dual_norm=RMSNorm.Config(
             normalized_shape=output_size,
             eps=_AUDIO_NORM_EPS,
-            sharding_config=audio_invariant_state_sharding_config(input_name="x"),
+            sharding_config=audio_invariant_state_sharding_config(),
         ),
         sharding_config=audio_encoder_sharding_config(),
     )
@@ -415,7 +413,7 @@ def _attention_config(
             normalized_shape=head_dim,
             eps=_NORM_EPS,
             elementwise_affine=False,
-            sharding_config=per_head_norm_sharding_config(),
+            sharding_config=head_norm_sharding_config(),
         ),
         inner_attention=inner_attention,
         rope=(
@@ -437,7 +435,7 @@ def _attention_config(
             normalized_shape=head_dim,
             eps=_NORM_EPS,
             elementwise_affine=False,
-            sharding_config=per_head_norm_sharding_config(),
+            sharding_config=head_norm_sharding_config(),
         ),
         output_gate=ColumnParallelLinear.Config(
             in_features=dim,

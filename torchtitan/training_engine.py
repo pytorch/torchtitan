@@ -35,6 +35,9 @@ from torchtitan.distributed.cuda_graph import (
     wrap_fwd_bwd_with_cuda_graph,
     wrap_with_cuda_graph,
 )
+from torchtitan.distributed.pipeline_parallel import (
+    prepare_pipeline_schedule_for_cuda_graph,
+)
 from torchtitan.models.base import BaseModel
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
@@ -161,7 +164,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "The optimization CUDA graph requires CUDA graphs to be enabled."
                 )
-            if self.training.cuda_graph_per_accumulation_group:
+            if self.training.cuda_graph_per_microbatch_group:
                 if self.training.disable_cuda_graphs:
                     raise ValueError(
                         "Per-group CUDA graphs require CUDA graphs to be enabled."
@@ -242,7 +245,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     device_memory_monitor: DeviceMemoryMonitor
     model_device_mem_stats: DeviceMemStats
     _run_forward_backward: _ForwardBackwardFn
-    _cuda_graph_per_accumulation_group_enabled: bool
+    _forward_backward_cuda_graph_enabled: bool
+    _cuda_graph_per_microbatch_group_enabled: bool
     _global_routing_token_counts: torch.Tensor
     _dist_moe_runtime: "DistMoeRuntime | None"
 
@@ -265,7 +269,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_completed_steps = 0
         self.ntokens_seen = 0
         self.sdc_replayer = None
-        self._cuda_graph_per_accumulation_group_enabled = False
+        self._forward_backward_cuda_graph_enabled = False
+        self._cuda_graph_per_microbatch_group_enabled = False
         self._dist_moe_runtime = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
@@ -280,6 +285,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         device_module.set_device(self.device)
         config = self.config
         set_batch_invariance(config.debug.batch_invariant)
+        # TODO: Remove this workaround once supported PyTorch builds ship
+        # NCCL >= 2.32.3.
+        dist_utils.configure_nccl_for_ulysses(
+            self.model_config,
+            device_type=self.device.type,
+            comm_backend=config.comm.backend,
+        )
         with sl.log_trace_span("torch_distributed_init"):
             topology = dist_utils.init_distributed(
                 config.comm,
@@ -502,7 +514,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             ),
         )
         self._run_forward_backward = eager_forward_backward_fn
-        if self.config.training.disable_cuda_graphs or not cuda_graphs_supported():
+        self._forward_backward_cuda_graph_enabled = (
+            not self.config.training.disable_cuda_graphs and cuda_graphs_supported()
+        )
+        if not self._forward_backward_cuda_graph_enabled:
             self._run_forward_backward = partial(
                 eager_forward_backward_fn,
                 preprocess_microbatch_groups_lazily=(
@@ -511,10 +526,32 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             )
             return
 
-        if self.config.training.cuda_graph_per_accumulation_group:
+        def prepare_for_capture(microbatch_groups, global_loss_token_counts) -> None:
+            """Prepare training PP metadata outside capture.
+
+            Eval can change the schedule mode after training warmup. Rebuilding
+            metadata can synchronize with the CPU, which capture does not allow.
+            """
+            arg_mbs, kwarg_mbs, target_mbs = microbatch_groups[0]
+            with self.parallelism_context.activate_spmd(
+                typechecking=self.config.debug.spmd_typechecking,
+            ):
+                prepare_pipeline_schedule_for_cuda_graph(
+                    self.pp_schedule,
+                    args=arg_mbs[0] if arg_mbs is not None else (),
+                    kwargs=kwarg_mbs[0],
+                    target=target_mbs[0] if target_mbs is not None else None,
+                    loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
+                )
+
+        if self.config.training.cuda_graph_per_microbatch_group:
             graph_group_runner = wrap_with_cuda_graph(
                 eager_forward_backward_fn,
                 num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                prepare_for_capture=prepare_for_capture
+                if self.parallelism_context.pp_enabled
+                else None,
+                name="forward_backward",
             )
 
             # TODO: Use multiple CUDA graphs to support variable group counts
@@ -542,7 +579,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 assert accumulated_loss is not None
                 return ForwardBackwardResult(accumulated_loss, loss_metrics)
 
-            self._cuda_graph_per_accumulation_group_enabled = True
+            self._cuda_graph_per_microbatch_group_enabled = True
             self._run_forward_backward = run_forward_backward_groups
             return
 
@@ -554,6 +591,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 for parameter in model_part.parameters()
             ),
             num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+            prepare_for_capture=prepare_for_capture
+            if self.parallelism_context.pp_enabled
+            else None,
+            name="forward_backward",
         )
 
     @sl.log_trace_span("forward_backward")
@@ -570,7 +611,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_accumulation_steps = len(microbatch_groups)
         self.garbage_collector.run(self.num_completed_steps + 1)
         self.optim.zero_grad(
-            set_to_none=not self._cuda_graph_per_accumulation_group_enabled
+            set_to_none=not self._cuda_graph_per_microbatch_group_enabled
         )
         global_loss_token_counts = torch.as_tensor(
             global_loss_token_counts, device=self.device
@@ -861,12 +902,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             del self.profiler
 
     def close(self) -> None:
-        """Release CUDA graph and checkpoint resources owned by the trainer."""
+        """Finish pending work and release CUDA graph resources."""
         self.close_profiler()
-        if not self.config.training.disable_cuda_graphs:
-            cuda_graph_teardown()
         if self._dist_moe_runtime is not None:
             self._dist_moe_runtime.close()
             self._dist_moe_runtime = None
         if hasattr(self, "checkpointer"):
             self.checkpointer.close()
+        cuda_graph_teardown()
