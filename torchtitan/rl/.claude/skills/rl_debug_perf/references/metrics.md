@@ -25,7 +25,7 @@ Sampled at the end of each step.
 - `generator/queue_time_ms/mean`: time a request waited for a seat. A few ms is nothing; compare it with the inter-token latency.
 - `generator/inter_token_latency_ms/mean`, `generator/time_to_first_token_ms/mean`, `generator/decode_time_ms/{mean,max}`. A `decode_time_ms/max` near `max_tokens * ITL` means truncated samples set the group tail.
 - `generator/num_cached_tokens/mean`: prompt tokens served from the prefix cache.
-- KV usage, running and waiting requests, preemptions: vLLM's periodic `Running: N reqs, Waiting: N reqs, GPU KV cache usage: X%` log lines, or `generator.vllm_stat_logger = VllmOtelStatLogger.Config()` with `OTEL_METRICS_EXPORTER=jsonl` ([vLLM engine metrics](../../../../observability/metrics/README.md#vllm-engine-metrics)).
+- KV usage, running and waiting requests, preemptions: vLLM's periodic `Running: N reqs, Waiting: N reqs, GPU KV cache usage: X%` log lines, or `generator.engine.stat_logger = VllmOtelStatLogger.Config()` with `OTEL_METRICS_EXPORTER=jsonl` ([vLLM engine metrics](../../../../observability/metrics/README.md#vllm-engine-metrics)).
 
 ## Rollouts and data
 

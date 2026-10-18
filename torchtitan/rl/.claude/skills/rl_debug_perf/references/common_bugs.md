@@ -72,7 +72,7 @@ Inter-token latency in the hundreds of ms can mean the generator runs eager inst
 - **Fix, Blackwell (SM100+):** Dist-MoE on the generator, as in `rl_grpo_moe_debug_dist_moe_tp2_ep4` (`torchtitan_recipes/tests/rl/alphabet_sort.py`). It needs the optional `dist_moe` package.
   ```python
   config.generator.dist_moe_runtime = DistMoeRuntime.Config(scratch_capacity_factor=4.0, inference=True)
-  config.generator.cuda_graph.mode = "FULL"
+  config.generator.engine.cuda_graph.mode = "FULL"
   config.generator = apply_transforms(config.generator, [DistMoeTransform()])
   ```
   For Dist-MoE on the trainer too, also set `trainer.dist_moe_runtime` and `trainer.activation_remat = ActivationRematConfig(save_regions=[])`: full activation checkpointing replays Dist-MoE's forward and corrupts its planner.
