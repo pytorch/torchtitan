@@ -4,9 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import re
 from dataclasses import dataclass
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+_GENERATION_TAG = re.compile(r"(\{%[-+]?\s*)(end)?generation(\s*[-+]?%\})")
 
 
 class HFBackendTokenizer(HuggingFaceTokenizer):
@@ -31,8 +34,22 @@ class HFBackendTokenizer(HuggingFaceTokenizer):
                 self.eos_token = eos_str
                 self.eos_id = self.tokenizer.token_to_id(eos_str)
 
+    def set_chat_template(self, template: str) -> None:
+        # transformers uses {% generation %} tags to build assistant masks (see
+        # transformers.utils.chat_template_utils.AssistantTracker), which are not
+        # built here, so the tagged block is rendered as a plain with-block.
+        template = _GENERATION_TAG.sub(
+            lambda m: m[1] + ("endwith" if m[2] else "with") + m[3], template
+        )
+        super().set_chat_template(template)
+
     def apply_chat_template(self, messages, **kwargs):
         kwargs.setdefault("bos_token", self.bos_token or "")
         kwargs.setdefault("eos_token", self.eos_token or "")
-        kwargs.setdefault("add_generation_prompt", True)
         return super().apply_chat_template(messages, **kwargs)
+
+    def encode(self, text: str, **kwargs) -> list[int]:
+        # Chat templates like Llama 3's render bos_token; don't prepend a second BOS.
+        if self.bos_token and text.startswith(self.bos_token):
+            kwargs["add_bos"] = False
+        return super().encode(text, **kwargs)

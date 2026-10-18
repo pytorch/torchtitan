@@ -30,7 +30,7 @@ from torchtitan.config.transform import (
 )
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import build_model_config, DeepSeekV3Model
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 from torchtitan.trainer import Trainer
@@ -73,7 +73,7 @@ def deepseek_v3_mxfp8_linear_converter_config(
     projections retain BF16 inputs. The language-model head is opt-in because
     some recipes intentionally keep logits on the high-precision path.
     """
-    fqns = ["attention", "shared_experts", "feed_forward"]
+    fqns = ["attention", "shared_experts", "feed_forward.w13", "feed_forward.w2"]
     if include_lm_head:
         fqns.append("lm_head")
     return MXFP8LinearConverter.Config(

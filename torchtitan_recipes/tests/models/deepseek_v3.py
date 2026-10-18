@@ -30,7 +30,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 
 from torchtitan.models.deepseek_v3 import build_model_config
 from torchtitan.models.deepseek_v3.mtp import MTPLoss

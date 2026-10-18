@@ -161,6 +161,7 @@ class TestLoss(unittest.TestCase):
             [False, False, False, False, False, False, True, True]
         )
         model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
+        routing_token_counts = torch.tensor([6, 4, 2])  # one per depth
         with patch(
             "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
@@ -176,8 +177,10 @@ class TestLoss(unittest.TestCase):
                 parallelism=SimpleNamespace(),
                 max_num_documents=2,
                 max_context_length=8,
+                global_routing_token_counts=routing_token_counts,
             )
 
+        assert extra_kwargs["aux_loss_denominators"] is routing_token_counts
         assert isinstance(input_tokens, tuple)
         assert isinstance(loss_labels, tuple)
         torch.testing.assert_close(input_tokens[0], tokens)

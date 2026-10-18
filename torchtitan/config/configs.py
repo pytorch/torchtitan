@@ -83,19 +83,25 @@ class TrainingConfig:
     capture.
     """
 
-    cuda_graph_per_accumulation_group: bool = False
-    """Capture and replay one uniform gradient-accumulation group.
+    cuda_graph_per_microbatch_group: bool = False
+    """Capture and replay one uniform microbatch group.
 
     Every group must have the same input structure, tensor metadata, and set of
     parameters receiving gradients. Each replay performs its own FSDP gradient
     reduction and reshard. With HSDP, each replay also performs the replica
     all-reduce. This costs one all-reduce per group and may not be bitwise
     identical to eager accumulation, which all-reduces once.
-    This mode supports RL workloads where the number of accumulation groups can
+    This mode supports RL workloads where the number of microbatch groups can
     change.
     """
     # TODO: Remove this option when multiple CUDA graphs support variable group
     # counts without duplicating the gradient accumulation logic.
+
+    preprocess_microbatch_groups_lazily: bool = False
+    """Preprocess each microbatch group (host-to-device copy, masks) just before its
+    forward/backward, not all groups up front, so RL can read the next microbatches
+    during training. Requires ``disable_cuda_graphs=True`` and no SDC replay.
+    """
 
     dtype: Literal["bfloat16", "float32"] = "float32"
     """

@@ -1225,14 +1225,15 @@ class HFTransformerModel(BaseModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build the attention mask (when positions are present), CP-shard, return."""
-        del max_num_documents, max_context_length
+        del max_num_documents, max_context_length, global_routing_token_counts
         # Function-local import avoids a circular import.
         from torchtitan.distributed import context_parallel
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types
         from torchtitan.models.common.attention.cp_attention import (
-            KVAllGatherCPFlexInnerAttention,
+            AllGatherKVFlexInnerAttention,
         )
         from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
@@ -1265,7 +1266,7 @@ class HFTransformerModel(BaseModel):
             if "attention_metadata" in input_dict:
                 input_dict[
                     "attention_metadata"
-                ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+                ] = AllGatherKVFlexInnerAttention.prepare_cp_metadata(
                     input_dict["attention_metadata"],
                     permutation=permutation,
                 )

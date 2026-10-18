@@ -18,11 +18,11 @@ from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
+    FeedForward,
     HiMidLoLinear,
     Linear,
     RMSNorm,
@@ -33,6 +33,7 @@ from torchtitan.models.common import (
     TransformerBlock,
     UnaryActivationFn,
 )
+from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -54,13 +55,14 @@ from torchtitan.models.common.decoder_sharding import (
     token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
-from torchtitan.models.common.moe_sharding import (
+from torchtitan.models.common.moe.sharding import (
     router_gate_sharding_config,
     router_sharding_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 
-from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
+from .attention import DeepSeekMLAAttention
+from .model import DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
 from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
 from .sharding import (
@@ -160,10 +162,12 @@ def make_mla_attention_config(
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
     rope: RoPE.Config,
-    attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
+    attention_config_factory: Callable[
+        [str], InnerAttention.Config
+    ] = get_attention_config,
     enable_sp: bool,
-) -> Attention.Config:
-    """Build a fully-specified, sharded DeepSeek V3 MLA ``Attention.Config``.
+) -> DeepSeekMLAAttention.Config:
+    """Build a fully-specified, sharded DeepSeek V3 MLA ``DeepSeekMLAAttention.Config``.
 
     All Linear and RMSNorm sub-configs have their dimensional fields set. When
     ``q_lora_rank == 0``, sets ``wq`` (not ``wq_a``/``wq_b``); when
@@ -189,7 +193,7 @@ def make_mla_attention_config(
         wq_a = None
         wq_b = None
         # q_norm is unused when q_lora_rank == 0 (never built), but the field is
-        # required on Attention.Config so we supply a placeholder.
+        # required on DeepSeekMLAAttention.Config so we supply a placeholder.
         q_norm = RMSNorm.Config(normalized_shape=1, eps=1e-6, param_init=norm_init)
     else:
         wq = None
@@ -212,7 +216,7 @@ def make_mla_attention_config(
             sharding_config=replicated_state_sharding_config("weight"),
         )
 
-    return Attention.Config(
+    return DeepSeekMLAAttention.Config(
         dim=dim,
         n_heads=n_heads,
         q_lora_rank=q_lora_rank,
@@ -284,7 +288,9 @@ def build_mla_moe_layers(
     depth_init: Callable[[int], dict[str, Callable]],
     depth_experts_init: Callable[[int], dict[str, Callable]],
     rope: RoPE.Config,
-    attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
+    attention_config_factory: Callable[
+        [str], InnerAttention.Config
+    ] = get_attention_config,
     router_config_factory: Callable[
         ..., TokenChoiceTopKRouter.Config
     ] = make_router_config,
@@ -294,8 +300,8 @@ def build_mla_moe_layers(
 ) -> list[TransformerBlock.Config]:
     """Build the sharded per-layer ``DeepSeekV3TransformerBlock`` configs.
 
-    Layers with layer_id < n_dense_layers get a dense FeedForward and no MoE.
-    Layers with layer_id >= n_dense_layers get a MoE and no FeedForward.
+    Layers with layer_id < n_dense_layers get a DenseFeedForward.
+    Layers with layer_id >= n_dense_layers get an MoE.
 
     Router and expert inits are constructed per-layer so depth-scaled
     initializers are correct for each layer's position. The router factory lets
@@ -326,6 +332,7 @@ def build_mla_moe_layers(
             enable_sp=enable_sp,
         )
 
+        ffn_cfg: FeedForward.Config
         if layer_id < n_dense_layers:
             ffn_cfg = make_ffn_config(
                 dim=dim,
@@ -334,10 +341,8 @@ def build_mla_moe_layers(
                 w2_param_init=depth_init(layer_id),
                 enable_sp=enable_sp,
             )
-            moe_cfg = None
         else:
-            ffn_cfg = None
-            moe_cfg = make_moe_config(
+            ffn_cfg = make_moe_config(
                 num_experts=num_experts,
                 router=router_config_factory(
                     dim=dim,
@@ -384,7 +389,6 @@ def build_mla_moe_layers(
                     sharding_config=norm_sharding,
                 ),
                 feed_forward=ffn_cfg,
-                moe=moe_cfg,
                 sharding_config=first_layer_sharding_config if layer_id == 0 else None,
             )
         )
@@ -427,7 +431,6 @@ def _build_mtp_layers(
             MTPTransformerBlock.Config(
                 attention=copy.deepcopy(inner_cfg.attention),
                 feed_forward=copy.deepcopy(inner_cfg.feed_forward),
-                moe=copy.deepcopy(inner_cfg.moe),
                 attention_norm=copy.deepcopy(inner_cfg.attention_norm),
                 ffn_norm=copy.deepcopy(inner_cfg.ffn_norm),
                 enorm=RMSNorm.Config(

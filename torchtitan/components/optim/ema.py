@@ -438,6 +438,8 @@ class EMA(OptimizersContainer):
             device_mesh=p.device_mesh,
             placements=p.placements,
             run_check=False,
+            shape=p.shape,
+            stride=p.stride(),
         )
 
     def _scratch_chunks(
