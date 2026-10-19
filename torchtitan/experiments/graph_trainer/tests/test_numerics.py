@@ -490,6 +490,26 @@ class TestGraphTrainerNumerics(unittest.TestCase):
                 "deepseek_v3_hybridep_chunk_control", target
             )
 
+    def test_hybridep_combined_pp_overlap_and_paging(self):
+        """Compare real PP2/EP2 training with full pipeline CUDA replay."""
+        for target in (
+            "deepseek_v3_hybridep_combined_pp_overlap",
+            "deepseek_v3_hybridep_combined_pp_overlap_paged",
+        ):
+            self._assert_hybridep_training_matches(
+                "deepseek_v3_hybridep_combined_pp_control", target
+            )
+
+    def test_hybridep_dual_pipe_v_overlap_and_paging(self):
+        """Exercise DualPipeV full and dI/dW backward with native varlen attention."""
+        for target in (
+            "deepseek_v3_hybridep_dual_pipe_v_overlap",
+            "deepseek_v3_hybridep_dual_pipe_v_overlap_paged",
+        ):
+            self._assert_hybridep_training_matches(
+                "deepseek_v3_hybridep_dual_pipe_v_control", target
+            )
+
     def test_dense_llama3_hsdp_gradient_accumulation_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_hsdp_llama3_gradient_accumulation_loss_compare())
 
@@ -498,6 +518,14 @@ class TestGraphTrainerNumerics(unittest.TestCase):
         self._assert_hybridep_training_matches(
             "deepseek_v3_hybridep_no_remat_control",
             "deepseek_v3_hybridep_no_remat_paged",
+            no_remat=True,
+        )
+
+    def test_hybridep_combined_pp_no_remat_paging(self):
+        """Compare no-remat combined PP with and without paged overlap."""
+        self._assert_hybridep_training_matches(
+            "deepseek_v3_hybridep_combined_pp_no_remat_control",
+            "deepseek_v3_hybridep_combined_pp_no_remat_paged",
             no_remat=True,
         )
 

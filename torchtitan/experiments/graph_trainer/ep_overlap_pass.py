@@ -214,11 +214,14 @@ def _prioritized_order(
     launches: set[fx.Node],
     waits: set[fx.Node],
     regions: list[tuple[set[fx.Node], set[fx.Node]]],
+    yield_to: dict[fx.Node, set[fx.Node]] | None = None,
 ) -> list[fx.Node]:
     """Topologically schedule ordered scopes with early launches and late waits.
 
     Each region contains its eligible scope and the owned body whose completion
-    advances to the next region.
+    advances to the next region. A multiplexed pair uses one whole-graph scope.
+    Optional launch boundaries prefer complementary work among equally ranked
+    ready nodes, preventing one source from draining all its completion waits.
     """
     successors: dict[fx.Node, list[fx.Node]] = {node: [] for node in deps}
     for node, predecessors in deps.items():
@@ -229,6 +232,7 @@ def _prioritized_order(
     emitted = set()
     result = []
     active_region = 0
+    preferred = set()
     while ready:
         while active_region < len(regions) and regions[active_region][1] <= emitted:
             active_region += 1
@@ -240,6 +244,7 @@ def _prioritized_order(
                 scoped_ready,
                 key=lambda candidate: (
                     0 if candidate in launches else 2 if candidate in waits else 1,
+                    candidate not in preferred,
                     order[candidate],
                 ),
             )
@@ -248,6 +253,8 @@ def _prioritized_order(
         ready.remove(node)
         emitted.add(node)
         result.append(node)
+        if yield_to is not None and node in yield_to:
+            preferred = yield_to[node]
         for successor in successors[node]:
             remaining[successor] -= 1
             if remaining[successor] == 0:

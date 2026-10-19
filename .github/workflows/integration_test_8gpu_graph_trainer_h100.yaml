@@ -111,6 +111,9 @@ jobs:
         CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics::test_hybridep_eager_overlap -v
         CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics::test_hybridep_eager_paging -v
         CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics::test_hybridep_eager_no_remat_paging -v
+        CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics::test_hybridep_combined_pp_overlap_and_paging -v
+        CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics::test_hybridep_dual_pipe_v_overlap_and_paging -v
+        CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics::test_hybridep_combined_pp_no_remat_paging -v
 
         # Run precompile integration tests (DSv3 with EP; Llama3 runs in default workflow)
         NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.run_precompile_tests $RUNNER_TEMP/artifacts-to-be-uploaded/precompile --ngpu 8 --test_name aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep
