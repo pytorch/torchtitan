@@ -141,6 +141,10 @@ class BaseLogger:
     def log(self, metrics: dict[str, Any], step: int) -> None:
         pass
 
+    def commit(self) -> None:
+        """Push the current step's metrics now; call it after the step's last log."""
+        pass
+
     def close(self) -> None:
         pass
 
@@ -176,6 +180,7 @@ class WandBLogger(BaseLogger):
 
         self.wandb = wandb
         self.tag = tag
+        self._uncommitted_step: int | None = None
 
         # Create logging directory
         os.makedirs(log_dir, exist_ok=True)
@@ -206,7 +211,14 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        self.wandb.log(wandb_metrics, step=step, commit=True)
+        # Don't commit here: W&B drops later logs to a committed step, e.g. validation after training.
+        self.wandb.log(wandb_metrics, step=step)
+        self._uncommitted_step = step
+
+    def commit(self) -> None:
+        if self._uncommitted_step is not None:
+            self.wandb.log({}, step=self._uncommitted_step, commit=True)
+            self._uncommitted_step = None
 
     def close(self) -> None:
         if self.wandb.run is not None:
@@ -225,6 +237,10 @@ class LoggerContainer(BaseLogger):
     def log(self, metrics: dict[str, Any], step: int) -> None:
         for logger_instance in self._loggers:
             logger_instance.log(metrics, step)
+
+    def commit(self) -> None:
+        for logger_instance in self._loggers:
+            logger_instance.commit()
 
     @property
     def number_of_loggers(self) -> int:
@@ -637,6 +653,9 @@ class MetricsProcessor(Configurable):
         )
 
         self.step_last_log = step
+
+    def commit(self):
+        self.logger.commit()
 
     def close(self):
         self.logger.close()
