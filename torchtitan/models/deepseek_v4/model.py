@@ -181,6 +181,7 @@ class DeepSeekV4Model(Decoder):
                     "fused_binary_activation",
                     "fp32_to_bf16_split",
                     "rope",
+                    "moe_router_topk",
                 ]
             )
         )
