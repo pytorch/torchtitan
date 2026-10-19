@@ -34,7 +34,7 @@ class _TestGradientClipper(GradientClipper):
         super().__init__(config)
         self.calls = []
 
-    def __call__(
+    def clip_grad_norm_(
         self,
         parameters: list[torch.nn.Parameter],
         max_norm: float | int,
@@ -59,7 +59,7 @@ def test_default_gradient_clipper_uses_distributed_clip_grad_norm() -> None:
         "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_",
         return_value=expected_grad_norm,
     ) as clip_grad_norm:
-        grad_norm = gradient_clipper(
+        grad_norm = gradient_clipper.clip_grad_norm_(
             parameters,
             1.0,
             parallelism_context=parallelism_context,
@@ -236,28 +236,6 @@ def test_optim_update_uses_configured_grad_clip() -> None:
     assert gradient_clipper.calls == [(parameters, 1.0, parallelism_context)]
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
     optim.optimizers.step.assert_called_once_with()
-
-
-@pytest.mark.parametrize(
-    ("grad_norm", "expected_error", "match"),
-    [
-        (2.0, TypeError, "torch.Tensor"),
-        (torch.tensor([2.0]), ValueError, "zero-dimensional"),
-    ],
-)
-def test_optim_rejects_invalid_grad_norm(
-    grad_norm: object,
-    expected_error: type[Exception],
-    match: str,
-) -> None:
-    optim = object.__new__(Optim)
-    optim.config = SimpleNamespace(max_norm=1.0)
-    optim.parallelism_context = MagicMock()
-    optim.parameters = [torch.nn.Parameter(torch.tensor(1.0))]
-    optim.gradient_clipper = MagicMock(return_value=grad_norm)
-
-    with pytest.raises(expected_error, match=match):
-        optim._clip_grad_norm()
 
 
 @pytest.mark.parametrize("cuda_initialized", [False, True])

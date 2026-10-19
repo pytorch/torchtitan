@@ -36,7 +36,7 @@ class GradientClipper(Configurable):
     def __init__(self, config: Config) -> None:
         self.config = config
 
-    def __call__(
+    def clip_grad_norm_(
         self,
         parameters: list[nn.Parameter],
         max_norm: float | int,
@@ -158,22 +158,13 @@ class Optim(Configurable):
             self.ema.step(current_step)
         return grad_norm
 
-    def _clip_grad_norm(self) -> torch.Tensor:
-        """Clip gradients and return their pre-clip global L2 norm."""
-        grad_norm = self.gradient_clipper(
+    def _update(self, loss: torch.Tensor) -> torch.Tensor:
+        """Clip gradients, check loss and gradient norm, then update parameters."""
+        grad_norm = self.gradient_clipper.clip_grad_norm_(
             self.parameters,
             self.config.max_norm,
             parallelism_context=self.parallelism_context,
         )
-        if not isinstance(grad_norm, torch.Tensor):
-            raise TypeError("Gradient clipping must return a torch.Tensor.")
-        if grad_norm.ndim != 0:
-            raise ValueError("Gradient clipping must return a zero-dimensional tensor.")
-        return grad_norm
-
-    def _update(self, loss: torch.Tensor) -> torch.Tensor:
-        """Clip gradients, check loss and gradient norm, then update parameters."""
-        grad_norm = self._clip_grad_norm()
         loss_is_finite = torch.isfinite(loss).all().to(torch.int32)
         if not self.parallelism_context.pp_enabled or self.pp_has_last_stage:
             loss_mesh = self.parallelism_context.get_optional_mesh("loss")

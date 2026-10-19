@@ -166,12 +166,13 @@ class TestTorchFTNonFiniteStep(unittest.TestCase):
 
     def test_finite_step_uses_configured_grad_clip(self):
         optim, manager = self._optim()
-        gradient_clipper = Mock(return_value=torch.tensor(2.0))
+        gradient_clipper = Mock()
+        gradient_clipper.clip_grad_norm_.return_value = torch.tensor(2.0)
         optim.gradient_clipper = gradient_clipper
 
         grad_norm = optim._update(torch.tensor(1.0))
 
-        gradient_clipper.assert_called_once_with(
+        gradient_clipper.clip_grad_norm_.assert_called_once_with(
             optim.parameters,
             optim.config.max_norm,
             parallelism_context=optim.parallelism_context,

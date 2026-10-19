@@ -126,7 +126,11 @@ class TorchFTOptim(Optim):
         if self._quorum_manager is None:
             return super()._update(loss)
         # Matches Optim._update except for the finite check.
-        grad_norm = self._clip_grad_norm()
+        grad_norm = self.gradient_clipper.clip_grad_norm_(
+            self.parameters,
+            self.config.max_norm,
+            parallelism_context=self.parallelism_context,
+        )
         loss_is_finite = torch.isfinite(loss).all().to(torch.int32)
         if not self.parallelism_context.pp_enabled or self.pp_has_last_stage:
             loss_mesh = self.parallelism_context.get_optional_mesh("loss")
