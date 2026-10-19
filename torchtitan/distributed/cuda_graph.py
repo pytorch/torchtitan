@@ -325,15 +325,9 @@ def get_cuspy_cuda_graph_annotation_config(
     launch stack, which needs the CUPTI backend.
 
     Returns ``None`` when graph annotations are unavailable, so capture does not
-    take a CUPTI subscription for nothing.
+    take a CUPTI subscription for nothing; the profiler warns about that once.
     """
     if not torch.cuda.graph_annotations.is_available():
-        logger.warning(
-            "CUDA graph annotations are unavailable (see "
-            "torch.cuda.graph_annotations.is_available for requirements); kernels "
-            "replayed from CUDA graphs will not carry process-group metadata in the "
-            "Cuspy trace."
-        )
         return None
     config: dict[str, Any] = {
         "backend": "cupti",

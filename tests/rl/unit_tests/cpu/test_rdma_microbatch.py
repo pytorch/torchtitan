@@ -187,7 +187,7 @@ def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> N
     )
     asyncio.run(batcher.maybe_release_oldest_batch())
 
-    assert isinstance(batch.microbatches[0][0], TrainingMicrobatch)
+    assert isinstance(batch.microbatch_groups[0][0][0], TrainingMicrobatch)
 
 
 def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> None:
@@ -205,7 +205,8 @@ def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> No
     buffers = [
         [
             leaf.buffer
-            for row in batch.microbatches
+            for group in batch.microbatch_groups
+            for row in group
             for microbatch in row
             for leaf in pytree.tree_leaves(microbatch.fields)
             if isinstance(leaf, _TensorRef)
@@ -214,7 +215,10 @@ def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> No
     ]
     assert buffers[0] and all(buffer.dropped for buffer in buffers[0])
     assert buffers[1] and not any(buffer.dropped for buffer in buffers[1])
-    assert [batch.microbatches[0][0].batch_index for batch in batches] == [0, 1]
+    assert [batch.microbatch_groups[0][0][0].batch_index for batch in batches] == [
+        0,
+        1,
+    ]
 
 
 def _fake_rdma_microbatch(index: int, started: list[int]) -> SimpleNamespace:
@@ -326,15 +330,15 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
                     training_sample_group=group
                 )
                 # All 4 ranks read at once, while the previous batch is still registered.
-                columns = list(
-                    (await ranks.read_column.call(batch.microbatches)).values()
-                )
+                rows = [row for group in batch.microbatch_groups for row in group]
+                columns = list((await ranks.read_column.call(rows)).values())
                 for dp_rank, column in enumerate(columns):
                     torch.testing.assert_close(
                         [dataclasses.asdict(microbatch) for microbatch in column],
                         [
                             dataclasses.asdict(row[dp_rank])
-                            for row in expected.microbatches
+                            for group in expected.microbatch_groups
+                            for row in group
                         ],
                         rtol=0,
                         atol=0,
