@@ -543,6 +543,8 @@ class RolloutWorker(Configurable):
                             completion_logprobs=np.asarray(
                                 completion.token_logprobs, dtype=np.float32
                             ),
+                            completion_topk_token_ids=completion.topk_token_ids,
+                            completion_topk_logprobs=completion.topk_logprobs,
                             completion_message=next_env_step.completion_message,
                             env_messages=next_env_step.env_messages,
                             env_rewards=next_env_step.env_rewards,

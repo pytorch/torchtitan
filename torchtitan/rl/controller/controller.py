@@ -101,6 +101,7 @@ from typing import Any
 # and in train.py; see the note there.
 import torch  # noqa: F401
 
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
@@ -127,6 +128,7 @@ from torchtitan.rl.rollout.types import GenerateFn, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.trainer.controller_state import DATALOADER_STATE_KEY
+from torchtitan.rl.trainer.losses import ScoreCenteringLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.tools.garbage_collector import GarbageCollector
 
@@ -381,6 +383,18 @@ class Controller(Configurable):
                         f"by sequence parallel degree ({sp_degree})."
                     )
 
+            loss_config = self.trainer.loss
+            if isinstance(loss_config, ChunkedLossWrapper.Config):
+                loss_config = loss_config.loss_fn
+            uses_score_centering = isinstance(loss_config, ScoreCenteringLoss.Config)
+            if uses_score_centering != (self.generator.sampling.num_topk_logprobs > 0):
+                raise ValueError(
+                    "ScoreCenteringLoss needs generator.sampling.num_topk_logprobs > 0, "
+                    "and other losses need 0 (they take no top-k inputs). Got "
+                    f"{type(loss_config).__qualname__} with num_topk_logprobs="
+                    f"{self.generator.sampling.num_topk_logprobs}."
+                )
+
             # TODO: add a check so that all seq_len related variables make sense
             # e.g. rollout max length cannot be larger than the model max_seq_len
             # or the packing len, etc.
@@ -596,6 +610,7 @@ class Controller(Configurable):
                 dp_degree=self.trainer_dp_degree,
                 pad_id=self.tokenizer.eos_id,
                 temperature=self._sampling.temperature,
+                num_topk_logprobs=self._sampling.num_topk_logprobs,
                 output_dir=config.dump_folder,
                 enable_structured_logging=config.trainer.debug.enable_structured_logging,
             )
@@ -718,7 +733,10 @@ class Controller(Configurable):
         if steps == 0:  # skip validation (e.g. loss guard CI)
             return []
         samples = self._rollouter.get_validation_samples(steps)
-        greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
+        # Validation rollouts are never trained, so skip the top-k transport.
+        greedy = replace(
+            self._sampling, temperature=0.0, top_p=1.0, num_topk_logprobs=0
+        )
 
         rollout_groups, validation_metrics = await self._collect_validation_rollouts(
             samples=samples, sampling=greedy, step=step

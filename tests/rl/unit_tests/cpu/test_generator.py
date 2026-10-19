@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, call, Mock, patch
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
@@ -244,6 +245,7 @@ def test_process_finished_requests_resolves_reply_with_completion():
         assert completion.request_id == "r0"
         assert completion.token_ids == [10, 11]
         assert completion.token_logprobs == [-0.1, -0.1]
+        assert completion.topk_token_ids is None
         assert completion.finish_reason == "length"
         assert completion.min_policy_version == 7  # min = version it was admitted under
         assert completion.max_policy_version == 8  # max = live version at finish
@@ -255,6 +257,42 @@ def test_process_finished_requests_resolves_reply_with_completion():
                 "generator/inflight_requests_at_completion/max"
             ]
             == 1
+        )
+
+    asyncio.run(main())
+
+
+def test_process_finished_requests_splits_topk_logprobs():
+    async def main():
+        dispatcher = _dispatcher()
+        reply = concurrent.futures.Future()
+        reply.set_running_or_notify_cancel()
+        generation = OutstandingGeneration(reply=reply, metrics_prefix="generator")
+        generation.min_policy_version = 7
+        dispatcher._rank0_outstanding_generations = {"r0": generation}
+        # vLLM's layout with logprobs=2: each position holds [sampled, top-1, top-2], and
+        # the sampled token repeats when it is also in the top-k.
+        logprobs = FlatLogprobs()
+        logprobs.append_fast(
+            [10, 10, 3], [-0.1, -0.1, -2.5], iter([1, 1, 2]), [None] * 3
+        )
+        logprobs.append_fast(
+            [11, 4, 11], [-0.7, -0.5, -0.7], iter([2, 1, 2]), [None] * 3
+        )
+        sample = SimpleNamespace(
+            token_ids=[10, 11], logprobs=logprobs, finish_reason="stop"
+        )
+
+        dispatcher.process_finished_requests(
+            [_finished_request(_request_output(outputs=[sample]))], policy_version=7
+        )
+
+        completion = await asyncio.wrap_future(reply)
+        assert completion.token_logprobs == [-0.1, -0.7]
+        assert completion.topk_token_ids.dtype == np.int32
+        assert completion.topk_token_ids.tolist() == [[10, 3], [4, 11]]
+        np.testing.assert_allclose(
+            completion.topk_logprobs, [[-0.1, -2.5], [-0.5, -0.7]], rtol=1e-6
         )
 
     asyncio.run(main())
@@ -297,6 +335,13 @@ def test_process_finished_requests_releases_dp_router_load():
 
 
 # --- SamplingParams contract (must match the batched path exactly) ---
+
+
+def test_build_sampling_params_requests_topk_logprobs():
+    params = _build_sampling_params(
+        SamplingConfig(max_tokens=8, stop_token_ids=[99], num_topk_logprobs=32)
+    )
+    assert params.logprobs == 32
 
 
 def test_build_sampling_params_matches_contract():
@@ -696,6 +741,7 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             model_dtype="bfloat16",
             gpu_memory_limit=0.9,
             max_num_batched_tokens=None,
+            num_topk_logprobs=0,
             checkpointer=None,
             dist_moe_runtime=None,
             debug=DebugConfig(),
@@ -743,6 +789,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         model_dtype=config.model_dtype,
         gpu_memory_limit=config.gpu_memory_limit,
         max_num_batched_tokens=config.max_num_batched_tokens,
+        num_topk_logprobs=config.sampling.num_topk_logprobs,
         checkpointer=None,
         dist_moe_runtime=None,
         debug=config.debug,
@@ -771,6 +818,17 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
     assert engine_kwargs["scheduling_policy"] == "priority"
 
 
+def test_num_topk_logprobs_sets_max_logprobs(monkeypatch, tmp_path):
+    engine_kwargs = _build_engine_kwargs(
+        monkeypatch,
+        tmp_path,
+        Generator.Config(
+            model=_MODEL_CONFIG, sampling=SamplingConfig(num_topk_logprobs=32)
+        ),
+    )
+    assert engine_kwargs["max_logprobs"] == 32
+
+
 @pytest.mark.parametrize(
     "key, match",
     [
@@ -782,6 +840,7 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
             r"use Generator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use Generator\.Config\.debug\.seed"),
+        ("max_logprobs", r"use Generator\.Config\.sampling\.num_topk_logprobs"),
     ],
 )
 def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):

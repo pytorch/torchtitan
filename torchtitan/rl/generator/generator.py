@@ -234,6 +234,7 @@ class Generator(Configurable):
                     model_dtype=config.model_dtype,
                     gpu_memory_limit=config.gpu_memory_limit,
                     max_num_batched_tokens=config.max_num_batched_tokens,
+                    num_topk_logprobs=config.sampling.num_topk_logprobs,
                     checkpointer=config.checkpointer,
                     dist_moe_runtime=config.dist_moe_runtime,
                     debug=config.debug,

@@ -7,6 +7,7 @@
 """Check that RL recipes select the intended loss and compile configurations."""
 
 import importlib
+from dataclasses import replace
 
 import pytest
 
@@ -77,3 +78,24 @@ def test_batch_invariant_configs_disable_local_compile(module_name, factory_name
 
     assert config.trainer.model.local_compile_regions == []
     assert config.generator.model.local_compile_regions == []
+
+
+def test_score_centering_loss_needs_topk_logprobs_and_others_reject_them():
+    pytest.importorskip("vllm")
+    pytest.importorskip("renderers")
+
+    from torchtitan.rl.trainer.losses import ScoreCenteringLoss
+
+    config = importlib.import_module(_ALPHABET).rl_grpo_qwen3_0_6b_varlen()
+    sampling = replace(config.generator.sampling, num_topk_logprobs=32)
+    score_centering = replace(config.trainer.loss, loss_fn=ScoreCenteringLoss.Config())
+
+    with pytest.raises(ValueError, match="num_topk_logprobs=32"):
+        replace(config, generator=replace(config.generator, sampling=sampling))
+    with pytest.raises(ValueError, match="num_topk_logprobs=0"):
+        replace(config, trainer=replace(config.trainer, loss=score_centering))
+    replace(
+        config,
+        generator=replace(config.generator, sampling=sampling),
+        trainer=replace(config.trainer, loss=score_centering),
+    )

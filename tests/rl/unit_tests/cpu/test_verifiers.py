@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 
 pytest.importorskip("verifiers")
@@ -470,6 +471,77 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
         pytest.approx([-0.1]),
         pytest.approx([-0.2]),
     ]
+
+
+def _two_turn_trace():
+    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
+
+    first_node = SimpleNamespace(
+        token_ids=[10, 11],
+        mask=[False, True],
+        sampled=True,
+        message=VerifiersAssistantMessage(content="first"),
+    )
+    second_node = SimpleNamespace(
+        token_ids=[12, 13, 14],
+        mask=[False, True, True],
+        sampled=True,
+        message=VerifiersAssistantMessage(content="second"),
+    )
+    return SimpleNamespace(
+        nodes=[first_node, second_node],
+        branches=[
+            SimpleNamespace(
+                nodes=[first_node, second_node],
+                token_ids=[10, 11, 12, 13, 14],
+                logprobs=[0.0, -0.1, 0.0, -0.2, -0.3],
+            )
+        ],
+    )
+
+
+def _metadata_with_topk(topk_by_generation) -> VerifiersGenerationMetadata:
+    return VerifiersGenerationMetadata(
+        min_policy_version=3,
+        max_policy_version=4,
+        metrics=[],
+        topk_by_generation=topk_by_generation,
+    )
+
+
+def test_verifiers_trace_attaches_each_generations_topk_rows() -> None:
+    # Generations are keyed by (prompt length, completion tokens): prompts [10] and
+    # [10, 11, 12] sampled completions [11] and [13, 14].
+    second_logprobs = np.array([[-0.2, -1.5], [-0.3, -1.2]], dtype=np.float32)
+    topk_by_generation = {
+        (1, (11,)): (np.array([[11, 7]]), np.array([[-0.1, -2.0]])),
+        (3, (13, 14)): (np.array([[13, 8], [14, 9]]), second_logprobs),
+    }
+    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
+        trace=_two_turn_trace(),
+        generation_metadata=_metadata_with_topk(topk_by_generation),
+        group_id=5,
+        rollout_id=2,
+    )
+
+    assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13, 14]]
+    assert [turn.completion_topk_token_ids.tolist() for turn in turns] == [
+        [[11, 7]],
+        [[13, 8], [14, 9]],
+    ]
+    np.testing.assert_array_equal(turns[1].completion_topk_logprobs, second_logprobs)
+
+
+def test_verifiers_trace_rejects_a_node_without_its_topk_rows() -> None:
+    # Top-k was requested, but no generation produced the second node's tokens.
+    topk_by_generation = {(1, (11,)): (np.array([[11, 7]]), np.array([[-0.1, -2.0]]))}
+    with pytest.raises(ValueError, match="top-k logprobs are unknown"):
+        VerifiersRolloutWorker.trace_to_rollout_turns(
+            trace=_two_turn_trace(),
+            generation_metadata=_metadata_with_topk(topk_by_generation),
+            group_id=5,
+            rollout_id=2,
+        )
 
 
 def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> None:
@@ -1203,6 +1275,18 @@ def test_parse_sampling_config_requires_temperature_top_p_max_tokens() -> None:
             _parse_sampling_config(
                 {key: value for key, value in sampling_params.items() if key != name}
             )
+
+
+def test_parse_sampling_config_reads_num_topk_logprobs() -> None:
+    sampling_params = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "max_tokens": 5,
+        "stop_token_ids": [1],
+    }
+    assert _parse_sampling_config(sampling_params).num_topk_logprobs == 0
+    sampling_params["num_topk_logprobs"] = 32
+    assert _parse_sampling_config(sampling_params).num_topk_logprobs == 32
 
 
 def test_parse_sampling_config_requires_stop_token_ids() -> None:

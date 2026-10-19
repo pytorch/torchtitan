@@ -135,6 +135,36 @@ def test_torchtitan_response_round_trips_every_completion_field() -> None:
         )
 
 
+def test_topk_logprobs_reach_both_response_formats() -> None:
+    topk_token_ids = np.array([[31, 5], [32, 6], [33, 7]], dtype=np.int32)
+    topk_logprobs = np.array([[-0.1, -2.0], [-0.2, -3.0], [-0.3, -1.5]], np.float32)
+
+    async def run() -> None:
+        async def generate(prompt_token_ids, **kwargs):
+            return _completion(
+                kwargs["request_id"],
+                topk_token_ids=topk_token_ids,
+                topk_logprobs=topk_logprobs,
+            )
+
+        async with _Server(generate) as server:
+            # Native rollouts: the top-k rides in the torchtitan response.
+            _, payload = await _post(server, _body(response_format="torchtitan"))
+            completion = response_to_completion(payload)
+            np.testing.assert_array_equal(completion.topk_token_ids, topk_token_ids)
+            np.testing.assert_array_equal(completion.topk_logprobs, topk_logprobs)
+            # Verifiers drops extra response fields, so the server folds the top-k per
+            # generation, keyed by (prompt length, completion tokens).
+            status, _ = await _post(server, _body(), session_id="trace-a")
+            assert status == 200
+            [metadata] = server.pop_generation_metadata(["trace-a"]).values()
+            ids, logprobs = metadata.topk_by_generation[(2, (31, 32, 33))]
+            np.testing.assert_array_equal(ids, topk_token_ids)
+            np.testing.assert_array_equal(logprobs, topk_logprobs)
+
+    asyncio.run(run())
+
+
 def test_server_mints_unique_request_ids_even_for_a_repeated_client_id() -> None:
     async def run() -> list[dict]:
         recorder = _Server()

@@ -110,7 +110,8 @@ class RolloutSampleRecorder(Configurable):
         """Also record each turn's `prompt_prefix_len`, `prompt_delta_token_ids` and `completion_token_ids`;
         `RolloutTurn` shows how to rebuild the full prompt."""
         log_logprobs: bool = False
-        """Also record the raw per-token completion logprob arrays per turn."""
+        """Also record the raw per-token completion logprob arrays per turn, plus the
+        generator's top-k when `SamplingConfig.num_topk_logprobs` > 0."""
 
     def __init__(self, config: Config, *, dump_dir: str) -> None:
         self._filter = config.filter.build()
@@ -170,4 +171,7 @@ class RolloutSampleRecorder(Configurable):
             encoded["completion_token_ids"] = turn.completion_token_ids.tolist()
         if self._log_logprobs:
             encoded["completion_logprobs"] = turn.completion_logprobs.tolist()
+            for key in ("completion_topk_token_ids", "completion_topk_logprobs"):
+                rows = getattr(turn, key)
+                encoded[key] = None if rows is None else rows.tolist()
         return encoded

@@ -313,6 +313,8 @@ class RequestDispatcher:
                     request_id=finished.request_id,
                     token_ids=finished.token_ids,
                     token_logprobs=finished.token_logprobs,
+                    topk_token_ids=finished.topk_token_ids,
+                    topk_logprobs=finished.topk_logprobs,
                     finish_reason=finished.finish_reason,
                     metrics=metrics,
                 )

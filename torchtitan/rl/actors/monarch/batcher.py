@@ -31,6 +31,7 @@ class _BatcherActorEndpoints:
         dp_degree: int,
         pad_id: int,
         temperature: float,
+        num_topk_logprobs: int = 0,
         output_dir: str,
         enable_structured_logging: bool,
     ) -> None:
@@ -51,6 +52,7 @@ class _BatcherActorEndpoints:
             dp_degree=dp_degree,
             pad_id=pad_id,
             temperature=temperature,
+            num_topk_logprobs=num_topk_logprobs,
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
         )
 

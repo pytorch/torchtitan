@@ -447,6 +447,111 @@ def compute_logprobs(
     return logprobs, entropy
 
 
+@local_compile("loss", batch_invariant=False)
+def compute_topk_logprobs(
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+    *,
+    vocab_parallel_group: dist.ProcessGroup | None,
+    global_vocab_size: int | None,
+) -> torch.Tensor:
+    """Logprobs `[T, k]` of `token_ids[T, k]` under `softmax(logits[T, V])`.
+
+    Like `compute_logprobs`, but for k token ids per position. A `vocab_parallel_group`
+    means `logits` hold this rank's vocab shard; the result is exact and identical on every
+    rank of the group, without gathering the vocab.
+
+    Example:
+
+        logits = log([[0.5, 0.3, 0.2]]);  token_ids = [[2, 0]]  ->  log([[0.2, 0.5]])
+    """
+    token_ids = token_ids.long()
+    if vocab_parallel_group is None:
+        return torch.log_softmax(logits.float(), dim=-1).gather(-1, token_ids)
+    return _VocabParallelTopKLogprobs.apply(
+        logits, token_ids, vocab_parallel_group, global_vocab_size
+    )
+
+
+class _VocabParallelTopKLogprobs(torch.autograd.Function):
+    """`compute_topk_logprobs` on local `[T, V_local]` logits shards.
+
+    Forward uses three TP all-reduces (max, sumexp, gathered logits); backward needs none,
+    since the output is identical on every rank and each rank owns its shard's gradient.
+    """
+
+    @staticmethod
+    def spmd_typecheck(
+        result: torch.Tensor,
+        *,
+        logits: torch.Tensor,
+        token_ids: torch.Tensor,
+        tp_group: dist.ProcessGroup,
+    ) -> None:
+        """SPMD type: logits S(-1)@TP, token_ids I@TP -> logprobs I@TP."""
+        spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
+        spmd.assert_type(token_ids, {tp_group: spmd.I})
+        spmd.assert_local_type_like(
+            result,
+            logits,
+            {tp_group: spmd.I},  # pyrefly: ignore [bad-argument-type]
+        )
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(
+        ctx,
+        logits: torch.Tensor,
+        token_ids: torch.Tensor,
+        tp_group: dist.ProcessGroup,
+        global_vocab_size: int,
+    ) -> torch.Tensor:
+        local_vocab_size = logits.shape[-1]
+        tp_world_size = dist.get_world_size(tp_group)
+        chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
+        vocab_start = min(global_vocab_size, chunk_size * dist.get_rank(tp_group))
+        logits_fp32 = logits.float()
+
+        global_max = funcol.all_reduce(
+            torch.amax(logits_fp32, dim=-1, keepdim=True),
+            reduceOp=dist.ReduceOp.MAX.name,
+            group=tp_group,
+        )
+        sumexp = funcol.all_reduce(
+            torch.exp(logits_fp32 - global_max).sum(dim=-1, keepdim=True),
+            reduceOp=dist.ReduceOp.SUM.name,
+            group=tp_group,
+        )
+        logsumexp = global_max + torch.log(sumexp)
+
+        # Each id lives on exactly one shard; the others contribute 0 to the sum.
+        local_token_ids = token_ids - vocab_start
+        in_shard = (local_token_ids >= 0) & (local_token_ids < local_vocab_size)
+        local_token_ids = local_token_ids.clamp(0, local_vocab_size - 1)
+        topk_logits = funcol.all_reduce(
+            torch.where(in_shard, logits_fp32.gather(-1, local_token_ids), 0.0),
+            reduceOp=dist.ReduceOp.SUM.name,
+            group=tp_group,
+        )
+
+        ctx.save_for_backward(logits, logsumexp, local_token_ids, in_shard)
+        return topk_logits - logsumexp
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def backward(
+        ctx, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, None, None, None]:
+        logits, logsumexp, local_token_ids, in_shard = ctx.saved_tensors
+        # d log p_j / d logit_v = [v == id_j] - softmax_v, summed over the k ids.
+        probs = torch.exp(logits.float() - logsumexp)
+        grad_logits = -grad_output.sum(dim=-1, keepdim=True) * probs
+        grad_logits.scatter_add_(
+            -1, local_token_ids, torch.where(in_shard, grad_output, 0.0)
+        )
+        return grad_logits.to(logits.dtype), None, None, None
+
+
 class GradAccumulator:
     """Accumulates chunk gradients into a pre-allocated buffer.
 
