@@ -1232,10 +1232,14 @@ def test_dsv3_mtp1_mlperf_recipe_contract(pp_degree, performance, monkeypatch):
     assert config.checkpointer.initial_load_in_hf and config.checkpointer.load_only
     from torchtitan.config import apply_overrides
     from torchtitan_recipes.overrides.fused_dsv3_router import FusedDSv3Router
+    from torchtitan_recipes.overrides.fused_dsv3_seqwise_loss import (
+        FusedDSv3SeqwiseLoss,
+    )
 
     apply_overrides(config.override, config)
     for _, moe, _, _ in config.model.traverse(MoE.Config):
         assert isinstance(moe.router, FusedDSv3Router.Config)
         assert moe.router.require_fusion
         assert moe.router.force_load_balancing == performance
-        assert isinstance(moe.router.aux_loss, UnbiasedTopKLoadBalanceLoss.Config)
+        assert isinstance(moe.router.aux_loss, FusedDSv3SeqwiseLoss.Config)
+        assert moe.router.aux_loss.top_k == 8 and moe.router.aux_loss.require_fusion
