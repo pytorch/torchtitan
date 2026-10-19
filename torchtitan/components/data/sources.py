@@ -242,9 +242,8 @@ class _HuggingFaceCursorIterator(grain.DatasetIterator):
         self._pending_hf_state: bytes | None = None
 
     def __next__(self) -> dict[str, Any]:
-        self._pending_hf_state = None
         try:
-            return next(self._iterator)
+            row = next(self._iterator)
         except StopIteration:
             if not self._repeat:
                 raise
@@ -253,7 +252,10 @@ class _HuggingFaceCursorIterator(grain.DatasetIterator):
                 self._dataset.set_epoch(self._epoch)
             self._dataset.load_state_dict(self._initial_state)
             self._iterator = iter(self._dataset)
-            return next(self._iterator)
+            row = next(self._iterator)
+        # HF has applied any restored cursor once it yields a row.
+        self._pending_hf_state = None
+        return row
 
     def get_state(self) -> dict[str, Any]:
         # Hugging Face streaming state adds and drops nested keys during
@@ -283,4 +285,6 @@ class _HuggingFaceCursorIterator(grain.DatasetIterator):
         self._iterator = iter(self._dataset)
         # HF applies the restored cursor lazily on the next read. Packers can
         # checkpoint before that read to reconstruct a partially consumed row.
+        # TODO: Remove once datasets.IterableDataset.state_dict() reflects a
+        # loaded-but-unapplied state.
         self._pending_hf_state = hf_state

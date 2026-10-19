@@ -518,7 +518,4 @@ With effective DP greater than one, `repeat=False` is rejected because ranks can
 - batching and prefetch state
 - effective DP degree
 
-A restored streaming cursor can be checkpointed before its next read. This
-preserves packing remainders across repeated checkpoint/resume cycles.
-
 Resume requires unchanged code, config, source contents, tokenizer, and effective DP degree.

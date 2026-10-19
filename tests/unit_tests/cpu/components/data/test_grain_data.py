@@ -306,7 +306,7 @@ def test_hf_resume_mid_second_epoch():
 
 
 @pytest.mark.parametrize("shuffle", [False, True])
-@pytest.mark.parametrize("num_consumed", [4, 20])
+@pytest.mark.parametrize("num_consumed", [4, 16, 20])
 def test_hf_cursor_state_after_restore(shuffle, num_consumed):
     original = _HuggingFaceCursorIterator(
         _hf_sharded_rows(), repeat=True, shuffle=shuffle
@@ -327,6 +327,29 @@ def test_hf_cursor_state_after_restore(shuffle, num_consumed):
     finally:
         original.close()
         restored.close()
+
+
+def test_hf_cursor_keeps_restored_state_after_failed_read():
+    original = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(), repeat=True, shuffle=False
+    )
+    for _ in range(4):
+        next(original)
+    state = original.get_state()
+    restored = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(), repeat=True, shuffle=False
+    )
+    restored.set_state(state)
+
+    def failing_read():
+        raise OSError("transient read error")
+        yield
+
+    restored._iterator = failing_read()
+    with pytest.raises(OSError, match="transient read error"):
+        next(restored)
+
+    assert restored.get_state() == state
 
 
 @pytest.mark.parametrize("num_prefetch_microbatches", [0, 2])
