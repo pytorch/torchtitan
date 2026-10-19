@@ -1636,7 +1636,7 @@ def _training_batch(step: int) -> SimpleNamespace:
     return SimpleNamespace(
         metrics=[],
         min_policy_versions=[step - 1],
-        microbatches=[],
+        microbatch_groups=[],
         global_loss_token_counts=[1],
         global_routing_token_counts=None,
         group_ids=[step],
