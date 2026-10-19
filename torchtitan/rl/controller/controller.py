@@ -1535,6 +1535,7 @@ class Controller(Configurable):
         pull_task: asyncio.Task[float] | None = None
         step_timer = MetricsTimer()
         gc_timer = m.GCTimer("controller", per_generation=True)
+        loop_lag = m.EventLoopLag("controller")
         step_start = time.perf_counter()
         # With `validation.overlap_training`: a pass is due, but waits for the running one to end.
         validation_requested = False
@@ -1729,6 +1730,7 @@ class Controller(Configurable):
                         *data_metrics,
                         *time_metrics,
                         *gc_timer.flush(),
+                        *loop_lag.flush(),
                         *policy_age_panel,
                         # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
                         m.Metric(
@@ -1788,6 +1790,7 @@ class Controller(Configurable):
                 step=step, num_training_steps=num_training_steps, pull_task=pull_task
             )
         gc_timer.close()
+        loop_lag.close()
 
         # Finish the last push and pull so generators hold the final weights for post-validation.
         if push_task is not None:

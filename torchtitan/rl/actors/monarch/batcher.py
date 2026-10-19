@@ -63,6 +63,7 @@ class _BatcherActorEndpoints:
             replay_routed_experts=replay_routed_experts,
         )
         self._gc_timer = m.GCTimer("batcher")
+        self._loop_lag = m.EventLoopLag("batcher")
 
     @endpoint
     async def add_group(
@@ -72,9 +73,15 @@ class _BatcherActorEndpoints:
         stateful batcher in arrival order. `async` because Monarch rejects mixing sync and async endpoints."""
         batch, has_samples = super().add_group(rollout_group=rollout_group)
         if batch is not None:
-            # This process's GC time since the previous batch, logged with the step it trains.
+            # This process's GC time and event-loop lag since the previous batch, logged with
+            # the step it trains.
             batch = dataclasses.replace(
-                batch, metrics=[*batch.metrics, *self._gc_timer.flush()]
+                batch,
+                metrics=[
+                    *batch.metrics,
+                    *self._gc_timer.flush(),
+                    *self._loop_lag.flush(),
+                ],
             )
         return batch, has_samples
 

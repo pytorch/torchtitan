@@ -8,6 +8,7 @@
 
 from .console import log_to_console
 from .gc import GCTimer
+from .loop_lag import EventLoopLag
 from .processor import MetricBackend, MetricsProcessor
 from .types import (
     fold,
@@ -24,6 +25,7 @@ from .types import (
 
 
 __all__ = [
+    "EventLoopLag",
     "fold",
     "GCTimer",
     "Max",

@@ -11,6 +11,7 @@ import asyncio
 import gc
 import json
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -2133,3 +2134,18 @@ def test_validation_config_rejects_bad_sampling() -> None:
         ValidationConfig(num_samples_per_prompt=0)
     with pytest.raises(ValueError, match="greedy"):
         ValidationConfig(temperature=0.0, num_samples_per_prompt=4)
+
+
+def test_event_loop_lag_records_a_blocking_call() -> None:
+    async def run() -> list[m.Metric]:
+        lag = m.EventLoopLag("controller", interval_s=0.01, threshold_s=0.05)
+        await asyncio.sleep(0.02)  # let the lag task start its first check
+        time.sleep(0.3)  # blocks the loop
+        await asyncio.sleep(0.05)  # the lag task wakes late and records it
+        metrics = lag.flush()
+        lag.close()
+        return metrics
+
+    values = {type(metric.value): metric.value.value for metric in asyncio.run(run())}
+    assert values[m.Max] >= 250.0
+    assert values[m.Sum] >= values[m.Max]

@@ -840,8 +840,9 @@ def test_generation_server_forwards_token_request() -> None:
         assert generation_metadata is not None
         assert generation_metadata.min_policy_version == 6
         assert generation_metadata.max_policy_version == 9
-        # Both generations folded into one Mean and one Max, plus the server's GC Sum and Max
-        assert len(generation_metadata.metrics) == 4
+        # Both generations folded into one Mean and one Max, plus the server's GC and
+        # event-loop lag (a Sum and a Max each)
+        assert len(generation_metadata.metrics) == 6
         metrics = m.MetricsProcessor._aggregate_metrics(generation_metadata.metrics)
         assert {
             key: value for key, value in metrics.items() if key.startswith("generator/")
