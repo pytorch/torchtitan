@@ -1231,12 +1231,15 @@ def test_dsv3_mtp1_mlperf_recipe_contract(pp_degree, performance, monkeypatch):
     assert isinstance(config.optim.gradient_clipper, MTPGradientClipper.Config)
     assert config.checkpointer.initial_load_in_hf and config.checkpointer.load_only
     from torchtitan.config import apply_overrides
+    from torchtitan_recipes.overrides.fused_dsv3_mtp_loss import FusedDSv3MTPLoss
     from torchtitan_recipes.overrides.fused_dsv3_router import FusedDSv3Router
     from torchtitan_recipes.overrides.fused_dsv3_seqwise_loss import (
         FusedDSv3SeqwiseLoss,
     )
 
     apply_overrides(config.override, config)
+    assert isinstance(config.loss.loss_fn, FusedDSv3MTPLoss.Config)
+    assert config.loss.loss_fn.require_fusion
     for _, moe, _, _ in config.model.traverse(MoE.Config):
         assert isinstance(moe.router, FusedDSv3Router.Config)
         assert moe.router.require_fusion

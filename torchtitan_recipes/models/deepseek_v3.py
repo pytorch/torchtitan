@@ -263,6 +263,10 @@ def _deepseek_v3_671b_mtp1_mlperf(
             ),
             {"require_fusion": True},
         ),
+        (
+            "torchtitan_recipes.overrides.fused_dsv3_mtp_loss.fused_dsv3_mtp_loss",
+            {"require_fusion": True},
+        ),
     ]
     return config
 
