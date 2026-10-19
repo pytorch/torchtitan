@@ -256,6 +256,30 @@ class RequestDispatcher:
         else:
             self._result_port.send(_RejectedRequests(requests=rejected_requests))
 
+    def process_aborted_requests(self, request_ids: list[str]) -> None:
+        """Like `process_rejected_requests`, for the requests this replica's engine aborted
+        because their caller left, without a warning per request (aborts come in bursts, e.g. a
+        group timing out)."""
+        if self._tp_rank != 0 or not request_ids:
+            return
+
+        aborted_requests: list[tuple[str, Exception]] = [
+            (request_id, RuntimeError(f"{request_id} aborted: its caller left"))
+            for request_id in request_ids
+        ]
+        if self._rank == 0:
+            self._rank0_fail_generations(aborted_requests)
+        else:
+            self._result_port.send(_RejectedRequests(requests=aborted_requests))
+
+    def rank0_fail_pending_generations(self, request_ids: list[str]) -> None:
+        """RANK 0: fail generations taken off the queue but not admitted yet, whose callers left.
+        They hold no DP reservation: `rank0_route` reserves only at admission."""
+        for request_id in request_ids:
+            self._rank0_outstanding_generations.pop(request_id).reply.set_exception(
+                RuntimeError(f"{request_id} aborted: its caller left")
+            )
+
     def _rank0_resolve_generations(
         self, finished_requests: list[FinishedRequest], policy_version: int
     ) -> None:
@@ -308,8 +332,8 @@ class RequestDispatcher:
                 self._rank0_dp_router.release(request_id)
 
     async def _rank0_drain_results(self) -> None:
-        """RANK 0 background task which receives and resolves finished (or rejected) requests
-        pushed by peer TP rank 0s.
+        """RANK 0 background task which receives and resolves finished (or rejected, or aborted)
+        requests pushed by peer TP rank 0s.
         """
         # TODO: wait_engine_loop does not watch this task. If it raises (e.g. an unknown request
         # id), later peer replies are never resolved and their generate() calls hang; make its
@@ -365,7 +389,8 @@ class _FinishedRequests:
 
 @dataclass(frozen=True, slots=True)
 class _RejectedRequests:
-    """Requests a peer DP replica's engine rejected at admission, sent to rank 0 with each error."""
+    """Requests a peer DP replica's engine rejected at admission or aborted, sent to rank 0 with
+    each error."""
 
     requests: list[tuple[str, Exception]]
 
