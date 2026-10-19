@@ -503,6 +503,7 @@ def _two_turn_trace():
                 nodes=[first_node, second_node],
                 token_ids=[10, 11, 12, 13, 14],
                 logprobs=[0.0, -0.1, 0.0, -0.2, -0.3],
+                routed_experts=None,
             )
         ],
     )

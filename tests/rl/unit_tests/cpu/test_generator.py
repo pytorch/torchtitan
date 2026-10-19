@@ -298,7 +298,10 @@ def test_process_finished_requests_splits_topk_logprobs():
             [11, 4, 11], [-0.7, -0.5, -0.7], iter([2, 1, 2]), [None] * 3
         )
         sample = SimpleNamespace(
-            token_ids=[10, 11], logprobs=logprobs, finish_reason="stop"
+            token_ids=[10, 11],
+            logprobs=logprobs,
+            finish_reason="stop",
+            routed_experts=None,
         )
 
         dispatcher.process_finished_requests(

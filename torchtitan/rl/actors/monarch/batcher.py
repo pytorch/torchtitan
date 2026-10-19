@@ -35,7 +35,7 @@ class _BatcherActorEndpoints:
         num_topk_logprobs: int = 0,
         output_dir: str,
         enable_structured_logging: bool,
-        replay_routed_experts: bool,
+        replay_routed_experts: bool = False,
     ) -> None:
         init_logger()
         sl.init_structured_logger(
