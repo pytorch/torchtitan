@@ -60,8 +60,7 @@ from torchtitan.rl.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 
-# Upper bound, not the expected wait: a weight load's gc.collect() takes ~0.7 s in the full
-# suite, and on a busy host two load tests went past 5 s.
+# Upper bound, not the expected wait: on a busy host two load tests went past 5 s.
 _TIMEOUT_S = 30
 
 
@@ -821,6 +820,18 @@ def _loading_engine(monkeypatch, load_pre_hook=None) -> _FakeEngine:
 
     monkeypatch.setattr(EngineLoop, "_load_model_state_dict", new_load)
     return _FakeEngine()
+
+
+def test_load_model_state_dict_runs_no_gc_collect(runner, monkeypatch) -> None:
+    """A full collection here stalls decoding while it walks every in-flight request's token lists."""
+    engine_loop = _bare_loop(event_loop=runner.get_loop())
+    collect_calls = []
+    monkeypatch.setattr(gc, "collect", lambda *args: collect_calls.append(args))
+
+    runner.run(engine_loop._load_model_state_dict(version=8))
+
+    assert engine_loop.policy_version == 8
+    assert collect_calls == []
 
 
 def _generate(engine_loop: EngineLoop, request_id: str, **kwargs: Any) -> asyncio.Task:

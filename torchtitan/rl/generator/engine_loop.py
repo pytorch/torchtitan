@@ -12,7 +12,6 @@ import asyncio
 import concurrent.futures
 import contextlib
 import enum
-import gc
 import logging
 import threading
 from collections.abc import Callable
@@ -567,7 +566,6 @@ class EngineLoop:
         """
         self._engine.load_prefetched_model_state_dict()
         self.policy_version = version
-        gc.collect()
 
     async def _release_resources(self) -> None:
         """Stop the dispatcher, fail the replies it left unresolved, and drop the engine. No-op
