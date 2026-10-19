@@ -109,9 +109,9 @@ _lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
 # Ordered effects, so graph-level selective checkpointing (the graph trainer's memory
 # policy) saves both ops instead of replaying them in backward. DeepEP assigns receive
 # slots with atomics, so a replayed dispatch can receive rows in another order, while
-# backward routes the gradients with the forward's handle. torch_remat ignores effects and
-# follows the ``recompute`` argument of dispatch_tokens/combine_tokens; dispatch_tokens
-# only replays with a deterministic buffer.
+# backward routes the gradients with the forward's handle. torch_remat ignores effects
+# and follows the ``recompute`` argument of dispatch_tokens (combine_tokens is never
+# replayed); dispatch_tokens only replays with a deterministic buffer.
 _lib._register_effectful_op("deepep::dispatch", torch.library.EffectType.ORDERED)
 _lib._register_effectful_op("deepep::combine", torch.library.EffectType.ORDERED)
 
@@ -505,8 +505,8 @@ def dispatch_tokens(
             must not exceed that maximum.
         remat_region_name: Name for the dispatch communication region.
         recompute: Whether activation remat replays the dispatch communication during
-            backward. Requires a deterministic buffer (see below), and must match
-            the ``recompute`` passed to ``combine_tokens``.
+            backward. Requires a deterministic buffer (see below). The combine
+            region is never replayed, so it has no matching argument.
         cuda_graph_compatible: If True, use the static, no-host-sync expand layout so the forward is
             CUDA-graph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact

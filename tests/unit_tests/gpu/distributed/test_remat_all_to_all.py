@@ -156,14 +156,15 @@ class TestAllToAllRematRegions(DTensorTestBase):
         )
 
         # dispatch holds the count exchange, its device-to-host sync, and the
-        # dispatch all-to-all; combine holds the combine all-to-all. The default
-        # policy recomputes the routed-expert projections but must retain both
-        # dispatcher regions under the same routed_experts prefix.
+        # dispatch all-to-all; combine holds the combine all-to-all. The
+        # dispatch region follows the policy; the combine region is never
+        # replayed (like DeepEP's), so only the dispatch collectives replay,
+        # and a combine-only save pattern changes nothing.
         dispatch = "routed_experts.token_dispatcher.dispatch"
         combine = "routed_experts.token_dispatcher.combine"
         for policy_config, expected_replay_collectives, expected_replay_syncs in (
-            (ActivationRematConfig(save_regions=[]), 3, 1),
-            (ActivationRematConfig(save_regions=[dispatch]), 1, 0),
+            (ActivationRematConfig(save_regions=[]), 2, 1),
+            (ActivationRematConfig(save_regions=[dispatch]), 0, 0),
             (ActivationRematConfig(save_regions=[combine]), 2, 1),
             (ActivationRematConfig(save_regions=[dispatch, combine]), 0, 0),
             (DefaultActivationRematConfig(), 0, 0),
@@ -223,9 +224,10 @@ class TestAllToAllRematRegions(DTensorTestBase):
     @with_comms
     def test_saved_w2_output_is_not_retained_under_ep(self):
         # Unpermute and the combine all-to-all do not need the w2 output in
-        # backward, so saving w2 and the combine must not keep the w2 output
-        # alive. bf16 activations, as in mixed-precision training, need no cast
-        # after w2.
+        # backward, so saving w2 must not keep the w2 output alive: the
+        # combine region is always saved and reads it only from its body, so
+        # it needs no persisting for a replay. bf16 activations, as in
+        # mixed-precision training, need no cast after w2.
         mesh = init_device_mesh(
             self.device_type,
             (self.world_size,),
@@ -249,10 +251,7 @@ class TestAllToAllRematRegions(DTensorTestBase):
             )
             remat_model.load_state_dict(baseline.state_dict())
             ActivationRematConfig(
-                save_regions=[
-                    "routed_experts.w2.grouped_mm",
-                    "routed_experts.token_dispatcher.combine",
-                ]
+                save_regions=["routed_experts.w2.grouped_mm"]
             ).apply(remat_model)
             w2 = remat_model.layers["0"].routed_experts.w2
             w2_output_refs = []
