@@ -7,8 +7,8 @@
 from types import SimpleNamespace
 
 from torchtitan.observability import metrics
+from torchtitan.observability.logging import NoColor
 from torchtitan.observability.metrics import DeviceMemStats, MetricsProcessor
-from torchtitan.tools.utils import NoColor
 
 
 class _FakeMemoryMonitor:

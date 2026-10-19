@@ -23,6 +23,7 @@ from torch.distributed.tensor import Shard
 from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.moe import MoE
 
 __all__ = [
     "apply_fsdp_to_decoder",
@@ -40,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from torchtitan.models.common.decoder import Decoder
-    from torchtitan.models.common.moe import MoE
 
 
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
@@ -81,12 +81,18 @@ def linear_param_shard_placements(
 
 def resolve_fsdp_mesh(
     parallelism_context: ParallelismContext,
+    *,
+    shard_on_cp_axis: bool = True,
 ) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
     """Select the dense storage mesh and DataParallelMeshDims.
 
     ``dp_shard`` is always included (force-kept-alive in the dense storage mesh
     even at size 1) so FSDP can pick the DP submesh out of the multi-axis
     storage mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
+
+    ``shard_on_cp_axis=False`` leaves CP in the storage mesh but outside FSDP's
+    reduction axes. Parameters must then be CP-invariant, with their gradient
+    contributions already reduced across CP before FSDP reduction.
     """
     storage_mesh = parallelism_context.get_activated_mesh(_DENSE_STORAGE_AXES)
     assert storage_mesh is not None
@@ -99,7 +105,7 @@ def resolve_fsdp_mesh(
         return storage_mesh, None
 
     shard_axes = ["dp_shard"]
-    if parallelism_context.cp_enabled:
+    if parallelism_context.cp_enabled and shard_on_cp_axis:
         shard_axes.append("cp")
     shard: str | tuple[str, ...] = (
         tuple(shard_axes) if len(shard_axes) > 1 else shard_axes[0]
@@ -145,12 +151,18 @@ def disable_fsdp_gradient_division(model: nn.Module) -> None:
 
 def enable_fsdp_symm_mem(model: nn.Module, scope: FSDPSymmMemScope) -> None:
     """Enable symmetric-memory communication for the FSDP modules ``scope`` selects."""
+    from torchtitan.models.common.decoder import TransformerBlock
+
     if scope is None:
         return
     for module in model.modules():
         if not isinstance(module, FSDPModule):
             continue
-        if scope == "dense" and getattr(module, "moe_enabled", False):
+        if (
+            scope == "dense"
+            and isinstance(module, TransformerBlock)
+            and isinstance(module.feed_forward, MoE)
+        ):
             continue
         module.set_force_sum_reduction_for_comms(True)
         module.set_symm_mem_for_comm()
@@ -244,7 +256,7 @@ def apply_fsdp_to_decoder(
     Shared by all dense and MoE decoders (llama3, qwen3, deepseek_v3,
     gpt_oss, qwen3_vl, ...). The MoE handling is a strict superset of the dense
     case: a dense model leaves ``ep_degree=1`` / ``edp_mesh=None`` and has no
-    ``moe_enabled`` blocks, so every transformer block is sharded as a single
+    MoE blocks, so every transformer block is sharded as a single
     FSDP unit and the expert-parallel prefetching below is skipped.
 
     Args:
@@ -336,9 +348,7 @@ def apply_fsdp_to_decoder(
         #   shard their output features when FSDP degree > num_experts
         # Dense blocks use the default mesh with only stacked-parameter
         # placement overrides.
-        if getattr(transformer_block, "moe_enabled", False):
-            assert hasattr(transformer_block, "moe")
-            moe = cast("MoE", transformer_block.moe)
+        if isinstance(moe := transformer_block.feed_forward, MoE):
             routed_experts = moe.routed_experts
             num_experts = moe.num_experts
 

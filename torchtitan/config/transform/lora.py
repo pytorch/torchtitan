@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass, fields
 from typing import Any, cast
 
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.lora import (
@@ -15,9 +17,8 @@ from torchtitan.models.common.lora import (
     get_lora_grouped_linear,
     get_lora_linear,
 )
-from torchtitan.protocols.module import Module
 
-from .base import ModelConfigTransform, ModelConfigTransformContext
+from .base import ModelConfigTransform
 
 
 logger = logging.getLogger(__name__)
@@ -208,7 +209,7 @@ class LoRATransform(ModelConfigTransform):
 
     Examples:
 
-    - ``"layers.0.moe.routed_experts.w2"``: one exact projection.
+    - ``"layers.0.feed_forward.routed_experts.w2"``: one exact projection.
     - ``"routed_experts.w2"``: every matching FQN suffix.
     - ``"w2"``: every supported projection named w2.
     - ``"*.w2"``: no matches; glob patterns are not supported.
@@ -231,19 +232,13 @@ class LoRATransform(ModelConfigTransform):
                 f"target_modules={sorted(self.target_modules)}"
             )
 
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
+    def transform(self, model: Module.Config) -> Module.Config:
         """Apply LoRA while walking the config tree from leaves to root.
 
         This lets Dist-MoE parents observe whether their projection children
         were converted to LoRA. All other configs are frozen so only adapters
         are trainable.
         """
-        del context
         transformed_root = model
         target_module_names = (
             set(self.target_modules) if self.target_modules is not None else None

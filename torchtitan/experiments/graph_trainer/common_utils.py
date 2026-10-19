@@ -9,7 +9,6 @@ import logging
 import time
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Any, TypeAlias
 
 import torch
@@ -23,10 +22,13 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
+    FSDP_PARAM_FQNS_META,
     MixedPrecisionPolicy,
 )
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
 
 
 logger = logging.getLogger(__name__)
@@ -53,29 +55,6 @@ def _get_graph_modules(
     return modules
 
 
-class GraphTrainerScaledDotProductInnerAttention(ScaledDotProductInnerAttention):
-    """Adapt flat graph-trainer attention inputs to the batched SDPA interface."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ScaledDotProductInnerAttention.Config):
-        pass
-
-    def forward(
-        self,
-        q_THK: torch.Tensor,
-        k_THK: torch.Tensor,
-        v_THV: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        out_1THV = super().forward(
-            q_THK.unsqueeze(0),
-            k_THK.unsqueeze(0),
-            v_THV.unsqueeze(0),
-            **kwargs,
-        )
-        return out_1THV.squeeze(0)
-
-
 @contextmanager
 def log_timer(label: str):
     start = time.perf_counter()
@@ -84,36 +63,23 @@ def log_timer(label: str):
     logger.info("%s took %.3fs", label, elapsed_s)
 
 
+def disable_inplace_wgrad_accum(model: Module.Config) -> None:
+    """Turn off ``inplace_wgrad_accum`` on every ``Linear`` config in ``model``.
+
+    GraphTrainer traces the backward, which cannot add a WGRAD into
+    ``weight.grad`` in place.
+    """
+    for _, linear_config, _, _ in model.traverse(Linear.Config):
+        linear_config.inplace_wgrad_accum = False
+
+
 def build_decoder_config_for_backend(
     config_builder: Callable, attn_backend: str, **builder_kwargs
 ):
-    """Build a Decoder model config for ``attn_backend``, allowing test-only SDPA.
-
-    ``SDPA`` is not a valid production language-model backend — ``get_attention_config``
-    rejects it because the dataloaders always emit per-document positions and SDPA
-    cannot consume them (it only has a boolean ``is_causal``). The graph_trainer
-    tests, however, use SDPA to exercise *backend-agnostic* graph machinery
-    (precompile-artifact serialization, custom codegen, context parallel, bitwise
-    determinism) without FlexInnerAttention's ``BlockMask``, which is unpicklable (its
-    ``mask_mod`` closures are Python code objects), is not a tensor (so it breaks
-    pipeline-parallel split-backward, which calls ``.requires_grad`` on every stage
-    input), and overflows the fp32 Triton shared-memory limit on large head dims.
-
-    For SDPA we build the flex config (a valid backend) and swap each layer's
-    ``inner_attention`` to ``GraphTrainerScaledDotProductInnerAttention.Config()``.
-    The adapter adds a singleton batch around the flat graph-trainer inputs and
-    delegates to the common batched SDPA implementation. Production code never
-    reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
-    registry can construct an SDPA language model outside these tests.
-    """
-    if attn_backend != "sdpa":
-        return config_builder(attn_backend=attn_backend, **builder_kwargs)
-
-    config = config_builder(attn_backend="flex", **builder_kwargs)
-    for layer in config.layers:
-        layer.attention.inner_attention = (
-            GraphTrainerScaledDotProductInnerAttention.Config()
-        )
+    """Build a Decoder config with a supported backend and traceable linears."""
+    config = config_builder(attn_backend=attn_backend, **builder_kwargs)
+    # GraphTrainer traces the backward.
+    disable_inplace_wgrad_accum(config)
     return config
 
 
@@ -210,6 +176,73 @@ _EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
 _EP_TOKEN_EXCHANGE = "EP_token_exchange"
 _EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
+
+
+def node_argument(
+    node: torch.fx.Node,
+    name: str,
+    position: int,
+    default: Any,
+) -> Any:
+    """Return one FX node argument by schema name or position."""
+    if name in node.kwargs:
+        return node.kwargs[name]
+    if position < len(node.args):
+        return node.args[position]
+    return default
+
+
+def node_tensor_meta(node: torch.fx.Node) -> torch.Tensor | None:
+    """Return a node's tensor value metadata when present."""
+    value = node.meta.get("val")
+    return value if isinstance(value, torch.Tensor) else None
+
+
+def same_tensor_metadata(lhs: torch.fx.Node, rhs: torch.fx.Node) -> bool:
+    """Return whether two nodes have the same tensor metadata."""
+    lhs_value = node_tensor_meta(lhs)
+    rhs_value = node_tensor_meta(rhs)
+    return (
+        lhs_value is not None
+        and rhs_value is not None
+        and lhs_value.shape == rhs_value.shape
+        and lhs_value.stride() == rhs_value.stride()
+        and lhs_value.dtype == rhs_value.dtype
+        and lhs_value.device == rhs_value.device
+    )
+
+
+def sole_user(node: torch.fx.Node, expected: torch.fx.Node) -> bool:
+    """Return whether ``expected`` is a node's only user."""
+    return len(node.users) == 1 and expected in node.users
+
+
+def walk_up_unary_chain(
+    output: torch.fx.Node,
+    user: torch.fx.Node,
+    is_passthrough: Callable[[torch.fx.Node], bool],
+) -> tuple[torch.fx.Node, ...] | None:
+    """Walk backward from ``output`` through an exclusive unary chain."""
+    reverse_nodes = []
+    node = output
+    while is_passthrough(node):
+        inputs = node.all_input_nodes
+        if len(inputs) != 1 or not sole_user(node, user):
+            return None
+        reverse_nodes.append(node)
+        user = node
+        node = inputs[0]
+    if not sole_user(node, user):
+        return None
+    return (node, *reversed(reverse_nodes))
+
+
+def parameter_gradient_fqns(node: torch.fx.Node) -> tuple[str, ...]:
+    """Return the parameter identities attached to a gradient node."""
+    custom = node.meta.get("custom", {})
+    return custom.get(PARAMETER_GRADIENT_FQNS_META) or custom.get(
+        FSDP_PARAM_FQNS_META, ()
+    )
 
 
 def compute_parameter_gradients(
@@ -334,7 +367,7 @@ def annotate_module_fqns(model: nn.Module) -> None:
 
 def annotate_graph_trainer_model(model: Decoder) -> None:
     """Attach the annotations consumed by GraphTrainer passes."""
-    if any(getattr(layer, "moe", None) is not None for layer in model.config.layers):
+    if model.config.first_moe is not None:
         annotate_moe_ep_regions()
     annotate_module_fqns(model)
 
@@ -359,7 +392,7 @@ def annotate_moe_ep_regions() -> None:
         return
 
     from torchtitan.models.common.moe import MoE
-    from torchtitan.models.common.token_dispatcher import (
+    from torchtitan.models.common.moe.token_dispatcher import (
         AllToAllTokenDispatcher,
         LocalTokenDispatcher,
     )
@@ -449,6 +482,7 @@ def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
 def get_default_transformer_block_buckets(
     n_layers: int,
     *,
+    num_mtp_layers: int = 0,
     chunked_loss_enabled: bool = False,
     moe_layer_ids: frozenset[int] = frozenset(),
     split_moe_expert_buckets: bool = False,
@@ -456,7 +490,9 @@ def get_default_transformer_block_buckets(
     """Get default transformer block buckets for manual bucketing passes.
 
     Assumes the standard Decoder layout: tok_embeddings, layers.0..N-1,
-    norm, and output (e.g., Llama3, DeepSeekV3, Qwen3).
+    optional mtp_layers.0..M-1, norm, and output (e.g., Llama3,
+    DeepSeekV3, Qwen3). Each MTP block uses its parent scope so auxiliary
+    projections and model-specific submodules stay in the same logical bucket.
     """
     layer_buckets: list[list[str] | str] = []
     for layer_id in range(n_layers):
@@ -467,10 +503,10 @@ def get_default_transformer_block_buckets(
                         f"layers.{layer_id}.attention_norm",
                         f"layers.{layer_id}.attention",
                         f"layers.{layer_id}.ffn_norm",
-                        f"layers.{layer_id}.moe.router",
-                        f"layers.{layer_id}.moe.shared_experts",
+                        f"layers.{layer_id}.feed_forward.router",
+                        f"layers.{layer_id}.feed_forward.shared_experts",
                     ],
-                    f"layers.{layer_id}.moe.routed_experts",
+                    f"layers.{layer_id}.feed_forward.routed_experts",
                 ]
             )
         else:
@@ -483,6 +519,7 @@ def get_default_transformer_block_buckets(
     return [
         "tok_embeddings",
         *layer_buckets,
+        *(f"mtp_layers.{layer_id}" for layer_id in range(num_mtp_layers)),
         final_bucket,
     ]
 
@@ -569,11 +606,11 @@ def apply_simple_fsdp(
         edp_mesh = parallelism_context.get_optional_mesh(edp_mesh_names)
         assert edp_mesh is not None
 
-        for _, transformer_block in model.layers.items():
+        for transformer_block in model.modules():
             if not isinstance(transformer_block, TransformerBlock):
                 continue
-            moe = getattr(transformer_block, "moe", None)
-            if moe is None:
+            moe = transformer_block.feed_forward
+            if not isinstance(moe, MoE):
                 continue
             routed_experts = moe.routed_experts
             experts_shard_dim = 0

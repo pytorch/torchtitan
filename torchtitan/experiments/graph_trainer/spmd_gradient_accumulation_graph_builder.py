@@ -480,6 +480,7 @@ def _extract_fwd_bwd_action_graphs(
     traced: TracedResult,
     *,
     trainer_config: "GraphTrainer.Config",
+    parallelism_context: ParallelismContext,
     plan: "GraphExecutionPlan",
     num_param_grads: int,
 ) -> tuple[_ScheduledFwdBwdGraphs, _FwdBwdGraphsMeta, Callable | None,]:
@@ -515,6 +516,7 @@ def _extract_fwd_bwd_action_graphs(
             stage,
             traced,
             config=trainer_config,
+            parallelism_context=parallelism_context,
             split_fsdp_param_unshard=plan.split_fsdp_param_unshard,
             split_fsdp_grad_reduction=plan.split_fsdp_grad_reduction,
         )
@@ -711,7 +713,7 @@ def _compile_scheduled_fwd_bwd_graphs(
     stage: GraphPipelineStage,
     graphs: _ScheduledFwdBwdGraphs,
     *,
-    compile_config: GraphTrainerCompileConfig,
+    trainer_config: "GraphTrainer.Config",
 ) -> _ScheduledFwdBwdGraphs:
     """Compile the FX module of each schedule action."""
     callable_names = {
@@ -729,8 +731,9 @@ def _compile_scheduled_fwd_bwd_graphs(
             call_spec,
             module=_compile_graph_pp_module(
                 call_spec.module,
-                compile_config=compile_config,
+                compile_config=trainer_config.compile,
                 graph_name=f"stage_{stage.stage_index}_{callable_name}",
+                use_cuda_graph=not trainer_config.training.disable_cuda_graphs,
             ),
         )
 
@@ -745,6 +748,7 @@ def _build_scheduled_fwd_bwd_graphs(
     traced: TracedResult,
     *,
     trainer_config: "GraphTrainer.Config",
+    parallelism_context: ParallelismContext,
     plan: "GraphExecutionPlan",
     num_param_grads: int,
 ) -> GraphTrainerScheduledFwdBwdStageGraphs:
@@ -756,6 +760,7 @@ def _build_scheduled_fwd_bwd_graphs(
         stage,
         traced,
         trainer_config=trainer_config,
+        parallelism_context=parallelism_context,
         plan=plan,
         num_param_grads=num_param_grads,
     )
@@ -773,7 +778,7 @@ def _build_scheduled_fwd_bwd_graphs(
     graphs = _compile_scheduled_fwd_bwd_graphs(
         stage,
         graphs,
-        compile_config=trainer_config.compile,
+        trainer_config=trainer_config,
     )
     return GraphTrainerScheduledFwdBwdStageGraphs(
         graphs=graphs,
@@ -808,6 +813,7 @@ def _build_gradient_accumulation_fwd_bwd_graphs(
         stage,
         traced,
         trainer_config=trainer_config,
+        parallelism_context=parallelism_context,
         plan=plan,
         num_param_grads=num_param_grads,
     )

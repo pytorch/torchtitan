@@ -59,6 +59,16 @@ class TorchFTManager(Configurable):
         Note: This currently only works with gloo process group.
         """
 
+        timeout_ms: int = 60000
+        """
+        Timeout for torchft manager operations, including process group
+        reconfiguration. Keep it below comm.train_timeout_seconds: a rank blocked
+        in reconfiguration stops issuing its intra-replica collectives, so its
+        peers' watchdog aborts the replica if this timeout is longer. It also
+        bounds checkpoint transfer during recovery, so leave room for that.
+        TORCHFT_TIMEOUT_SEC overrides it.
+        """
+
         replica_id: int = 0
         """The TorchFT replica ID of this run."""
 
@@ -133,6 +143,7 @@ class TorchFTManager(Configurable):
             state_dict=None,
             use_async_quorum=config.use_async_quorum and self.use_async_quorum,
             replica_id=f"torchtitan_ft_{config.replica_id}",
+            timeout=timedelta(milliseconds=config.timeout_ms),
         )
         self.group_size = config.group_size
         self.replica_id = config.replica_id

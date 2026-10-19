@@ -20,7 +20,7 @@ import torch._C._profiler
 from torchtitan.config import Configurable
 from torchtitan.distributed.cuda_graph import get_cuda_graph_annotations
 from torchtitan.observability import structured_logger as sl
-from torchtitan.tools.utils import device_module
+from torchtitan.tools.utils import device_module, device_type
 
 # torch's export_chrome_trace gained cuda_graph_annotations when the offline joiner
 # (torch.cuda._annotate_cuda_graph_trace) was removed. Older versions still export, just
@@ -38,6 +38,7 @@ PROFILE_DIR = "profiling/traces"  # Profiler.Config.save_traces_folder default
 PROFILE_ITER_DIR = "iteration_{step}"  # PROFILE_DIR/{PROFILE_ITER_DIR}
 PROFILE_FILE = "rank{rank}_trace.json.gz"  # PROFILE_DIR/PROFILE_ITER_DIR/{PROFILE_FILE}
 PFTRACE_PROFILE_FILE = "rank{rank}_trace.pftrace.gz"
+PY_STACKS_FILE = "rank{rank}_cuda_graph_py_stacks.json.gz"
 
 MEMORY_DIR = (
     "profiling/memory_snapshot"  # Profiler.Config.save_memory_snapshot_folder default
@@ -67,6 +68,12 @@ class CuspyProfilerConfig:
 
     enable_event_node_ids: bool = False
     """Associate CUDA events with CUDA graph event-record nodes."""
+
+    record_py_stacks: bool = False
+    """Record each CUDA graph kernel's Python launch stack at capture and save them
+    beside the trace as ``rank{rank}_cuda_graph_py_stacks.json.gz``, keyed by
+    ``(graph id << 32) | graph node id`` of the trace's kernel events (see
+    ``torch.cuda.graph_annotations.get_kernel_py_stacks``)."""
 
     performance_metrics: list[str] = field(default_factory=list)
     """CUPTI PM-sampling metric names to collect."""
@@ -441,6 +448,13 @@ class Profiler(Configurable):
             output_file = os.path.join(curr_trace_dir, profile_file.format(rank=rank))
             if cuspy is not None:
                 prof.export_chrome_trace(output_file)
+                if (
+                    cuspy.record_py_stacks
+                    and torch.cuda.graph_annotations.get_kernel_py_stacks()
+                ):
+                    torch.cuda.graph_annotations.dump_kernel_py_stacks(
+                        os.path.join(curr_trace_dir, PY_STACKS_FILE.format(rank=rank))
+                    )
             else:
                 # CUDA graph annotations are baked in during the export rather than
                 # joined onto the written file afterwards: re-reading and rewriting a
@@ -477,6 +491,7 @@ class Profiler(Configurable):
 
         wait = profile_freq - (active + warmup)
         activities: list[Any] = [torch.profiler.ProfilerActivity.CPU]
+        with_stack = False
         if cuspy is not None:
             if not torch.cuda.is_available():
                 raise ValueError("profiler.cuspy requires CUDA.")
@@ -490,6 +505,10 @@ class Profiler(Configurable):
             activities.append(torch.profiler.ProfilerActivity.CUDA)
         elif torch.xpu.is_available():
             activities.append(torch.profiler.ProfilerActivity.XPU)
+        elif device_type == "neuron":
+            activities.append(torch.profiler.ProfilerActivity.PrivateUse1)
+            # Neuron can link framework events to source lines through the stacks.
+            with_stack = True
 
         torch_profiler = torch.profiler.profile(
             activities=activities,
@@ -498,6 +517,7 @@ class Profiler(Configurable):
             ),
             on_trace_ready=trace_handler,
             record_shapes=True,
+            with_stack=with_stack,
         )
         torch_profiler.__enter__()
         torch_profiler.step_num = global_step

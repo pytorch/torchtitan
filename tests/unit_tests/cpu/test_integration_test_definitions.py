@@ -13,13 +13,10 @@ import pytest
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
-from torchtitan_recipes.tests.suites.features import (
-    llama3_debugmodel_default,
-    llama3_debugmodel_hf_checkpoint_load,
-    muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph,
+from torchtitan.models.common.attention.cp_attention import (
+    UlyssesCPVarlenInnerAttention,
 )
-from torchtitan_recipes.tests.suites.models import llama3_debugmodel_fsdp2_tp2_pp2
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 from tests.integration_tests import (
     get_importable_config_module,
@@ -27,10 +24,18 @@ from tests.integration_tests import (
     validate_fake_pg_compatibility,
 )
 from tests.integration_tests.b200 import build_b200_tests_list
-from tests.integration_tests.features import build_features_test_list
+from tests.integration_tests.features import (
+    build_features_test_list,
+    llama3_debugmodel_default,
+    llama3_debugmodel_hf_checkpoint_load,
+    muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph,
+)
 from tests.integration_tests.flux import build_flux_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
-from tests.integration_tests.models import build_model_tests_list
+from tests.integration_tests.models import (
+    build_model_tests_list,
+    llama3_debugmodel_fsdp2_tp2_pp2,
+)
 from tests.integration_tests.run_tests import _parse_test_suites, run_single_test
 
 
@@ -142,6 +147,34 @@ def test_split_backward_pp_cases_exercise_varlen_cuda_graphs() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("test_name", "tp_degree", "ngpu"),
+    [("fsdp+cp_ulysses_varlen", 1, 4), ("fsdp+tp+cp_ulysses_varlen", 2, 8)],
+)
+def test_varlen_cp_combinations_require_real_collectives(
+    test_name, tp_degree, ngpu
+) -> None:
+    tests_by_name = {test.test_name: test for test in build_features_test_list()}
+    test = tests_by_name[test_name]
+    config = test.configs[0]()
+
+    assert test.use_real_pg and not test.disabled
+    assert test.ngpu == ngpu
+    assert config.parallelism.data_parallel_shard_degree == 2
+    assert config.parallelism.context_parallel_degree == 2
+    assert config.parallelism.tensor_parallel_degree == tp_degree
+    assert config.parallelism.context_parallel_load_balancer is None
+    assert not config.training.disable_cuda_graphs
+    assert config.dataloader.max_num_documents is not None
+    assert all(
+        isinstance(
+            layer.attention.inner_attention, UlyssesCPVarlenInnerAttention.Config
+        )
+        for layer in config.model.layers
+    )
+    config.__post_init__()
+
+
 def test_per_group_cuda_graph_integration_supports_fake_pg() -> None:
     tests_by_name = {test.test_name: test for test in build_features_test_list()}
     test = tests_by_name["fsdp_per_group_cuda_graph"]
@@ -183,6 +216,8 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
         "kimi_k3_mm_allgather_kv_cp",
         "kimi_k3_mm_ulysses_cp",
         "qwen3_fsdp+deepep",
+        "qwen3_5_mm_allgather_kv_cp",
+        "qwen3_5_mm_ulysses_cp",
         "qwen3_5_moe_lora",
     }
     assert all(not hasattr(test, "use_h100") for test in build_features_test_list())

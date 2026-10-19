@@ -6,7 +6,7 @@
 
 import torch
 
-from torchtitan.rl.losses.dapo import _normalize, DAPOLoss
+from torchtitan.rl.trainer.losses.dapo import _normalize, DAPOLoss
 
 
 def test_loss_normalization_uses_mutable_tensor_denominator() -> None:

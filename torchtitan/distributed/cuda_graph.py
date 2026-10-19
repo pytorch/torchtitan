@@ -281,8 +281,8 @@ def get_cuda_graph_annotations() -> dict[int, list[Any]]:
 
 
 def get_cuspy_cuda_graph_annotation_config(
-    *, enable_event_node_ids: bool
-) -> dict[str, str] | None:
+    *, enable_event_node_ids: bool, record_py_stacks: bool = False
+) -> dict[str, Any] | None:
     """``torch.cuda.graph`` annotation options for a Cuspy-profiled run.
 
     ``backend="cupti"`` finds each ``mark_kernels`` scope's nodes through CUPTI
@@ -292,7 +292,8 @@ def get_cuspy_cuda_graph_annotation_config(
     CUPTI's ``sourceGraphNodeId``, falling back to the exec graph where CUPTI or
     the driver is too old. Cuspy resolves graph event-record nodes (NCCL's under
     ``NCCL_GRAPH_MIXING_SUPPORT``) only by exec-graph id, so ``enable_event_node_ids``
-    keys by the exec graph instead.
+    keys by the exec graph instead. ``record_py_stacks`` records each node's Python
+    launch stack, which needs the CUPTI backend.
 
     Returns ``None`` when graph annotations are unavailable, so capture does not
     take a CUPTI subscription for nothing.
@@ -305,7 +306,13 @@ def get_cuspy_cuda_graph_annotation_config(
             "Cuspy trace."
         )
         return None
-    return {"backend": "cupti", "key_by": "exec" if enable_event_node_ids else "auto"}
+    config: dict[str, Any] = {
+        "backend": "cupti",
+        "key_by": "exec" if enable_event_node_ids else "auto",
+    }
+    if record_py_stacks:
+        config["record_py_stacks"] = True
+    return config
 
 
 def run_eager_on_cuda_graph_stream(
