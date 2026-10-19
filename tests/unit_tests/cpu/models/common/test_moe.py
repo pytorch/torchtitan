@@ -612,19 +612,19 @@ class TestMoE(unittest.TestCase):
 
         with (
             patch(
-                "torchtitan.models.common.moe.spmd_sparse_mesh",
+                "torchtitan.models.common.moe.moe.spmd_sparse_mesh",
                 return_value=object(),
             ),
             patch(
-                "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                "torchtitan.models.common.moe.moe.spmd_dense_sp_enabled",
                 return_value=False,
             ),
             patch(
-                "torchtitan.models.common.moe.spmd_mesh_group",
+                "torchtitan.models.common.moe.moe.spmd_mesh_group",
                 return_value=object(),
             ),
             patch(
-                "torchtitan.models.common.moe.spmd_mesh_size",
+                "torchtitan.models.common.moe.moe.spmd_mesh_size",
                 return_value=2,
             ),
             self.assertRaisesRegex(RuntimeError, r"divisible by the TP degree \(2\)"),
