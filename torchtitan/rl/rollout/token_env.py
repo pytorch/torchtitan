@@ -98,7 +98,8 @@ class TokenEnv(Configurable):
 
         max_rollout_tokens: int | None = None
         """Max prompt tokens before the next turn; multi-turn envs use it to stop before the
-        prompt outgrows context (`None` disables)."""
+        prompt outgrows context (`None` disables). Unset, a prompt past the generator's context
+        fails the generate call, and the rollout ends as `ERROR_SYSTEM` (not trained)."""
 
         # TODO: its unclear if timeout should be on this layer or handled by the messageEnv
         step_timeout_s: float | None = 1800.0
