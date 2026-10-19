@@ -22,7 +22,7 @@ def reset_local_compile():
     apply_local_compile([])
 
 
-def test_compiled_bf16_rope_is_bitwise_with_eager() -> None:
+def test_compiled_bf16_rope_matches_eager() -> None:
     torch.manual_seed(0)
     # DeepSeek-V3's 128 query heads; an odd token count leaves a partial block.
     num_heads, num_tokens = 128, 1027
@@ -68,6 +68,8 @@ def test_compiled_bf16_rope_is_bitwise_with_eager() -> None:
         results.append((rotated_q, rotated_k_pe, q_in.grad, kv_in.grad))
 
     eager, *compiled_runs = results
+    # Bitwise on GB300 but not on A10G: compiled real arithmetic can round
+    # differently from eager's complex multiply.
     for compiled in compiled_runs:
         for got, want in zip(compiled, eager, strict=True):
-            assert torch.equal(got, want)
+            torch.testing.assert_close(got, want)
