@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from torchtitan.rl.actors.system import TrainerHandle
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.controller import Controller, ValidationConfig
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
 GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"
@@ -81,6 +81,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
             target_offpolicy_steps=1,
             max_offpolicy_steps=None,
             num_prompts_per_train_step=5,
+            validation=ValidationConfig(),
         )
     )
     controller.start_step = 0

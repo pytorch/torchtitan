@@ -33,6 +33,7 @@ from torchtitan.rl.generator.types import (
     FinishedRequest,
     RequestMetricsInputs,
     SamplingConfig,
+    vllm_priority,
 )
 from torchtitan.rl.generator.vllm.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
@@ -280,9 +281,8 @@ class VLLMEngine(GenerationEngine):
         engine_kwargs["max_num_seqs"] = max_num_seqs
         if max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
-        # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
-        # (-1 for all validation), so older groups have higher priority (see its docstring).
-        # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.
+        # Smaller `priority` runs first and is preempted last; `vllm_priority` sets it from the
+        # group id (see `EngineRequest.group_id`).
         engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.
@@ -380,7 +380,7 @@ class VLLMEngine(GenerationEngine):
                     prompt=engine_input,
                     params=_build_sampling_params(request.sampling),
                     arrival_time=request.arrival_time,
-                    priority=max(request.group_id, -1),
+                    priority=vllm_priority(request.group_id),
                 )
                 if self._session_kv_holder is not None:
                     self._session_kv_holder.track(
