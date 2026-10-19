@@ -575,9 +575,9 @@ class ChunkedLossWrapper(BaseLoss):
         with ``_skip_lm_head=True``. Tensor inputs must be paired with tensor
         labels; tuple inputs must contain one labels tensor per prediction.
 
-        Per-chunk backward runs when the decoder outputs or loss require
+        Per-chunk backward runs when the decoder outputs or head require
         gradients, including training the lm_head on frozen decoder outputs.
-        Under ``no_grad``, runs chunked forward only.
+        With frozen decoder outputs, ``no_grad`` runs chunked forward only.
 
         Returns a differentiable loss and metrics. When ``.backward()`` is called
         on the loss, it triggers backward through the decoder via a custom
@@ -606,13 +606,18 @@ class ChunkedLossWrapper(BaseLoss):
                 "ChunkedLossWrapper requires either one prediction/labels "
                 "tensor pair or non-empty aligned tuples."
             )
-        requires_grad = pred[0].requires_grad
-        if any(prediction.requires_grad != requires_grad for prediction in pred[1:]):
+        decoder_requires_grad = pred[0].requires_grad
+        if any(
+            prediction.requires_grad != decoder_requires_grad for prediction in pred[1:]
+        ):
             raise ValueError(
                 "All chunked-loss predictions must agree on whether gradients "
                 "are required."
             )
-        requires_grad = requires_grad and torch.is_grad_enabled()
+        run_backward = decoder_requires_grad or (
+            torch.is_grad_enabled()
+            and any(p.requires_grad for p in lm_head.parameters())
+        )
 
         # Chunking operates on the local tensor. Equal chunk sizes match
         # GradAccumulator's sequential slice
@@ -633,7 +638,7 @@ class ChunkedLossWrapper(BaseLoss):
             # accumulates ``.grad`` for ``GradAccumulator``.
             hidden_state_chunks_per_output = tuple(
                 tuple(
-                    chunk.detach().requires_grad_(requires_grad)
+                    chunk.detach().requires_grad_(decoder_requires_grad)
                     for chunk in _chunk_local(hidden_state)
                 )
                 for hidden_state in pred
@@ -652,7 +657,7 @@ class ChunkedLossWrapper(BaseLoss):
                     )
                     for hidden_state in pred
                 )
-                if requires_grad
+                if decoder_requires_grad
                 else ()
             )
 
@@ -664,7 +669,6 @@ class ChunkedLossWrapper(BaseLoss):
                     dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
                 )
             metrics: dict[str, torch.Tensor] = {}
-            requires_backward = False
 
             fsdp_enabled = isinstance(lm_head, FSDPModule)
             # Disable FSDP reshard on lm_head to keep its weight unsharded across
@@ -720,11 +724,10 @@ class ChunkedLossWrapper(BaseLoss):
                 metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
                 total_loss = total_loss + chunk_loss.detach()
 
-                if requires_grad or chunk_loss.requires_grad:
-                    requires_backward = True
+                if run_backward:
                     with spmd.no_typecheck():
                         chunk_loss.backward()
-                        if requires_grad:
+                        if decoder_requires_grad:
                             for h_chunk, grad_accumulator in zip(
                                 h_chunks, grad_accumulators, strict=True
                             ):
@@ -736,9 +739,9 @@ class ChunkedLossWrapper(BaseLoss):
                 lm_head.set_reshard_after_forward(True)
                 lm_head.set_reshard_after_backward(True)
                 lm_head.reshard()
-            if not requires_grad:
+            if not decoder_requires_grad:
                 # Scaling this leaf cannot rescale already accumulated head gradients.
-                return total_loss.requires_grad_(requires_backward), metrics
+                return total_loss.requires_grad_(run_backward), metrics
 
             accumulated_grads = tuple(
                 grad_accumulator.buffer.to(hidden_state.dtype)

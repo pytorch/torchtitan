@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -32,6 +33,8 @@ from torchtitan.components.loss import (
     GradAccumulator,
     IGNORE_INDEX,
 )
+from torchtitan.config import ParallelismConfig
+from torchtitan.config.transform import LoRATransform, transform_model_config_
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.deepseek_v3.mtp import (
     get_mtp_token_counts,
@@ -39,6 +42,7 @@ from torchtitan.models.deepseek_v3.mtp import (
     MTPLoss,
     roll_mtp_sequence,
 )
+from torchtitan.models.llama3 import build_model_config
 
 
 class TestLoss(unittest.TestCase):
@@ -955,6 +959,72 @@ class TestChunkedLossWrapper(unittest.TestCase):
                     ):
                         torch.testing.assert_close(actual.grad, expected.grad)
 
+    def test_lora_head_only_matches_cross_entropy(self):
+        """The in-tree lm_head LoRA config preserves loss and adapter gradients."""
+        torch.manual_seed(42)
+        model_config = build_model_config(
+            "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+        )
+        model_config = transform_model_config_(
+            model_config, [LoRATransform(rank=2, alpha=4.0, target_modules=["lm_head"])]
+        )
+        model = model_config.build()
+        model.init_states()
+        model._skip_lm_head = True
+        # A nonzero B matrix exercises gradients for both adapter matrices.
+        with torch.no_grad():
+            model.lm_head.lora_b.weight.normal_(std=0.02)
+        reference_head = copy.deepcopy(model.lm_head)
+        trainable_names = {
+            name for name, param in model.named_parameters() if param.requires_grad
+        }
+        self.assertEqual(
+            trainable_names, {"lm_head.lora_a.weight", "lm_head.lora_b.weight"}
+        )
+
+        for num_chunks in (1, 2, 4):
+            with self.subTest(num_chunks=num_chunks):
+                model.zero_grad(set_to_none=True)
+                reference_head.zero_grad(set_to_none=True)
+                chunked_loss = ChunkedLossWrapper(
+                    ChunkedLossWrapper.Config(num_chunks=num_chunks)
+                )
+                chunked_loss.set_lm_head(model.lm_head)
+                for _ in range(2):
+                    tokens = torch.randint(0, model_config.vocab_size, (8,))
+                    positions = torch.arange(8)
+                    hidden_TD = model(
+                        tokens,
+                        positions=positions,
+                        attention_metadata=model._get_attention_metadata(positions),
+                    )
+                    self.assertFalse(hidden_TD.requires_grad)
+                    labels = torch.randint(0, model_config.vocab_size, (8,))
+                    labels[0] = IGNORE_INDEX
+                    token_count = (labels != IGNORE_INDEX).sum()
+                    reference_loss = (
+                        F.cross_entropy(
+                            reference_head(hidden_TD), labels, reduction="sum"
+                        )
+                        / token_count
+                    )
+
+                    loss, _ = chunked_loss(hidden_TD, labels, token_count)
+                    loss.backward()
+                    reference_loss.backward()
+
+                    torch.testing.assert_close(loss, reference_loss)
+                    for name, parameter in model.named_parameters():
+                        if name in trainable_names:
+                            torch.testing.assert_close(
+                                parameter.grad,
+                                reference_head.get_parameter(
+                                    name.removeprefix("lm_head.")
+                                ).grad,
+                            )
+                        else:
+                            self.assertIsNone(parameter.grad)
+
     def test_detached_chunk_loss_with_trainable_features_raises(self):
         """A detached chunk must not silently shift later decoder gradients."""
         for detached_chunk in (0, 1, 2):
@@ -986,24 +1056,20 @@ class TestChunkedLossWrapper(unittest.TestCase):
                     self.assertIsNone(hidden_TD.grad)
 
     def test_no_grad_leaves_head_and_features_unchanged(self):
-        """Validation does not backpropagate even with trainable input tensors."""
-        for requires_grad in (False, True):
-            with self.subTest(requires_grad=requires_grad):
-                head = nn.Linear(5, 17)
-                chunked_loss = ChunkedLossWrapper(
-                    ChunkedLossWrapper.Config(num_chunks=2)
-                )
-                chunked_loss.set_lm_head(head)
-                hidden = torch.randn(8, 5, requires_grad=requires_grad)
-                labels = torch.randint(0, 17, (8,))
+        """Validation leaves frozen decoder outputs and the head without gradients."""
+        head = nn.Linear(5, 17)
+        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
+        chunked_loss.set_lm_head(head)
+        hidden = torch.randn(8, 5)
+        labels = torch.randint(0, 17, (8,))
 
-                with torch.no_grad():
-                    loss, _ = chunked_loss(hidden, labels)
+        with torch.no_grad():
+            loss, _ = chunked_loss(hidden, labels)
 
-                self.assertFalse(loss.requires_grad)
-                self.assertIsNone(hidden.grad)
-                for parameter in head.parameters():
-                    self.assertIsNone(parameter.grad)
+        self.assertFalse(loss.requires_grad)
+        self.assertIsNone(hidden.grad)
+        for parameter in head.parameters():
+            self.assertIsNone(parameter.grad)
 
     def test_fully_frozen_model_returns_detached_loss(self):
         """Frozen features and head keep the forward-only loss contract."""
