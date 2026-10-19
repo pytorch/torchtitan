@@ -45,6 +45,35 @@ class _TestGradientClipper(GradientClipper):
         return torch.tensor(self.config.grad_norm)
 
 
+def test_default_gradient_clipper_uses_distributed_clip_grad_norm() -> None:
+    parameters = [torch.nn.Parameter(torch.tensor(1.0))]
+    parallelism_context = MagicMock()
+    pp_mesh = MagicMock()
+    parallelism_context.get_optional_mesh.return_value = pp_mesh
+    gradient_clipper_config = Optim.Config().gradient_clipper
+    assert isinstance(gradient_clipper_config, GradientClipper.Config)
+    gradient_clipper = gradient_clipper_config.build()
+    expected_grad_norm = torch.tensor(2.0)
+
+    with patch(
+        "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_",
+        return_value=expected_grad_norm,
+    ) as clip_grad_norm:
+        grad_norm = gradient_clipper(
+            parameters,
+            1.0,
+            parallelism_context=parallelism_context,
+        )
+
+    clip_grad_norm.assert_called_once_with(
+        parameters,
+        1.0,
+        foreach=True,
+        pp_mesh=pp_mesh,
+    )
+    assert grad_norm is expected_grad_norm
+
+
 def test_optim_config_rejects_negative_max_norm() -> None:
     with pytest.raises(ValueError, match="max_norm"):
         Optim.Config(max_norm=-1)
@@ -59,16 +88,20 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
     optimizers = MagicMock()
     lr_schedulers = MagicMock()
     ema = MagicMock()
+    gradient_clipper = MagicMock()
     optimizer_config = _OptimizersConfig(
         optimizers=[_OptimizerConfig()],
         build=MagicMock(return_value=optimizers),
+    )
+    gradient_clipper_config = SimpleNamespace(
+        build=MagicMock(return_value=gradient_clipper)
     )
     config = SimpleNamespace(
         optimizer=optimizer_config,
         lr_scheduler=SimpleNamespace(build=MagicMock(return_value=lr_schedulers)),
         ema=SimpleNamespace(build=MagicMock(return_value=ema)),
         max_norm=1.0,
-        gradient_clipper=None,
+        gradient_clipper=gradient_clipper_config,
         enable_cuda_graph=enable_cuda_graph,
     )
     wrapped_update = MagicMock()
@@ -97,6 +130,8 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
         training_steps=10,
     )
     config.ema.build.assert_called_once_with(model_parts=[model])
+    gradient_clipper_config.build.assert_called_once_with()
+    assert optim.gradient_clipper is gradient_clipper
     assert optim._is_first_step_call
     if enable_cuda_graph:
         wrap.assert_called_once_with(
@@ -117,6 +152,7 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
     model = torch.nn.Linear(2, 2)
     optimizers = MagicMock()
     optimizer_build = MagicMock(return_value=optimizers)
+    gradient_clipper_config = SimpleNamespace(build=MagicMock())
     config = SimpleNamespace(
         optimizer=_OptimizersConfig(
             optimizers=[_OptimizerConfig()],
@@ -125,7 +161,7 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
         lr_scheduler=SimpleNamespace(build=MagicMock()),
         ema=None,
         max_norm=1.0,
-        gradient_clipper=None,
+        gradient_clipper=gradient_clipper_config,
         enable_cuda_graph=True,
     )
 
@@ -145,6 +181,7 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
         model_parts=[model],
         enable_cuda_graph=False,
     )
+    gradient_clipper_config.build.assert_called_once_with()
     wrap.assert_not_called()
     assert optim._run_update == optim._update
     assert "Optim CUDA graph is disabled" in caplog.text

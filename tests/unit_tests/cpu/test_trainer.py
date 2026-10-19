@@ -19,7 +19,7 @@ from torchtitan.components.data.types import (
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
 )
-from torchtitan.components.optim import Optim
+from torchtitan.components.optim import GradientClipper, Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.aux_loss import AuxLoss
@@ -777,7 +777,7 @@ def test_optim_update_clips_before_parameter_update() -> None:
     )
     optim.parameters = []
     optim.optimizers = optimizers
-    optim.gradient_clipper = None
+    optim.gradient_clipper = GradientClipper(GradientClipper.Config())
 
     def clip_grad_norm(*args, **kwargs):
         events.append("clip")

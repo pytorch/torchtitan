@@ -27,10 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class GradientClipper(Configurable):
-    """Base class for optimizer-owned gradient clipping.
-
-    Implementations must define their own nested ``Config`` class.
-    """
+    """Default optimizer-owned gradient clipping implementation."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -46,14 +43,19 @@ class GradientClipper(Configurable):
         *,
         parallelism_context: ParallelismContext,
     ) -> torch.Tensor:
-        """Clip gradients with semantics matching ``dist_utils.clip_grad_norm_``.
+        """Clip gradients with ``dist_utils.clip_grad_norm_``.
 
         Use ``foreach=True`` and the PP mesh from ``parallelism_context``.
         Return the pre-clip global L2 norm as a local zero-dimensional tensor
         with an equivalent value on every rank. Preserve non-finite values and
         do not reuse the returned norm as the clip coefficient or scratch.
         """
-        raise NotImplementedError
+        return dist_utils.clip_grad_norm_(
+            parameters,
+            max_norm,
+            foreach=True,
+            pp_mesh=parallelism_context.get_optional_mesh("pp"),
+        )
 
 
 class Optim(Configurable):
@@ -71,8 +73,10 @@ class Optim(Configurable):
         """Optional online EMA of model weights."""
         max_norm: float | int = 1.0
         """Maximum norm used for gradient clipping."""
-        gradient_clipper: GradientClipper.Config | None = None
-        """Optional optimizer-owned gradient clipping implementation."""
+        gradient_clipper: GradientClipper.Config = field(
+            default_factory=GradientClipper.Config
+        )
+        """Optimizer-owned gradient clipping implementation."""
         enable_cuda_graph: bool = False
         """Capture gradient clipping and optimizer updates in one CUDA graph."""
 
@@ -83,7 +87,7 @@ class Optim(Configurable):
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
     ema: EMA | None
-    gradient_clipper: GradientClipper | None
+    gradient_clipper: GradientClipper
 
     def __init__(
         self,
@@ -126,11 +130,7 @@ class Optim(Configurable):
             if config.ema is not None
             else None
         )
-        self.gradient_clipper = (
-            config.gradient_clipper.build()
-            if config.gradient_clipper is not None
-            else None
-        )
+        self.gradient_clipper = config.gradient_clipper.build()
 
         self._run_update = self._update
         if enable_cuda_graph:
@@ -160,19 +160,11 @@ class Optim(Configurable):
 
     def _clip_grad_norm(self) -> torch.Tensor:
         """Clip gradients and return their pre-clip global L2 norm."""
-        if self.gradient_clipper is None:
-            grad_norm = dist_utils.clip_grad_norm_(
-                self.parameters,
-                self.config.max_norm,
-                foreach=True,
-                pp_mesh=self.parallelism_context.get_optional_mesh("pp"),
-            )
-        else:
-            grad_norm = self.gradient_clipper(
-                self.parameters,
-                self.config.max_norm,
-                parallelism_context=self.parallelism_context,
-            )
+        grad_norm = self.gradient_clipper(
+            self.parameters,
+            self.config.max_norm,
+            parallelism_context=self.parallelism_context,
+        )
         if not isinstance(grad_norm, torch.Tensor):
             raise TypeError("Gradient clipping must return a torch.Tensor.")
         if grad_norm.ndim != 0:

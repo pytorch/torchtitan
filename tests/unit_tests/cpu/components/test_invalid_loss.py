@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.optim import Optim
+from torchtitan.components.optim import GradientClipper, Optim
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
@@ -66,7 +66,7 @@ class TestInvalidLoss(unittest.TestCase):
         optim.pp_has_last_stage = True
         optim.parameters = []
         optim.optimizers = MagicMock()
-        optim.gradient_clipper = None
+        optim.gradient_clipper = GradientClipper(GradientClipper.Config())
         optim.lr_schedulers = MagicMock()
         optim.lr_schedulers.get_metrics.return_value = {}
         optim.ema = None
