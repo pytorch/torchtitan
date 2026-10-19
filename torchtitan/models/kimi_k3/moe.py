@@ -73,7 +73,7 @@ class KimiLatentMoE(MoE):
             padding_mask_T=routed_padding_mask_T,
             **router_kwargs,
         )
-        num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
+        num_tokens_per_expert_E = self.routed_experts.count_tokens(routing_map_TE)
 
         routed_down_TD = self.routed_down(routed_x_TD)
         # The token dispatcher reads the routed_down projection output with bare ops.
