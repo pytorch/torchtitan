@@ -315,6 +315,98 @@ def test_batch_invariant_decode_matches_prefill(monkeypatch) -> None:
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+def test_batch_invariant_chunked_and_mixed_steps_match_decode(monkeypatch) -> None:
+    """A token's output and state must not depend on how its sequence was scheduled.
+
+    Reference: every token decodes alone. Schedule: a 4-token prefill, a 2-token
+    second chunk, then decode tokens that each share a packed step with a fresh
+    prefill. Mismatches are rare per element, so 64 batches of 32 sequences run.
+    """
+    monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: True)
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    num_sequences, num_tokens, channels, heads = 32, 16, 6144, 16
+    layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "gdn"
+    layer.local_num_k_heads = layer.local_num_v_heads = heads
+    layer.head_k_dim = layer.head_v_dim = 128
+    layer.local_key_dim = 2048
+    weight = torch.randn(channels, 4, device=device, dtype=torch.bfloat16)
+    A_log, bias = torch.randn(2, heads, device=device)
+    slots = list(range(1, num_sequences + 1))
+    filler_slot = num_sequences + 1
+
+    def step(x, a, b, path, start, stop):
+        """Run positions [start, stop) of every sequence as one step."""
+        length = stop - start
+        rows = [t[:, start:stop].flatten(0, 1) for t in (x, a, b)]
+        offsets = [length * i for i in range(num_sequences + 1)]
+        step_slots, initial = slots, [start > 0] * num_sequences
+        if path is LinearAttentionExecutionPath.PACKED:
+            # A fresh 2-token prefill shares the step, then the zero-length interval
+            # on null slot 0 that the metadata builder always appends.
+            offsets += [offsets[-1] + 2] * 2
+            step_slots = slots + [filler_slot, 0]
+            initial = initial + [False, False]
+            rows = [torch.cat([t, torch.randn_like(t[:2])]) for t in rows]
+        metadata = TorchTitanLinearAttentionMetadata(
+            execution_path=path,
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_spec_decodes=0,
+            num_spec_decode_tokens=0,
+            num_actual_tokens=rows[0].shape[0],
+            non_spec_query_start_loc=torch.tensor(
+                offsets, device=device, dtype=torch.int32
+            ),
+            non_spec_state_indices_tensor=torch.tensor(
+                step_slots, device=device, dtype=torch.int32
+            ),
+            has_initial_state=torch.tensor(initial, device=device),
+        )
+        output = rows[0].new_zeros(rows[0].shape[0], heads, 128)
+        context = ForwardContext(
+            no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
+        )
+        with override_forward_context(context):
+            layer._forward(*rows, weight, None, A_log, bias, output)
+        return output[: num_sequences * length].unflatten(0, (num_sequences, length))
+
+    def run(x, a, b, path, chunks):
+        conv_state = torch.full(
+            (filler_slot + 1, 3, channels),
+            torch.nan,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        ssm_state = torch.full(
+            (filler_slot + 1, heads, 128, 128), torch.nan, device=device
+        )
+        layer.kv_cache = (conv_state, ssm_state)
+        output = torch.cat([step(x, a, b, path, *chunk) for chunk in chunks], 1)
+        return output, conv_state[1:filler_slot], ssm_state[1:filler_slot]
+
+    decode_alone = [(t, t + 1) for t in range(num_tokens)]
+    chunked_then_mixed = [(0, 4), (4, 6)] + [(t, t + 1) for t in range(6, num_tokens)]
+    with torch.inference_mode():
+        for _ in range(64):
+            x = torch.randn(
+                num_sequences, num_tokens, channels, device=device, dtype=torch.bfloat16
+            )
+            a, b = torch.randn(2, num_sequences, num_tokens, heads, device=device)
+            reference = run(
+                x, a, b, LinearAttentionExecutionPath.SINGLE_TOKEN, decode_alone
+            )
+            scheduled = run(
+                x, a, b, LinearAttentionExecutionPath.PACKED, chunked_then_mixed
+            )
+            for actual, expected in zip(scheduled, reference, strict=True):
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     assert int(os.environ["WORLD_SIZE"]) == 1
     # Eager runs the real token count, while FULL replay pads it up to a capture
