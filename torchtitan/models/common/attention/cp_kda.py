@@ -16,6 +16,7 @@ from torchtitan.models.common.attn_gym import (
     context_parallel_conv_history,
     context_parallel_kda,
     ContextParallelRouting,
+    require_attn_gym,
 )
 
 from .cp_attention import CPInnerAttention
@@ -39,6 +40,13 @@ class ContextParallelInnerKDA(
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config, InnerKDA.Config):
         pass
+
+    def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(
+            context_parallel_kda, context_parallel_conv_history, ContextParallelRouting
+        )
+        super().__init__(config)
 
     @staticmethod
     def prepare_cp_metadata(
