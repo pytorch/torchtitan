@@ -11,7 +11,8 @@ import itertools
 import logging
 import statistics
 import threading
-from collections.abc import Iterable
+import time
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
@@ -505,25 +506,22 @@ class RolloutWorker(Configurable):
         try:
             # produce the rollouts. A cancel cancels every sibling, and with return_exceptions the
             # gather still waits for each one's `finally` (session release) before it raises.
-            results = await asyncio.gather(
-                *(
-                    self._run_single_rollout(
-                        generate_fn=generate_fn,
-                        release_session_fn=release_session_fn,
-                        env=env,
-                        # Offset the base seed per sample so a group's n=1
-                        # requests are diverse yet reproducible run-to-run.
-                        sampling=(
-                            sampling
-                            if sampling.seed is None
-                            else replace(sampling, seed=sampling.seed + sample_idx)
-                        ),
-                        group_id=group_id,
-                        rollout_id=sample_idx,
-                    )
-                    for sample_idx, env in enumerate(envs)
-                ),
-                return_exceptions=True,
+            results, group_metrics = await gather_rollouts(
+                self._run_single_rollout(
+                    generate_fn=generate_fn,
+                    release_session_fn=release_session_fn,
+                    env=env,
+                    # Offset the base seed per sample so a group's n=1
+                    # requests are diverse yet reproducible run-to-run.
+                    sampling=(
+                        sampling
+                        if sampling.seed is None
+                        else replace(sampling, seed=sampling.seed + sample_idx)
+                    ),
+                    group_id=group_id,
+                    rollout_id=sample_idx,
+                )
+                for sample_idx, env in enumerate(envs)
             )
         finally:
             # close the envs
@@ -547,7 +545,7 @@ class RolloutWorker(Configurable):
         )
         for rollout, advantage in zip(scored, advantages, strict=True):
             rollout.advantage = advantage
-        return RolloutGroup(group_id=group_id, rollouts=rollouts)
+        return RolloutGroup(group_id=group_id, rollouts=rollouts, metrics=group_metrics)
 
     async def _run_single_rollout(
         self,
@@ -679,6 +677,40 @@ class RolloutWorker(Configurable):
             turns=turns,
             logs=logs,
         )
+
+
+async def gather_rollouts(
+    rollouts: Iterable[Awaitable[Rollout]],
+) -> tuple[list[Rollout | BaseException], list[m.Metric]]:
+    """`asyncio.gather(*rollouts, return_exceptions=True)`, plus how long the group took and how
+    long it waited for its slowest rollout: a group trains only once every sibling is done.
+
+    Example (16 siblings; the first ends 120 s after the start, the last at 900 s):
+
+        results, metrics = await gather_rollouts(coroutines)
+        # metrics: rollout/group_wall_s 900, rollout/group_straggler_wait_s 780 (Mean and Max each)
+    """
+    start = time.perf_counter()
+    finish_times: list[float] = []
+
+    async def timed(rollout: Awaitable[Rollout]) -> Rollout:
+        try:
+            return await rollout
+        finally:
+            finish_times.append(time.perf_counter())
+
+    results = await asyncio.gather(
+        *(timed(rollout) for rollout in rollouts), return_exceptions=True
+    )
+    durations = {
+        "rollout/group_wall_s": max(finish_times) - start,
+        "rollout/group_straggler_wait_s": max(finish_times) - min(finish_times),
+    }
+    return results, [
+        m.Metric(key, metric_type(value))
+        for key, value in durations.items()
+        for metric_type in (m.Mean, m.Max)
+    ]
 
 
 def rollouts_from_gather(

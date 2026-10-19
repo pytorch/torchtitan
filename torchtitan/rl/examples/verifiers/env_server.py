@@ -142,7 +142,17 @@ class VerifiersEnvServer(Configurable):
             ),
             daemon=False,
         )
-        process.start()
+        # A spawned process starts with this process's env: tag it `env_server` for host memory
+        # metrics (it sets `env_server_worker` for its own pool workers).
+        role = os.environ.get(RL_ROLE_ENV)
+        os.environ[RL_ROLE_ENV] = "env_server"
+        try:
+            process.start()
+        finally:
+            if role is None:
+                del os.environ[RL_ROLE_ENV]
+            else:
+                os.environ[RL_ROLE_ENV] = role
         child_conn.close()
 
         deadline = asyncio.get_running_loop().time() + self.config.startup_timeout_sec

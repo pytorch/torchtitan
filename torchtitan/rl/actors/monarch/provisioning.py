@@ -295,9 +295,12 @@ def spawn_proc_mesh(
     return trainer_mesh, generator_meshes
 
 
-def spawn_cpu_procs(num_procs: int) -> ProcMesh:
-    """Spawn ``num_procs`` CPU procs on the controller host."""
-    return this_host().spawn_procs(per_host={"cpus": num_procs})
+def spawn_cpu_procs(num_procs: int, *, role: str) -> ProcMesh:
+    """Spawn ``num_procs`` CPU procs on the controller host, tagged ``role`` for host memory metrics."""
+    return this_host().spawn_procs(
+        per_host={"cpus": num_procs},
+        bootstrap_command=default_bootstrap_cmd().with_env({RL_ROLE_ENV: role}),
+    )
 
 
 def shutdown() -> None:

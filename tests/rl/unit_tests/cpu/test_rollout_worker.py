@@ -21,10 +21,11 @@ from torchtitan.rl.generator.generation_server import GenerationServer
 from torchtitan.rl.generator.http_client import GeneratorClient
 
 from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup, RolloutStatus
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
-from torchtitan.rl.rollout.rollouter import RolloutWorker
+from torchtitan.rl.rollout.rollouter import gather_rollouts, RolloutWorker
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
@@ -560,3 +561,22 @@ def test_stopped_rollout_cancels_its_call_and_releases_lease_and_session(stop) -
         assert released == [{"routing_session_id": "group=7/rollout=0"}]
 
     asyncio.run(run())
+
+
+def test_gather_rollouts_times_the_group_and_its_straggler() -> None:
+    async def rollout(seconds: float) -> float:
+        await asyncio.sleep(seconds)
+        return seconds
+
+    async def fails() -> float:
+        raise ValueError("env crashed")
+
+    results, metrics = asyncio.run(
+        gather_rollouts([rollout(0.05), rollout(0.01), fails()])
+    )
+
+    assert results[:2] == [0.05, 0.01] and isinstance(results[2], ValueError)
+    values = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert values["rollout/group_wall_s/max"] >= 0.05
+    # The last sibling ended ~0.05 s after the first (the one that raised at once).
+    assert values["rollout/group_straggler_wait_s/max"] >= 0.04

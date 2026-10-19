@@ -493,7 +493,8 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
     monkeypatch.setattr(
         monarch_system,
         "spawn_cpu_procs",
-        lambda num_procs: events.append(f"cpu procs {num_procs}") or "cpu_mesh",
+        lambda num_procs, *, role: events.append(f"cpu procs {num_procs}")
+        or "cpu_mesh",
     )
     monkeypatch.setattr(
         monarch_system, "setup_torch_elastic_env", setup_torch_elastic_env

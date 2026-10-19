@@ -17,6 +17,7 @@ import pytest
 from monarch.actor import ActorError, this_host
 
 from torchtitan.observability import structured_logger as sl
+from torchtitan.rl._env import RL_ROLE_ENV
 from torchtitan.rl.actors.monarch import (
     provisioning,
     rollout_worker as rollout_worker_module,
@@ -204,7 +205,11 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
             hf_assets_path="hf_assets_path",
         )
 
-        assert host.spawn_kwargs == {"per_host": {"cpus": 3}}
+        assert host.spawn_kwargs["per_host"] == {"cpus": 3}
+        # Tagged for host memory metrics.
+        assert host.spawn_kwargs["bootstrap_command"].env == {
+            RL_ROLE_ENV: "rollout_worker"
+        }
         args, kwargs = worker_mesh.spawn_args
         assert args[0] == "rollout_worker"
         assert args[1] is RolloutWorkerActor

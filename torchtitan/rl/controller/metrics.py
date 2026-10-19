@@ -323,30 +323,39 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     return out
 
 
-# TODO: tag the batcher, generator-router and rollout-worker procs too, as spawn_proc_mesh does:
-# pass `bootstrap_command` to the `this_host().spawn_procs` call in `spawn_cpu_procs`.
-# Until then they count as `other`, mixed with Monarch host agents and the env server.
-_PROCESS_ROLES = ("controller", "trainer", "generator", "env_server_worker", "other")
+_PROCESS_ROLES = (
+    "controller",
+    "trainer",
+    "generator",
+    "batcher",
+    "router",
+    "rollout_worker",
+    "env_server",
+    "env_server_worker",
+    "other",
+)
 
 
 def compute_host_memory_metrics() -> list[m.Metric]:
-    """Anonymous memory (`RssAnon`) per process role on this host, plus the cgroup total.
+    """Anonymous memory (`RssAnon`) per process role on this host, plus the cgroup total and the
+    node's `MemAvailable`.
 
     `RssAnon` leaves out shared libraries, which summed RSS counts once per process.
     Scans every process in the controller's cgroup: trainer ranks need not be the
     controller's descendants. A process's role is `TORCHTITAN_RL_ROLE` in its spawn env:
 
-        controller           this process
-        trainer, generator   Monarch procs and their children
-        env_server_worker    processes the env server spawns, and their children
-        other                the rest, e.g. the batcher, router and rollout-worker procs,
-                             Monarch host agents and the env server itself
+        controller                         this process
+        trainer, generator                 Monarch procs and their children
+        batcher, router, rollout_worker    the controller host's CPU procs (`spawn_cpu_procs`)
+        env_server                         each Verifiers env server
+        env_server_worker                  processes an env server spawns, and their children
+        other                              the rest, e.g. Monarch host agents
 
     Example:
         compute_host_memory_metrics()
         # -> host_memory/rss_anon_gib/env_server_worker 230.5,
         #    host_memory/num_processes/env_server_worker 611, ...,
-        #    host_memory/cgroup_memory_current_gib 655.0
+        #    host_memory/cgroup_memory_current_gib 655.0, host_memory/node_mem_available_gib 300.2
     """
     cgroup_dir = _cgroup_dir()
     if cgroup_dir is None:
@@ -384,6 +393,16 @@ def compute_host_memory_metrics() -> list[m.Metric]:
                 m.NoReduce(memory_current / 2**30),
             )
         )
+    # "MemAvailable:   312345678 kB": what the node can still give before swapping or OOM.
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemAvailable:"):
+            metrics.append(
+                m.Metric(
+                    "host_memory/node_mem_available_gib",
+                    m.NoReduce(int(line.split()[1]) / 2**20),
+                )
+            )
+            break
     return metrics
 
 

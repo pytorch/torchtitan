@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import itertools
 import logging
 from dataclasses import dataclass, field, replace
@@ -44,6 +43,7 @@ from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.rollouter import (
+    gather_rollouts,
     Rollouter,
     rollouts_from_gather,
     RolloutWorker,
@@ -376,22 +376,19 @@ class VerifiersRolloutWorker(RolloutWorker):
             )
         # A cancel cancels every sibling, and with return_exceptions the gather still waits for each
         # one's lease release before it raises: the caller releases the group next.
-        results = await asyncio.gather(
-            *(
-                self._run_single_rollout(
-                    generator_client=generate_fn,
-                    sample=sample,
-                    sampling=(
-                        sampling
-                        if sampling.seed is None
-                        else replace(sampling, seed=sampling.seed + rollout_id)
-                    ),
-                    group_id=group_id,
-                    rollout_id=rollout_id,
-                )
-                for rollout_id in range(group_size)
-            ),
-            return_exceptions=True,
+        results, group_metrics = await gather_rollouts(
+            self._run_single_rollout(
+                generator_client=generate_fn,
+                sample=sample,
+                sampling=(
+                    sampling
+                    if sampling.seed is None
+                    else replace(sampling, seed=sampling.seed + rollout_id)
+                ),
+                group_id=group_id,
+                rollout_id=rollout_id,
+            )
+            for rollout_id in range(group_size)
         )
         rollouts = rollouts_from_gather(results, group_id=group_id)
 
@@ -410,7 +407,7 @@ class VerifiersRolloutWorker(RolloutWorker):
         )
         for rollout, advantage in zip(scored, advantages, strict=True):
             rollout.advantage = advantage
-        return RolloutGroup(group_id=group_id, rollouts=rollouts)
+        return RolloutGroup(group_id=group_id, rollouts=rollouts, metrics=group_metrics)
 
     async def _run_single_rollout(
         self,
