@@ -185,7 +185,7 @@ class ComplexRoPE(RoPE):
     class Config(RoPE.Config):
         pass
 
-    # Cat options: the stack path (split views, fp32) writes each half with one store,
+    # Cat options: the stack path (non-bf16 inputs) writes each half with one store,
     # instead of one masked kernel over both.
     @local_compile(
         "rope",
@@ -258,16 +258,23 @@ class ComplexRoPE(RoPE):
         query: torch.Tensor,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Return complex cache shaped for query/key broadcast.
+        """Return the cache shaped for query/key broadcast.
 
         Returns:
-            Cache of shape ``(T, 1, dim / 2)``.
+            Complex cache of shape ``(T, 1, dim / 2)``; under compile, its real view
+            ``(T, 1, dim)`` with each ``(cos, sin)`` pair adjacent.
         """
         if positions is not None:
             _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
         # Complex RoPE cache has width dim / 2 because each complex value
         # represents a pair of real dimensions.
         complex_query_shape = (*query.shape[:-1], query.shape[-1] // 2)
+        if torch.compiler.is_compiling():
+            # Gather rows of the real view, (T, 1, dim): Inductor can't load complex, so a complex
+            # gather runs as its own kernel, while a float gather fuses into the rotation.
+            return _reshape_for_broadcast(
+                torch.view_as_real(self.cache).flatten(-2), query.shape, positions
+            )
         return _reshape_for_broadcast(self.cache, complex_query_shape, positions)
 
     @staticmethod
@@ -282,7 +289,12 @@ class ComplexRoPE(RoPE):
         if torch.compiler.is_compiling():
             # Inductor can't compile a complex multiply, so rotate in real arithmetic: it fuses
             # with the casts, within 1 bf16 ulp of eager. Eager keeps the complex ops.
-            cache = torch.view_as_real(rope_cache)
+            # _reshape_cache hands over the real view, gathered as floats; direct callers may
+            # still pass the complex cache.
+            if rope_cache.is_complex():
+                cache = torch.view_as_real(rope_cache)
+            else:
+                cache = rope_cache.unflatten(-1, (-1, 2))
             cos, sin = cache[..., 0], cache[..., 1]
             if inverse:
                 sin = -sin
@@ -326,16 +338,22 @@ class _RotatePairs(torch.autograd.Function):
 
     @staticmethod
     def rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        if x.dtype == torch.bfloat16 and x.is_contiguous():
-            # Read each pair as one int32 (x[2i] in the low half), so loads and stores stay
-            # contiguous; a store per half writes every other element. A bf16 shifted into the
-            # high 16 bits is its exact fp32. The int32 view also ends the fusion with whatever
-            # produced x, which is written out first.
-            pairs = x.view(torch.int32)
-            x_real = (pairs << 16).view(torch.float32)
-            x_imag = (pairs & ~0xFFFF).view(torch.float32)
+        if x.dtype == torch.bfloat16:
+            if x.is_contiguous():
+                # Read each pair as one int32 (x[2i] in the low half), so loads stay contiguous.
+                # A bf16 shifted into the high 16 bits is its exact fp32. The int32 view also
+                # ends the fusion with whatever produced x, which is written out first.
+                pairs = x.view(torch.int32)
+                x_real = (pairs << 16).view(torch.float32)
+                x_imag = (pairs & ~0xFFFF).view(torch.float32)
+            else:
+                # A split view would be copied before an int32 view; read its halves instead.
+                x_pairs = x.float().unflatten(-1, (-1, 2))
+                x_real, x_imag = x_pairs[..., 0], x_pairs[..., 1]
             real = (x_real * cos - x_imag * sin).to(torch.bfloat16)
             imag = (x_real * sin + x_imag * cos).to(torch.bfloat16)
+            # Write each rotated pair as one int32 so stores stay contiguous; a store per half
+            # writes every other element.
             low = real.view(torch.int16).to(torch.int32) & 0xFFFF
             high = imag.view(torch.int16).to(torch.int32) << 16
             return (low | high).view(torch.bfloat16)
