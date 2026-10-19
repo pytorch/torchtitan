@@ -101,6 +101,7 @@ class Optim(Configurable):
             self._run_update = wrap_with_cuda_graph(
                 self._update,
                 num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                name="optimizer",
                 annotation_config=cuda_graph_annotation_config,
             )
 

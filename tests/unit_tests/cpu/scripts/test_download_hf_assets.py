@@ -198,6 +198,28 @@ class TestDownloadHfAssets(unittest.TestCase):
         self.assertNotIn("original/consolidated.00.pth", downloaded_files)
 
     @patch("huggingface_hub.list_repo_files")
+    @patch("huggingface_hub.hf_hub_download")
+    def test_tokenizer_includes_standalone_chat_template(
+        self, mock_download, mock_list_files
+    ):
+        """Repos such as openai/gpt-oss-20b keep the chat template only in
+        chat_template.jinja, which HuggingFaceTokenizer loads from the assets."""
+        test_files = [
+            "chat_template.jinja",
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ]
+        self._setup_mocks(mock_download, mock_list_files, repo_files=test_files)
+
+        self._call_download_hf_assets(asset_types=["tokenizer"])
+
+        self._assert_files_downloaded(
+            mock_download,
+            ["chat_template.jinja", "tokenizer.json", "tokenizer_config.json"],
+        )
+
+    @patch("huggingface_hub.list_repo_files")
     def test_missing_files_warning(self, mock_list_files):
         """Test warning when requested files are not found"""
         mock_list_files.return_value = ["config.json", "README.md"]
