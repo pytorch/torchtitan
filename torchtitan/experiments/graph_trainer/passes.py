@@ -40,7 +40,6 @@ import torch
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
-    MOE_BLOCK_FQN,
     validate_ep_overlap_config,
 )
 
@@ -229,7 +228,7 @@ def compile_time_passes(
         )
     ep_overlap_module_fqn: str | None = None
     if ep_overlap_enabled:
-        _, ep_overlap_module_fqn = validate_ep_overlap_config(config.compile.ep_overlap)
+        ep_overlap_module_fqn = validate_ep_overlap_config(config.compile.ep_overlap)
 
     passes.extend(
         [
@@ -327,7 +326,6 @@ def compile_time_passes(
                 require_all_to_all=(
                     getattr(config.parallelism, "expert_parallel_degree", 1) > 1
                 ),
-                pair_first_token_exchange=ep_overlap_module_fqn == MOE_BLOCK_FQN,
             )
         )
 

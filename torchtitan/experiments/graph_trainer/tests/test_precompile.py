@@ -247,7 +247,6 @@ class TestConfigFingerprint(unittest.TestCase):
         cfg_graph_seq = _StubCompileConfig(
             ep_overlap=EpOverlapConfig(
                 enabled=True,
-                chunk_dim="seq",
                 module_fqn="layers.*.feed_forward",
             ),
         )
