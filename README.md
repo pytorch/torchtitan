@@ -163,7 +163,8 @@ the [model guide](torchtitan/models/README.md).
 
 **Debugging and observability**
 - [Metrics](torchtitan/observability/METRICS.md): loss, memory, throughput, TFLOPs, and MFU in TensorBoard or W&B
-- [Profiling, memory snapshots, and Flight Recorder](docs/debugging.md)
+- [Profiling and memory snapshots](torchtitan/observability/README.md)
+- [Flight Recorder and other debugging tools](docs/debugging.md)
 - Fake-backend dry runs of large layouts on one GPU
 - Deterministic mode and [loss comparison](scripts/loss_compare.py) across commits
 - [SDC replay](torchtitan/observability/SILENT_DATA_CORRUPTION.md) and [structured logging](torchtitan/observability/structured_logger/README.md)
