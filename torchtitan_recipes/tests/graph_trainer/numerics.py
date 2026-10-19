@@ -40,7 +40,9 @@ from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 from torchtitan_recipes.tests.models.qwen3 import qwen3_debugmodel, qwen3_moe_debug
 
 
-def _deepseek_v3_hybridep_chunks(*, overlap: bool):
+def _deepseek_v3_hybridep_chunks(
+    *, overlap: bool, paging: bool, no_remat: bool = False
+):
     """Build matched four-rank production recipes for eager HybridEP chunking."""
     config = graph_trainer_deepseek_v3_debugmodel(
         attn_backend="varlen",
@@ -58,6 +60,16 @@ def _deepseek_v3_hybridep_chunks(*, overlap: bool):
     config.training.disable_cuda_graphs = False
     config.compile.ep_overlap.enabled = True
     config.compile.inductor_compilation = "regional"
+    if no_remat:
+        config.activation_remat = None
+    config.compile.memory_policy = "none" if no_remat else "default"
+    if paging:
+        config.compile.memory_policy = (
+            "none_and_paged_stash" if no_remat else "sac_and_paged_stash"
+        )
+        # Cover this seeded calibration's live routing bound as expert bias
+        # updates change the distribution; the default is measured headroom.
+        config.compile.paged_stash.buffer_size_factor_cuda = 2.1
     if not overlap:
         config.compile.disable_passes = ["ep_overlap_schedule_pass"]
     config.debug.seed = 42
@@ -79,12 +91,34 @@ def _deepseek_v3_hybridep_chunks(*, overlap: bool):
 
 def deepseek_v3_hybridep_chunk_control():
     """Run eager token chunks with the overlap scheduler disabled."""
-    return _deepseek_v3_hybridep_chunks(overlap=False)
+    return _deepseek_v3_hybridep_chunks(overlap=False, paging=False)
 
 
 def deepseek_v3_hybridep_overlap():
     """Run scheduled eager token chunks without paged stashing."""
-    return _deepseek_v3_hybridep_chunks(overlap=True)
+    return _deepseek_v3_hybridep_chunks(overlap=True, paging=False)
+
+
+def deepseek_v3_hybridep_overlap_paged():
+    """Run scheduled eager token chunks with paged stashing."""
+    return _deepseek_v3_hybridep_chunks(overlap=True, paging=True)
+
+
+def deepseek_v3_hybridep_overlap_paged_all_layers():
+    """Exercise terminal stash joins instead of keeping the last layer resident."""
+    config = deepseek_v3_hybridep_overlap_paged()
+    config.compile.paged_stash.skip_immediate_backward = False
+    return config
+
+
+def deepseek_v3_hybridep_no_remat_control():
+    """Run identical eager token chunks with no activation recomputation."""
+    return _deepseek_v3_hybridep_chunks(overlap=False, paging=False, no_remat=True)
+
+
+def deepseek_v3_hybridep_no_remat_paged():
+    """Overlap eager EP and paging without activation recomputation."""
+    return _deepseek_v3_hybridep_chunks(overlap=True, paging=True, no_remat=True)
 
 
 def _without_inplace_wgrad_accum(config):

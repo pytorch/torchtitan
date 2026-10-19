@@ -89,6 +89,7 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     tag_paged_stash_activations,
     warmup_paged_stash_kernels,
 )
+from torchtitan.experiments.graph_trainer.registry import MEMORY_POLICY_REGISTRY
 
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="paged stash requires CUDA"
@@ -101,6 +102,31 @@ MAX_TOKENS = 4096  # capacity-padded rows per activation: the worst case
 HIDDEN = 256
 PAGE_SIZE = 64
 KEY = (BF16, HIDDEN)
+
+
+@pytest.mark.parametrize(
+    "policy, expected",
+    [
+        ("none_and_paged_stash", CheckpointPolicy.MUST_SAVE),
+        ("sac_and_paged_stash", CheckpointPolicy.PREFER_RECOMPUTE),
+    ],
+)
+def test_paged_policy_preserves_selected_recomputation(policy, expected):
+    """A real non-expert FX graph retains the selected base save policy."""
+    from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
+        graph_trainer_deepseek_v3_debugmodel,
+    )
+
+    config = graph_trainer_deepseek_v3_debugmodel()
+    config.compile.memory_policy = policy
+    input_T = torch.randn(16)
+    graph = make_fx(lambda x: x.sin() * x)(input_T)
+    MEMORY_POLICY_REGISTRY[policy](graph, config=config)
+    sine = next(
+        node for node in graph.graph.nodes if node.target == torch.ops.aten.sin.default
+    )
+    assert sine.meta["recompute"] == expected
+    torch.testing.assert_close(graph(input_T), input_T.sin() * input_T)
 
 
 @pytest.fixture
@@ -263,9 +289,9 @@ def test_round_trip_is_exact(manager):
 
     Data slots address one row per token; a block-scale slot is a flat e8m0
     buffer with one row per 32 tokens, paged in its own (uint8) pool. Live
-    counts that are not page multiples leave partial pages. The measure step
-    hands back the original activation, so it is numerically identical to a
-    run without paged stashing. The kernels read the live counts and the
+    counts that are not page multiples leave partial pages. Calibration and
+    real paging preserve the live bytes and capacity shape; padding is not
+    meaningful in either phase. The kernels read the live counts and the
     freelists from device memory, so one capture serves steps with different
     counts, provided ``begin_step`` resets the freelists (outside the graph)
     before each replay.
@@ -275,7 +301,11 @@ def test_round_trip_is_exact(manager):
     )
     live = [1997, 700, 1024]  # block scales cover whole 32-token blocks
     tensors, counts, measured = _setup_stash(manager, slots, live)
-    assert all(out is tensor for out, tensor in zip(measured, tensors))
+    _assert_live_rows_equal(slots, tensors, measured, live)
+    assert all(
+        (out.shape, out.dtype) == (tensor.shape, tensor.dtype)
+        for out, tensor in zip(measured, tensors, strict=True)
+    )
     assert len(manager.stash_buffers) == 2, "one pool per (dtype, hidden_size)"
 
     manager.begin_step()
@@ -287,6 +317,31 @@ def test_round_trip_is_exact(manager):
         replay(live)
         _assert_live_rows_equal(slots, tensors, outputs, live)
         assert not check_paged_stash_overflow().item()
+
+
+@requires_cuda
+@pytest.mark.parametrize("dtype, token_divisor", [(BF16, 1), (E8M0, 32)])
+@pytest.mark.parametrize("live", [0, 1024, MAX_TOKENS])
+def test_calibration_parks_only_live_rows(manager, dtype, token_divisor, live):
+    """Real stash/reload ops release padding and preserve live bytes and shape."""
+    (slot,) = _make_slots(manager, 1, dtype=dtype, token_divisor=token_divisor)
+    manager.begin_step()
+    activation = _random_activation(slot)
+    shape = list(activation.shape)
+    expected = _live_bytes(activation, slot, live).clone()
+    source_ref = weakref.ref(activation)
+    count = torch.tensor(live, dtype=torch.int64, device="cuda")
+    handle = _stash(slot, activation, count)
+    del activation
+    gc.collect()
+    parked, measured = manager._parked_tensors[slot.slot_id][0]
+    assert measured == live // token_divisor
+    assert parked.untyped_storage().nbytes() == expected.numel()
+    assert (source_ref() is not None) == (live == MAX_TOKENS)
+    restored = torch.ops.paged_stash.reload(handle, count, slot.slot_id, shape, dtype)
+    restored = torch.ops.paged_stash.wait_reload(restored)
+    assert list(restored.shape) == shape and restored.dtype == dtype
+    assert torch.equal(_live_bytes(restored, slot, live), expected)
 
 
 @requires_cuda
@@ -703,7 +758,7 @@ def _fake_experts_graph(*, fused_mxfp8: bool = False):
         "dispatch",
         call(
             torch.ops.hybridep.dispatch.default,
-            (tokens, tokens, tokens, 8, 2, "ep", True, 1.0, None),
+            (tokens, tokens, tokens, 8, 2, "ep", padded, None, False),
         ),
     )
     # Autograd numbers the dispatch; its backward carries the same number.
@@ -888,9 +943,13 @@ def test_annotated_region_is_paged(manager, caplog, expert_mlp):
     with caplog.at_level("WARNING"):
         apply_paged_stash_pass(gm, None, page_size=PAGE_SIZE, prefetch_lookahead=0)
     assert "unpaged" not in caplog.text
-    assert not [
-        user for node in originals for user in node.users if _is_backward_node(user)
-    ], "backward still reads a padded original"
+    assert all(
+        user.target is torch.ops.paged_stash.group_start.default
+        and node in user.args[-1]
+        for node in originals
+        for user in node.users
+        if _is_backward_node(user)
+    ), "backward reads a padded original instead of retaining only a copy keepalive"
     targets = [node.target for node in gm.graph.nodes]
     ops = torch.ops.paged_stash
     assert targets.count(ops.stash_.default) == len(paged)
@@ -934,19 +993,39 @@ def test_pass_places_megatron_stash_points(manager):
     apply_paged_stash_pass(gm, None, page_size=PAGE_SIZE, prefetch_lookahead=1)
     nodes = list(gm.graph.nodes)
 
-    (start,) = [node for node in nodes if node.target is ops.group_start.default]
-    assert start.args == (n["x"],)
+    (start,) = [
+        node
+        for node in nodes
+        if node.target is ops.group_start.default and not _is_backward_node(node)
+    ]
+    assert start.args == (n["x"], [])
     assert nodes[nodes.index(start) + 1] is min(readers, key=nodes.index)
     assert all(start in reader.all_input_nodes for reader in readers)
     assert {user.target for user in n["x"].users} == {
         ops.group_start.default,
         ops.stash_.default,
     }
+    (join,) = [
+        node
+        for node in nodes
+        if node.target is ops.group_start.default and _is_backward_node(node)
+    ]
+    reloads = [node for node in nodes if node.target is ops.reload.default]
+    assert reloads[0].args[0] is join
+    assert all(
+        n[name] in join.args[-1] for name in ("x", "gate_up", "silu", "h", "out")
+    )
+    assert all(
+        n[name] not in reload.all_input_nodes
+        for reload in reloads
+        for name in ("x", "gate_up", "silu", "h", "out")
+    ), "functional reload directly retains an input it may return during calibration"
 
     stashes = [node for node in nodes if node.target is ops.stash_.default]
     order = ("x", "gate_up", "silu", "h", "out")
     assert [stash.args[1] for stash in stashes] == [n[name] for name in order]
     assert [stash.args[4] for stash in stashes] == [0, 0, 0, 0, 1]
+    assert all(n["out"] in stash.args[-1] for stash in stashes)
     first, last = nodes.index(stashes[0]), nodes.index(stashes[-1])
     assert first > nodes.index(n["out"]), "launched before the MLP finished"
     launch_ops = (ops.stash_.default, torch.ops.aten.empty.memory_format)

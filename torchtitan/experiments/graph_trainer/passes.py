@@ -265,6 +265,10 @@ def compile_time_passes(
                 apply_paged_stash_pass,
                 page_size=config.compile.paged_stash.page_size,
                 prefetch_lookahead=config.compile.paged_stash.prefetch_n_layers,
+                skip_immediate_backward=(
+                    config.compile.paged_stash.skip_immediate_backward
+                    and config.parallelism.pipeline_parallel_degree == 1
+                ),
             ),
         ]
     )

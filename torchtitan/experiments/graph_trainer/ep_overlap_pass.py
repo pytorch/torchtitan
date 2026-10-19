@@ -266,10 +266,13 @@ def _plan_order(
     exchanges: list[dict[int, tuple[_TokenExchange, ...]]],
 ) -> list[fx.Node]:
     """Choose the earliest legal launches and postpone waits behind ready work."""
+    from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+        _paging_dependencies,
+    )
 
     order = ordered_nodes(gm)
     deps = _graph_dependencies(gm)
-    launches, waits = set(), set()
+    launches, waits = _paging_dependencies(gm, deps)
     for region, chunk_exchanges in zip(regions, exchanges, strict=True):
         chunk_order = (1, 0) if region.is_backward else (0, 1)
         for first, second in zip(
