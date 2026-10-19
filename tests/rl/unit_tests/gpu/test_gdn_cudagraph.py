@@ -265,6 +265,56 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
                 assert torch.equal(actual[:, -128:], untouched[:, -128:])
 
 
+def test_batch_invariant_decode_matches_prefill(monkeypatch) -> None:
+    """Batch-invariant GDN: 20 decode steps give the bits of one 20-token prefill.
+
+    Calls ``_forward_gdn`` directly and skips the short convolution on purpose: the
+    paged conv has a separate rounding difference when a window reads cached history.
+    """
+    monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: True)
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    # Qwen3.5-0.8B's local TP=1 shapes. With decode offsets, 32 rows x 16 heads
+    # would take L2Norm's decode-tuned launch on Blackwell.
+    num_sequences, num_tokens, heads = 32, 20, 16
+    layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
+    torch.nn.Module.__init__(layer)
+    layer.local_num_k_heads = layer.local_num_v_heads = heads
+    layer.head_k_dim = layer.head_v_dim = 128
+    layer.local_key_dim = 2048
+    qkv = torch.randn(
+        num_sequences, num_tokens, 6144, device=device, dtype=torch.bfloat16
+    )
+    a, b = torch.randn(2, num_sequences, num_tokens, heads, device=device)
+    A_log, bias = torch.randn(2, heads, device=device)
+    slots = torch.arange(1, num_sequences + 1, device=device, dtype=torch.int32)
+
+    def run(tokens_per_step):
+        """Run every sequence in steps of `tokens_per_step` tokens."""
+        state = torch.full(
+            (num_sequences + 1, heads, 128, 128), torch.nan, device=device
+        )
+        layer.kv_cache = (None, state)
+        offsets = tokens_per_step * torch.arange(
+            num_sequences + 1, device=device, dtype=torch.int32
+        )
+        outputs = []
+        for start in range(0, num_tokens, tokens_per_step):
+            stop = start + tokens_per_step
+            rows = [t[:, start:stop].flatten(0, 1) for t in (qkv, a, b)]
+            output = rows[0].new_zeros(rows[0].shape[0], heads, 128)
+            initial = torch.full((num_sequences,), start > 0, device=device)
+            layer._forward_gdn(*rows, A_log, bias, output, offsets, slots, initial)
+            outputs.append(output.unflatten(0, (num_sequences, tokens_per_step)))
+        return torch.cat(outputs, 1), state[1:]
+
+    with torch.inference_mode():
+        decoded = run(tokens_per_step=1)
+        prefilled = run(tokens_per_step=num_tokens)
+    for actual, expected in zip(decoded, prefilled, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     assert int(os.environ["WORLD_SIZE"]) == 1
     # Eager runs the real token count, while FULL replay pads it up to a capture
