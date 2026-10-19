@@ -8,8 +8,11 @@
 #   T = packed tokens, H = attention heads, K = query/key head dimension,
 #   V = value head dimension, D = model dimension
 
+import importlib
 import unittest
 from unittest.mock import patch
+
+import pytest
 
 import spmd_types as spmd
 import torch
@@ -26,6 +29,67 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import ComplexRoPE
+
+
+@pytest.mark.parametrize("model_name", ["deepseek_v3", "kimi_k3"])
+@pytest.mark.parametrize("capability", [(9, 0), (10, 0)])
+@pytest.mark.parametrize("backend_active", [False, True])
+@pytest.mark.parametrize("attn_backend", ["varlen", "flex"])
+def test_mla_construction_checks_backend(
+    monkeypatch, model_name, capability, backend_active, attn_backend
+):
+    model_module = importlib.import_module(f"torchtitan.models.{model_name}")
+    model_config = model_module.build_model_config(
+        "debugmodel", attn_backend=attn_backend, parallelism=ParallelismConfig()
+    )
+    attention_config = model_config.first_full_attention
+    assert attention_config is not None
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: capability)
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    impl = {9: "FA3", 10: "FA4"}[capability[0]] if backend_active else None
+    monkeypatch.setattr("torch.nn.attention.current_flash_attention_impl", lambda: impl)
+
+    with torch.device("meta"):
+        if backend_active or attn_backend == "flex":
+            attention_config.build()
+        else:
+            with pytest.raises(ValueError, match="FA2 requires equal"):
+                attention_config.build()
+
+
+@pytest.mark.parametrize("model_name", ["llama3", "qwen3", "qwen3_5", "gpt_oss"])
+def test_equal_head_model_constructs_without_fa3(monkeypatch, model_name):
+    model_module = importlib.import_module(f"torchtitan.models.{model_name}")
+    model_config = model_module.build_model_config(
+        "debugmodel", attn_backend="varlen", parallelism=ParallelismConfig()
+    )
+    attention_config = model_config.first_full_attention
+    assert attention_config is not None
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    monkeypatch.setattr("torch.nn.attention.current_flash_attention_impl", lambda: None)
+    with torch.device("meta"):
+        attention = attention_config.build()
+    assert isinstance(attention.inner_attention, VarlenInnerAttention)
+
+
+def test_ulysses_varlen_validates_head_dims(monkeypatch):
+    from torchtitan.models.common.attention.cp_attention import (
+        UlyssesVarlenInnerAttention,
+    )
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    monkeypatch.setattr("torch.nn.attention.current_flash_attention_impl", lambda: None)
+    attention = UlyssesVarlenInnerAttention.Config().build()
+    with pytest.raises(ValueError, match="FA2 requires equal"):
+        attention.validate_head_dims(192, v_head_dim=128)
 
 
 class TestPackedVarlenAttentionMetadata(unittest.TestCase):

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import importlib.util
 import logging
 import os
 import subprocess
@@ -14,6 +15,7 @@ from types import ModuleType
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
 
+from torchtitan.observability.logging import warn_once
 
 logger = logging.getLogger(__name__)
 
@@ -31,25 +33,101 @@ def has_cuda_capability(major: int, minor: int) -> bool:
     )
 
 
-def get_cuda_flash_attention_impl() -> str | None:
-    """Return the FlashAttention implementation for the current CUDA architecture."""
-
-    # ROCm has neither FA3 nor FA4: torch's flash_attn_interface is CUDA-only.
-    # This has to be checked explicitly, because has_cuda_capability() below is
-    # just torch.cuda.get_device_capability() >= (major, minor) and AMD devices
-    # report a capability too -- gfx950 (MI350X) reports (9, 5), which satisfies
-    # the (9, 0) test and would select FA3 on hardware that cannot run it.
-    if torch.version.hip is not None:
+def _cuda_flash_attention_backend() -> tuple[str, str] | None:
+    if not torch.cuda.is_available() or torch.version.hip is not None:
         return None
-
     # FA4 advertises Hopper support, but as of writing it hangs under
     # torch.compile there, so Hopper (sm90) stays on FA3.
     # https://github.com/pytorch/torchtitan/pull/4413
-    if has_cuda_capability(10, 0):
-        return "FA4"
-    if has_cuda_capability(9, 0):
-        return "FA3"
-    return None
+    # PyTorch supports FA3 on major 9 and FA4 on majors 9/10 only.
+    major, _ = torch.cuda.get_device_capability()
+    return {
+        9: ("FA3", "flash_attn_interface"),
+        10: ("FA4", "flash_attn.cute.interface"),
+    }.get(major)
+
+
+def get_cuda_flash_attention_impl() -> str | None:
+    """Return an installed FlashAttention implementation supported by this GPU."""
+    backend = _cuda_flash_attention_backend()
+    if backend is None:
+        return None
+    impl, module_path = backend
+    try:
+        available = importlib.util.find_spec(module_path) is not None
+    except ModuleNotFoundError as error:
+        # Looking up a submodule imports its parents. Only a missing backend
+        # package means unavailable; a missing dependency is a broken install.
+        if error.name is None or not (
+            module_path == error.name or module_path.startswith(error.name + ".")
+        ):
+            raise
+        available = False
+    return impl if available else None
+
+
+def activate_cuda_flash_attention() -> None:
+    """Activate the installed CUDA backend, or retain PyTorch's default FA2."""
+    from torch.nn.attention import (
+        activate_flash_attention_impl,
+        current_flash_attention_impl,
+    )
+
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        return
+    capability = torch.cuda.get_device_capability()
+    backend = _cuda_flash_attention_backend()
+    if backend is not None:
+        impl, module_path = backend
+        # Activation replaces process-wide dispatcher registrations.
+        if current_flash_attention_impl() == impl:
+            return
+        try:
+            if get_cuda_flash_attention_impl() is not None:
+                activate_flash_attention_impl(impl)
+                return
+        except (ImportError, RuntimeError, ValueError) as error:
+            raise RuntimeError(
+                f"{impl} activation failed on SM {capability[0]}.{capability[1]}. "
+                f"Check that '{module_path}' and its dependencies are installed "
+                "and compatible with this PyTorch/CUDA build."
+            ) from error
+        reason = f"{impl} module '{module_path}' is not installed"
+    else:
+        reason = "No supported FA3/FA4 implementation"
+
+    if current_flash_attention_impl() is None:
+        warn_once(
+            logger,
+            f"{reason} on SM {capability[0]}.{capability[1]}; using FA2. "
+            "FA2 requires equal Q/K/V head dimensions.",
+        )
+
+
+def validate_flash_attention_head_dims(qk_head_dim: int, *, v_head_dim: int) -> None:
+    """Reject CUDA FA2 layouts with unequal query/key and value head dimensions."""
+    from torch.nn.attention import current_flash_attention_impl
+
+    if (
+        qk_head_dim == v_head_dim
+        or not torch.cuda.is_available()
+        or torch.version.hip is not None
+        or current_flash_attention_impl() not in (None, "FA2")
+    ):
+        return
+    capability = torch.cuda.get_device_capability()
+    backend = _cuda_flash_attention_backend()
+    remedy = "Configure a compatible attention backend, such as FlexAttention."
+    if backend is not None:
+        impl, module_path = backend
+        remedy = (
+            f"Install a compatible {impl} wheel providing '{module_path}', "
+            "or configure a compatible attention backend, such as FlexAttention."
+        )
+    raise ValueError(
+        f"FA2 requires equal Q/K/V head dimensions, but got Q/K={qk_head_dim}, "
+        f"V={v_head_dim} on SM {capability[0]}.{capability[1]}. {remedy}"
+    )
 
 
 def has_rocm_capability(major: int, minor: int) -> bool:

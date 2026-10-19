@@ -92,6 +92,7 @@ class GptOssAttention(Attention):
         self.wo = config.wo.build()
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
         self.inner_attention = config.inner_attention.build()
+        self.inner_attention.validate_head_dims(self.head_dim, v_head_dim=self.head_dim)
         self.rope = config.rope.build()
 
     def forward(

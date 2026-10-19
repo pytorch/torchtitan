@@ -337,6 +337,7 @@ class DeepSeekV4Attention(Attention):
             self.compressor_128 = cfg.compressor_128.build()
 
         self.inner_attention = cfg.inner_attention.build()
+        self.inner_attention.validate_head_dims(self.head_dim, v_head_dim=self.head_dim)
 
     def forward(
         self,
