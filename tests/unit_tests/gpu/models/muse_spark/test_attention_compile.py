@@ -26,6 +26,7 @@ def _run(fn, inputs_):
     "region", ["muse_spark_attention_qk_norm", "muse_spark_attention_output"]
 )
 def test_attention_region_matches_eager(region):
+    torch.manual_seed(0)
     attention = build_model_config("debugmodel").layers[0].attention.build().cuda()
     num_tokens, num_heads, num_kv_heads = 64, attention.n_heads, attention.n_kv_heads
     head_dim = attention.head_dim
