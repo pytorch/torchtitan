@@ -443,10 +443,12 @@ class Qwen35Model(MultimodalModel):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
+        loss_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return."""
         del kwargs
+        loss_kwargs = loss_kwargs or {}
         padding_mask = input_dict.get("padding_mask", None)
 
         # Attention masks are built from the 1D ``positions``.
@@ -519,6 +521,8 @@ class Qwen35Model(MultimodalModel):
             "'positions' or 'mrope_positions'."
         )
         input_dict["positions"] = rope_positions
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
@@ -537,13 +541,14 @@ class Qwen35Model(MultimodalModel):
                 if isinstance(metadata, LinearAttentionMetadata):
                     metadata.annotate_spmd_types()
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         if any(
             isinstance(layer.feed_forward, MoE.Config) for layer in self.config.layers
         ):
             input_dict["aux_loss_denominators"] = global_routing_token_counts
-        return inputs, labels, input_dict
+        return inputs, labels, input_dict, loss_kwargs
 
     def _get_vision_embeds(
         self,

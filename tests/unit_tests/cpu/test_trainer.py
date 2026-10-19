@@ -282,6 +282,7 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
                 input_dict["input"] + 1,
                 input_dict["labels"] + 2,
                 {"positions": input_dict["positions"] + 3},
+                kwargs["loss_kwargs"],
             )
 
     trainer = cast(
@@ -410,12 +411,14 @@ def test_forward_backward_runs_whole_accumulation(
             return iter(())
 
         def preprocess_inputs(self, input_dict, *, global_routing_token_counts, **kw):
+            loss_kwargs = kw.pop("loss_kwargs")
             captured["preprocess_kwargs"] = kw
             events.append(f"preprocess {input_dict['input']}")
             return (
                 "INPUTS",
                 torch.ones(7),
                 {"positions": 1, "aux_loss_denominators": global_routing_token_counts},
+                loss_kwargs,
             )
 
     losses = iter((torch.tensor(1.0), torch.tensor(2.0)))
@@ -1372,7 +1375,7 @@ class _RecordingFSDPPart:
         return iter(())
 
     def preprocess_inputs(self, input_dict, **kwargs):
-        return input_dict["input"], input_dict["labels"], {}
+        return input_dict["input"], input_dict["labels"], {}, {}
 
 
 def _run_forward_backward_recording_all_reduce(

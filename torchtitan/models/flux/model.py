@@ -318,10 +318,13 @@ class FluxModel(BaseModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        loss_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Encode a raw image-text batch and prepare flow-matching inputs."""
         del max_num_documents, max_context_length
+        if loss_kwargs:
+            raise ValueError("Flux does not support per-microbatch loss arguments.")
         autoencoder = cast(AutoEncoder | None, kwargs["autoencoder"])
         clip_encoder = cast(FluxEmbedder, kwargs["clip_encoder"])
         t5_encoder = cast(FluxEmbedder, kwargs["t5_encoder"])
@@ -403,6 +406,7 @@ class FluxModel(BaseModel):
                 "timesteps": timesteps,
                 "loss_target": target,
             },
+            {},
         )
 
     def forward(
