@@ -495,7 +495,6 @@ class MuseSparkModel(MultimodalModel):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
-        loss_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         from torchtitan.models.muse_spark.sharding import (
@@ -503,8 +502,8 @@ class MuseSparkModel(MultimodalModel):
         )
 
         del kwargs
-        loss_kwargs = loss_kwargs or {}
         batch: dict[str, Any] = dict(input_dict)
+        loss_kwargs = batch.pop("loss_kwargs", {})
         special_tokens = batch.get("special_tokens")
         for input_name, placeholder_key, bank_indices_name in (
             ("pixel_values", "image_id", "image_bank_indices_T"),

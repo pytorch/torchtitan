@@ -1226,7 +1226,6 @@ class HFTransformerModel(BaseModel):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
-        loss_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build the attention mask (when positions are present), CP-shard, return."""
         del max_num_documents, max_context_length, global_routing_token_counts
@@ -1239,7 +1238,7 @@ class HFTransformerModel(BaseModel):
         from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
         input_shardings = decoder_input_sharding()
-        loss_kwargs = loss_kwargs or {}
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
         input_dict.update(loss_kwargs)
         input_dict.pop("padding_mask", None)

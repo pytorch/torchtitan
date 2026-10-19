@@ -323,12 +323,11 @@ class KimiK3Model(MultimodalModel):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
-        loss_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build metadata, CP-shard inputs, and annotate K3 layouts."""
         del kwargs
-        loss_kwargs = loss_kwargs or {}
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         positions = input_dict.get("positions")
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:

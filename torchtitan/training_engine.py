@@ -693,9 +693,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         max_num_documents=self.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
                         global_routing_token_counts=global_routing_token_counts,
-                        loss_kwargs=microbatch.to_loss_kwargs(
-                            self.device, non_blocking=True
-                        ),
                         **self.preprocess_inputs_kwargs,
                     )
                 )

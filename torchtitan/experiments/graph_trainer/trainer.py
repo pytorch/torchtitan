@@ -226,7 +226,7 @@ class GraphTrainingEngine(TrainingEngine):
         # The traced loss only receives the shared loss arguments, on both the
         # single-stage and the PP path.
         if any(
-            microbatch.loss_kwargs()
+            microbatch.as_input_dict().get("loss_kwargs")
             for microbatch_group in microbatch_groups
             for microbatch in microbatch_group
         ):

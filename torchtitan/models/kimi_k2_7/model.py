@@ -140,12 +140,11 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
-        loss_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap, and return the batch."""
         del kwargs
-        loss_kwargs = loss_kwargs or {}
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:

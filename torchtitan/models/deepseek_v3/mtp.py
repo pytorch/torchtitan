@@ -254,7 +254,6 @@ class MTPDecoder(Decoder):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
-        loss_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
@@ -264,7 +263,7 @@ class MTPDecoder(Decoder):
     ]:
         """Prepare aligned pairs before applying CP sharding and annotations."""
         del kwargs
-        loss_kwargs = loss_kwargs or {}
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         tokens = input_dict["input"]
         labels = input_dict["labels"]
         positions = input_dict.get("positions")

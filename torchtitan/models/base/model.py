@@ -56,7 +56,6 @@ class BaseModel(Module, ABC):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
-        loss_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
@@ -73,9 +72,10 @@ class BaseModel(Module, ABC):
         ``(inputs, labels, model_kwargs, loss_kwargs)``. Models with aligned
         multi-output objectives may return tuples of input and label tensors.
 
-        ``loss_kwargs``: per-microbatch loss arguments, e.g. RL advantages.
-        Tensors share the ``labels`` token dimension and are CP-sharded and
-        SPMD-annotated like ``labels``; non-tensor values pass through.
+        ``input_dict["loss_kwargs"]``, if present, holds per-microbatch loss
+        arguments, e.g. RL advantages. Its tensors share the ``labels`` token
+        dimension and are CP-sharded and SPMD-annotated like ``labels``;
+        non-tensor values pass through. They are returned as ``loss_kwargs``.
 
         Additional keyword arguments may provide model-specific preprocessing
         dependencies that are owned outside the trainable model. The trainer

@@ -443,12 +443,11 @@ class Qwen35Model(MultimodalModel):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
-        loss_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return."""
         del kwargs
-        loss_kwargs = loss_kwargs or {}
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         padding_mask = input_dict.get("padding_mask", None)
 
         # Attention masks are built from the 1D ``positions``.

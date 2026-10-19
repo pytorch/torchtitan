@@ -61,16 +61,19 @@ class TestDecoderLossKwargsContextParallel(DTensorTestBase):
                         model_kwargs,
                         loss_kwargs,
                     ) = model.preprocess_inputs(
-                        {"input": labels_T.clone(), "labels": labels_T},
+                        {
+                            "input": labels_T.clone(),
+                            "labels": labels_T,
+                            "loss_kwargs": {
+                                "advantages": labels_T.float() / 10,
+                                "loss_mask": labels_T % 3 != 0,
+                                "reduction": "sum",
+                            },
+                        },
                         parallelism_context=parallelism_context,
                         parallelism=ParallelismConfig(
                             context_parallel_load_balancer=load_balancer
                         ),
-                        loss_kwargs={
-                            "advantages": labels_T.float() / 10,
-                            "loss_mask": labels_T % 3 != 0,
-                            "reduction": "sum",
-                        },
                     )
 
                 cp_rank = parallelism_context.get_mesh("cp").get_local_rank()

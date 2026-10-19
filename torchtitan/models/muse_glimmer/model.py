@@ -401,14 +401,13 @@ class MuseGlimmerModel(MultimodalModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-        loss_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build first-stage vision-bank indices and masks, then shard the batch."""
         del kwargs
         from .sharding import vision_bank_indices_placement
 
-        loss_kwargs = loss_kwargs or {}
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         pixel_values = input_dict.get("pixel_values")
         grid_thw = input_dict.get("grid_thw")
         pixel_values_videos = input_dict.get("pixel_values_videos")
