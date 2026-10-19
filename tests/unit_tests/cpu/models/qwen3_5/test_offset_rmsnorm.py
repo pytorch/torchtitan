@@ -17,6 +17,7 @@ def test_qwen35_architecture_enables_offset_rmsnorm_local_compile() -> None:
             "fused_binary_activation",
             "gated_rmsnorm",
             "offset_rmsnorm",
+            "residual_add_norm",
             "partial_rope",
             "shared_expert_gate",
             "fp32_to_bf16_split",
