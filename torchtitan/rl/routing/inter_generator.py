@@ -9,13 +9,17 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+import aiohttp
+
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.generator.generation_server import VerifiersGenerationMetadata
 from torchtitan.rl.routing.strategies import (
     RoutingStrategy,
     StickySessionRoutingStrategy,
@@ -35,16 +39,40 @@ class _GeneratorHandle(RoutingCandidate):
     """Rank-0 handle of the same generator. Used for calls that only rank 0 needs
     to run."""
 
+    index: int
+    """Position in the router's generator list; callers pass it back to `release` or
+    `release_rollout`."""
+
+    url: str | None = None
+    """Base URL of the generator's HTTP server; set by `start_engine_loop`."""
+
     reserved_load: int = 0
     """Router-side estimate of in-flight routed generation work."""
 
 
-class InterGeneratorRouter(Configurable):
-    """Routes generation calls across generator meshes and pulls model's state dict.
+@dataclass(frozen=True, slots=True)
+class GeneratorEndpoint:
+    """Where a caller sends a generate call, from `InterGeneratorRouter.acquire`."""
 
-    This is layer 1 of the two-layer routing design: it routes each call across
-    generator *meshes* (replicas). Within the chosen mesh, ``IntraGeneratorRouter``
-    then routes the request across that mesh's data-parallel ranks.
+    index: int
+    """Pass it back to `InterGeneratorRouter.release` or `release_rollout`."""
+
+    url: str
+    """Base URL of the generator's HTTP server, e.g. `"http://host-3.example.com:41233"`."""
+
+
+class InterGeneratorRouter(Configurable):
+    """Picks the generator mesh for each generate call and pulls model's state dict.
+
+    This is layer 1 of the two-layer routing design: it picks a generator *mesh*
+    (replica) per call. The caller then sends the call to that generator's HTTP
+    server (`GenerationServer`), and within the mesh, `IntraGeneratorRouter`
+    routes the request across its data-parallel ranks. No request body passes
+    through the router:
+
+        caller --acquire(session)--> router --> GeneratorEndpoint(index, url)
+        caller --HTTP POST url/inference/v1/generate--> generator
+        caller --release(index)--> router
 
     Singleton:
         Routing decisions read and write mutable states such as
@@ -56,8 +84,8 @@ class InterGeneratorRouter(Configurable):
           * this mesh should consists of only 1 actor.
 
         This pattern is simpler to implement, and should be good enough to handle
-        the RL job's scale because the router is just a proxy, and the number of
-        concurrent requests should be reasonable for a singleton to handle.
+        the RL job's scale because the router only places calls and never carries
+        their payloads.
 
     Actor:
        The router singleton is reached from different processes and hosts, so it
@@ -98,13 +126,18 @@ class InterGeneratorRouter(Configurable):
     ):
         self._config = config
         self._generators = [
-            _GeneratorHandle(actor=generator.all_ranks, rank0_actor=generator.rank0)
-            for generator in generators
+            _GeneratorHandle(
+                actor=generator.all_ranks, rank0_actor=generator.rank0, index=index
+            )
+            for index, generator in enumerate(generators)
         ]
         if not self._generators:
             raise ValueError("InterGeneratorRouter requires at least one generator")
 
         self._strategy = config.strategy.build()
+        # Group id -> {generator index: leases its callers hold}. Lets `release_groups` give back
+        # leases a caller never released (e.g. its process died mid-call).
+        self._leases: dict[int, Counter[int]] = {}
 
     def _reserve(self, h: _GeneratorHandle, cost: int) -> None:
         """Reserve estimated generation work on a handle before dispatch."""
@@ -121,22 +154,15 @@ class InterGeneratorRouter(Configurable):
             h.reserved_load >= 0
         ), f"generator reserved_load went negative: {h.reserved_load}"
 
-    async def _route(
-        self,
-        method: str,
-        *args,
-        routing_ctx: RoutingContext,
-        **kwargs,
-    ) -> Any:
-        """Dispatch one call to a strategy-chosen generator's rank 0;
-        return its result.
-        """
-        h = self._strategy.choose(routing_ctx, self._generators)
-        self._reserve(h, routing_ctx.estimated_cost)
-        try:
-            return await getattr(h.rank0_actor, method).call_one(*args, **kwargs)
-        finally:
-            self._release(h, routing_ctx.estimated_cost)
+    def _release_lease(self, index: int, *, group_id: int) -> None:
+        """Give back one of `group_id`'s leases on generator `index`; a no-op once `release_groups`
+        freed it. `release_rollout` calls this, not `release`: on the actor, `self.release` is
+        the Monarch endpoint, not this method."""
+        leases = self._leases.get(group_id)
+        if leases is None or leases[index] == 0:
+            return
+        leases[index] -= 1
+        self._release(self._generators[index], cost=1)
 
     async def _fanout(
         self,
@@ -204,37 +230,65 @@ class InterGeneratorRouter(Configurable):
         #   big models / many generators, not at small scale.
         await asyncio.gather(*[_pull_one(h) for h in self._generators])
 
-    async def generate(
-        self,
-        prompt_token_ids: list[int],
-        *,
-        request_id: str,
-        group_id: int,
-        routing_session_id: str | None,
-        sampling_config: Any | None,
-        metrics_prefix: str,
-    ) -> Any:
-        """Route one generation call to a generator and return its completion."""
-        return await self._route(
-            "generate",
-            prompt_token_ids,
-            request_id=request_id,
-            group_id=group_id,
-            # Generator.generate also requires this field for its
-            # intra-mesh DP routing.
-            routing_session_id=routing_session_id,
-            sampling_config=sampling_config,
-            metrics_prefix=metrics_prefix,
-            # Load is measured as in-flight request count (one unit per call).
-            routing_ctx=RoutingContext(
-                estimated_cost=1,
-                session_id=routing_session_id,
-            ),
+    async def acquire(
+        self, session_id: str | None, *, group_id: int
+    ) -> GeneratorEndpoint:
+        """Take one unit of load on the generator chosen for `session_id`; `release` (or
+        `release_rollout`) gives it back.
+
+        Load is in-flight leases:
+
+            native rollout     one lease per generate call; the sticky strategy can re-pin between turns
+            Verifiers rollout  one lease, no session, for the whole episode; its agent posts to one URL
+
+        Args:
+            session_id: Routing session for sticky placement; None places by load alone.
+            group_id: Rollout group the lease belongs to; `release_groups` frees what it still holds.
+        """
+        h = self._strategy.choose(
+            RoutingContext(estimated_cost=1, session_id=session_id), self._generators
         )
+        self._reserve(h, cost=1)
+        self._leases.setdefault(group_id, Counter())[h.index] += 1
+        return GeneratorEndpoint(index=h.index, url=h.url)
+
+    async def release(self, index: int, *, group_id: int) -> None:
+        """Give back one unit of load that `acquire` took; a no-op once `release_groups` freed it."""
+        self._release_lease(index, group_id=group_id)
+
+    async def release_rollout(
+        self, index: int, *, group_id: int, session_ids: list[str]
+    ) -> dict[str, VerifiersGenerationMetadata]:
+        """End a whole-rollout lease: the generator drops the rollout's sessions and returns what
+        they folded. The lease goes back even if that call fails."""
+        try:
+            return await self._generators[index].rank0_actor.release_sessions.call_one(
+                session_ids
+            )
+        finally:
+            self._release_lease(index, group_id=group_id)
 
     async def start_engine_loop(self) -> None:
-        """Start the engine loop on every rank of every generator."""
+        """Start the engine loop on every rank of every generator, then check that this host
+        reaches each generator's HTTP server."""
         await self._fanout("start_engine_loop")
+        urls = await asyncio.gather(
+            *(h.rank0_actor.http_url.call_one() for h in self._generators)
+        )
+        # Callers (rollout workers, Verifiers env servers) run on this host too, so an address
+        # the router can't reach fails here, at setup, instead of on the first rollout.
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as session:
+            for h, url in zip(self._generators, urls, strict=True):
+                try:
+                    async with session.get(f"{url}/healthz") as response:
+                        response.raise_for_status()
+                except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+                    raise RuntimeError(
+                        f"generator {h.index} serves HTTP at {url}, which the router can't reach"
+                    ) from error
+                h.url = url
 
     async def sync_log_step(self, step: int) -> None:
         """Set the step counter in this process and in every generator rank."""
@@ -253,7 +307,11 @@ class InterGeneratorRouter(Configurable):
             await pinned.rank0_actor.release_sessions.call_one([routing_session_id])
 
     async def release_groups(self, group_ids: list[int]) -> None:
-        """Tell every generator that these rollout groups are finished."""
+        """Tell every generator that these rollout groups are finished, and give back the load
+        their callers still hold."""
+        for group_id in group_ids:
+            for index, num_leases in self._leases.pop(group_id, Counter()).items():
+                self._release(self._generators[index], cost=num_leases)
         await self._fanout("release_groups", group_ids)
 
     async def close_generators(self) -> list[Any | BaseException]:
