@@ -54,8 +54,9 @@ def _run_env_server_process(
     # Give free memory at the top of each heap back to the OS at once (glibc's default keeps up to 128 KB).
     os.environ.setdefault("MALLOC_TRIM_THRESHOLD_", "0")
 
-    # Tag the pool workers spawned below as `env_server_worker` for host memory metrics.
-    # This process itself stays `other`: /proc/<pid>/environ keeps the env it started with.
+    # Tag the pool workers spawned below as `env_server_worker` for host memory metrics. This
+    # process keeps `env_server`, the tag it was spawned with: /proc/<pid>/environ keeps its
+    # starting env.
     os.environ[RL_ROLE_ENV] = "env_server_worker"
 
     # Registered here too: resolve_env_config imports the taskset before serve_env runs log_setup.
@@ -142,7 +143,17 @@ class VerifiersEnvServer(Configurable):
             ),
             daemon=False,
         )
-        process.start()
+        # A spawned process starts with this process's env: tag it `env_server` for host memory
+        # metrics (it sets `env_server_worker` for its own pool workers).
+        role = os.environ.get(RL_ROLE_ENV)
+        os.environ[RL_ROLE_ENV] = "env_server"
+        try:
+            process.start()
+        finally:
+            if role is None:
+                del os.environ[RL_ROLE_ENV]
+            else:
+                os.environ[RL_ROLE_ENV] = role
         child_conn.close()
 
         deadline = asyncio.get_running_loop().time() + self.config.startup_timeout_sec

@@ -98,10 +98,10 @@ class MonarchActorSystem(ActorSystem):
         # it with `call_one`. It gets its own mesh rather than sharing the
         # controller's process so routing does not contend with the training
         # loop for the controller's GIL.
-        self._router_mesh = spawn_cpu_procs(1)
+        self._router_mesh = spawn_cpu_procs(1, role="router")
         # Same for the batcher: build + pack would contend for the controller's GIL.
         # It drops its own buffers (maybe_release_oldest_batch): Monarch's drop must run on the owner's host.
-        self._batcher_mesh = spawn_cpu_procs(1)
+        self._batcher_mesh = spawn_cpu_procs(1, role="batcher")
 
         await setup_torch_elastic_env(self._trainer_mesh)
         for generator_mesh in self._generator_meshes:
@@ -176,7 +176,7 @@ class MonarchActorSystem(ActorSystem):
     async def spawn_rollout_workers(
         self, config: RolloutWorker.Config, *, num_workers: int, num_threads: int
     ) -> Any:
-        self._rollout_worker_mesh = spawn_cpu_procs(num_workers)
+        self._rollout_worker_mesh = spawn_cpu_procs(num_workers, role="rollout_worker")
         return self._rollout_worker_mesh.spawn(
             "rollout_worker",
             RolloutWorkerActor,

@@ -888,3 +888,12 @@ def test_compute_host_memory_metrics_groups_processes_by_role() -> None:
     assert after["host_memory/num_processes/controller"] == 1
     assert after[trainer_count_key] == before[trainer_count_key] + 1
     assert after["host_memory/rss_anon_gib/trainer"] > 0
+
+
+def test_compute_host_memory_metrics_reports_node_mem_available() -> None:
+    metrics = {
+        metric.key: metric.value.value for metric in compute_host_memory_metrics()
+    }
+    if not metrics:
+        pytest.skip("needs cgroup v2")
+    assert metrics["host_memory/node_mem_available_gib"] > 0
