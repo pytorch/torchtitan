@@ -7,7 +7,6 @@
 """CPU checks for the Terminal-Bench Verifiers recipe."""
 
 import asyncio
-import json
 import pickle
 import subprocess
 import sys
@@ -149,44 +148,17 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     )
 
 
-def test_worker_process_resolves_the_harness_from_a_fresh_interpreter() -> None:
-    """The env-server worker shares no ``sys.modules`` with the controller.
-
-    It imports only the local taskset module and then rebuilds the environment
-    config from JSON, so that one import must be enough to make the harness id
-    resolvable. Resolving in the test process would pass regardless, because the
-    controller side has already registered the alias there.
-    """
-    config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET)
-    environment = json.dumps(env_config_data(config.verifiers_env_server.environment))
-    worker = f"""
-import json
-from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
-from verifiers.v1.utils.loaders import load_harness, resolve_env_config
-
-environment = json.loads({environment!r})
-environment["taskset"]["id"] = register_local_taskset_alias(
-    {config.verifiers_env_server.local_taskset_module!r}
-)
-env_config = resolve_env_config(environment)
-print(type(load_harness(env_config.agent.harness)).__name__)
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", worker], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.strip().endswith("TerminalBenchTerminusHarness")
-
-
 def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
-    """A pool worker loads the broker's ``__main__``, the pickled ``log_setup``
-    and the taskset module. None of them may import torch, vLLM or Monarch.
+    """A pool worker loads the broker's ``__main__``, runs the pickled ``log_setup``, then
+    resolves the env config, whose taskset id is the local alias. It must find the taskset
+    and the harness without importing torch, vLLM or Monarch.
     """
     captured = {}
 
     def serve_env(**kwargs) -> None:
         captured["main"] = sys.modules["__main__"]
         captured["log_setup"] = pickle.dumps(kwargs["log_setup"])
+        captured["config_data"] = pickle.dumps(kwargs["config_data"])
 
     monkeypatch.setattr(env_server, "serve_env", serve_env)
     # _run_env_server_process replaces __main__ and edits no_proxy; restore both after the test.
@@ -207,15 +179,17 @@ def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
     assert not hasattr(captured["main"], "__file__")
     worker = f"""
 import pickle, sys
-pickle.loads({captured["log_setup"]!r})
-import {taskset.__name__}
+from verifiers.v1.utils.loaders import load_harness, resolve_env_config
+pickle.loads({captured["log_setup"]!r})()
+env_config = resolve_env_config(pickle.loads({captured["config_data"]!r}))
+print(type(load_harness(env_config.agent.harness)).__name__)
 print([name for name in ("torch", "vllm", "monarch") if name in sys.modules])
 """
     result = subprocess.run(
         [sys.executable, "-c", worker], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.strip() == "[]"
+    assert result.stdout.split() == ["TerminalBenchTerminusHarness", "[]"]
 
 
 def test_training_cannot_read_benchmark_as_training_data() -> None:

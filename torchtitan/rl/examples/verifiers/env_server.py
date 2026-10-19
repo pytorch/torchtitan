@@ -24,10 +24,12 @@ from verifiers.v1.configs.serve import (
 )
 from verifiers.v1.serve import env_config_data, serve_env
 from verifiers.v1.utils.loaders import resolve_env_config
-from verifiers.v1.utils.logging import setup_logging
 
 from torchtitan.config import Configurable
-from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
+from torchtitan.rl.examples.verifiers.worker_setup import (
+    register_local_taskset_alias,
+    setup_env_server_worker,
+)
 
 
 def _run_env_server_process(
@@ -44,6 +46,7 @@ def _run_env_server_process(
     os.environ["no_proxy"] = no_proxy
     os.environ["NO_PROXY"] = no_proxy
 
+    # Registered here too: resolve_env_config imports the taskset before serve_env runs log_setup.
     if local_taskset_module is not None:
         environment["taskset"]["id"] = register_local_taskset_alias(
             local_taskset_module
@@ -58,7 +61,11 @@ def _run_env_server_process(
         address_queue=address_queue,
         death_pipe=death_pipe,
         # Workers unpickle this by importing its module, so that module must not import torch.
-        log_setup=functools.partial(setup_logging, "INFO"),
+        log_setup=functools.partial(
+            setup_env_server_worker,
+            level="INFO",
+            local_taskset_module=local_taskset_module,
+        ),
         config_data=env_config_data(env_config),
         max_concurrent=serve.max_concurrent,
     )
