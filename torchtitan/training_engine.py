@@ -31,6 +31,7 @@ from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
+    get_cuspy_cuda_graph_annotation_config,
     NUM_CUDA_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_cuda_graph,
     wrap_with_cuda_graph,
@@ -64,6 +65,17 @@ class ForwardBackwardResult(NamedTuple):
 _ForwardBackwardFn: TypeAlias = Callable[
     [list[Any], torch.Tensor], ForwardBackwardResult
 ]
+
+
+def _get_cuda_graph_annotation_config(
+    profiler: Profiler.Config,
+) -> dict[str, Any] | None:
+    if not profiler.enable_profiling or profiler.cuspy is None:
+        return None
+    return get_cuspy_cuda_graph_annotation_config(
+        enable_event_node_ids=profiler.cuspy.enable_event_node_ids,
+        record_py_stacks=profiler.cuspy.record_py_stacks,
+    )
 
 
 class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Stateful):
@@ -440,6 +452,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             parallelism_context=self.parallelism_context,
             training_steps=self.config.training.steps,
             pp_has_last_stage=self.pp_has_last_stage,
+            cuda_graph_annotation_config=_get_cuda_graph_annotation_config(
+                self.config.profiler
+            ),
         )
         self.model_cls._register_optimizer_hooks(
             self.optim.optimizers,
@@ -515,6 +530,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             graph_group_runner = wrap_with_cuda_graph(
                 eager_forward_backward_fn,
                 num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                annotation_config=_get_cuda_graph_annotation_config(
+                    self.config.profiler
+                ),
             )
 
             # TODO: Use multiple CUDA graphs to support variable group counts
@@ -554,6 +572,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 for parameter in model_part.parameters()
             ),
             num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+            annotation_config=_get_cuda_graph_annotation_config(self.config.profiler),
         )
 
     @sl.log_trace_span("forward_backward")
