@@ -235,6 +235,11 @@ def test_full_metadata_and_native_dispatch_variants():
             getattr(decode_capture, name).data_ptr() == getattr(actual, name).data_ptr()
         )
     assert actual.num_prefills == 0 and actual.num_decodes == 2
+    # A one-token step padded past max_num_seqs (4 tokens > 2) can replay the packed
+    # graph, so query_start_loc must hold this step's offsets, not a stale step's.
+    builder.query_start_loc.fill_(-1)
+    builder.build(0, replace(common, max_query_len=1))
+    assert builder.query_start_loc.tolist() == [0, 1, 2, 4]
 
     # vLLM can synthesize one sequence as large as the FULL capture token
     # bucket. Reject a bucket larger than the GDN model context before its state
