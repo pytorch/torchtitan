@@ -38,6 +38,8 @@ class GenerationEngine(Configurable, abc.ABC):
         gpu_memory_limit: Fraction of GPU memory the engine may use.
         max_num_batched_tokens: Max tokens scheduled per engine step, or None for the
             engine's default.
+        num_topk_logprobs: The most top-k logprobs a request may ask for
+            (``SamplingConfig.num_topk_logprobs``); 0 for none.
         checkpointer: Optional initial-weight loader; None when weights arrive through
             model state dict loads.
         dist_moe_runtime: Dist-MoE runtime policy, when the model has Dist-MoE experts.

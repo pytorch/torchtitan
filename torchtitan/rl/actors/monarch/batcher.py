@@ -32,6 +32,7 @@ class _BatcherActorEndpoints:
         num_pp_microbatches: int = 1,
         pad_id: int,
         temperature: float,
+        num_topk_logprobs: int = 0,
         output_dir: str,
         enable_structured_logging: bool,
         replay_routed_experts: bool,
@@ -54,6 +55,7 @@ class _BatcherActorEndpoints:
             num_pp_microbatches=num_pp_microbatches,
             pad_id=pad_id,
             temperature=temperature,
+            num_topk_logprobs=num_topk_logprobs,
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
             replay_routed_experts=replay_routed_experts,
         )

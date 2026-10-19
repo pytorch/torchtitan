@@ -16,7 +16,7 @@ import logging
 import resource
 import socket
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from aiohttp import web
@@ -57,8 +57,8 @@ class VerifiersGenerationMetadata:
     """TorchTitan generation data aggregated over one Verifiers rollout.
 
     Verifiers sends the trace ID as the generation session ID, but does not
-    retain TorchTitan policy versions or generator metrics in the returned
-    trace. The generation server therefore records their rollout-wide span.
+    retain TorchTitan policy versions, generator metrics or top-k logprobs in the
+    returned trace. The generation server therefore records them per rollout.
     """
 
     min_policy_version: int
@@ -70,6 +70,18 @@ class VerifiersGenerationMetadata:
     metrics: list[m.Metric]
     """Metrics from every generation in the rollout, merged with `m.fold`."""
 
+    topk_by_generation: dict[
+        tuple[int, tuple[int, ...]], tuple[np.ndarray, np.ndarray]
+    ] = field(default_factory=dict)
+    """The generator's top-k ids and logprobs `[num_completion_tokens, k]` per generation,
+    keyed by `(len(prompt_token_ids), completion_token_ids)`; empty unless
+    `SamplingConfig.num_topk_logprobs` > 0.
+
+    Example:
+
+        {(2, (12, 13)): (array([[12, 5], [13, 6]]), array([[-0.1, -2.4], [-0.2, -1.9]]))}
+    """
+
 
 class GenerationServer:
     """Serve a generator's `generate` over HTTP, so every caller reaches the generator directly.
@@ -78,8 +90,8 @@ class GenerationServer:
 
         default                    vLLM's token-in response, which Verifiers' client reads. Verifiers
                                    drops other fields, so the server folds each session's policy
-                                   versions and metrics for `pop_generation_metadata`.
-        "response_format":         token ids and logprobs as raw arrays, versions and metrics in one
+                                   versions, metrics and top-k for `pop_generation_metadata`.
+        "response_format":         token ids, logprobs, top-k as raw arrays; versions, metrics in one
           "torchtitan"             `torchtitan` block; 200 whenever the engine produced a completion.
 
     The server mints every request id, so no client can send an id the engine already runs.
@@ -287,6 +299,13 @@ class GenerationServer:
             )
 
         previous = self.generation_metadata.get(session_id)
+        topk_by_generation = {} if previous is None else previous.topk_by_generation
+        if completion.topk_token_ids is not None:
+            key = (len(prompt_token_ids), tuple(completion.token_ids))
+            topk_by_generation = {
+                **topk_by_generation,
+                key: (completion.topk_token_ids, completion.topk_logprobs),
+            }
         self.generation_metadata[session_id] = VerifiersGenerationMetadata(
             min_policy_version=(
                 completion.min_policy_version
@@ -305,6 +324,7 @@ class GenerationServer:
                 if previous is None
                 else [*previous.metrics, *completion.metrics]
             ),
+            topk_by_generation=topk_by_generation,
         )
         self._group_sessions.setdefault(group_id, set()).add(session_id)
         # Text, not one dict per token: 1.4x faster, and no GC pass every ~700 tokens.
@@ -407,6 +427,14 @@ def completion_to_response(completion: Completion) -> dict:
                     "dtype": str(completion.routed_expert_ids.dtype),
                 }
             ),
+            **(
+                {}
+                if completion.topk_token_ids is None
+                else {
+                    "topk_token_ids": _base64(completion.topk_token_ids),
+                    "topk_logprobs": _base64(completion.topk_logprobs),
+                }
+            ),
         },
     }
 
@@ -414,16 +442,30 @@ def completion_to_response(completion: Completion) -> dict:
 def response_to_completion(payload: dict) -> Completion:
     """Inverse of `completion_to_response`."""
     block = payload["torchtitan"]
+    token_ids = np.frombuffer(base64.b64decode(block["token_ids"]), dtype=np.int32)
+    topk_token_ids = topk_logprobs = None
+    if "topk_token_ids" in block:
+        # [num_tokens, k]: k from the flat length; .copy() makes the read-only buffer writable.
+        topk_token_ids = (
+            np.frombuffer(base64.b64decode(block["topk_token_ids"]), dtype=np.int32)
+            .reshape(len(token_ids), -1)
+            .copy()
+        )
+        topk_logprobs = (
+            np.frombuffer(base64.b64decode(block["topk_logprobs"]), dtype=np.float32)
+            .reshape(len(token_ids), -1)
+            .copy()
+        )
     return Completion(
         min_policy_version=block["min_policy_version"],
         max_policy_version=block["max_policy_version"],
         request_id=payload["request_id"],
-        token_ids=np.frombuffer(
-            base64.b64decode(block["token_ids"]), dtype=np.int32
-        ).tolist(),
+        token_ids=token_ids.tolist(),
         token_logprobs=np.frombuffer(
             base64.b64decode(block["logprobs"]), dtype=np.float64
         ).tolist(),
+        topk_token_ids=topk_token_ids,
+        topk_logprobs=topk_logprobs,
         finish_reason=block["finish_reason"],
         routed_expert_ids=(
             None
@@ -470,6 +512,7 @@ def _parse_sampling_config(value: object):
         "max_tokens",
         "seed",
         "stop_token_ids",
+        "num_topk_logprobs",
     }
     protocol_fields = {
         "logprobs",
@@ -495,4 +538,5 @@ def _parse_sampling_config(value: object):
         max_tokens=int(value["max_tokens"]),
         seed=value.get("seed"),
         stop_token_ids=stop_token_ids,
+        num_topk_logprobs=int(value.get("num_topk_logprobs", 0)),
     )

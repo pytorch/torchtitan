@@ -27,6 +27,7 @@ from torchtitan.components.loss import (
     BaseLoss,
     ChunkedLossWrapper,
     compute_logprobs,
+    compute_topk_logprobs,
     cross_entropy_loss,
     CrossEntropyLoss,
     GradAccumulator,
@@ -680,6 +681,86 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     self.assertFalse(entropy.requires_grad)
                     torch.testing.assert_close(logprobs, expected_logprobs)
                     torch.testing.assert_close(entropy, expected_entropy)
+
+                    (logprobs * local_weights).sum().backward()
+                    torch.testing.assert_close(local_logits.grad, expected_grad)
+
+    @with_comms
+    def test_vocab_parallel_topk_logprobs_parity(self):
+        """Vocab-sharded logprobs and gradients match the full-vocab ones, with SPMD types."""
+        num_tokens, num_topk = 16, 5
+        mesh_configs = (
+            ((4,), ("tp",), (Shard(1),), (Replicate(),)),
+            ((2, 2), ("dp", "tp"), (Shard(0), Shard(1)), (Shard(0), Replicate())),
+        )
+        for mesh_shape, axis_names, logits_placements, row_placements in mesh_configs:
+            mesh = init_device_mesh(
+                self.device_type, mesh_shape, mesh_dim_names=axis_names
+            )
+            tp_group = mesh.get_group("tp")
+            for vocab_size, dtype in ((128, torch.float32), (131, torch.bfloat16)):
+                with self.subTest(
+                    mesh_shape=mesh_shape, vocab_size=vocab_size, dtype=dtype
+                ):
+                    generator = torch.Generator(device=self.device_type).manual_seed(
+                        vocab_size
+                    )
+                    global_logits = torch.randn(
+                        num_tokens, vocab_size, dtype=dtype, generator=generator
+                    )
+                    # Ids spread over every shard, including the last (uneven) one.
+                    global_token_ids = torch.randint(
+                        0, vocab_size, (num_tokens, num_topk), generator=generator
+                    )
+                    global_weights = torch.randn(
+                        num_tokens, num_topk, generator=generator
+                    )
+
+                    reference_logits = global_logits.clone().requires_grad_(True)
+                    reference_logprobs = torch.log_softmax(
+                        reference_logits.float(), dim=-1
+                    ).gather(-1, global_token_ids)
+                    (reference_logprobs * global_weights).sum().backward()
+
+                    local_logits = (
+                        distribute_tensor(global_logits, mesh, logits_placements)
+                        .to_local()
+                        .detach()
+                        .requires_grad_(True)
+                    )
+                    local_token_ids = distribute_tensor(
+                        global_token_ids, mesh, row_placements
+                    ).to_local()
+                    local_weights = distribute_tensor(
+                        global_weights, mesh, row_placements
+                    ).to_local()
+                    expected_logprobs = distribute_tensor(
+                        reference_logprobs.detach(), mesh, row_placements
+                    ).to_local()
+                    expected_grad = distribute_tensor(
+                        reference_logits.grad, mesh, logits_placements
+                    ).to_local()
+
+                    logits_type = {tp_group: spmd.S(1)}
+                    token_ids_type = {tp_group: spmd.I}
+                    if "dp" in axis_names:
+                        dp_group = mesh.get_group("dp")
+                        logits_type[dp_group] = spmd.S(0)
+                        token_ids_type[dp_group] = spmd.S(0)
+                    spmd.assert_type(local_logits, logits_type)
+                    spmd.assert_type(local_token_ids, token_ids_type)
+
+                    with set_current_spmd_mesh(mesh):
+                        with typecheck(strict_mode="strict"):
+                            logprobs = compute_topk_logprobs(
+                                local_logits,
+                                local_token_ids,
+                                vocab_parallel_group=tp_group,
+                                global_vocab_size=vocab_size,
+                            )
+
+                    self.assertIs(spmd.get_axis_local_type(logprobs, tp_group), spmd.I)
+                    torch.testing.assert_close(logprobs, expected_logprobs)
 
                     (logprobs * local_weights).sum().backward()
                     torch.testing.assert_close(local_logits.grad, expected_grad)

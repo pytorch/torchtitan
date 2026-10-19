@@ -117,6 +117,8 @@ class _GenerateFn:
             request_id=kwargs["request_id"],
             token_ids=[4],
             token_logprobs=[-0.5],
+            topk_token_ids=np.array([[4, 9]], dtype=np.int32),
+            topk_logprobs=np.array([[-0.5, -1.5]], dtype=np.float32),
             finish_reason="stop",
         )
 
@@ -164,6 +166,8 @@ def test_worker_executes_group_without_actor_mesh() -> None:
         assert worker.score_group_called
         assert [rollout.reward for rollout in group.rollouts] == [1.0, 2.0]
         assert [rollout.advantage for rollout in group.rollouts] == [10.0, 20.0]
+        # The generator's top-k rides on the turn, for ScoreCenteringLoss.
+        assert group.rollouts[0].turns[0].completion_topk_token_ids.tolist() == [[4, 9]]
         assert all(env.closed for env in token_env_config.envs)
         assert [type(r).__name__ for r in token_env_config.renderers] == [
             "Qwen3Renderer",

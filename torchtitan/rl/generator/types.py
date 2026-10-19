@@ -28,6 +28,11 @@ class SamplingConfig:
     max_tokens: int = 100
     """Maximum number of tokens to generate per completion."""
 
+    num_topk_logprobs: int = 0
+    """Per generated token, also return the generator's k most likely token ids and their
+    logprobs, which `ScoreCenteringLoss` needs. 0 returns only the sampled token's logprob.
+    Costs 8 * k bytes per token; k = 32 matched the full vocab in arXiv 2609.20807."""
+
     seed: int | None = None
     """Per-request RNG seed. The rollouter offsets this per sample so a group's
     n=1 requests stay diverse while remaining reproducible (None = nondeterministic)."""
@@ -107,3 +112,7 @@ class FinishedRequest:
     metrics_inputs: RequestMetricsInputs
     routed_expert_ids: np.ndarray | None = None
     """Router replay rows; see `Completion.routed_expert_ids`."""
+    topk_token_ids: np.ndarray | None = None
+    """[generated_tokens, k] int32; None unless `SamplingConfig.num_topk_logprobs` > 0."""
+    topk_logprobs: np.ndarray | None = None
+    """[generated_tokens, k] float32 logprobs of `topk_token_ids`."""
