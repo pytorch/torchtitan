@@ -34,22 +34,25 @@ from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAt
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
-def _metadata():
-    boundaries = torch.tensor([0, 32, 64], device="cuda", dtype=torch.int32)
-    return VarlenAttentionMetadata(boundaries, boundaries, 32, 32)
+def _metadata(seq_len=32):
+    boundaries = torch.tensor(
+        [0, seq_len, 2 * seq_len], device="cuda", dtype=torch.int32
+    )
+    return VarlenAttentionMetadata(boundaries, boundaries, seq_len, seq_len)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("upcast_qk", [False, True])
 @pytest.mark.parametrize("causal", [False, True])
-def test_forward_backward_precision(dtype, upcast_qk, causal):
+@pytest.mark.parametrize("backend", [None, SDPBackend.FLASH_ATTENTION])
+def test_forward_backward_precision(dtype, upcast_qk, causal, backend, seq_len=32):
     torch.manual_seed(42)
     attention = VarlenInnerAttention.Config(
-        window_size=(-1, 0) if causal else (-1, -1)
+        sdpa_backend=backend, window_size=(-1, 0) if causal else (-1, -1)
     ).build()
     inputs = [
         torch.randn(
-            64,
+            2 * seq_len,
             4,
             64,
             device="cuda",
@@ -59,9 +62,9 @@ def test_forward_backward_precision(dtype, upcast_qk, causal):
         for index in range(3)
     ]
     reference_inputs = [x.detach().double().requires_grad_() for x in inputs]
-    actual = attention(*inputs, attention_metadata=_metadata())
+    actual = attention(*inputs, attention_metadata=_metadata(seq_len))
     reference_q, reference_k, reference_v = (
-        x.reshape(2, 32, 4, 64).transpose(1, 2) for x in reference_inputs
+        x.reshape(2, seq_len, 4, 64).transpose(1, 2) for x in reference_inputs
     )
     with sdpa_kernel(SDPBackend.MATH):
         expected = (
@@ -72,7 +75,7 @@ def test_forward_backward_precision(dtype, upcast_qk, causal):
                 is_causal=causal,
             )
             .transpose(1, 2)
-            .reshape(64, 4, 64)
+            .reshape(2 * seq_len, 4, 64)
         )
     grad_output = torch.randn_like(actual)
     actual_grads = torch.autograd.grad(actual, inputs, grad_output)
@@ -85,6 +88,19 @@ def test_forward_backward_precision(dtype, upcast_qk, causal):
     for result, reference in zip((actual, *actual_grads), (expected, *expected_grads)):
         relative_error = (result.double() - reference).norm() / reference.norm()
         assert relative_error.item() < tolerance
+
+
+def test_explicit_cudnn_forward_backward_precision():
+    if (
+        torch.version.hip is not None
+        or torch.cuda.get_device_capability()[0] not in (9, 10)
+        or (torch.backends.cudnn.version() or 0) < 91800
+    ):
+        pytest.skip("requires the native cuDNN varlen backend")
+    # Use actual 256-token documents supported by the validated cuDNN releases.
+    test_forward_backward_precision(
+        torch.bfloat16, False, True, SDPBackend.CUDNN_ATTENTION, seq_len=256
+    )
 
 
 def test_fp32_fallback_matches_legacy_forward_backward():
