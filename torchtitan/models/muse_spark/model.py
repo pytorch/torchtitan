@@ -148,13 +148,7 @@ class MuseSparkAttention(GQAttention):
         return output_TD
 
     # Limit 16: RoPE and no-RoPE layers share this region and use 8 graphs, exactly the default limit.
-    # Cat options: write RoPE's real/imag halves with one store each (see ComplexRoPE.forward).
-    @local_compile(
-        "muse_spark_attention_qk",
-        batch_invariant=False,
-        recompile_limit=16,
-        options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
-    )
+    @local_compile("muse_spark_attention_qk", batch_invariant=False, recompile_limit=16)
     def _prepare_query_and_key(
         self,
         query_TNH: torch.Tensor,
