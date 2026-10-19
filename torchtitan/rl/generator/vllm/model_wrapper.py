@@ -426,6 +426,10 @@ class VLLMModelWrapper(Module):
         # (e.g. vLLM's attention scales) keep the values copied here.
         _copy_state_dict(model_state_dict, self._prefetched_model_state_dict)
 
+        # vLLM switches torch to 1 CPU thread when warmup ends, and torch.compile recompiles
+        # a region when the thread count changes. Switch now, before the first compile.
+        _torch_utils.set_torch_threads_for_runtime()
+
         # Unshard the model here so vLLM performs its GPU memory profiling
         # based on the model's actual representation used during forward
         for module in self.model.modules():
