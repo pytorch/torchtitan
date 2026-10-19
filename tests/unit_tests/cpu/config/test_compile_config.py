@@ -15,7 +15,11 @@ from torchtitan.components.loss import compute_logprobs, cross_entropy_loss, mse
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.attention.attention import _compiled_create_block_mask
-from torchtitan.models.common.moe.moe import _microbatch_load_balance_local_stats
+from torchtitan.models.common.aux_loss import AuxLoss
+from torchtitan.models.common.moe.moe import (
+    _expert_counts,
+    _microbatch_load_balance_local_stats,
+)
 from torchtitan.models.common.vision_encoder import compiled_create_block_mask
 
 
@@ -162,15 +166,13 @@ def test_moe_aux_loss_uses_local_compile(monkeypatch) -> None:
     monkeypatch.setattr(torch, "compile", fake_compile)
     LocalCompileConfig(regions=["moe_aux_loss"]).apply()
 
-    assert [
-        call
-        for call in compiled
-        if call[0] is _microbatch_load_balance_local_stats.__wrapped__
-    ] == [
-        (
-            _microbatch_load_balance_local_stats.__wrapped__,
-            {"fullgraph": True},
-        )
+    aux_loss_fns = (
+        AuxLoss._norm_sum_scores_over_tokens.__wrapped__,
+        _microbatch_load_balance_local_stats.__wrapped__,
+        _expert_counts.__wrapped__,
+    )
+    assert [call for call in compiled if call[0] in aux_loss_fns] == [
+        (fn, {"fullgraph": True}) for fn in aux_loss_fns
     ]
 
 
