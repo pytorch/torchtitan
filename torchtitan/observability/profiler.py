@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import torch
-import torch._C._profiler
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.cuda_graph import (
@@ -83,7 +82,9 @@ class CuspyProfilerConfig:
     ``torch.cuda.graph_annotations.get_kernel_py_stacks``)."""
 
     performance_metrics: list[str] = field(default_factory=list)
-    """CUPTI PM-sampling metric names to collect."""
+    """CUPTI PM-sampling metric names to collect, e.g. ``sm__cycles_active.avg``.
+    See "PM sampling configuration" in torchtitan/observability/README.md for how
+    to list the metrics available on the current GPU."""
 
     pm_sampling_interval_ms: float | None = None
     """PM-sampling interval; ``None`` uses torch's default."""
@@ -102,6 +103,23 @@ class CuspyProfilerConfig:
                 "pm_sampling_interval_ms and pm_lookback_window_ms require "
                 "performance_metrics."
             )
+        if (
+            self.pm_sampling_interval_ms is not None
+            and self.pm_sampling_interval_ms <= 0
+        ):
+            raise ValueError(
+                "pm_sampling_interval_ms must be positive, got "
+                f"{self.pm_sampling_interval_ms}."
+            )
+        if (
+            self.pm_sampling_interval_ms is not None
+            and self.pm_lookback_window_ms is not None
+            and self.pm_lookback_window_ms < self.pm_sampling_interval_ms
+        ):
+            raise ValueError(
+                f"pm_lookback_window_ms ({self.pm_lookback_window_ms}) must be at least "
+                f"pm_sampling_interval_ms ({self.pm_sampling_interval_ms})."
+            )
 
 
 def _cuspy_unavailable_reasons(config: CuspyProfilerConfig) -> list[str]:
@@ -110,21 +128,23 @@ def _cuspy_unavailable_reasons(config: CuspyProfilerConfig) -> list[str]:
     Probes without taking a CUPTI subscription: holding one makes Kineto's one-shot
     CUPTI init fail for the rest of the process.
     """
-    reasons = []
     if getattr(torch.profiler, "CuspyConfig", None) is None:
-        reasons.append("this torch build has no torch.profiler.CuspyConfig")
-    elif config.trace_format == "pftrace":
+        return ["this torch build has no torch.profiler.CuspyConfig"]
+    reasons = []
+    if config.trace_format == "pftrace":
+        from torch._C import _profiler
+
         # torch has no capability flag for the native encoder; builds without it
         # compile a stub that raises on any input, so encode an empty trace.
         try:
-            torch._C._profiler._cuspy.encode_pftrace(0, [], [], [], [])
+            _profiler._cuspy.encode_pftrace(0, [], [], [], [])
         except RuntimeError as error:
             reasons.append(f'trace_format="pftrace" is unsupported: {error}')
     # Private module, and importing it raises without the cupti-python package.
     try:
         from torch.profiler._cuspy import cupti_python
     except ModuleNotFoundError as error:
-        reasons.append(str(error))
+        reasons.append(f"{error}; install it with `pip install cupti-python`")
         return reasons
     try:
         version = cupti_python.pylibcupti().get_version()
@@ -523,14 +543,21 @@ class Profiler(Configurable):
                     "replay streams."
                 )
             if cuspy is not None:
+                # Cuspy picks its Perfetto encoder from the ".pftrace" in the path.
                 prof.export_chrome_trace(output_file)
-                if (
-                    cuspy.record_py_stacks
-                    and torch.cuda.graph_annotations.get_kernel_py_stacks()
-                ):
-                    torch.cuda.graph_annotations.dump_kernel_py_stacks(
-                        os.path.join(curr_trace_dir, PY_STACKS_FILE.format(rank=rank))
-                    )
+                if cuspy.record_py_stacks:
+                    if torch.cuda.graph_annotations.get_kernel_py_stacks():
+                        torch.cuda.graph_annotations.dump_kernel_py_stacks(
+                            os.path.join(
+                                curr_trace_dir, PY_STACKS_FILE.format(rank=rank)
+                            )
+                        )
+                    else:
+                        logger.warning(
+                            "profiler.cuspy.record_py_stacks is set, but no CUDA graph "
+                            "launch stacks were recorded; stacks are only recorded for "
+                            "CUDA graphs, so check that CUDA graphs are enabled."
+                        )
             else:
                 # CUDA graph annotations are baked in during the export rather than
                 # joined onto the written file afterwards: re-reading and rewriting a
@@ -573,11 +600,20 @@ class Profiler(Configurable):
         with_stack = False
         if cuspy is not None:
             if not torch.cuda.is_available():
-                raise ValueError("profiler.cuspy requires CUDA.")
+                raise ValueError(
+                    "profiler.cuspy is set, but no CUDA device is available."
+                )
             if reasons := _cuspy_unavailable_reasons(cuspy):
                 raise ValueError(
                     "profiler.cuspy is set, but Cuspy cannot run here:\n  - "
                     + "\n  - ".join(reasons)
+                )
+            if not torch.cuda.graph_annotations.is_available():
+                logger.warning(
+                    "CUDA graph annotations are unavailable (see "
+                    "torch.cuda.graph_annotations.is_available for requirements); "
+                    "kernels replayed from CUDA graphs will not carry mark_kernels "
+                    "metadata in the Cuspy trace."
                 )
             activities.append(
                 _get_cuspy_activity_config(cuspy, graph_lanes=graph_lanes)
