@@ -364,6 +364,12 @@ class TestProfilerEnabledPaths(unittest.TestCase):
         self.assertEqual(pm_config.metric_names, ["sm__cycles_active.avg"])
         self.assertEqual(pm_config.sampling_interval_ms, 0.5)
 
+        if hasattr(torch.profiler.CuspyConfig, "graph_lanes"):
+            [cuspy_config] = _get_cuspy_activity_config(
+                CuspyProfilerConfig(), graph_lanes=True
+            )[torch.profiler.ProfilerActivity.CUDA].profiler_configs
+            self.assertEqual(cuspy_config.graph_lanes, "all")
+
 
 if __name__ == "__main__":
     unittest.main()
