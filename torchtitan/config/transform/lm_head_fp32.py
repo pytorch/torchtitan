@@ -9,8 +9,9 @@
 from dataclasses import dataclass, fields
 from typing import Literal
 
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import Linear
+
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
 from .converter import ModelConfigConverter
 
@@ -43,6 +44,15 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
             if fqn.rsplit(".", 1)[-1] != self._TARGET:
                 continue
             found = True
+            # Already converted, e.g. by a recipe: keep its backward_mode.
+            if isinstance(linear_config, HiMidLoLinear.Config):
+                continue
+            if type(linear_config) is not Linear.Config:
+                raise ValueError(
+                    f"LMHeadFP32OutputConverter only converts a plain Linear.Config, but "
+                    f"{fqn!r} is a {type(linear_config).__qualname__}, whose extra fields "
+                    "or forward (e.g. a logit soft cap) HiMidLoLinear would drop."
+                )
             kwargs = {
                 f.name: getattr(linear_config, f.name) for f in fields(linear_config)
             }

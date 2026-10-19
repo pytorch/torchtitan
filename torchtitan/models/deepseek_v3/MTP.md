@@ -182,7 +182,7 @@ The benefit is that MTP reuses the existing DeepSeek-V3 FSDP policy instead of d
 
 ### 3.2 TP/SP
 
-MTP TP/SP sharding is configured in `_set_deepseek_v3_mtp_sharding()`. The main rules are:
+MTP TP/SP sharding is set where `_build_mtp_layers()` in `flavors.py` builds each MTP block. The main rules are:
 
 - MTP attention/feed-forward/MoE submodules reuse the normal DeepSeek-V3 layer sharding policy.
 - `enorm`, `hnorm`, and `mtp_norm` use norm sharding that matches the activation layout.

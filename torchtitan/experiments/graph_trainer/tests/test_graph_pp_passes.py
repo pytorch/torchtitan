@@ -32,6 +32,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
     PARAMETER_GRADIENT_FQNS_META,
 )
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
 )
@@ -80,6 +81,7 @@ from torchtitan.experiments.graph_trainer.mutation_utils import (
     mutation_deps,
     mutation_target_nodes,
 )
+from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
@@ -89,6 +91,8 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     FSDP_PARAM_FQNS_META,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
+
+from torchtitan.models.common.moe import MoE
 from torchtitan.trainer import Trainer
 
 
@@ -146,8 +150,9 @@ def _trace_dsv3_moe_block_stage(
     torch.manual_seed(0)
 
     with _stable_flex_attention_compile_config():
+        parallelism = ParallelismConfig(expert_parallel_degree=2)
         model_config = build_deepseek_v3_model_config(
-            "debugmodel", attn_backend="flex", seq_len=seq_len
+            "debugmodel", attn_backend="flex", seq_len=seq_len, parallelism=parallelism
         )
         trainer_config = Trainer.Config(
             model=model_config,
@@ -157,13 +162,12 @@ def _trace_dsv3_moe_block_stage(
                 steps=1,
                 disable_cuda_graphs=True,
             ),
-            parallelism=ParallelismConfig(expert_parallel_degree=2),
+            parallelism=parallelism,
             checkpointer=CheckpointManager.Config(initial_load_model_only=False),
             debug=DebugConfig(seed=0, deterministic=True),
         )
-        model_config.set_sharding_(trainer_config.parallelism)
         moe_layer_config = model_config.layers[1]
-        if moe_layer_config.moe is None:
+        if not isinstance(moe_layer_config.feed_forward, MoE.Config):
             raise AssertionError("DeepSeek V3 MoE layer must contain an MoE block")
 
         with (
@@ -185,9 +189,9 @@ def _trace_dsv3_moe_block_stage(
         model.train()
 
         block = model.layers["1"]
-        if not block.moe_enabled:
+        if not isinstance(block.feed_forward, MoE):
             raise AssertionError("DeepSeek V3 debug layer 1 must be a MoE layer")
-        attention_metadata_key = block.attention.attention_metadata_key
+        inner_attention_type = type(block.attention.inner_attention)
         if fsdp_mesh is not None:
             block = data_parallel(
                 block,
@@ -216,7 +220,7 @@ def _trace_dsv3_moe_block_stage(
         ):
             out = block(
                 x,
-                attention_metadata.get(attention_metadata_key),
+                attention_metadata.get(inner_attention_type),
                 positions,
                 aux_loss_denominator=aux_loss_denominator,
             )
@@ -1331,6 +1335,52 @@ def _make_unbucketed_action_graph(
     return _make_graph_module(graph)
 
 
+def _make_multilayer_unbucketed_action_graph(collective: str) -> fx.GraphModule:
+    graph = fx.Graph()
+    outputs = []
+    with FakeTensorMode() as fake_mode:
+        values = []
+        for layer_id in range(2):
+            for part_id in range(2):
+                name = f"layer_{layer_id}_part_{part_id}"
+                value = graph.placeholder(name)
+                fake_value = fake_mode.from_tensor(torch.empty(2 + part_id))
+                value.meta["val"] = fake_value
+                values.append((layer_id, part_id, value, fake_value))
+        for layer_id, part_id, value, fake_value in values:
+            if collective == "all_gather":
+                start = graph.call_function(
+                    torch.ops._c10d_functional.all_gather_into_tensor.default,
+                    args=(value, 1, _FAKE_PG),
+                )
+            elif collective == "reduce_scatter":
+                start = graph.call_function(
+                    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+                    args=(value, "sum", 1, _FAKE_PG),
+                )
+            elif collective == "all_reduce":
+                start = graph.call_function(
+                    torch.ops._c10d_functional.all_reduce.default,
+                    args=(value, "sum", _FAKE_PG),
+                )
+            else:
+                raise ValueError(f"Unsupported test collective: {collective}")
+            wait = graph.call_function(
+                torch.ops._c10d_functional.wait_tensor.default,
+                args=(start,),
+            )
+            module_fqn = f"layers.{layer_id}.part{part_id}"
+            for node in (start, wait):
+                node.meta["val"] = fake_value
+                node.meta["custom"] = {
+                    _MODULE_FQN: module_fqn,
+                    FSDP_PARAM_FQNS_META: (f"{module_fqn}.weight",),
+                }
+            outputs.append(wait)
+    graph.output(tuple(outputs))
+    return _make_graph_module(graph)
+
+
 def _make_interleaved_reduce_grad_action_graph() -> fx.GraphModule:
     graph = fx.Graph()
     outputs = []
@@ -1836,6 +1886,63 @@ class GraphPPActionBucketingTest(unittest.TestCase):
                     2,
                 )
 
+    def test_extracted_actions_preserve_per_layer_bucket_scopes(self) -> None:
+        scoped_pass = functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            module_bucket_plans=[
+                ["layers.0.part0", "layers.0.part1"],
+                ["layers.1.part0", "layers.1.part1"],
+            ],
+            bucket_mode="custom_ops",
+        )
+        compile_config = GraphTrainerCompileConfig()
+
+        cases = (
+            (
+                "all_gather",
+                (True, False, False),
+                torch.ops.bucketing._pre_bucket_all_gather.default,
+            ),
+            (
+                "reduce_scatter",
+                (False, True, False),
+                torch.ops.bucketing._pre_bucket_reduce_scatter.default,
+            ),
+            (
+                "all_reduce",
+                (False, False, True),
+                torch.ops.aten.cat.default,
+            ),
+        )
+        for collective, enabled_types, bucket_target in cases:
+            with (
+                self.subTest(collective=collective),
+                patch(
+                    "torch.distributed.distributed_c10d._resolve_process_group",
+                    return_value=object(),
+                ),
+                patch("torch.distributed.get_rank", return_value=0),
+            ):
+                configured_pass = _configure_fsdp_bucketing_pass(
+                    scoped_pass,
+                    bucket_all_gathers=enabled_types[0],
+                    bucket_reduce_scatters=enabled_types[1],
+                    bucket_all_reduces=enabled_types[2],
+                )
+                if configured_pass is None:
+                    self.fail("Expected a configured FSDP bucketing pass")
+                scoped = apply_graph_passes(
+                    _make_multilayer_unbucketed_action_graph(collective),
+                    (),
+                    [configured_pass],
+                    compile_config=compile_config,
+                )
+
+            self.assertEqual(
+                sum(node.target == bucket_target for node in scoped.graph.nodes),
+                2,
+            )
+
     def test_reduce_grad_action_sorts_interleaved_reduction_inputs(self) -> None:
         gm = _make_interleaved_reduce_grad_action_graph()
         real_inputs = (torch.tensor([1.0, -2.0]), torch.tensor([3.0, 4.0, 5.0]))
@@ -2213,6 +2320,53 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         )
         actual = (compute_outputs[0], *reduced_grads)
         _assert_tensor_sequence_equal(self, actual, expected)
+
+    def test_forward_split_extracts_local_parameter_preparation(self) -> None:
+        gm = _make_forward_graph_with_quantized_unshard()
+        graph = gm.graph
+        param = graph.find_nodes(op="placeholder")[0]
+        (all_gather,) = graph.find_nodes(
+            op="call_function",
+            target=torch.ops._c10d_functional.all_gather_into_tensor.default,
+        )
+        (wait,) = graph.find_nodes(
+            op="call_function", target=torch.ops._c10d_functional.wait_tensor.default
+        )
+        with graph.inserting_before(all_gather):
+            cast = graph.call_function(
+                torch.ops.aten._to_copy.default,
+                args=(param,),
+                kwargs={"dtype": torch.bfloat16},
+            )
+        cast.meta.update(all_gather.meta)
+        wait.replace_all_uses_with(cast)
+        graph.erase_node(wait)
+        graph.erase_node(all_gather)
+        graph.lint()
+        gm.recompile()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        split = extract_fsdp_unshard_graph(
+            gm,
+            num_params=1,
+            input_names=("sharded_param", "x"),
+            flat_input_indices=(0, 1),
+        )
+        self.assertIsNotNone(split.unshard_module)
+        for target in (
+            torch.ops.aten._to_copy.default,
+            _quantize_weight_for_graph_test,
+        ):
+            self.assertIn(target, _call_targets(split.unshard_module))
+            self.assertNotIn(target, _call_targets(split.compute_module))
+
+        weight = torch.arange(4, dtype=torch.float32) / 7
+        prepared = split.unshard_module(weight)
+        for microbatch in range(240):
+            x = torch.full((4,), microbatch, dtype=torch.bfloat16)
+            expected = gm(weight, x)
+            actual = split.compute_module(*prepared, x)
+            _assert_tensor_sequence_equal(self, actual, expected)
 
     def test_forward_split_keeps_quantization_in_unshard_chain(self) -> None:
         gm = _make_forward_graph_with_quantized_unshard()

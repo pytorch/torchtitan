@@ -7,6 +7,7 @@
 import inspect
 import operator
 import sys
+from collections import Counter, defaultdict
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,11 +22,16 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.fx.traceback import preserve_node_meta
+from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
+from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
+from torchtitan.config import TrainingConfig
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     _EP_TOKEN_COUNT_EXCHANGE,
@@ -35,7 +41,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
     annotate_moe_ep_regions,
+    apply_simple_fsdp,
     get_default_transformer_block_buckets,
+    get_simple_fsdp_mesh,
 )
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
@@ -73,12 +81,16 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     deduplicate_fsdp_unshard_chains_pass,
     get_transformer_block_bucket_counts,
     get_transformer_block_layer_ids,
+    joint_transformer_block_bucketing_reordering_pass,
+    JointManualOverlapScheduler,
     reassign_collective_pgs_pass,
+    reorder_hsdp_grad_collectives_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     GraphStateSpec,
     minimal_fx_tracer,
+    run_traced,
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
     _backward_side_nodes,
@@ -121,8 +133,10 @@ from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # 
 from torchtitan.experiments.graph_trainer.tests.test_performance_passes import (  # noqa: F401
     TestAnnotateRMSNormForRegionalInductorPass,
 )
+from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.module import Module, ModuleList
+
+from torchtitan.models.common.moe import MoE
 
 
 @torch.library.custom_op(
@@ -152,8 +166,12 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             return SimpleNamespace(
                 compile=GraphTrainerCompileConfig(inductor_compilation="full"),
                 loss=loss,
-                model=SimpleNamespace(layers=[0, 1]),
+                model=SimpleNamespace(
+                    layers=[SimpleNamespace(feed_forward=None) for _ in range(2)],
+                    mtp_layers=[object()],
+                ),
                 parallelism=SimpleNamespace(),
+                training=SimpleNamespace(disable_cuda_graphs=False),
             )
 
         traced_result = SimpleNamespace(
@@ -175,6 +193,119 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             ],
             [False, True],
         )
+        self.assertEqual(
+            [call.kwargs["num_mtp_layers"] for call in mock_bucket_plan.call_args_list],
+            [1, 1],
+        )
+
+    def test_hsdp_collective_reordering_precedes_bucketing(self) -> None:
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(
+                disable_passes=["cuda_graph_pass"],
+                inductor_compilation="full",
+            ),
+            loss=None,
+            model=SimpleNamespace(layers=[SimpleNamespace(feed_forward=None)]),
+            parallelism=SimpleNamespace(
+                data_parallel_replicate_degree=2,
+                data_parallel_shard_degree=2,
+                fsdp_reshard_after_forward="always",
+                pipeline_parallel_degree=1,
+            ),
+            training=TrainingConfig(disable_cuda_graphs=True),
+        )
+        traced_result = SimpleNamespace(state_fqns=[])
+
+        def make_mesh(axis, degree):
+            return SimpleNamespace(
+                size=lambda: degree,
+                get_group=lambda: SimpleNamespace(group_name=axis),
+            )
+
+        def get_mesh(axis):
+            return make_mesh(axis, 2)
+
+        def get_optional_mesh(axis, *, include_singleton_axes=False):
+            if axis == ["dp_shard", "cp"]:
+                return SimpleNamespace(
+                    _flatten=lambda name: make_mesh(name, 2),
+                )
+            if axis == ["dp_replicate", "edp_shard"]:
+                return {
+                    "dp_replicate": make_mesh("expert_dp_replicate", 2),
+                    "edp_shard": make_mesh("edp_shard", 2),
+                }
+            return None
+
+        parallelism_context = SimpleNamespace(
+            dp_replicate=2,
+            dp_shard=2,
+            get_mesh=get_mesh,
+            get_optional_mesh=get_optional_mesh,
+        )
+        graph_passes = compile_time_passes(
+            traced_result,
+            config,
+            parallelism_context=parallelism_context,
+        )
+        pass_fns = [getattr(pass_fn, "func", pass_fn) for pass_fn in graph_passes]
+
+        self.assertLess(
+            pass_fns.index(reorder_hsdp_grad_collectives_pass),
+            pass_fns.index(joint_transformer_block_bucketing_reordering_pass),
+        )
+        hsdp_pass = next(
+            graph_pass
+            for graph_pass in graph_passes
+            if getattr(graph_pass, "func", None) is reorder_hsdp_grad_collectives_pass
+        )
+        self.assertEqual(
+            hsdp_pass.keywords["hsdp_process_group_pairs"],
+            (
+                ("dp_replicate", 2, "fsdp"),
+                ("expert_dp_replicate", 2, "edp_shard"),
+            ),
+        )
+
+    def test_compile_time_passes_follow_core_cuda_graph_config(self):
+        from torchtitan.components.loss import CrossEntropyLoss
+        from torchtitan.experiments.graph_trainer.cuda_graph import (
+            cuda_graph_pass,
+            insert_kernel_annotations_pass,
+        )
+
+        def make_config(*, disable_cuda_graphs):
+            return SimpleNamespace(
+                compile=GraphTrainerCompileConfig(inductor_compilation="regional"),
+                loss=CrossEntropyLoss.Config(),
+                model=SimpleNamespace(
+                    layers=[SimpleNamespace(feed_forward=None) for _ in range(2)]
+                ),
+                parallelism=SimpleNamespace(),
+                training=SimpleNamespace(disable_cuda_graphs=disable_cuda_graphs),
+            )
+
+        traced_result = SimpleNamespace(
+            state_fqns=[],
+            graph_state=GraphStateSpec(),
+        )
+        with patch(
+            "torchtitan.experiments.graph_trainer.common_utils."
+            "get_default_transformer_block_buckets",
+            return_value=[],
+        ):
+            with_cuda_graph = compile_time_passes(
+                traced_result,
+                make_config(disable_cuda_graphs=False),
+            )
+            without_cuda_graph = compile_time_passes(
+                traced_result,
+                make_config(disable_cuda_graphs=True),
+            )
+
+        self.assertEqual(with_cuda_graph.count(insert_kernel_annotations_pass), 1)
+        self.assertNotIn(insert_kernel_annotations_pass, without_cuda_graph)
+        self.assertNotIn(cuda_graph_pass, with_cuda_graph)
 
 
 class TestFSDPUnshardDedupPass(TestCase):
@@ -280,7 +411,7 @@ class TestFSDPUnshardDedupPass(TestCase):
                 custom.update(
                     {
                         "chunk_id": chunk_id,
-                        "chunked_region_fqn": "layers.0.moe",
+                        "chunked_region_fqn": "layers.0.feed_forward",
                         "chunked_region_role": "body",
                     }
                 )
@@ -299,10 +430,354 @@ class TestFSDPUnshardDedupPass(TestCase):
         self.assertEqual(
             {_chunk_owner(node) for node in wait.users},
             {
-                ChunkOwner("layers.0.moe", False, 0),
-                ChunkOwner("layers.0.moe", False, 1),
+                ChunkOwner("layers.0.feed_forward", False, 0),
+                ChunkOwner("layers.0.feed_forward", False, 1),
             },
         )
+
+
+class TestReorderHSDPGradCollectivesPass(TestCase):
+    def _make_graph(
+        self,
+        *,
+        all_reduce_op: str = "sum",
+        reduce_scatter_op: str = "sum",
+        reduce_scatter_group_size: int = 2,
+        all_reduce_group_name: str = "dp_replicate",
+        reduce_scatter_group_name: str = "dp_shard",
+        group_args_as_nodes: bool = False,
+        branch_all_reduce_wait: bool = False,
+        strided_shard_layout: bool = False,
+    ) -> tuple[torch.fx.GraphModule, dict[str, torch.fx.Node]]:
+        c10d = torch.ops._c10d_functional
+        graph = torch.fx.Graph()
+        grad = graph.placeholder("grad")
+        if group_args_as_nodes:
+            all_reduce_group = graph.placeholder("all_reduce_group")
+            all_reduce_group.meta["val"] = SimpleNamespace(
+                group_name=all_reduce_group_name
+            )
+            reduce_scatter_group = graph.placeholder("reduce_scatter_group")
+            reduce_scatter_group.meta["val"] = SimpleNamespace(
+                group_name=reduce_scatter_group_name
+            )
+        else:
+            all_reduce_group = all_reduce_group_name
+            reduce_scatter_group = reduce_scatter_group_name
+        all_reduce = graph.call_function(
+            c10d.all_reduce.default,
+            args=(grad, all_reduce_op, all_reduce_group),
+        )
+        all_reduce_wait = graph.call_function(
+            c10d.wait_tensor.default,
+            args=(all_reduce,),
+        )
+        reduce_scatter_input = all_reduce_wait
+        layout_nodes = []
+        if strided_shard_layout:
+            split = graph.call_function(
+                torch.ops.aten.split.Tensor,
+                args=(all_reduce_wait, 4, 0),
+            )
+            first = graph.call_function(operator.getitem, args=(split, 0))
+            second = graph.call_function(operator.getitem, args=(split, 1))
+            packed = graph.call_function(
+                torch.ops.aten.cat.default,
+                args=([first, second], 0),
+            )
+            reduce_scatter_input = packed
+            layout_nodes = [split, first, second, packed]
+        reduce_scatter = graph.call_function(
+            c10d.reduce_scatter_tensor.default,
+            args=(
+                reduce_scatter_input,
+                reduce_scatter_op,
+                reduce_scatter_group_size,
+                reduce_scatter_group,
+            ),
+        )
+        reduce_scatter_wait = graph.call_function(
+            c10d.wait_tensor.default,
+            args=(reduce_scatter,),
+        )
+        if branch_all_reduce_wait:
+            side_output = graph.call_function(
+                torch.ops.aten.clone.default,
+                args=(all_reduce_wait,),
+            )
+            graph.output((reduce_scatter_wait, side_output))
+        else:
+            graph.output(reduce_scatter_wait)
+
+        with torch._subclasses.FakeTensorMode():
+            grad.meta["val"] = torch.empty(8, 4)
+            all_reduce.meta["val"] = torch.empty(8, 4)
+            all_reduce_wait.meta["val"] = torch.empty(8, 4)
+            reduce_scatter.meta["val"] = torch.empty(4, 4)
+            reduce_scatter_wait.meta["val"] = torch.empty(4, 4)
+            if strided_shard_layout:
+                split.meta["val"] = (
+                    torch.empty(4, 4),
+                    torch.empty(4, 4),
+                )
+                first.meta["val"] = torch.empty(4, 4)
+                second.meta["val"] = torch.empty(4, 4)
+                packed.meta["val"] = torch.empty(8, 4)
+        for node in (
+            all_reduce,
+            all_reduce_wait,
+            reduce_scatter,
+            reduce_scatter_wait,
+        ):
+            node.meta["autograd_backward"] = True
+        all_reduce.meta["custom"] = {"origin": "all_reduce"}
+        all_reduce_wait.meta["custom"] = {"origin": "all_reduce_wait"}
+        if strided_shard_layout:
+            fsdp_meta = {FSDP_PARAM_FQNS_META: ("linear.weight",)}
+            for node in (all_reduce, all_reduce_wait, *layout_nodes, reduce_scatter):
+                node.meta.setdefault("custom", {}).update(fsdp_meta)
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        return gm, {
+            "grad": grad,
+            "all_reduce": all_reduce,
+            "all_reduce_wait": all_reduce_wait,
+            **(
+                {
+                    "split": split,
+                    "first": first,
+                    "second": second,
+                    "packed": packed,
+                }
+                if strided_shard_layout
+                else {}
+            ),
+            "reduce_scatter": reduce_scatter,
+            "reduce_scatter_wait": reduce_scatter_wait,
+        }
+
+    def _apply(
+        self,
+        gm: torch.fx.GraphModule,
+        *,
+        hsdp_process_group_pairs: tuple[tuple[str, int, str], ...] = (
+            ("dp_replicate", 2, "dp_shard"),
+        ),
+    ) -> torch.fx.GraphModule:
+        return reorder_hsdp_grad_collectives_pass(
+            gm,
+            (),
+            hsdp_process_group_pairs=hsdp_process_group_pairs,
+        )
+
+    def test_reorders_direct_hsdp_gradient_chain(self) -> None:
+        gm, nodes = self._make_graph()
+
+        self._apply(gm)
+
+        call_nodes = [node for node in gm.graph.nodes if node.op == "call_function"]
+        self.assertEqual(
+            [node.target for node in call_nodes],
+            [
+                torch.ops._c10d_functional.reduce_scatter_tensor.default,
+                torch.ops._c10d_functional.wait_tensor.default,
+                torch.ops._c10d_functional.all_reduce.default,
+                torch.ops._c10d_functional.wait_tensor.default,
+            ],
+        )
+        self.assertIs(nodes["reduce_scatter"].args[0], nodes["grad"])
+        self.assertIs(nodes["all_reduce"].args[0], nodes["reduce_scatter_wait"])
+        output = gm.graph.find_nodes(op="output")[0]
+        self.assertIs(output.args[0], nodes["all_reduce_wait"])
+        self.assertEqual(tuple(nodes["all_reduce"].meta["val"].shape), (4, 4))
+        self.assertEqual(tuple(nodes["all_reduce_wait"].meta["val"].shape), (4, 4))
+        self.assertIsNot(
+            nodes["all_reduce"].meta["val"], nodes["reduce_scatter"].meta["val"]
+        )
+        self.assertIsNot(
+            nodes["all_reduce_wait"].meta["val"],
+            nodes["reduce_scatter_wait"].meta["val"],
+        )
+        self.assertNotEqual(
+            nodes["all_reduce"].meta["val"].untyped_storage()._cdata,
+            nodes["reduce_scatter"].meta["val"].untyped_storage()._cdata,
+        )
+        self.assertEqual(nodes["all_reduce"].meta["custom"], {"origin": "all_reduce"})
+        self.assertEqual(
+            nodes["all_reduce_wait"].meta["custom"],
+            {"origin": "all_reduce_wait"},
+        )
+        gm.graph.lint()
+
+    def test_reorders_compile_on_one_rank_group_nodes(self) -> None:
+        gm, nodes = self._make_graph(group_args_as_nodes=True)
+
+        self._apply(gm)
+
+        self.assertIs(nodes["reduce_scatter"].args[0], nodes["grad"])
+        self.assertIs(nodes["all_reduce"].args[0], nodes["reduce_scatter_wait"])
+
+    def test_reorders_strided_shard_layout(self) -> None:
+        gm, nodes = self._make_graph(strided_shard_layout=True)
+
+        self._apply(gm)
+
+        call_nodes = [node for node in gm.graph.nodes if node.op == "call_function"]
+        self.assertEqual(
+            [node.target for node in call_nodes],
+            [
+                torch.ops.aten.split.Tensor,
+                operator.getitem,
+                operator.getitem,
+                torch.ops.aten.cat.default,
+                torch.ops._c10d_functional.reduce_scatter_tensor.default,
+                torch.ops._c10d_functional.wait_tensor.default,
+                torch.ops._c10d_functional.all_reduce.default,
+                torch.ops._c10d_functional.wait_tensor.default,
+            ],
+        )
+        self.assertIs(nodes["split"].args[0], nodes["grad"])
+        self.assertIs(nodes["reduce_scatter"].args[0], nodes["packed"])
+        self.assertIs(nodes["all_reduce"].args[0], nodes["reduce_scatter_wait"])
+        output = gm.graph.find_nodes(op="output")[0]
+        self.assertIs(output.args[0], nodes["all_reduce_wait"])
+        gm.graph.lint()
+
+    def test_does_not_partially_reorder_target_chains(self) -> None:
+        gm, nodes = self._make_graph()
+        graph = gm.graph
+        output = graph.find_nodes(op="output")[0]
+        with graph.inserting_before(nodes["all_reduce"]):
+            second_grad = graph.placeholder("second_grad")
+        with graph.inserting_before(output):
+            second_all_reduce = graph.call_function(
+                torch.ops._c10d_functional.all_reduce.default,
+                args=(second_grad, "sum", "dp_replicate"),
+            )
+            second_wait = graph.call_function(
+                torch.ops._c10d_functional.wait_tensor.default,
+                args=(second_all_reduce,),
+            )
+            second_output = graph.call_function(
+                torch.ops.aten.clone.default,
+                args=(second_wait,),
+            )
+        output.args = ((output.args[0], second_output),)
+        with torch._subclasses.FakeTensorMode():
+            second_grad.meta["val"] = torch.empty(8, 4)
+            second_all_reduce.meta["val"] = torch.empty(8, 4)
+            second_wait.meta["val"] = torch.empty(8, 4)
+        second_all_reduce.meta["autograd_backward"] = True
+        gm.recompile()
+
+        self._apply(gm)
+
+        self.assertIs(nodes["reduce_scatter"].args[0], nodes["all_reduce_wait"])
+        gm.graph.lint()
+
+    def test_reorders_edp_shard_gradient_chain(self) -> None:
+        gm, nodes = self._make_graph(
+            all_reduce_group_name="expert_dp_replicate",
+            reduce_scatter_group_name="edp_shard",
+            reduce_scatter_group_size=4,
+        )
+
+        self._apply(
+            gm,
+            hsdp_process_group_pairs=(
+                ("dp_replicate", 2, "dp_shard"),
+                ("expert_dp_replicate", 4, "edp_shard"),
+            ),
+        )
+
+        self.assertIs(nodes["reduce_scatter"].args[0], nodes["grad"])
+        self.assertIs(nodes["all_reduce"].args[0], nodes["reduce_scatter_wait"])
+
+    def test_does_not_mix_dense_and_expert_process_groups(self) -> None:
+        gm, nodes = self._make_graph(
+            reduce_scatter_group_name="edp_shard",
+            reduce_scatter_group_size=4,
+        )
+
+        self._apply(
+            gm,
+            hsdp_process_group_pairs=(
+                ("dp_replicate", 2, "dp_shard"),
+                ("expert_dp_replicate", 4, "edp_shard"),
+            ),
+        )
+
+        self.assertIs(nodes["reduce_scatter"].args[0], nodes["all_reduce_wait"])
+
+    def test_skips_non_sum_or_branched_chains(self) -> None:
+        cases = (
+            {"all_reduce_op": "avg"},
+            {"reduce_scatter_op": "avg"},
+            {"reduce_scatter_group_size": 4},
+            {"all_reduce_group_name": "other"},
+            {"reduce_scatter_group_name": "other"},
+            {"reduce_scatter_group_name": "dp_replicate"},
+            {"branch_all_reduce_wait": True},
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                gm, nodes = self._make_graph(**case)
+
+                self._apply(gm)
+
+                self.assertIs(nodes["reduce_scatter"].args[0], nodes["all_reduce_wait"])
+                gm.graph.lint()
+
+    def test_prefetch_scheduling_treats_hsdp_as_one_reduction(self) -> None:
+        graph = torch.fx.Graph()
+        value = graph.placeholder("value")
+        first_reduce_scatter = graph.call_function(
+            torch.ops.aten.relu.default, (value,)
+        )
+        first_reduce_scatter_wait = graph.call_function(
+            torch.ops.aten.neg.default, (first_reduce_scatter,)
+        )
+        hsdp_all_reduce = graph.call_function(
+            torch.ops.aten.sin.default, (first_reduce_scatter_wait,)
+        )
+        hsdp_wait = graph.call_function(torch.ops.aten.cos.default, (hsdp_all_reduce,))
+        second_reduce_scatter = graph.call_function(
+            torch.ops.aten.tanh.default, (value,)
+        )
+        second_reduce_scatter_wait = graph.call_function(
+            torch.ops.aten.abs.default, (second_reduce_scatter,)
+        )
+        graph.output((hsdp_wait, second_reduce_scatter_wait))
+
+        for node in (hsdp_all_reduce, hsdp_wait):
+            node.meta["custom"] = {FSDP_PARAM_FQNS_META: ("linear.weight",)}
+
+        scheduler = JointManualOverlapScheduler.__new__(JointManualOverlapScheduler)
+        scheduler.graph = graph
+        scheduler.nodes = list(graph.nodes)
+        scheduler.node_ancestors = scheduler._collect_node_ancestors()
+        scheduler.in_degree = Counter(
+            user for node in scheduler.nodes for user in node.users
+        )
+        scheduler.bucketer = SimpleNamespace(  # pyrefly: ignore [bad-assignment]
+            bucketed_node_types={
+                first_reduce_scatter: "bucketed_reduce_scatter",
+                first_reduce_scatter_wait: "bucketed_reduce_scatter_wait",
+                hsdp_all_reduce: "bucketed_all_reduce",
+                hsdp_wait: "bucketed_all_reduce_wait",
+                second_reduce_scatter: "bucketed_reduce_scatter",
+                second_reduce_scatter_wait: "bucketed_reduce_scatter_wait",
+            }
+        )
+        overlap_deps = defaultdict(OrderedSet)
+
+        scheduler._schedule_rs_prefetch(overlap_deps)
+
+        self.assertEqual(
+            overlap_deps,
+            {first_reduce_scatter_wait: OrderedSet([second_reduce_scatter])},
+        )
+        self.assertNotIn(hsdp_wait, overlap_deps)
 
 
 class ToyModel(Module):
@@ -314,7 +789,13 @@ class ToyModel(Module):
         super().__init__()
 
         def _make_linear():
-            cfg = Linear.Config(in_features=dim, out_features=dim, bias=True)
+            # Traced under SimpleFSDP: no in-place WGRAD accumulation.
+            cfg = Linear.Config(
+                in_features=dim,
+                out_features=dim,
+                bias=True,
+                inplace_wgrad_accum=False,
+            )
             return cfg.build()
 
         self.layers = ModuleList([_make_linear() for _ in range(n_layers)])
@@ -328,6 +809,136 @@ class ToyModel(Module):
                 use_reentrant=False,
             )
         return x
+
+
+class TestHSDPGradCollectiveReorderingPass(FSDPTest):
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    @skip_if_lt_x_gpu(4)
+    def test_reorders_real_simple_fsdp_joint_trace(self) -> None:
+        parallelism_context = ParallelismContext(
+            dp_shard=2,
+            dp_replicate=2,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+        model = ToyModel(dim=16, n_layers=2).cuda()
+        model = apply_simple_fsdp(
+            model,
+            parallelism_context=parallelism_context,
+            training=TrainingConfig(mixed_precision_param="float32"),
+        )
+        torch.manual_seed(42 + self.rank)
+        inputs = torch.randn(4, 16, device="cuda")
+
+        def fwd_bwd(inp):
+            loss = model(inp).sum()
+            return list(torch.autograd.grad(loss, tuple(model.parameters())))
+
+        traced = minimal_fx_tracer(fwd_bwd, module=model)(inputs)
+        c10d = torch.ops._c10d_functional
+        all_reduces = [
+            node
+            for node in traced.gm.graph.nodes
+            if node.op == "call_function" and node.target is c10d.all_reduce.default
+        ]
+        reduce_scatters = [
+            node
+            for node in traced.gm.graph.nodes
+            if node.op == "call_function"
+            and node.target is c10d.reduce_scatter_tensor.default
+        ]
+        self.assertGreater(len(all_reduces), 0)
+        self.assertEqual(len(all_reduces), len(reduce_scatters))
+        self.assertTrue(
+            all(
+                node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+                for node in all_reduces
+            )
+        )
+        self.assertTrue(
+            all(
+                next(iter(all_reduce.users)).args[0] is all_reduce
+                for all_reduce in all_reduces
+            )
+        )
+
+        expected = fwd_bwd(inputs)
+        reorder_hsdp_grad_collectives_pass(
+            traced.gm,
+            traced.example_inputs,
+            hsdp_process_group_pairs=(
+                (
+                    parallelism_context.get_mesh("dp_replicate").get_group().group_name,
+                    get_simple_fsdp_mesh(parallelism_context).size(),
+                    get_simple_fsdp_mesh(parallelism_context).get_group().group_name,
+                ),
+            ),
+        )
+        actual = run_traced(traced, module=model)(inputs)
+
+        for all_reduce in all_reduces:
+            reduce_scatter_wait = all_reduce.args[0]
+            self.assertIsInstance(reduce_scatter_wait, torch.fx.Node)
+            self.assertEqual(reduce_scatter_wait.target, c10d.wait_tensor.default)
+            reduce_scatter = reduce_scatter_wait.args[0]
+            self.assertIsInstance(reduce_scatter, torch.fx.Node)
+            self.assertEqual(
+                reduce_scatter.target,
+                c10d.reduce_scatter_tensor.default,
+            )
+            self.assertEqual(
+                all_reduce.meta["val"].shape,
+                reduce_scatter.meta["val"].shape,
+            )
+        for expected_grad, actual_grad in zip(expected, actual, strict=True):
+            torch.testing.assert_close(
+                expected_grad.to_local(),
+                actual_grad.to_local(),
+            )
+
+        for node in traced.gm.graph.nodes:
+            if node.target in (
+                c10d.all_reduce.default,
+                c10d.reduce_scatter_tensor.default,
+            ):
+                node.meta.setdefault("custom", {})[_MODULE_FQN] = "layers.0"
+        joint_transformer_block_bucketing_reordering_pass(
+            traced.gm,
+            module_bucket_plans=["layers.0"],
+        )
+        bucketed_all_reduces = traced.gm.graph.find_nodes(
+            op="call_function", target=c10d.all_reduce.default
+        )
+        bucketed_reduce_scatters = traced.gm.graph.find_nodes(
+            op="call_function", target=c10d.reduce_scatter_tensor.default
+        )
+        self.assertEqual(len(bucketed_all_reduces), 1)
+        self.assertEqual(len(bucketed_reduce_scatters), 1)
+        self.assertTrue(
+            bucketed_all_reduces[0].meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+        )
+        (bucketed_all_reduce_wait,) = tuple(
+            node
+            for node in bucketed_all_reduces[0].users
+            if node.target is c10d.wait_tensor.default
+        )
+        self.assertTrue(
+            bucketed_all_reduce_wait.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+        )
+        bucketed_actual = run_traced(traced, module=model)(inputs)
+        for expected_grad, actual_grad in zip(expected, bucketed_actual, strict=True):
+            torch.testing.assert_close(
+                expected_grad.to_local(),
+                actual_grad.to_local(),
+            )
+        traced.gm.graph.lint()
 
 
 class TestReassignCollectivePgsPass(FSDPTest):
@@ -539,7 +1150,7 @@ class TestReassignCollectivePgsPass(FSDPTest):
             c10d.all_to_all_single.default, args=(x, [], [], fsdp_pg_name)
         )
         a2a.meta["custom"] = {
-            _MODULE_FQN: "layers.0.moe",
+            _MODULE_FQN: "layers.0.feed_forward",
             "EP": "dispatch",
             _EP_TOKEN_EXCHANGE: "dispatch",
         }
@@ -623,10 +1234,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
                     "layers.1.attention_norm",
                     "layers.1.attention",
                     "layers.1.ffn_norm",
-                    "layers.1.moe.router",
-                    "layers.1.moe.shared_experts",
+                    "layers.1.feed_forward.router",
+                    "layers.1.feed_forward.shared_experts",
                 ],
-                "layers.1.moe.routed_experts",
+                "layers.1.feed_forward.routed_experts",
                 ["norm", "lm_head"],
             ],
             n_layers=2,
@@ -640,7 +1251,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
                 "tok_embeddings.weight",
                 "layers.1.attention.wq.weight",
                 "layers.1.ffn_norm.weight",
-                "layers.4.moe.router.weight",
+                "layers.4.feed_forward.router.weight",
                 "norm.weight",
             ],
             n_layers=6,
@@ -651,7 +1262,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
     def test_transformer_block_layer_ids_reject_out_of_range_layer(self):
         with self.assertRaisesRegex(ValueError, r"references layers \[6\]"):
             get_transformer_block_layer_ids(
-                ["layers.1.attention.weight", "layers.6.moe.router.weight"],
+                ["layers.1.attention.weight", "layers.6.feed_forward.router.weight"],
                 n_layers=6,
             )
 
@@ -701,7 +1312,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
             )
             for plan_fqn in (
                 "layers.1.attention",
-                "layers.1.moe.routed_experts.w13",
+                "layers.1.feed_forward.routed_experts.w13",
             )
         ]
         fwd_dense1 = self._tag_fsdp_schedule_node(
@@ -726,7 +1337,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
             )
             for plan_fqn in (
                 "layers.0.attention",
-                "layers.0.moe.routed_experts.w13",
+                "layers.0.feed_forward.routed_experts.w13",
             )
         ]
         bwd_dense0 = self._tag_fsdp_schedule_node(
@@ -826,14 +1437,14 @@ class TestFsdpDenseSchedulerPass(TestCase):
             shared_prep,
             [
                 "layers.1.attention",
-                "layers.1.moe.routed_experts.w13",
+                "layers.1.feed_forward.routed_experts.w13",
             ],
             "fwd",
         )
         buckets = []
         for plan_fqn in (
             "layers.1.attention",
-            "layers.1.moe.routed_experts.w13",
+            "layers.1.feed_forward.routed_experts.w13",
         ):
             bucket = graph.call_function(
                 torch.ops.bucketing._pre_bucket_all_gather.default,
@@ -1752,12 +2363,12 @@ class TestFsdpDenseSchedulerPass(TestCase):
                 c10d.all_to_all_single.default,
                 args=(ffn_norm, [], [], "ep_pg"),
             ),
-            "layers.1.moe.routed_experts",
+            "layers.1.feed_forward.routed_experts",
             backward=True,
         )
         moe_dispatch_wait = self._tag_fsdp_schedule_node(
             graph.call_function(c10d.wait_tensor.default, args=(moe_dispatch,)),
-            "layers.1.moe.routed_experts",
+            "layers.1.feed_forward.routed_experts",
             backward=True,
         )
         dense1_attention = self._tag_fsdp_schedule_node(
@@ -1797,7 +2408,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
 
         moe_node = self._tag_fsdp_schedule_node(
             graph.call_function(torch.ops.aten.relu.default, args=(x,)),
-            "layers.0.moe.router",
+            "layers.0.feed_forward.router",
         )
         dense0 = self._tag_fsdp_schedule_node(
             graph.call_function(torch.ops.aten.relu.default, args=(moe_node,)),
@@ -1889,7 +2500,7 @@ class TestOverlapPgIsolationPass(FSDPTest):
             c10d.all_to_all_single.default, args=(x, [], [], ep_pg_name)
         )
         a2a.meta["custom"] = {
-            _MODULE_FQN: "layers.0.moe",
+            _MODULE_FQN: "layers.0.feed_forward",
             "EP": "combine",
             _EP_TOKEN_EXCHANGE: "combine",
         }
@@ -1921,14 +2532,14 @@ class TestOverlapPgIsolationPass(FSDPTest):
             c10d.all_to_all_single.default, args=(x, [], [], tp_pg_name)
         )
         a2a.meta["custom"] = {
-            _MODULE_FQN: "layers.0.moe",
+            _MODULE_FQN: "layers.0.feed_forward",
             "EP": "dispatch",
         }
         generic_ep_a2a = graph.call_function(
             c10d.all_to_all_single.default, args=(x, [], [], tp_pg_name)
         )
         generic_ep_a2a.meta["custom"] = {
-            _MODULE_FQN: "layers.0.moe",
+            _MODULE_FQN: "layers.0.feed_forward",
             "EP": "combine",
         }
         graph.output((ag, a2a, generic_ep_a2a))
@@ -2008,6 +2619,31 @@ class TestApplySACPass(TestCase):
                 if node.op == "call_function"
             )
         )
+
+    def test_inplace_mutation_not_recomputed(self):
+        """An in-place buffer update consumed by backward is saved, not replayed."""
+        graph = torch.fx.Graph()
+        buf = graph.placeholder("buf")
+        x = graph.placeholder("x")
+        counts = graph.call_function(torch.ops.aten.mul.Tensor, args=(x, 2))
+        update = graph.call_function(torch.ops.aten.add_.Tensor, args=(buf, counts))
+        snapshot = graph.call_function(torch.ops.aten.clone.default, args=(update,))
+        scaled = graph.call_function(torch.ops.aten.div.Tensor, args=(snapshot, 4))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(scaled, x))
+        bwd.meta["autograd_backward"] = True
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        tag_sac_policy(gm)
+        selective_activation_remat_pass(gm)
+
+        self.assertEqual(update.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(snapshot.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(scaled.meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
+        mutations = [
+            n for n in gm.graph.nodes if n.target is torch.ops.aten.add_.Tensor
+        ]
+        self.assertEqual(mutations, [update])
 
     def test_non_save_ops_marked_recompute(self):
         """Ops not in the save list should be marked PREFER_RECOMPUTE."""
@@ -2369,13 +3005,13 @@ class TestFullMemoryPolicy(TestCase):
 
     def test_selected_module_ops_saved(self):
         policy_fn = _make_full_memory_policy(
-            "layers.*.moe.router.gate :: aten.mm.default | "
+            "layers.*.feed_forward.router.gate :: aten.mm.default | "
             "layers.*.attention.inner_attention :: higher_order.flex_attention"
         )
         cases = (
             (
                 torch.ops.aten.mm.default,
-                "layers.3.moe.router.gate",
+                "layers.3.feed_forward.router.gate",
                 CheckpointPolicy.MUST_SAVE,
             ),
             (
@@ -2385,7 +3021,7 @@ class TestFullMemoryPolicy(TestCase):
             ),
             (
                 torch.ops.aten._to_copy.default,
-                "layers.3.moe.router.gate",
+                "layers.3.feed_forward.router.gate",
                 CheckpointPolicy.MUST_RECOMPUTE,
             ),
             (
@@ -2419,12 +3055,14 @@ class TestFullMemoryPolicy(TestCase):
     def test_full_policy_uses_configured_save_ops(self):
         gm = self._build_gm(
             [torch.ops.aten.mm.default],
-            layer_fqns=["layers.3.moe.router.gate"],
+            layer_fqns=["layers.3.feed_forward.router.gate"],
         )
         config = SimpleNamespace(
             compile=GraphTrainerCompileConfig(
                 memory_policy="full",
-                full_recompute_save_ops=("layers.*.moe.router.gate :: aten.mm.default"),
+                full_recompute_save_ops=(
+                    "layers.*.feed_forward.router.gate :: aten.mm.default"
+                ),
             )
         )
 
@@ -2436,7 +3074,7 @@ class TestFullMemoryPolicy(TestCase):
     def test_save_ops_rejected_for_other_memory_policies(self):
         compile_config = GraphTrainerCompileConfig(
             memory_policy="default",
-            full_recompute_save_ops="layers.*.moe.router.gate::aten.mm.default",
+            full_recompute_save_ops="layers.*.feed_forward.router.gate::aten.mm.default",
         )
 
         with self.assertRaisesRegex(
@@ -2446,11 +3084,11 @@ class TestFullMemoryPolicy(TestCase):
 
     def test_invalid_save_op_selectors_rejected(self):
         invalid_values = (
-            "layers.*.moe.router.gate",
+            "layers.*.feed_forward.router.gate",
             ":: aten.mm.default",
-            "layers.*.moe.router.gate ::",
-            "layers.*.moe.router.gate :: aten.not_an_op.default",
-            "layers.*.moe.router.gate :: aten.mm",
+            "layers.*.feed_forward.router.gate ::",
+            "layers.*.feed_forward.router.gate :: aten.not_an_op.default",
+            "layers.*.feed_forward.router.gate :: aten.mm",
         )
         for value in invalid_values:
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -2777,7 +3415,9 @@ class TestBucketingPrefetchOrder(FSDPTest):
             enable_sequence_parallel=False,
         )
 
-        model_config = build_llama3_model_config("debugmodel")
+        model_config = build_llama3_model_config(
+            "debugmodel", parallelism=ParallelismConfig()
+        )
         vocab_size = model_config.vocab_size
 
         with torch.device("meta"):
@@ -3054,7 +3694,7 @@ class TestChunkPasses(TestCase):
         self,
         node,
         *,
-        fqn: str = "layers.0.moe",
+        fqn: str = "layers.0.feed_forward",
         chunk_id: int,
         backward: bool = False,
         ep: str | None = None,
@@ -3139,7 +3779,7 @@ class TestChunkPasses(TestCase):
         self,
         gm,
         *,
-        module_pattern: str = "layers.*.moe",
+        module_pattern: str = "layers.*.feed_forward",
         pair_first_token_exchange: bool = True,
     ):
         _schedule_ep_overlap_regions(
@@ -3157,7 +3797,7 @@ class TestChunkPasses(TestCase):
     def _build_ep_sync_copy_schedule_gm(
         self,
         *,
-        fqn: str = "layers.0.moe",
+        fqn: str = "layers.0.feed_forward",
         copies_per_chunk: int = 2,
         cpu_destination: bool = True,
     ):
@@ -3244,12 +3884,13 @@ class TestChunkPasses(TestCase):
             graph_state=GraphStateSpec(),
         )
         config = SimpleNamespace(
-            model=SimpleNamespace(layers=[object()]),
+            model=SimpleNamespace(layers=[SimpleNamespace(feed_forward=None)]),
             parallelism=SimpleNamespace(
                 expert_parallel_degree=1,
                 fsdp_reshard_after_forward="default",
                 pipeline_parallel_degree=1,
             ),
+            training=SimpleNamespace(disable_cuda_graphs=False),
             compile=GraphTrainerCompileConfig(
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
@@ -3276,10 +3917,7 @@ class TestChunkPasses(TestCase):
             )
 
         return [
-            pass_name(pass_fn)
-            for pass_fn in compile_time_passes(
-                traced_result, config, use_cuda_graph=False
-            )
+            pass_name(pass_fn) for pass_fn in compile_time_passes(traced_result, config)
         ]
 
     def test_ep_overlap_pass_pipeline_order(self):
@@ -3330,10 +3968,10 @@ class TestChunkPasses(TestCase):
             config.compile.enable_fsdp_dense_region_overlap = True
 
         def moe_ep_default(config):
-            config.compile.ep_overlap.module_fqn = "layers.*.moe"
+            config.compile.ep_overlap.module_fqn = "layers.*.feed_forward"
 
         def moe_ep_explicit(config):
-            config.compile.ep_overlap.module_fqn = "layers.*.moe"
+            config.compile.ep_overlap.module_fqn = "layers.*.feed_forward"
             config.compile.enable_fsdp_dense_region_overlap = True
 
         def fsdp_dense_without_ep(config):
@@ -3396,16 +4034,36 @@ class TestChunkPasses(TestCase):
                 "layers.1.attention_norm",
                 "layers.1.attention",
                 "layers.1.ffn_norm",
-                "layers.1.moe.router",
-                "layers.1.moe.shared_experts",
+                "layers.1.feed_forward.router",
+                "layers.1.feed_forward.shared_experts",
             ],
             buckets,
         )
-        self.assertIn("layers.1.moe.routed_experts", buckets)
+        self.assertIn("layers.1.feed_forward.routed_experts", buckets)
         self.assertNotIn("layers.1", buckets)
 
+    def test_mtp_layers_use_parent_scope_buckets(self):
+        buckets = get_default_transformer_block_buckets(
+            2,
+            num_mtp_layers=2,
+        )
+
+        self.assertEqual(
+            buckets,
+            [
+                "tok_embeddings",
+                "layers.0",
+                "layers.1",
+                "mtp_layers.0",
+                "mtp_layers.1",
+                ["norm", "lm_head"],
+            ],
+        )
+
     def test_moe_ep_annotations_cover_all_to_all_dispatcher(self):
-        from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+        from torchtitan.models.common.moe.token_dispatcher import (
+            AllToAllTokenDispatcher,
+        )
 
         annotate_moe_ep_regions()
 
@@ -3875,7 +4533,7 @@ class TestChunkPasses(TestCase):
         with self.assertRaisesRegex(ValueError, "exactly two token-count sync"):
             _schedule_ep_overlap_regions(
                 gm,
-                module_pattern="layers.*.moe",
+                module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
@@ -3886,7 +4544,7 @@ class TestChunkPasses(TestCase):
         with self.assertRaisesRegex(ValueError, "CPU _to_copy destinations"):
             _schedule_ep_overlap_regions(
                 gm,
-                module_pattern="layers.*.moe",
+                module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
@@ -3908,7 +4566,7 @@ class TestChunkPasses(TestCase):
         with self.assertRaises(ValueError, msg="did not find any chunked EP"):
             _schedule_ep_overlap_regions(
                 gm,
-                module_pattern="layers.*.moe",
+                module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
@@ -3926,7 +4584,7 @@ class TestChunkPasses(TestCase):
         with self.assertRaisesRegex(ValueError, "non-marker node"):
             _schedule_ep_overlap_regions(
                 gm,
-                module_pattern="layers.*.moe",
+                module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
@@ -3946,7 +4604,7 @@ class TestChunkPasses(TestCase):
         with self.assertRaisesRegex(ValueError, "matching token-exchange labels"):
             _schedule_ep_overlap_regions(
                 gm,
-                module_pattern="layers.*.moe",
+                module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
@@ -3970,7 +4628,7 @@ class TestChunkPasses(TestCase):
         with self.assertRaisesRegex(ValueError, "wait to appear after its launch"):
             _schedule_ep_overlap_regions(
                 gm,
-                module_pattern="layers.*.moe",
+                module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
@@ -4018,14 +4676,20 @@ class TestChunkPasses(TestCase):
             }
 
             for node in (combine_pre, combine, combine_wait):
-                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "combine"}
+                node.meta["custom"] = {
+                    _MODULE_FQN: "layers.0.feed_forward",
+                    "EP": "combine",
+                }
             combine.meta["custom"][_EP_TOKEN_EXCHANGE] = "combine"
-            dispatch_prefix.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
-            dispatch_pre.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+            dispatch_prefix.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
+            dispatch_pre.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
             for node in (dispatch, dispatch_wait):
-                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "dispatch"}
+                node.meta["custom"] = {
+                    _MODULE_FQN: "layers.0.feed_forward",
+                    "EP": "dispatch",
+                }
             dispatch.meta["custom"][_EP_TOKEN_EXCHANGE] = "dispatch"
-            tail.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+            tail.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
             for node in (
                 combine_pre,
                 combine,
@@ -4037,7 +4701,7 @@ class TestChunkPasses(TestCase):
                 tail,
             ):
                 node.meta["chunk_id"] = chunk_id
-                node.meta["chunked_region_fqn"] = "layers.0.moe"
+                node.meta["chunked_region_fqn"] = "layers.0.feed_forward"
                 node.meta["chunked_region_role"] = "body"
                 node.meta["autograd_backward"] = True
 
@@ -4103,12 +4767,18 @@ class TestChunkPasses(TestCase):
             }
 
             for node in (dispatch_pre, dispatch, dispatch_wait):
-                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "dispatch"}
+                node.meta["custom"] = {
+                    _MODULE_FQN: "layers.0.feed_forward",
+                    "EP": "dispatch",
+                }
             dispatch.meta["custom"][_EP_TOKEN_EXCHANGE] = "dispatch"
-            all_reduce.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
-            combine_pre.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+            all_reduce.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
+            combine_pre.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
             for node in (combine, combine_wait):
-                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "combine"}
+                node.meta["custom"] = {
+                    _MODULE_FQN: "layers.0.feed_forward",
+                    "EP": "combine",
+                }
             combine.meta["custom"][_EP_TOKEN_EXCHANGE] = "combine"
 
             for node in (
@@ -4121,7 +4791,7 @@ class TestChunkPasses(TestCase):
                 combine_wait,
             ):
                 node.meta["chunk_id"] = chunk_id
-                node.meta["chunked_region_fqn"] = "layers.0.moe"
+                node.meta["chunked_region_fqn"] = "layers.0.feed_forward"
                 node.meta["chunked_region_role"] = "body"
 
         graph.output((refs[0]["combine_wait"], refs[1]["combine_wait"]))
@@ -4157,7 +4827,7 @@ class TestChunkPasses(TestCase):
         with self.assertRaisesRegex(ValueError, "matching EP all-to-all counts"):
             _schedule_ep_overlap_regions(
                 gm,
-                module_pattern="layers.*.moe",
+                module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
@@ -4181,15 +4851,18 @@ class TestChunkPasses(TestCase):
                 wait = graph.call_function(c10d.wait_tensor.default, args=(launch,))
                 launches[(chunk_id, idx)] = launch
                 for node in (pre, launch, wait):
-                    node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": kind}
+                    node.meta["custom"] = {
+                        _MODULE_FQN: "layers.0.feed_forward",
+                        "EP": kind,
+                    }
                 launch.meta["custom"][_EP_TOKEN_EXCHANGE] = kind
                 value = graph.call_function(torch.ops.aten.neg.default, args=(wait,))
-                value.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+                value.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
                 body_nodes.extend((pre, launch, wait, value))
             outputs.append(value)
             for node in body_nodes:
                 node.meta["chunk_id"] = chunk_id
-                node.meta["chunked_region_fqn"] = "layers.0.moe"
+                node.meta["chunked_region_fqn"] = "layers.0.feed_forward"
                 node.meta["chunked_region_role"] = "body"
                 node.meta["autograd_backward"] = True
 
@@ -4234,17 +4907,23 @@ class TestChunkPasses(TestCase):
             setup_nodes[chunk_id] = setup
             first_waits[chunk_id] = dispatch_wait
 
-            setup.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+            setup.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
             for node in (pre, dispatch, dispatch_wait):
-                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "dispatch"}
+                node.meta["custom"] = {
+                    _MODULE_FQN: "layers.0.feed_forward",
+                    "EP": "dispatch",
+                }
             dispatch.meta["custom"][_EP_TOKEN_EXCHANGE] = "dispatch"
-            compute.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+            compute.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
             for node in (combine, combine_wait):
-                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "combine"}
+                node.meta["custom"] = {
+                    _MODULE_FQN: "layers.0.feed_forward",
+                    "EP": "combine",
+                }
             combine.meta["custom"][_EP_TOKEN_EXCHANGE] = "combine"
             for node in (pre, dispatch, dispatch_wait, compute, combine, combine_wait):
                 node.meta["chunk_id"] = chunk_id
-                node.meta["chunked_region_fqn"] = "layers.0.moe"
+                node.meta["chunked_region_fqn"] = "layers.0.feed_forward"
                 node.meta["chunked_region_role"] = "body"
 
         graph.output(tuple(outputs))
@@ -4372,16 +5051,22 @@ class TestChunkPasses(TestCase):
         }.items():
             for node in nodes:
                 node.meta["chunk_id"] = chunk_id
-                node.meta["chunked_region_fqn"] = "layers.0.moe"
+                node.meta["chunked_region_fqn"] = "layers.0.feed_forward"
                 node.meta["chunked_region_role"] = "body"
                 node.meta["autograd_backward"] = True
             ep_nodes = nodes[1:] if chunk_id == 1 else nodes
             for node in ep_nodes[:3]:
-                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "combine"}
+                node.meta["custom"] = {
+                    _MODULE_FQN: "layers.0.feed_forward",
+                    "EP": "combine",
+                }
             ep_nodes[1].meta["custom"][_EP_TOKEN_EXCHANGE] = "combine"
-            ep_nodes[3].meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+            ep_nodes[3].meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
             for node in ep_nodes[4:]:
-                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "dispatch"}
+                node.meta["custom"] = {
+                    _MODULE_FQN: "layers.0.feed_forward",
+                    "EP": "dispatch",
+                }
             ep_nodes[4].meta["custom"][_EP_TOKEN_EXCHANGE] = "dispatch"
 
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
@@ -6038,7 +6723,10 @@ class TestEagerChunking(TestCase):
     def test_moe_chunking_splits_activation_only(self):
         seen_shapes = []
 
-        class Moe(torch.nn.Module):
+        class Moe(MoE):
+            def __init__(self):
+                torch.nn.Module.__init__(self)
+
             def forward(self, x):
                 seen_shapes.append(tuple(x.shape))
                 return x
@@ -6047,15 +6735,15 @@ class TestEagerChunking(TestCase):
             def __init__(self):
                 super().__init__()
                 self.layers = torch.nn.ModuleList([torch.nn.Module()])
-                self.layers[0].moe = Moe()
+                self.layers[0].feed_forward = Moe()
 
             def forward(self, x):
-                return self.layers[0].moe(x)
+                return self.layers[0].feed_forward(x)
 
         model = Model()
         maybe_apply_ep_overlap_eager_chunking(
             model,
-            self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
+            self._config(chunk_dim="seq", module_fqn="layers.*.feed_forward"),
         )
         x = torch.randn(8, 3)
 
@@ -6065,7 +6753,10 @@ class TestEagerChunking(TestCase):
     def test_moe_chunking_splits_padding_mask_with_activation(self):
         seen_inputs = []
 
-        class Moe(torch.nn.Module):
+        class Moe(MoE):
+            def __init__(self):
+                torch.nn.Module.__init__(self)
+
             def forward(self, x, *, padding_mask_T=None):
                 seen_inputs.append((x, padding_mask_T))
                 return x.masked_fill(padding_mask_T.unsqueeze(-1), 0)
@@ -6074,15 +6765,15 @@ class TestEagerChunking(TestCase):
             def __init__(self):
                 super().__init__()
                 self.layers = torch.nn.ModuleList([torch.nn.Module()])
-                self.layers[0].moe = Moe()
+                self.layers[0].feed_forward = Moe()
 
             def forward(self, x, padding_mask_T):
-                return self.layers[0].moe(x, padding_mask_T=padding_mask_T)
+                return self.layers[0].feed_forward(x, padding_mask_T=padding_mask_T)
 
         model = Model()
         maybe_apply_ep_overlap_eager_chunking(
             model,
-            self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
+            self._config(chunk_dim="seq", module_fqn="layers.*.feed_forward"),
         )
         x = torch.randn(8, 3)
         padding_mask_T = torch.tensor(
@@ -6103,7 +6794,10 @@ class TestEagerChunking(TestCase):
     def test_moe_chunking_shares_aux_loss_denominator(self):
         seen_denominators = []
 
-        class Moe(torch.nn.Module):
+        class Moe(MoE):
+            def __init__(self):
+                torch.nn.Module.__init__(self)
+
             def forward(self, x, *, aux_loss_denominator):
                 seen_denominators.append(aux_loss_denominator)
                 return x
@@ -6112,15 +6806,17 @@ class TestEagerChunking(TestCase):
             def __init__(self):
                 super().__init__()
                 self.layers = torch.nn.ModuleList([torch.nn.Module()])
-                self.layers[0].moe = Moe()
+                self.layers[0].feed_forward = Moe()
 
             def forward(self, x, aux_loss_denominator):
-                return self.layers[0].moe(x, aux_loss_denominator=aux_loss_denominator)
+                return self.layers[0].feed_forward(
+                    x, aux_loss_denominator=aux_loss_denominator
+                )
 
         model = Model()
         maybe_apply_ep_overlap_eager_chunking(
             model,
-            self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
+            self._config(chunk_dim="seq", module_fqn="layers.*.feed_forward"),
         )
         x = torch.randn(8, 3)
         aux_loss_denominator = torch.tensor(8)
@@ -6129,7 +6825,10 @@ class TestEagerChunking(TestCase):
         self.assertEqual(seen_denominators, [aux_loss_denominator] * 2)
 
     def test_moe_chunking_rejects_extra_tensor_input(self):
-        class Moe(torch.nn.Module):
+        class Moe(MoE):
+            def __init__(self):
+                torch.nn.Module.__init__(self)
+
             def forward(self, x, aux):
                 return x + aux
 
@@ -6137,15 +6836,15 @@ class TestEagerChunking(TestCase):
             def __init__(self):
                 super().__init__()
                 self.layers = torch.nn.ModuleList([torch.nn.Module()])
-                self.layers[0].moe = Moe()
+                self.layers[0].feed_forward = Moe()
 
             def forward(self, x, aux):
-                return self.layers[0].moe(x, aux)
+                return self.layers[0].feed_forward(x, aux)
 
         model = Model()
         maybe_apply_ep_overlap_eager_chunking(
             model,
-            self._config(module_fqn="layers.*.moe"),
+            self._config(module_fqn="layers.*.feed_forward"),
         )
 
         with self.assertRaisesRegex(

@@ -13,7 +13,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 - ``memory_policy.py`` - SAC and min-cut policy tagging and dispatch
 - ``decompositions.py`` — standalone graph decomposition
 - ``inductor_passes.py`` — regional and full Inductor compilation
-- ``CUDA graph.py`` — CUDA graph wrapping and kernel annotations
+- ``cuda_graph.py`` — opt-in CUDA graph wrapping and kernel annotations
 - ``fsdp_passes.py`` — FSDP bucketing and resharding
 - ``remove_noop_passes.py`` — mandatory gradient-marker cleanup plus graph
   cleanup bundled as ``canonicalize_graph_pass`` (detach, identity view/slice,
@@ -23,6 +23,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
   shared region prologue extraction
 - ``selective_activation_remat.py`` — activation rematerialization
 - ``cpu_offload.py`` — CPU offload insertion
+- ``paged_stash_memory_policy.py`` — MoE paged stash insertion
 - ``custom_codegen.py`` — custom code generation for profiling/debugging
 """
 
@@ -45,7 +46,6 @@ from torchtitan.experiments.graph_trainer.configs import (
 
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cuda_graph import (
-    cuda_graph_pass,
     insert_kernel_annotations_pass,
 )
 from torchtitan.experiments.graph_trainer.debug_utils import (
@@ -69,6 +69,7 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     get_transformer_block_layer_ids,
     joint_transformer_block_bucketing_reordering_pass,
     reassign_collective_pgs_pass,
+    reorder_hsdp_grad_collectives_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
 from torchtitan.experiments.graph_trainer.inductor_passes import (
@@ -80,6 +81,9 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.memory_policy import (
     tag_with_memory_policy_pass,
 )
+from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+    apply_paged_stash_pass,
+)
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
     eliminate_dead_code_pass,
@@ -88,6 +92,8 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
+
+from torchtitan.models.common.moe import MoE
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +148,6 @@ def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
     *,
-    use_cuda_graph: bool = False,
     parallelism_context=None,
     include_inductor: bool = True,
     include_mandatory_normalization: bool = True,
@@ -153,8 +158,10 @@ def compile_time_passes(
     that compiled Triton kernels are baked into the artifact. Otherwise
     they run at trace time via ``construct_default_graph_passes``.
 
-    CUDA graph is excluded because it needs to re-capture the graph into
-    an in-memory CUDA graph at runtime.
+    The graph-level capture pass in ``cuda_graph.py`` is not part of this list.
+    The kernel annotation pass remains enabled when the trainer owns CUDA graph
+    capture. Custom callers can use ``construct_cuda_graph_passes`` to apply
+    both passes explicitly at runtime.
 
     ``reassign_collective_pgs_pass`` runs just before bucketing to place
     collectives on dedicated process groups / streams (bucketing then inherits
@@ -172,30 +179,40 @@ def compile_time_passes(
     from torchtitan.components.loss import ChunkedLossWrapper
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
+        get_simple_fsdp_mesh,
     )
 
     n_layers = len(config.model.layers)
+    num_mtp_layers = len(getattr(config.model, "mtp_layers", ()) or ())
     loss_config = getattr(config, "loss", None)
     uses_chunked_loss = isinstance(loss_config, ChunkedLossWrapper.Config)
     moe_layer_ids = frozenset(
         i
         for i, layer_cfg in enumerate(config.model.layers)
-        if getattr(layer_cfg, "moe", None) is not None
+        if isinstance(layer_cfg.feed_forward, MoE.Config)
     )
     ep_overlap_enabled = config.compile.ep_overlap.enabled
     if parallelism_context is not None and hasattr(
         parallelism_context, "get_optional_mesh"
     ):
+        dp_replicate_degree = parallelism_context.dp_replicate
+        dp_shard_degree = parallelism_context.dp_shard
         edp_shard_mesh = parallelism_context.get_optional_mesh("edp_shard")
         edp_shard_degree = 1 if edp_shard_mesh is None else edp_shard_mesh.size()
     else:
-        dp_shard = max(1, getattr(config.parallelism, "data_parallel_shard_degree", 1))
+        dp_replicate_degree = getattr(
+            config.parallelism, "data_parallel_replicate_degree", 1
+        )
+        dp_shard_degree = getattr(config.parallelism, "data_parallel_shard_degree", 1)
         cp_degree = getattr(config.parallelism, "context_parallel_degree", 1)
         tp_degree = getattr(config.parallelism, "tensor_parallel_degree", 1)
         ep_degree = max(1, getattr(config.parallelism, "expert_parallel_degree", 1))
-        edp_shard_degree = max(1, (dp_shard * cp_degree * tp_degree) // ep_degree)
+        edp_shard_degree = max(
+            1, (max(1, dp_shard_degree) * cp_degree * tp_degree) // ep_degree
+        )
     module_bucket_plans = get_default_transformer_block_buckets(
         n_layers,
+        num_mtp_layers=num_mtp_layers,
         chunked_loss_enabled=uses_chunked_loss,
         moe_layer_ids=moe_layer_ids,
         split_moe_expert_buckets=edp_shard_degree > 1,
@@ -226,12 +243,66 @@ def compile_time_passes(
                 defer_n_layers=config.compile.cpu_offload_defer_n_layers,
             ),
             selective_activation_remat_pass,
+            # Paged stash runs after CPU offload (the two claim disjoint nodes)
+            # and *after* remat. Remat duplicates recomputed forward ops in
+            # front of their backward consumers, and those duplicates read the
+            # stashed activation. Paging before remat would leave them pointing
+            # at the original, which would keep the padded tensor alive for
+            # backward and cancel the whole saving.
+            functools.partial(
+                apply_paged_stash_pass,
+                page_size=config.compile.paged_stash.page_size,
+                prefetch_lookahead=config.compile.paged_stash.prefetch_n_layers,
+            ),
         ]
     )
     if ep_overlap_enabled:
         passes.append(populate_eager_chunk_metadata_pass)
         passes.append(isolate_ep_process_group_pass)
         passes.append(eliminate_dead_code_pass)
+
+    if dp_replicate_degree > 1:
+        if parallelism_context is None and (
+            dp_shard_degree > 1 or dp_shard_degree == -1 or edp_shard_degree > 1
+        ):
+            logger.warning(
+                "Skipping HSDP collective reordering because the configured "
+                "process groups are unavailable"
+            )
+        elif parallelism_context is not None:
+            hsdp_process_group_pairs: list[tuple[str, int, str]] = []
+            dense_shard_mesh = get_simple_fsdp_mesh(parallelism_context)
+            if dense_shard_mesh.size() > 1:
+                dense_replicate_mesh = parallelism_context.get_mesh("dp_replicate")
+                hsdp_process_group_pairs.append(
+                    (
+                        dense_replicate_mesh.get_group().group_name,
+                        dense_shard_mesh.size(),
+                        dense_shard_mesh.get_group().group_name,
+                    )
+                )
+
+            sparse_hsdp_mesh = parallelism_context.get_optional_mesh(
+                ["dp_replicate", "edp_shard"]
+            )
+            if sparse_hsdp_mesh is not None:
+                sparse_replicate_mesh = sparse_hsdp_mesh["dp_replicate"]
+                sparse_shard_mesh = sparse_hsdp_mesh["edp_shard"]
+                hsdp_process_group_pairs.append(
+                    (
+                        sparse_replicate_mesh.get_group().group_name,
+                        sparse_shard_mesh.size(),
+                        sparse_shard_mesh.get_group().group_name,
+                    )
+                )
+
+            if hsdp_process_group_pairs:
+                passes.append(
+                    functools.partial(
+                        reorder_hsdp_grad_collectives_pass,
+                        hsdp_process_group_pairs=tuple(hsdp_process_group_pairs),
+                    )
+                )
 
     if config.compile.enable_fsdp_ag_rs_overlap:
         passes.append(reassign_collective_pgs_pass)
@@ -305,7 +376,7 @@ def compile_time_passes(
     passes.extend(
         final_inductor_compile_passes(
             config.compile,
-            use_cuda_graph=use_cuda_graph,
+            use_cuda_graph=not config.training.disable_cuda_graphs,
         )
     )
     return passes
@@ -322,8 +393,9 @@ def final_inductor_compile_passes(
     GraphTrainer applies these to the full train-step graph. GraphPP applies
     the same pass list to each extracted stage callable after its PP-specific
     partitioning has chosen the callable boundary. Terminal Inductor selection
-    only depends on compile config; model- and parallelism-aware rewrites stay
-    in ``compile_time_passes``.
+    depends on compile config, while kernel annotation selection follows the
+    trainer's CUDA graph setting. Model- and parallelism-aware rewrites stay in
+    ``compile_time_passes``.
     """
     from torchtitan.models.common.attention import FlexInnerAttention
 
@@ -378,36 +450,22 @@ def construct_default_graph_passes(
     """Build the pass list for the aot_fx_trace path.
 
     When ``precompile_artifact_dir`` is unset, returns the full list: cleanup,
-    FlexInnerAttention annotation, regional_inductor, and CUDA graph.
+    FlexInnerAttention annotation, and regional_inductor.
 
     When ``precompile_artifact_dir`` is set, the artifact has graph
-    transformed during precompile phase, so only CUDA graph is returned.
+    transformed during precompile phase, so no passes are returned.
+
+    This default list never includes ``cuda_graph_pass``. GraphTrainer uses
+    client-owned outer capture, while custom callers can use
+    ``construct_cuda_graph_passes`` from ``cuda_graph.py`` themselves.
     """
-    want_cuda_graph = "cuda_graph_pass" not in config.compile.disable_passes
-
-    has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
-
-    passes: list[Callable] = []
-    if not has_precompile_artifact:
-        passes.extend(
-            compile_time_passes(
-                traced_result,
-                config,
-                use_cuda_graph=want_cuda_graph,
-                parallelism_context=parallelism_context,
-            )
-        )
-
-    if want_cuda_graph:
-        static_input_indices = list(range(traced_result.num_static_inputs))
-        passes.append(
-            functools.partial(
-                cuda_graph_pass,
-                static_input_indices=static_input_indices,
-                tensor_input_indices=traced_result.tensor_input_indices,
-            )
-        )
-    return passes
+    if config.compile.precompile_artifact_dir:
+        return []
+    return compile_time_passes(
+        traced_result,
+        config,
+        parallelism_context=parallelism_context,
+    )
 
 
 def _get_pass_name(pass_fn: Callable) -> str:

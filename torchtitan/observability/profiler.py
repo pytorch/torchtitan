@@ -20,7 +20,7 @@ import torch._C._profiler
 from torchtitan.config import Configurable
 from torchtitan.distributed.cuda_graph import get_cuda_graph_annotations
 from torchtitan.observability import structured_logger as sl
-from torchtitan.tools.utils import device_module
+from torchtitan.tools.utils import device_module, device_type
 
 # torch's export_chrome_trace gained cuda_graph_annotations when the offline joiner
 # (torch.cuda._annotate_cuda_graph_trace) was removed. Older versions still export, just
@@ -477,6 +477,7 @@ class Profiler(Configurable):
 
         wait = profile_freq - (active + warmup)
         activities: list[Any] = [torch.profiler.ProfilerActivity.CPU]
+        with_stack = False
         if cuspy is not None:
             if not torch.cuda.is_available():
                 raise ValueError("profiler.cuspy requires CUDA.")
@@ -490,6 +491,10 @@ class Profiler(Configurable):
             activities.append(torch.profiler.ProfilerActivity.CUDA)
         elif torch.xpu.is_available():
             activities.append(torch.profiler.ProfilerActivity.XPU)
+        elif device_type == "neuron":
+            activities.append(torch.profiler.ProfilerActivity.PrivateUse1)
+            # Neuron can link framework events to source lines through the stacks.
+            with_stack = True
 
         torch_profiler = torch.profiler.profile(
             activities=activities,
@@ -498,6 +503,7 @@ class Profiler(Configurable):
             ),
             on_trace_ready=trace_handler,
             record_shapes=True,
+            with_stack=with_stack,
         )
         torch_profiler.__enter__()
         torch_profiler.step_num = global_step

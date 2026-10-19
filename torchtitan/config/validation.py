@@ -10,16 +10,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from torchtitan.models.common.attention import BaseAttention
+from torchtitan.models.common.attention import Attention, LinearAttention
 
 if TYPE_CHECKING:
     from torchtitan.config import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
-    from torchtitan.distributed.activation_checkpoint import (
-        ActivationCheckpointingConfig,
-    )
-    from torchtitan.protocols.model import BaseModel
-    from torchtitan.protocols.module import Module
+    from torchtitan.distributed.activation_remat import ActivationRematConfig
+    from torchtitan.models.base.model import BaseModel
+    from torchtitan.models.base.module import Module
 
 __all__ = [
     "validate_context_parallel",
@@ -33,16 +31,15 @@ def validate_model_training_config(
     parallelism: ParallelismConfig,
     training: TrainingConfig,
     debug: DebugConfig,
-    activation_checkpoint: ActivationCheckpointingConfig,
+    activation_remat: ActivationRematConfig | None,
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
     from torchtitan.distributed.cuda_graph import cuda_graphs_supported
-    from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE
-    from torchtitan.models.common.token_dispatcher import (
+    from torchtitan.models.common.moe.token_dispatcher import (
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,
@@ -67,7 +64,7 @@ def validate_model_training_config(
             )
 
         tp = parallelism.tensor_parallel_degree
-        attention = model.first_base_attention
+        attention = model.first_full_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -96,20 +93,6 @@ def validate_model_training_config(
                 raise ValueError(
                     f"{moe_fqn}.num_experts ({moe.num_experts}) must be "
                     f"divisible by expert_parallel_degree ({ep})."
-                )
-            routed_weight_sharding = moe.routed_experts.w13.sharding_config
-            routed_on_ep = (
-                routed_weight_sharding is not None
-                and MeshAxisName.EP
-                in routed_weight_sharding.state_shardings["weight"].local_type
-            )
-            if model.tok_embeddings.sharding_config is not None and (
-                routed_on_ep != (ep > 1)
-            ):
-                raise ValueError(
-                    f"{moe_fqn} routed-expert sharding does not match "
-                    f"expert_parallel_degree ({ep}). Resolve model sharding "
-                    "from the consumer's parallelism config before building it."
                 )
 
         for fqn, dispatcher, _, _ in model.traverse(LocalTokenDispatcher.Config):
@@ -173,10 +156,11 @@ def validate_context_parallel(
         CPInnerAttention,
         UlyssesCPInnerAttention,
     )
+    from torchtitan.models.common.decoder import Decoder
 
     cp = parallelism.context_parallel_degree
 
-    for fqn, traversed, _, _ in model.traverse(BaseAttention.Config):
+    for fqn, traversed, _, _ in model.traverse(Attention.Config):
         attention = traversed
         inner_attention = attention.inner_attention
         is_cp_attention = isinstance(inner_attention, CPInnerAttention.Config)
@@ -212,7 +196,13 @@ def validate_context_parallel(
                     )
 
         load_balancer_config = parallelism.context_parallel_load_balancer
+        # Linear attention routes recurrent states using the shared permutation;
+        # it does not constrain which attention load balancer creates it.
+        if isinstance(attention, LinearAttention.Config):
+            continue
         if load_balancer_config is None:
+            continue
+        if isinstance(model, Decoder.Config) and model.first_full_attention is None:
             continue
         if issubclass(cp_inner_attention, UlyssesCPInnerAttention):
             raise ValueError(

@@ -35,7 +35,12 @@ def cross_entropy_loss(
     global_vocab_size: int | None = None,
     reduction: Literal["sum", "none"] = "sum",
 ) -> torch.Tensor:
-    """Cross-entropy over ``pred[T, V]`` and ``labels[T]``."""
+    """Cross-entropy over ``pred[T, V]`` and ``labels[T]``.
+
+    ``pred`` is upcast to fp32 here rather than in the model forward, so that
+    compiling the loss region fuses the forward and backward casts into the loss
+    kernels, which saves both time and memory.
+    """
     if reduction not in ("sum", "none"):
         raise ValueError(f"Unsupported cross-entropy reduction: {reduction}")
     if spmd_mesh_size("tp") > 1:
@@ -432,9 +437,13 @@ def compute_logprobs(
     if not return_entropy:
         return logprobs
     with torch.no_grad():
-        entropy = torch.logsumexp(logits, dim=-1) - (
-            torch.softmax(logits, dim=-1) * logits
-        ).sum(dim=-1)
+        log_normalizer = torch.logsumexp(logits, dim=-1)
+        # Match _VocabParallelEntropy's zero contribution for masked logits.
+        weighted_logits = (torch.softmax(logits, dim=-1) * logits).nan_to_num_(
+            nan=0.0, posinf=torch.inf, neginf=-torch.inf
+        )
+        entropy = log_normalizer - weighted_logits.sum(dim=-1)
+        entropy.masked_fill_(~torch.isfinite(log_normalizer), torch.nan)
     return logprobs, entropy
 
 

@@ -27,12 +27,15 @@ from spmd_types import SpmdType
 from torch import nn
 from torch.autograd.function import once_differentiable
 
-from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
+)
+from torchtitan.models.common.linear.inplace_wgrad_accum import (
+    reject_inplace_wgrad_accum,
 )
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
@@ -336,7 +339,12 @@ class NVFP4Linear(Linear):
     class Config(Linear.Config):
         """Drop-in replacement for Linear.Config that builds NVFP4Linear."""
 
+        inplace_wgrad_accum: bool = False
+
         def __post_init__(self) -> None:
+            reject_inplace_wgrad_accum(
+                self, "the NVFP4 backward does not add WGRAD into weight.grad"
+            )
             # NVFP4's Triton kernels need every GEMM dim to be a multiple of
             # 128. in_features / out_features are known at config-build time
             # (the TP degree is not), so reject the model-dim violations up
@@ -420,6 +428,20 @@ class NVFP4Linear(Linear):
         self.register_buffer("_rht_sign_vector", None, persistent=False)
         self._rht_sign_vector_tuple = None
 
+    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
+        # spmd_types returns a plain tensor when TP shards the weight. Restore
+        # the FSDP extension wrapper before fully_shard() consumes it.
+        super()._parallelize(parallelism_context)
+        if isinstance(self.weight, _LinearShardedTensorWithNVFP4Compute):
+            return
+        distributed_weight = self.weight
+        wrapped_weight = nn.Parameter(
+            _LinearShardedTensorWithNVFP4Compute(distributed_weight.data),
+            requires_grad=distributed_weight.requires_grad,
+        )
+        spmd.assert_type_like(wrapped_weight, distributed_weight)
+        self.weight = wrapped_weight
+
     def _refresh_rht_sign_vector_tuple(self) -> None:
         sign_vector = self._rht_sign_vector
         if sign_vector is not None and hasattr(sign_vector, "to_local"):
@@ -466,7 +488,7 @@ class NVFP4Linear(Linear):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        physical_weight = self.weight
+        physical_weight = weight
         local_out_features = physical_weight.shape[-2]
         if local_out_features % _NVFP4_GEMM_ALIGNMENT:
             raise ValueError(
@@ -487,15 +509,16 @@ class NVFP4Linear(Linear):
                 operands = _quantize_nvfp4_weight(high_precision_weight.flatten(0, -2))
         if self._sr_seed is None:
             raise RuntimeError("NVFP4 stochastic-rounding seed is not materialized")
+        weight_NK, bias_N = self._flatten_weight_and_bias(weight, bias)
         output = _NVFP4LinearFunction.apply(
             input,
-            weight,
+            weight_NK,
             operands.weight_qdata_fprop,
             operands.weight_scale_fprop,
             operands.weight_qdata_dgrad,
             operands.weight_scale_dgrad,
             operands.weight_amax,
-            bias,
+            bias_N,
             self._sr_seed,
             self.rht_sign_vector,
             _resolve_use_cutedsl(KernelPreference.AUTO),

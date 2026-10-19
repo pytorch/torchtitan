@@ -14,7 +14,6 @@ live in ``graph_builder_utils``.
 from __future__ import annotations
 
 import dataclasses
-import warnings
 from collections.abc import Callable
 from typing import Any, cast, Literal, TYPE_CHECKING
 
@@ -76,7 +75,11 @@ ReduceGradPlacement = Literal["last_microbatch", "schedule", "every_microbatch"]
 class GraphExecutionPlan:
     """Resolved FSDP placement, gradient accumulation, and action variants.
 
-    ``unshard`` and ``reduce_grad`` are ``None`` without FSDP. With FSDP:
+    ``reduce_grad`` is ``None`` without FSDP.
+    In case of PP and no FSDP parameters preparation (e.g. cast, quantization) are
+    also extracted into unshard to do it only once.
+
+    With FSDP:
 
     - SPMD without gradient accumulation keeps both boundaries in its single
       joint graph.
@@ -184,27 +187,10 @@ class GraphTrainerStageGraphProvider:
     config: "GraphTrainer.Config | GraphTrainerConfigView"
     plan: GraphExecutionPlan
     parallelism_context: ParallelismContext | None = None
-    _warned_cuda_graph: bool = False
     # Calling convention:
     # key = (forward_stage_index, backward_stage_index); the graph is reused
     # across microbatches for that stage pair.
     _overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] | None = None
-
-    def _warn_if_cuda_graph_pass_requested(self) -> None:
-        if self._warned_cuda_graph:
-            return
-        if not self.config.compile.enable_passes:
-            return
-        if "cuda_graph_pass" in self.config.compile.disable_passes:
-            return
-        warnings.warn(
-            "GraphPP compiles extracted stage graphs with use_cuda_graph=False "
-            "even though cuda_graph_pass is enabled. CUDA graph capture needs "
-            "a separate GraphPP runtime integration. Pass "
-            "Add 'cuda_graph_pass' to compile.disable_passes to silence this warning.",
-            stacklevel=3,
-        )
-        self._warned_cuda_graph = True
 
     def prepare_graphs(
         self,
@@ -299,9 +285,12 @@ class GraphTrainerStageGraphProvider:
                 loss_kwargs,
                 loss_fn=self.loss_fn,
                 config=self.config,
+                parallelism_context=self.parallelism_context,
                 compile_graphs=False,
                 extract_fsdp_param_unshard=self.plan.extract_fsdp_param_unshard,
                 extract_fsdp_grad_reduction=self.plan.extract_fsdp_grad_reduction,
+                gradient_accumulation=self.plan.has_gradient_accumulation,
+                fuse_wgrad_accumulation=self.plan.fuse_wgrad_accumulation,
                 activation_slot_id_1=_resolve_dist_moe_activation_slot(
                     dist_moe_forward_context,
                     stage_index=stage.stage_index,
@@ -316,6 +305,7 @@ class GraphTrainerStageGraphProvider:
             self._overlap_graphs = _build_graph_pp_overlap_graphs(
                 schedule,
                 compile_config=self.config.compile,
+                use_cuda_graph=not self.config.training.disable_cuda_graphs,
             )
             overlap_graphs = dict(self._overlap_graphs)
         else:
@@ -330,5 +320,9 @@ class GraphTrainerStageGraphProvider:
             }
 
         for stage in graph_stages:
-            _compile_stage_graphs(stage, compile_config=self.config.compile)
+            _compile_stage_graphs(
+                stage,
+                compile_config=self.config.compile,
+                use_cuda_graph=not self.config.training.disable_cuda_graphs,
+            )
         return overlap_graphs

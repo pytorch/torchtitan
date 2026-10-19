@@ -147,7 +147,7 @@ def run_training(
 def rl_loss_compare_config():
     """Build the deterministic RL configuration used by this script."""
     from torchtitan.config import ConfigLoader
-    from torchtitan.rl.controller import Controller
+    from torchtitan.rl.controller.controller import Controller
 
     config = ConfigLoader._load_config(
         os.environ["TORCHTITAN_RL_LOSS_MODULE"],
@@ -166,7 +166,7 @@ def rl_loss_compare_config():
     config.async_loop.num_training_steps = 10
     # Lockstep removes timing-dependent policy lag from the loss curve.
     config.async_loop.target_offpolicy_steps = 0
-    config.async_loop.validation.num_samples = 0
+    config.async_loop.validation.steps = 0
     config.metrics.enable_tensorboard = True
     config.metrics.enable_wandb = False
     return config

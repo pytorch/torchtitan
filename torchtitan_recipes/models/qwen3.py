@@ -7,6 +7,7 @@
 """Verified Qwen3 model recipes."""
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -16,15 +17,18 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
+
 
 def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("14B", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config("14B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = 4 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -34,6 +38,9 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-14B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -43,11 +50,11 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=3000,
         ),
-        parallelism=ParallelismConfig(),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )

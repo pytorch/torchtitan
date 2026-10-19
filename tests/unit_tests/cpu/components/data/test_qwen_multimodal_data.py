@@ -14,15 +14,15 @@ import torchvision.transforms.v2.functional as TVF
 
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.dataset import SingleDatasetConfig
-from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
-from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import (
+from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.mm_datasets import (
     MM_DATASETS,
     MMSamplePackingConfig,
     VisionProcessor,
 )
-from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
+from torchtitan.components.data.multimodal.utils.image import resize_to_navit_patch_grid
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan_recipes.tests.datasets.synthetic_multimodal import SYNTHETIC_MM_DATASETS
 from torchtitan_recipes.tests.models import (
     kimi_k2_7 as kimi_configs,
@@ -31,10 +31,8 @@ from torchtitan_recipes.tests.models import (
     qwen3_8 as qwen38_configs,
 )
 from torchtitan_recipes.tests.models.multimodal import DPRankImagePresenceDatasetConfig
-from torchtitan_recipes.tests.suites import (
-    b200 as b200_recipes,
-    models as integration_recipes,
-)
+
+from tests.integration_tests import b200 as b200_recipes, models as integration_recipes
 
 
 class _Tokenizer:
@@ -100,12 +98,7 @@ def _dataset(rows, *, repeat=False):
 class _RowsSourceConfig:
     rows: tuple[dict, ...]
 
-    def build(
-        self,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ):
-        del dataset_iteration_policy
+    def build(self):
         return _RowsSource(self.rows)
 
 

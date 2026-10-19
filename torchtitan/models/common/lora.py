@@ -21,12 +21,13 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 
+from torchtitan.models.base.module import Module
+from torchtitan.models.base.sharding import ShardingConfig
+
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.common.linear import GroupedLinear, Linear
-from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
-from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
 
 __all__ = [
     "get_lora_dist_moe_routed_experts",
@@ -83,6 +84,8 @@ class _LoRALinearMixin(_LoRAMixin):
             in_features=config.in_features,
             out_features=config.rank,
             bias=False,
+            # Inherit the option, so turning it off for tracing covers the adapters.
+            inplace_wgrad_accum=config.inplace_wgrad_accum,
             sharding_config=lora_a_sharding,
             param_init={
                 "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
@@ -93,6 +96,7 @@ class _LoRALinearMixin(_LoRAMixin):
             out_features=config.out_features,
             num_linears=config.num_linears,
             bias=False,
+            inplace_wgrad_accum=config.inplace_wgrad_accum,
             sharding_config=lora_b_sharding,
             param_init={"weight": nn.init.zeros_},
         ).build()
@@ -107,10 +111,10 @@ class _LoRALinearMixin(_LoRAMixin):
         # The adapters call their local compute directly, so they run inside this
         # projection's remat region instead of declaring their own: a region
         # nested in a saved region cannot be recomputed.
-        lora_a_weight, _ = self.lora_a._flatten_weight_and_bias()
-        lora_b_weight, _ = self.lora_b._flatten_weight_and_bias()
         lora_out_XO = self.lora_b._linear(
-            self.lora_a._linear(input, lora_a_weight, None), lora_b_weight, None
+            self.lora_a._linear(input, self.lora_a.weight, None),
+            self.lora_b.weight,
+            None,
         )
         return base_out_XO + self._lora_scaling * lora_out_XO
 
