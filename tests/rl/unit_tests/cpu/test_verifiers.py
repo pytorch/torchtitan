@@ -23,18 +23,18 @@ from aiohttp import ClientSession
 
 from torchtitan.rl.actors.system import ActorSystem
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
-from torchtitan.rl.examples.verifiers.generation_server import (
-    _parse_sampling_config,
-    _validate_token_ids,
-    GenerationServer,
-    VerifiersGenerationMetadata,
-)
 from torchtitan.rl.examples.verifiers.rollouter import (
     _trainable_token_spans,
     log_failed_rollout,
     VERIFIERS_REWARD_KEY,
     verifiers_rollout_logs,
     VerifiersRollouter,
+)
+from torchtitan.rl.generator.generation_server import (
+    _parse_sampling_config,
+    _validate_token_ids,
+    GenerationServer,
+    VerifiersGenerationMetadata,
 )
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
