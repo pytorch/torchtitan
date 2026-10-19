@@ -15,6 +15,7 @@ import torch
 
 from torchtitan.config import Configurable
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest
+from torchtitan.rl.observability import metrics as m
 
 
 class GenerationEngine(Configurable, abc.ABC):
@@ -111,6 +112,11 @@ class GenerationEngine(Configurable, abc.ABC):
 
     def log_stats(self, step: int) -> None:
         """Log the engine's own per-step stats, if any."""
+
+    def session_kv_metrics(self) -> list[m.Metric]:
+        """This replica's session-KV metrics, if it holds session KV. Runs on the actor thread, as
+        ``log_stats`` does: read only single values, no engine-owned containers."""
+        return []
 
     @abc.abstractmethod
     def shutdown(self) -> None:

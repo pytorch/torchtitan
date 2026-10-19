@@ -114,8 +114,14 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     controller.trainer = TrainerHandle(
         all_ranks=trainer, rank0=trainer, by_dp_rank=[trainer]
     )
+
+    async def no_session_kv_metrics():
+        return []
+
     controller.generator_router = SimpleNamespace(
-        sync_log_step=_Endpoint(), pull_model_state_dict=_Endpoint(pull)
+        sync_log_step=_Endpoint(),
+        pull_model_state_dict=_Endpoint(pull),
+        get_session_kv_metrics=_Endpoint(no_session_kv_metrics),
     )
     controller.batcher = SimpleNamespace(
         sync_log_step=SimpleNamespace(broadcast=lambda step: None),

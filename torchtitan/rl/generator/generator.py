@@ -37,6 +37,7 @@ from torchtitan.rl.generator.generation_server import (
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
@@ -218,6 +219,7 @@ class Generator(Configurable):
         # TODO: revisit if PP/CP are added.
         dp_rank = self._rank // tp_degree
         tp_rank = self._rank % tp_degree
+        self._tp_rank = tp_rank
 
         set_batch_invariance(config.debug.batch_invariant)
         self._set_determinism(config.debug)
@@ -455,6 +457,13 @@ class Generator(Configurable):
         if self._generation_server is None:
             return {}
         return self._generation_server.pop_generation_metadata(session_ids)
+
+    async def get_session_kv_metrics(self) -> list[m.Metric]:
+        """This replica's session-KV metrics (levels now, counts since the last call); [] on
+        TP ranks > 0, whose holders mirror TP rank 0's."""
+        if self._tp_rank != 0:
+            return []
+        return self._engine_loop.session_kv_metrics()
 
     async def initialize_torchstore_client(self, requester_index: int) -> None:
         """Initialize this process as a TorchStore routing requester.

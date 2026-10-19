@@ -110,6 +110,18 @@ class RequestDispatcher:
             if self._rank == 0 and self._dp_degree > 1
             else None
         )
+        # `_rank0_dp_router.num_repins` at the last `rank0_repin_metrics`.
+        self._num_repins_logged = 0
+
+    def rank0_repin_metrics(self) -> list[m.Metric]:
+        """RANK 0: sessions the DP router moved to another DP rank since the last call (each move
+        recomputes the session's prompt there); [] without a DP router."""
+        if self._rank0_dp_router is None:
+            return []
+        num_repins = self._rank0_dp_router.num_repins
+        repinned = num_repins - self._num_repins_logged
+        self._num_repins_logged = num_repins
+        return [m.Metric("generator/session_kv/dp_repinned_sessions", m.Sum(repinned))]
 
     def rank0_register_generation(
         self,

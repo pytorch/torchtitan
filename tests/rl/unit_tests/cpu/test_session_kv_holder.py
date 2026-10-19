@@ -191,6 +191,56 @@ def _finished_turn(manager, holder, requests, session: str, tokens: list[int]) -
     holder.after_step()
 
 
+def test_a_later_turn_counts_its_prefix_as_gpu_hit_or_recomputed(manager):
+    """Turn 1 computed 64 tokens in full blocks; the hold keeps its prompt end (48)."""
+    requests = {}
+    holder = _holder(manager, requests)
+    turn1 = _request("t1", list(range(50)))
+    requests["t1"] = turn1
+    holder.track("t1", session_id="s", group_id=0)
+    _prefill(manager, turn1)
+    holder.after_step()
+    for t in range(20):
+        _schedule(manager, turn1, 1, sample=100 + t)
+    manager.free(turn1)
+    del requests["t1"]
+    holder.after_step()
+    # A session's first turn has nothing to reuse.
+    assert holder.gpu_hit_prefix_tokens == holder.recomputed_prefix_tokens == 0
+
+    turn2 = _request("t2", list(turn1.all_token_ids) + [5, 6, 7])
+    requests["t2"] = turn2
+    holder.track("t2", session_id="s", group_id=0)
+    gpu_hit_tokens = _prefill(manager, turn2)
+    # vLLM fills these at the first schedule; `_prefill` stands in for it.
+    turn2.prefill_stats.set(
+        num_prompt_tokens=turn2.num_prompt_tokens,
+        num_local_cached_tokens=gpu_hit_tokens,
+        num_external_cached_tokens=0,
+    )
+    holder.after_step()
+
+    assert gpu_hit_tokens == 48
+    # 64 reusable tokens (4 full blocks), 48 hit: the decode block was recomputed.
+    assert (holder.gpu_hit_prefix_tokens, holder.recomputed_prefix_tokens) == (48, 16)
+
+
+def test_held_blocks_count_a_block_two_siblings_hold_once(manager):
+    requests = {}
+    holder = _holder(manager, requests)
+    _finished_turn(manager, holder, requests, "a", list(range(50)))
+    held_by_a = holder.num_held_blocks
+    # The same prompt: "b" hits and holds the blocks "a" holds.
+    _finished_turn(manager, holder, requests, "b", list(range(50)))
+
+    assert held_by_a > 0
+    assert holder.num_sessions == 2 and holder.num_held_blocks == held_by_a
+    holder.release(session_ids=["a"])
+    assert holder.num_held_blocks == held_by_a
+    holder.release(session_ids=["b"])
+    assert holder.num_held_blocks == 0
+
+
 def test_release_frees_sessions_in_sorted_order(manager):
     """Every TP rank frees a release's sessions in one order; set order depends on the process."""
     requests = {}
