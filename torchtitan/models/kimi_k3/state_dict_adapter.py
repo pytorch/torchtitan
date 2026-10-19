@@ -103,7 +103,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             "language_model.model.layers.{}.self_attn.q_b_proj.weight": "layers.{}.attention.wq_b.weight",
             "language_model.model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": "layers.{}.attention.wkv_a.weight",
             "language_model.model.layers.{}.self_attn.kv_a_layernorm.weight": "layers.{}.attention.kv_norm.weight",
-            "language_model.model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.wkv_b.weight",
+            "language_model.model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.inner_attention.wkv_b.weight",
             "language_model.model.layers.{}.self_attn.g_proj.weight": "layers.{}.attention.gate.weight",
             "language_model.model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
         }

@@ -8,6 +8,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from functools import partial
+from typing import Any
 
 import torch
 from torch.distributed.pipelining.schedules import (
@@ -132,6 +133,7 @@ class Validator(BaseValidator):
         seq_len: int,
         num_tokens_per_microbatch: int,
         cuda_graph_enabled: bool = False,
+        cuda_graph_annotation_config: dict[str, Any] | None = None,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
@@ -162,6 +164,7 @@ class Validator(BaseValidator):
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
         self._run_eval = None
+        self._cuda_graph_annotation_config = cuda_graph_annotation_config
         self._cuda_graph_enabled = cuda_graph_enabled and cuda_graphs_supported()
         if self._cuda_graph_enabled:
             # Keep training and optimizer eager until eval captures.
@@ -215,6 +218,7 @@ class Validator(BaseValidator):
                 if self.parallelism_context.pp_enabled
                 else None,
                 name="validation",
+                annotation_config=self._cuda_graph_annotation_config,
             )
         elif (
             not cuda_graph_manager.capture_allowed
