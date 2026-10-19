@@ -163,9 +163,8 @@ class DeepSeekMLAAttention(Attention):
         output = output.contiguous().view(num_tokens, -1)
         return self.wo(output)
 
-    # With RoPE in real arithmetic under compile, Inductor's default pointwise-cat
-    # lowering turns the q_nope/q_pe concat into masked loads, which are slower than
-    # a plain cat kernel.
+    # Cat options: rotate_tail concatenates q's untouched int32 words with the rotated ones;
+    # Inductor's default pointwise cat makes that masked loads, slower than a plain cat.
     @local_compile(
         "mla_qk",
         batch_invariant=True,
@@ -187,11 +186,7 @@ class DeepSeekMLAAttention(Attention):
             The rotated query, same shape as ``q``, and the rotated ``k_pe`` as
             ``[T, 1, qk_rope_head_dim]``.
         """
-        q_nope, q_pe = torch.split(
-            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
-        q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
-        return torch.cat([q_nope, q_pe], dim=-1), k_pe
+        return self.rope.rotate_tail(q, k_pe.unsqueeze(1), positions)
 
     @local_compile("mla_qk", batch_invariant=True)
     def _split_kv_and_build_k(
