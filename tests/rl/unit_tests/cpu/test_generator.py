@@ -408,20 +408,24 @@ def _engine_request(request_id: str, *, min_policy_version: int, group_id: int =
 
 
 def test_admission_passes_group_id_as_priority_and_arrival_time():
-    # Priority is the group id (3), not the pinned version (6); every validation id shares -1.
+    # Priority is the group id (3), not the pinned version (6); blocking validation ids share -1,
+    # and overlapped validation ids get the lowest priority.
     engine = _vllm_engine()
     engine.add_requests(
         [
             _engine_request("train", min_policy_version=6, group_id=3),
             _engine_request("val_1", min_policy_version=6, group_id=-1),
             _engine_request("val_5", min_policy_version=6, group_id=-5),
+            _engine_request(
+                "val_overlapped", min_policy_version=6, group_id=-1_000_000
+            ),
         ]
     )
 
     llm_engine = cast(_FakeLLMEngine, engine._engine)
     added_kwargs = [kwargs for _, kwargs in llm_engine.add_requests]
-    assert [kwargs["priority"] for kwargs in added_kwargs] == [3, -1, -1]
-    assert [kwargs["arrival_time"] for kwargs in added_kwargs] == [1.5] * 3
+    assert [kwargs["priority"] for kwargs in added_kwargs] == [3, -1, -1, 2**31 - 1]
+    assert [kwargs["arrival_time"] for kwargs in added_kwargs] == [1.5] * 4
 
 
 def test_session_kv_holder_tracks_admitted_requests_and_releases_sessions():

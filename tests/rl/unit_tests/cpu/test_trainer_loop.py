@@ -19,7 +19,7 @@ import pytest
 
 from torchtitan.rl.actors.system import TrainerHandle
 from torchtitan.rl.controller import controller as controller_module
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.controller import Controller, ValidationConfig
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
 GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"
@@ -95,8 +95,12 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
             target_offpolicy_steps=1,
             max_offpolicy_steps=None,
             num_prompts_per_train_step=5,
+            validation=ValidationConfig(),
+            extra_validations=[],
         )
     )
+    controller._extra_validation_tasks = {}
+    controller._extra_validation_requested = set()
     controller.start_step = 0
     controller._trainer_policy_version = 0
     trainer = SimpleNamespace(
@@ -125,9 +129,17 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         sync_log_step=sync_log_step,
         acknowledge_training_sample_ids=lambda group_ids: None,
         state_dict=lambda: {},
+        training_data_metrics=list,
     )
+
+    async def record_step_start(*, trainer_policy_version):
+        pass
+
     controller._group_buffer = SimpleNamespace(
-        metrics=lambda: [], release_active_groups=release_active_groups
+        metrics=lambda: [],
+        release_active_groups=release_active_groups,
+        record_step_start=record_step_start,
+        pop_dropped_group_ids=list,
     )
     controller.logged_metrics = []
     controller.metrics_processor = SimpleNamespace(
@@ -189,11 +201,16 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
 
 
 def test_optimizer_step_waits_for_the_previous_push() -> None:
-    async def slow_push():
-        for _ in range(5):
-            await asyncio.sleep(0)
-
     events: list[str] = []
+
+    async def slow_push():
+        # Event-loop ticks alone can finish before forward/backward 2: the loop also awaits
+        # worker threads (asyncio.to_thread). Hold push 1 until forward/backward 2 starts.
+        for _ in range(1000):
+            if "fwd_bwd 2" in events:
+                return
+            await asyncio.sleep(0.001)
+
     _run(_controller(events, on_push=slow_push), num_training_steps=2)
 
     # Forward/backward 2 overlaps push 1; optimizer step 2 waits for it to finish.

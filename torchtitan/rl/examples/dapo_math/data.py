@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import random
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -66,6 +67,10 @@ class _CyclingDataset(RLDataset):
         sample_index = self._order[self._position]
         self._position += 1
         return self._samples[sample_index]
+
+    def sample_key(self, sample: DapoMathSample) -> str:
+        """A short hash of the prompt, so the loader's saved task keys stay small."""
+        return hashlib.sha256(sample.prompt.encode()).hexdigest()[:16]
 
     def state_dict(self) -> dict:
         """Snapshot row order and position so resume continues the same stream."""

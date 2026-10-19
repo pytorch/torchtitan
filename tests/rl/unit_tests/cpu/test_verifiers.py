@@ -247,6 +247,7 @@ def test_verifiers_worker_sends_muse_glimmer_renderer_config(monkeypatch) -> Non
     worker = object.__new__(VerifiersRolloutWorker)
     worker._verifiers_config = SimpleNamespace(
         env_server_address="tcp://127.0.0.1:1",
+        extra_env_server_addresses={},
         connection_timeout_sec=5.0,
         renderer_multiplex=8,
     )
@@ -317,6 +318,7 @@ def test_setup_starts_the_env_server_then_spawns_workers_with_its_address(
     rollouter._verifiers_env_server = SimpleNamespace(
         start=start, close=close_env_server
     )
+    rollouter._extra_env_servers = {}
     rollouter._worker_actors = None
     rollouter._actor_system = None
     rollouter._inflight_run_group_calls = set()

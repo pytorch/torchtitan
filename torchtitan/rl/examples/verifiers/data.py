@@ -12,6 +12,7 @@ from typing import Any
 
 import grain.python as grain
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
+from verifiers.v1.task import task_key
 from verifiers.v1.utils.loaders import load_taskset
 
 from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
@@ -23,6 +24,10 @@ class VerifiersTaskSample:
     """Serialized task data dispatched to a stateless Verifiers EnvServer."""
 
     verifiers_task_data: dict[str, Any]
+
+    validation_set: str | None = None
+    """Extra validation set the task came from; it runs on that set's EnvServer. None: the
+    training EnvServer (training and the main validation set)."""
 
 
 class VerifiersTaskDataset(RLDataset):
@@ -97,6 +102,10 @@ class VerifiersTaskDataset(RLDataset):
 
     def __next__(self) -> VerifiersTaskSample:
         return next(self._iterator)
+
+    def sample_key(self, sample: VerifiersTaskSample) -> str:
+        """Verifiers' content hash of the task data (its default `Task.key`)."""
+        return task_key(sample.verifiers_task_data)
 
     def state_dict(self) -> dict:
         return self._iterator.get_state()

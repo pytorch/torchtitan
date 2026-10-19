@@ -11,30 +11,50 @@ import asyncio
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 import pytest
 import torch
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.adaptive_demand import (
+    estimate_next_unavailable_upper_bound,
+    mean_age_ceiling,
+    prediction_multiplier,
+    smooth_demand_toward_needed,
+    StallDrivenDemand,
+)
+from torchtitan.rl.controller.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     MetricsTimer,
 )
 from torchtitan.rl.controller.work_buffer import (
+    AdaptiveRolloutGroupWorkBuffer,
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
-from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.rollout.types import (
+    Rollout,
+    RolloutStatus,
+    RolloutTurn,
+    RolloutTurnID,
+)
 
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
     TrainingSampleGroup,
 )
+
+from tests.rl.unit_tests.cpu.test_trainer_loop import _controller
 
 
 def test_controller_config_maybe_log(tmp_path, caplog) -> None:
@@ -855,6 +875,7 @@ async def _block_forever(*args, **kwargs) -> None:
 def _run_with_generator_watcher(watcher) -> None:
     """Run Controller.run with every stage but the engine-loop watcher stubbed to block."""
     controller = object.__new__(Controller)
+    controller._extra_validation_tasks = {}
     controller.config = SimpleNamespace(
         async_loop=SimpleNamespace(
             num_training_steps=1,
@@ -867,6 +888,8 @@ def _run_with_generator_watcher(watcher) -> None:
             group_buffer=SimpleNamespace(
                 build=lambda **kwargs: SimpleNamespace(close=AsyncMock())
             ),
+            validation=ValidationConfig(),
+            extra_validations=[],
         ),
         trainer=SimpleNamespace(
             training=SimpleNamespace(
@@ -959,3 +982,1104 @@ def test_cancelled_rollout_loop_releases_its_group() -> None:
         group_buffer.finalize_work.assert_not_awaited()
 
     asyncio.run(run())
+
+
+def test_fixed_buffer_ignores_the_adaptive_hooks() -> None:
+    """The default buffer takes and meters the same with the adaptive buffer's hooks called."""
+    config = AsyncLoopConfig(
+        num_prompts_per_train_step=4, target_offpolicy_steps=1, windowed_fifo_batches=1
+    )
+    assert type(config.group_buffer) is RolloutGroupWorkBuffer.Config
+    assert config.max_concurrent_rollout_groups == config.max_active_rollout_groups == 8
+    assert config.max_offpolicy_steps == 2
+
+    async def run(*, with_hooks: bool) -> list:
+        buffer = _buffer(capacity=8, window_size=4)
+        for group_id in range(8):
+            await _admit(buffer, group_id)
+        for _ in range(8):
+            await buffer.claim_next()
+        for group_id in (3, 1, 2, 5, 0, 7):
+            await _finalize(buffer, group_id)
+        log = []
+        for version in range(2):
+            if with_hooks:
+                await buffer.record_step_start(trainer_policy_version=version)
+            for _ in range(3):
+                kwargs = {"consuming_policy_version": version} if with_hooks else {}
+                log.append((await buffer.take_finalized(**kwargs)).group_id)
+            if with_hooks:
+                assert buffer.pop_dropped_group_ids() == []
+            await buffer.release_active_groups(3, reason="trained")
+            log.append({metric.key: metric.value.value for metric in buffer.metrics()})
+        return log
+
+    log = asyncio.run(run(with_hooks=True))
+    assert log == asyncio.run(run(with_hooks=False))
+    assert [entry for entry in log if isinstance(entry, int)] == [0, 1, 2, 3, 5, 7]
+
+
+def _adaptive_buffer(
+    *,
+    num_prompts: int,
+    max_offpolicy_steps: int | None = 4,
+    generation_capacity: int = 64,
+    **kwargs,
+) -> AdaptiveRolloutGroupWorkBuffer:
+    return AdaptiveRolloutGroupWorkBuffer.Config(
+        max_offpolicy_steps=max_offpolicy_steps,
+        generation_capacity=generation_capacity,
+    ).build(num_prompts_per_train_step=num_prompts, **kwargs)
+
+
+def _buffer_metric(buffer: RolloutGroupWorkBuffer, key: str) -> float:
+    return next(metric.value.value for metric in buffer.metrics() if metric.key == key)
+
+
+def test_stall_driven_demand_quantile_uses_every_point_of_the_lookback() -> None:
+    history = [44, 46, 41, 48, 45, 47, 50, 43, 46, 45]
+    # mean 45.5, sd 2.55, Student-t prediction multiplier for 10 samples at 95% = 1.92 -> 50.4 -> 51 (above the max seen)
+    assert (
+        estimate_next_unavailable_upper_bound(history=history, probability=0.95) == 51
+    )
+    assert (
+        estimate_next_unavailable_upper_bound(history=[45, 45, 45], probability=0.95)
+        == 45
+    )
+    assert estimate_next_unavailable_upper_bound(history=[24], probability=0.95) == 24
+    assert round(prediction_multiplier(samples=10, probability=0.95), 3) == 1.923
+    assert round(prediction_multiplier(samples=1000, probability=0.95), 2) == 1.65
+    assert mean_age_ceiling(
+        num_prompts_per_train_step=8,
+        mean_age_limit=4,
+        groups_generating=40,
+        untrainable_share=0.36,
+    ) == pytest.approx(54.4)
+    # half the gap, the same up and down, rounded away from the current value
+    assert (
+        smooth_demand_toward_needed(
+            current_demand=64, demand_needed=59, damping_factor=0.5
+        )
+        == 61
+    )
+    assert (
+        smooth_demand_toward_needed(
+            current_demand=64, demand_needed=73, damping_factor=0.5
+        )
+        == 69
+    )
+    assert (
+        smooth_demand_toward_needed(
+            current_demand=64, demand_needed=65, damping_factor=0.5
+        )
+        == 65
+    )
+
+
+def test_stall_driven_demand_starts_at_three_batches_and_moves_half_the_gap() -> None:
+    demand = StallDrivenDemand(num_prompts_per_train_step=8, max_offpolicy_steps=10)
+    assert demand.demand == 24
+    # nothing ready: unavailable 24, one sample -> quantile 24, needed 8 + 24 + 1 = 33, half the gap up: 24 + 5
+    assert (
+        demand.observe(step=1, ready=0, generating=24, completed=0, trainable=0) == 29
+    )
+    assert demand.state == "ok"
+    # a full shelf: unavailable max(0, 29 - 40) = 0; history [24, 0] -> mean 12, sd 17, two samples give a wide
+    # margin (t = 7.5): quantile 128 -> needed 137. The ceiling at the max caps it: 10 x 8 + 8 + mean(24, 0) x
+    # (1 - 40 / 40) = 88. Half the gap up from 29: 29 + 30
+    assert (
+        demand.observe(step=2, ready=40, generating=0, completed=40, trainable=40) == 59
+    )
+    assert demand.state == "age-limited"
+
+
+def test_stall_driven_demand_moves_down_one_group_per_step() -> None:
+    for damping_factor in (0.5, 1.0):
+        demand = StallDrivenDemand(
+            num_prompts_per_train_step=8, start_batches=8, damping_factor=damping_factor
+        )
+        # a full shelf: unavailable 0 -> needed 8 + 0 + 1 = 9; one group down from 64, whatever the damping
+        assert (
+            demand.observe(step=1, ready=64, generating=0, completed=64, trainable=64)
+            == 63
+        )
+        assert demand.state == "ok"
+
+
+def test_stall_driven_demand_above_the_ceiling_moves_down_half_the_gap() -> None:
+    # ceiling with a max of 1: 1 x 8 + 8 + generating x untrainable share = 16 + 0 in both cases below
+    # nothing ready: needed 8 + 64 + 1 = 73, capped at 16; half the gap down: 64 - 24
+    demand = StallDrivenDemand(
+        num_prompts_per_train_step=8, max_offpolicy_steps=1, start_batches=8
+    )
+    assert demand.observe(step=1, ready=0, generating=0, completed=0, trainable=0) == 40
+    assert demand.state == "age-limited"
+    # a full shelf: needed 8 + 4 + 1 = 13 is under the ceiling, but demand 64 is above it; half the gap down too
+    demand = StallDrivenDemand(
+        num_prompts_per_train_step=8, max_offpolicy_steps=1, start_batches=8
+    )
+    assert (
+        demand.observe(step=1, ready=60, generating=4, completed=60, trainable=60) == 40
+    )
+    assert demand.state == "age-limited"
+
+
+def test_stall_driven_demand_is_capped_by_the_mean_age_ceiling() -> None:
+    # target 4 with 40 generating and 36% rejected: ceiling 4 x 8 + 8 + 40 x 0.36 = 54.4 -> 54
+    demand = StallDrivenDemand(
+        num_prompts_per_train_step=8, max_offpolicy_steps=10, target_offpolicy_steps=4
+    )
+    path = [
+        demand.observe(step=step, ready=0, generating=40, completed=25, trainable=16)
+        for step in range(1, 9)
+    ]
+    assert path == [29, 42, 48, 51, 53, 54, 54, 54]
+    assert demand.state == "age-limited"
+    # no target: the same ceiling is applied at max_offpolicy_steps
+    demand = StallDrivenDemand(num_prompts_per_train_step=8, max_offpolicy_steps=4)
+    path = [
+        demand.observe(step=step, ready=0, generating=40, completed=25, trainable=16)
+        for step in range(1, 9)
+    ]
+    assert path == [29, 42, 48, 51, 53, 54, 54, 54]
+    assert demand.state == "age-limited"
+    # a ceiling that stops binding is reported: once the lookback holds only step starts with a full shelf
+    # (unavailable 0), the need falls to P + 0 + 1 = 9 and the state returns to "ok"
+    for step in range(9, 21):
+        demand.observe(step=step, ready=100, generating=0, completed=8, trainable=8)
+    assert demand.state == "ok"
+
+
+def test_stall_driven_demand_without_a_max_has_no_ceiling_and_drops_nothing() -> None:
+    demand = StallDrivenDemand(num_prompts_per_train_step=2, max_offpolicy_steps=None)
+    for step in range(1, 11):
+        demand.observe(step=step, ready=0, generating=6, completed=0, trainable=0)
+    # with a max of 1 the ceiling would have held it at 8
+    assert demand.demand > 8 and demand.state == "ok"
+
+    async def run() -> None:
+        buffer = _adaptive_buffer(
+            num_prompts=2, max_offpolicy_steps=None, generation_capacity=4
+        )
+        await _admit(buffer, 0)
+        await buffer.claim_next()  # g0 generates under version 0
+        await _finalize(buffer, 0)
+        # 50 versions old: kept
+        selected = await buffer.take_finalized(consuming_policy_version=50)
+        assert selected is not None and selected.group_id == 0
+        assert _buffer_metric(buffer, "rollout_buffer/dropped_too_old") == 0
+
+    asyncio.run(run())
+    with pytest.raises(ValueError, match="target_offpolicy_steps"):
+        AdaptiveRolloutGroupWorkBuffer.Config(
+            max_offpolicy_steps=None, generation_capacity=4, target_offpolicy_steps=0
+        )
+    # a target without a max is allowed: the ceiling holds the mean age, nothing is dropped
+    config = AsyncLoopConfig(
+        group_buffer=AdaptiveRolloutGroupWorkBuffer.Config(
+            max_offpolicy_steps=None, generation_capacity=4, target_offpolicy_steps=3
+        )
+    )
+    assert config.max_offpolicy_steps is None
+    assert config.max_concurrent_rollout_groups == 4
+
+
+def test_adaptive_buffer_takes_oldest_finalized_and_lets_slow_groups_keep_their_slot() -> None:
+    async def run() -> None:
+        buffer = _adaptive_buffer(num_prompts=2, generation_capacity=4)
+        for group_id in range(4):
+            await _admit(buffer, group_id)
+        for _ in range(4):
+            await buffer.claim_next()
+        await _finalize(buffer, 2)
+        await _finalize(buffer, 1)
+
+        # g0 is still INFLIGHT: the batcher gets g1 then g2 without waiting for it
+        assert (await buffer.take_finalized()).group_id == 1
+        assert (await buffer.take_finalized()).group_id == 2
+        taker = asyncio.create_task(buffer.take_finalized())
+        await asyncio.sleep(0)
+        assert not taker.done()
+
+        await _finalize(buffer, 0)
+        assert (await taker).group_id == 0
+        # taking never frees a slot: 4 admitted -> 4 still active
+        assert _buffer_metric(buffer, "rollout_buffer/active_slots_in_use_peak") == 4
+
+    asyncio.run(run())
+
+
+def test_adaptive_buffer_drops_groups_past_max_offpolicy_steps() -> None:
+    async def run() -> None:
+        buffer = _adaptive_buffer(
+            num_prompts=2, max_offpolicy_steps=1, generation_capacity=4
+        )
+        for group_id in range(4):
+            await _admit(buffer, group_id)
+        for _ in range(4):
+            await buffer.claim_next()  # g0..g3 generate under version 0
+
+        # Step 1 trains g2 and g3 at version 0; the pull of version 1 releases their slots
+        for group_id in (2, 3):
+            await _finalize(buffer, group_id)
+            await buffer.take_finalized(consuming_policy_version=0)
+        await buffer.release_active_groups(2, reason="trained")
+        await _admit(buffer, 4)
+        await buffer.claim_next()  # g4 generates under version 1
+
+        # The trainer starts step 2 (version 1); g0 and g1 finish
+        await buffer.record_step_start(trainer_policy_version=1)
+        await _finalize(buffer, 1)
+        await _finalize(buffer, 0)
+        # Finalization alone cannot know whether the batcher is assembling the
+        # current or prefetched batch, so it must not guess the consume version.
+        assert _buffer_metric(buffer, "rollout_buffer/num_groups_finalized") == 2
+
+        # The batch being assembled trains at version 2: g0 and g1 would be 2 old -> dropped; g4 is 1 old
+        await _finalize(buffer, 4)
+        selected = await buffer.take_finalized(consuming_policy_version=2)
+        assert selected is not None
+        assert selected.group_id == 4
+        metrics = {metric.key: metric.value.value for metric in buffer.metrics()}
+        assert metrics["rollout_buffer/dropped_too_old"] == 2
+        # The controller acknowledges dropped ids once, so the dataloader does not replay them
+        assert buffer.pop_dropped_group_ids() == [0, 1]
+        assert buffer.pop_dropped_group_ids() == []
+        # Dropped slots are free at once: 5 admitted, 2 trained, 2 dropped -> 1 active
+        assert metrics["rollout_buffer/available_active_slots"] == (
+            metrics["rollout_buffer/demand_target_groups"] - 1
+        )
+
+    asyncio.run(run())
+
+
+def test_adaptive_buffer_measures_the_shelf_and_moves_demand() -> None:
+    async def run() -> None:
+        # P=4: demand starts at three batches = 12; the shelf is what is finished and not held by the trainer.
+        buffer = _adaptive_buffer(num_prompts=4, generation_capacity=40)
+        assert _buffer_metric(buffer, "rollout_buffer/demand_target_groups") == 12
+        for group_id in range(12):
+            await _admit(buffer, group_id)
+        for _ in range(12):
+            await buffer.claim_next()
+
+        # nothing finished: unavailable 12 -> needed 4 + 12 + 1 = 17 -> half the gap up: 12 + 3
+        await buffer.record_step_start(trainer_policy_version=0)
+        metrics = {metric.key: metric.value.value for metric in buffer.metrics()}
+        assert metrics["rollout_buffer/demand_target_groups"] == 15
+        assert metrics["rollout_buffer/ready_at_step_start"] == 0
+        assert metrics["rollout_buffer/generating_at_step_start"] == 12
+        assert metrics["rollout_buffer/unavailable_at_step_start"] == 12
+        assert metrics["rollout_buffer/demand_age_limited"] == 0
+
+        # ten groups finish; the batcher selects four and the trainer trains them at version 0. The pull
+        # of version 1 has not released them yet, so they leave the shelf
+        for group_id in range(10):
+            await _finalize(buffer, group_id)
+        for _ in range(4):
+            await buffer.take_finalized(consuming_policy_version=0)
+        await buffer.record_step_start(trainer_policy_version=1)
+        metrics = {metric.key: metric.value.value for metric in buffer.metrics()}
+        assert metrics["rollout_buffer/ready_at_step_start"] == 6
+        assert metrics["rollout_buffer/generating_at_step_start"] == 2
+        assert metrics["rollout_buffer/unavailable_at_step_start"] == 9
+        # unavailable 15 - 6 = 9; history [12, 9] -> mean 10.5 + 4.46 x 2.12 -> 20 -> needed 25; ceiling
+        # 4 x 4 + 4 + mean(12, 2) x (1 - 10 / 10) = 20 -> capped at 20 -> half the gap: 15 + 3
+        assert metrics["rollout_buffer/demand_target_groups"] == 18
+        assert metrics["rollout_buffer/demand_age_limited"] == 1
+
+    asyncio.run(run())
+
+
+def test_adaptive_buffer_target_offpolicy_steps_caps_demand() -> None:
+    # P=4, target 5 of max 10: the ceiling is 5 x 4 + 4 + generating x untrainable share
+    buffer = AdaptiveRolloutGroupWorkBuffer.Config(
+        max_offpolicy_steps=10, generation_capacity=40, target_offpolicy_steps=5
+    ).build(num_prompts_per_train_step=4)
+    assert _buffer_metric(buffer, "rollout_buffer/demand_target_groups") == 12
+
+    async def run() -> None:
+        for _ in range(12):
+            # nothing generating, nothing completed
+            await buffer.record_step_start(trainer_policy_version=0)
+        # nothing generating and no completions: ceiling 20 + 4 + 0 = 24, however short the shelf
+        assert _buffer_metric(buffer, "rollout_buffer/demand_target_groups") == 24
+        assert _buffer_metric(buffer, "rollout_buffer/demand_age_limited") == 1
+
+    asyncio.run(run())
+    with pytest.raises(ValueError, match="target_offpolicy_steps"):
+        AdaptiveRolloutGroupWorkBuffer.Config(
+            generation_capacity=40, target_offpolicy_steps=0
+        )
+    with pytest.raises(ValueError, match="target_offpolicy_steps"):
+        AdaptiveRolloutGroupWorkBuffer.Config(
+            max_offpolicy_steps=4, generation_capacity=40, target_offpolicy_steps=5
+        )
+
+
+def test_adaptive_buffer_demand_stays_under_the_mean_age_ceiling() -> None:
+    async def run() -> None:
+        buffer = _adaptive_buffer(
+            num_prompts=2, max_offpolicy_steps=1, generation_capacity=4
+        )
+        for group_id in range(4):
+            await _admit(buffer, group_id)
+        for _ in range(4):
+            await buffer.claim_next()
+        for _ in range(10):
+            await buffer.record_step_start(trainer_policy_version=0)
+        # nothing has completed, so every generating group counts as untrainable: ceiling 1 x 2 + 2 + 4 x 1.0 = 8
+        assert _buffer_metric(buffer, "rollout_buffer/demand_target_groups") == 8
+        # demand has room, generation does not
+        waiter = asyncio.create_task(buffer.wait_for_slot())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        await buffer.close()
+        assert await waiter is False
+
+    asyncio.run(run())
+
+
+def test_adaptive_buffer_does_not_queue_ahead_of_generation() -> None:
+    async def run() -> None:
+        buffer = _adaptive_buffer(num_prompts=2, generation_capacity=2)
+        await _admit(buffer, 0)
+        await _admit(buffer, 1)
+        await buffer.claim_next()
+        await buffer.claim_next()
+
+        third_slot = asyncio.create_task(buffer.wait_for_slot())
+        await asyncio.sleep(0)
+        assert not third_slot.done()
+
+        # Finalization releases a generation permit without releasing the
+        # group's active demand slot.
+        await _finalize(buffer, 0)
+        assert await third_slot
+        assert (
+            _buffer_metric(buffer, "rollout_buffer/available_generation_permits") == 1
+        )
+        await buffer.close()
+
+    asyncio.run(run())
+
+
+def test_adaptive_buffer_admits_a_granted_slot_after_the_demand_drops() -> None:
+    async def run() -> None:
+        # P=2: demand 6. Five groups finished and none trained: a full shelf.
+        buffer = _adaptive_buffer(num_prompts=2, generation_capacity=8)
+        for group_id in range(5):
+            await _admit(buffer, group_id)
+            await buffer.claim_next()
+            await _finalize(buffer, group_id)
+        assert await buffer.wait_for_slot()
+
+        # While the data input loop reads the sample, a step start lowers the demand:
+        # unavailable 6 - 5 = 1 -> needed 2 + 1 + 1 = 4 -> one group down to 5, which the 5 groups fill.
+        await buffer.record_step_start(trainer_policy_version=0)
+        assert _buffer_metric(buffer, "rollout_buffer/demand_target_groups") == 5
+        # The granted slot is still admitted; the next one waits.
+        await buffer.add_work(RolloutGroupWork(group_id=5, sample=object()))
+        assert _buffer_metric(buffer, "rollout_buffer/active_slots_in_use_peak") == 6
+        waiter = asyncio.create_task(buffer.wait_for_slot())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        await buffer.close()
+
+    asyncio.run(run())
+
+
+def test_batcher_passes_the_version_that_trains_each_group() -> None:
+    """Batches train in order, one per version, so the batch a group joins sets its consuming version."""
+    # Groups 0, 2, 3, 4 are trainable; group 1 is not and joins no batch's count.
+    trainable = {0: True, 1: False, 2: True, 3: True, 4: True}
+    consuming_policy_versions = []
+
+    class _Buffer:
+        async def take_finalized(self, *, consuming_policy_version):
+            consuming_policy_versions.append(consuming_policy_version)
+            group_id = len(consuming_policy_versions) - 1
+            if group_id == len(trainable):
+                return None
+            return RolloutGroup(group_id=group_id, rollouts=[])
+
+        async def release_active_groups(self, count, *, reason):
+            assert reason == "untrainable_group"
+
+    trainable_seen = []
+
+    async def add_group(*, rollout_group):
+        # A batch of 2 trainable groups, as the batcher actor returns it.
+        if not trainable[rollout_group.group_id]:
+            return None, False
+        trainable_seen.append(rollout_group.group_id)
+        return ("batch" if len(trainable_seen) % 2 == 0 else None), True
+
+    controller = SimpleNamespace(
+        start_step=5,
+        _group_buffer=_Buffer(),
+        batcher=SimpleNamespace(add_group=SimpleNamespace(call_one=add_group)),
+    )
+    queue: asyncio.Queue = asyncio.Queue()
+    asyncio.run(Controller._batcher_loop(controller, training_batch_queue=queue))
+    # [0, 1, 2] trains at version 5, [3, 4] at 6; the last call returns None
+    assert consuming_policy_versions == [5, 5, 5, 6, 6, 7]
+    assert queue.qsize() == 3  # two batches and the None sentinel
+
+
+def test_generation_capacity_default_follows_target_offpolicy_steps() -> None:
+    config = AdaptiveRolloutGroupWorkBuffer.Config(
+        max_offpolicy_steps=10, target_offpolicy_steps=6
+    )
+    # 2 x (6 + 1) versions x 48 prompts: room for up to half the groups being untrainable.
+    assert config.resolve_generation_capacity(48) == 672
+    loop = AsyncLoopConfig(num_prompts_per_train_step=48, group_buffer=config)
+    assert loop.max_concurrent_rollout_groups == 672
+    buffer = config.build(num_prompts_per_train_step=48)
+    assert _buffer_metric(buffer, "rollout_buffer/generation_capacity_groups") == 672
+
+
+def test_generation_capacity_default_without_target_fills_vllm() -> None:
+    config = AdaptiveRolloutGroupWorkBuffer.Config(max_offpolicy_steps=10)
+    # 512 sequences x 24 generator DP shards / 16 samples per prompt
+    assert (
+        config.resolve_generation_capacity(
+            48, num_generator_dp_shards=24, num_samples_per_prompt=16
+        )
+        == 768
+    )
+    loop = AsyncLoopConfig(
+        num_prompts_per_train_step=48, num_samples_per_prompt=16, group_buffer=config
+    )
+    assert loop.resolve_max_concurrent_rollout_groups(num_generator_dp_shards=12) == 384
+    # Without the generator layout the default can't be computed.
+    with pytest.raises(ValueError, match="needs num_generator_dp_shards"):
+        loop.max_concurrent_rollout_groups
+
+
+def test_generation_capacity_explicit_overrides_default() -> None:
+    explicit = AdaptiveRolloutGroupWorkBuffer.Config(
+        max_offpolicy_steps=12, target_offpolicy_steps=6, generation_capacity=96
+    )
+    assert explicit.resolve_generation_capacity(16) == 96
+    assert (
+        explicit.resolve_generation_capacity(
+            16, num_generator_dp_shards=24, num_samples_per_prompt=16
+        )
+        == 96
+    )
+
+
+def test_adaptive_buffer_warns_once_when_generation_capacity_caps_demand(
+    caplog,
+) -> None:
+    # Demand starts at 3 batches (24 groups), above the capacity of 10.
+    buffer = _adaptive_buffer(num_prompts=8, generation_capacity=10)
+
+    async def run() -> None:
+        with caplog.at_level(logging.WARNING):
+            await buffer.record_step_start(trainer_policy_version=0)
+            await buffer.record_step_start(trainer_policy_version=1)
+
+    asyncio.run(run())
+    warnings = [r for r in caplog.records if "> generation_capacity 10" in r.message]
+    assert len(warnings) == 1
+
+
+def _validation_rollout(versions: list[tuple[int, int]]) -> Rollout:
+    """One rollout with a turn per `(min_policy_version, max_policy_version)`."""
+    return Rollout(
+        group_id=-1,
+        rollout_id=0,
+        status=RolloutStatus.COMPLETED,
+        reward=1.0,
+        turns=[
+            RolloutTurn(
+                rollout_id=RolloutTurnID(group_id=-1, rollout_id=0, turn_id=turn_id),
+                prompt_prefix_len=0,
+                prompt_delta_token_ids=np.array([1], dtype=np.int32),
+                completion_token_ids=np.array([2], dtype=np.int32),
+                completion_logprobs=np.array([-0.1], dtype=np.float32),
+                min_policy_version=min_version,
+                max_policy_version=max_version,
+            )
+            for turn_id, (min_version, max_version) in enumerate(versions)
+        ],
+    )
+
+
+def test_validation_logs_the_policies_its_rollouts_sampled() -> None:
+    """A weight sync during a rollout shows as a newer max version and a mixed-policy rollout."""
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(validation=ValidationConfig())
+    )
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+    controller._rollouter = SimpleNamespace(
+        run_group_rollouts=AsyncMock(
+            side_effect=[
+                # A sync to policy 27 landed during the second turn.
+                RolloutGroup(
+                    group_id=-1,
+                    rollouts=[_validation_rollout([(25, 25), (25, 27)])],
+                ),
+                RolloutGroup(group_id=-2, rollouts=[_validation_rollout([(25, 25)])]),
+            ]
+        ),
+    )
+
+    _, metrics = asyncio.run(
+        controller._collect_validation_rollouts(
+            samples=["prompt", "prompt"], sampling=SamplingConfig(), step=25
+        )
+    )
+
+    reduced = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert reduced["validation/min_policy_version/min"] == 25
+    assert reduced["validation/max_policy_version/max"] == 27
+    assert reduced["validation/mixed_policy_rollouts/mean"] == 0.5
+
+
+@pytest.mark.parametrize(
+    "overlapped, group_ids", [(False, [-1, -2]), (True, [-1_000_000, -1_000_001])]
+)
+def test_overlapped_validation_uses_lowest_priority_group_ids(
+    overlapped, group_ids
+) -> None:
+    """A pass beside training runs and releases ids at or below -1_000_000, which `vllm_priority`
+    puts after training; a pass training waits for keeps -1, -2, ..."""
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(validation=ValidationConfig())
+    )
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+    controller._rollouter = SimpleNamespace(
+        run_group_rollouts=AsyncMock(
+            side_effect=lambda *, group_id, **kwargs: RolloutGroup(
+                group_id=group_id, rollouts=[]
+            )
+        ),
+    )
+
+    asyncio.run(
+        controller._collect_validation_rollouts(
+            samples=["prompt", "prompt"],
+            sampling=SamplingConfig(),
+            step=3,
+            overlapped=overlapped,
+        )
+    )
+
+    run_group_ids = [
+        call.kwargs["group_id"]
+        for call in controller._rollouter.run_group_rollouts.call_args_list
+    ]
+    assert run_group_ids == group_ids
+    controller.generator_router.release_groups.call_one.assert_awaited_once_with(
+        group_ids
+    )
+
+
+class _FakeValidation:
+    """Stands in for `Controller.validate`: each pass runs until the test ends it."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, int]] = []
+        self.overlapped: dict[int, bool] = {}
+        self._end_events: dict[int, asyncio.Event] = {}
+        self._errors: dict[int, Exception] = {}
+
+    @property
+    def started_steps(self) -> list[int]:
+        return [step for event, step in self.events if event == "start"]
+
+    async def __call__(self, *, step: int, overlapped: bool = False) -> list[m.Metric]:
+        self.events.append(("start", step))
+        self.overlapped[step] = overlapped
+        await self._end_event(step).wait()
+        self.events.append(("end", step))
+        if step in self._errors:
+            raise self._errors[step]
+        return [m.Metric("validation_reward", m.Mean(float(step)))]
+
+    def end(self, step: int, error: Exception | None = None) -> None:
+        if error is not None:
+            self._errors[step] = error
+        self._end_event(step).set()
+
+    def _end_event(self, step: int) -> asyncio.Event:
+        return self._end_events.setdefault(step, asyncio.Event())
+
+
+def _controller_for_validation(
+    validation: ValidationConfig, *, events: list[str] | None = None, on_pull=None
+) -> tuple[Controller, _FakeValidation]:
+    """`test_trainer_loop`'s fake controller, plus `validation`, a fake `validate` and a `Mock`
+    metrics processor that records each `log` and `commit`."""
+    controller = _controller([] if events is None else events, on_pull=on_pull)
+    controller.config.async_loop.validation = validation
+    controller.metrics_processor = Mock()
+    controller._validation_task = None
+    controller._extra_validation_tasks = {}
+    controller._extra_validation_requested = set()
+    fake_validation = _FakeValidation()
+    controller.validate = fake_validation
+    return controller, fake_validation
+
+
+def _training_batch(step: int) -> SimpleNamespace:
+    """Stands in for the `TrainerStepBatch` that `step` trains on."""
+    return SimpleNamespace(
+        metrics=[],
+        min_policy_versions=[step - 1],
+        microbatches=[],
+        global_loss_token_counts=[1],
+        global_routing_token_counts=None,
+        group_ids=[step],
+    )
+
+
+def _logged_steps(controller: Controller, *, is_validation: bool) -> list[int]:
+    return [
+        call.kwargs["step"]
+        for call in controller.metrics_processor.log.call_args_list
+        if call.kwargs["is_validation"] == is_validation
+    ]
+
+
+def _validation_logs(controller: Controller) -> list[tuple[int, list[str]]]:
+    """`(step, metric keys)` of each validation log."""
+    return [
+        (call.kwargs["step"], [metric.key for metric in call.kwargs["metrics"]])
+        for call in controller.metrics_processor.log.call_args_list
+        if call.kwargs["is_validation"]
+    ]
+
+
+async def _run_until(condition) -> None:
+    """Let other tasks run until `condition()` holds (up to ~5 s: the trainer loop also awaits
+    worker threads, so a fixed count of event-loop ticks is not enough)."""
+    for _ in range(5000):
+        if condition():
+            return
+        await asyncio.sleep(0.001)
+    raise AssertionError("condition never held")
+
+
+async def _train(controller: Controller, queue: asyncio.Queue, step: int) -> None:
+    """Hand `_trainer_loop` the batch for `step` and wait until it logs that step."""
+    await queue.put(_training_batch(step))
+    await _run_until(lambda: step in _logged_steps(controller, is_validation=False))
+
+
+def test_overlapped_validation_runs_beside_training() -> None:
+    """Training keeps stepping while a pass runs; the pass is logged at the step it ends, and a
+    validation step that comes meanwhile starts the next pass once it ends."""
+    events: list[str] = []
+    pulls_may_end = asyncio.Event()
+    controller, validation = _controller_for_validation(
+        ValidationConfig(freq=2, overlap_training=True),
+        events=events,
+        on_pull=pulls_may_end.wait,
+    )
+
+    async def run() -> None:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        trainer = asyncio.create_task(
+            controller._trainer_loop(queue, num_training_steps=6)
+        )
+
+        pulls_may_end.set()
+        await _train(controller, queue, 1)
+        # Step 1's pull has ended.
+        await _run_until(lambda: "release 5 trained" in events)
+        # Hold step 2's pull: the pass must not start before it ends.
+        pulls_may_end.clear()
+        await _train(controller, queue, 2)
+        await _run_until(lambda: "pull 2" in events)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert validation.started_steps == []
+        pulls_may_end.set()
+        await _run_until(lambda: validation.started_steps == [2])
+
+        # Steps 3 and 4 train while the step-2 pass runs; step 4's pass waits for it.
+        await _train(controller, queue, 3)
+        await _train(controller, queue, 4)
+        assert validation.started_steps == [2]
+        assert _logged_steps(controller, is_validation=True) == []
+
+        validation.end(2)
+        await _run_until(lambda: controller._validation_task.done())
+        await _train(controller, queue, 5)
+        assert _logged_steps(controller, is_validation=True) == [5]
+        await _run_until(lambda: validation.started_steps == [2, 5])
+
+        await _train(controller, queue, 6)
+        await asyncio.wait_for(trainer, timeout=5)
+        # Step 6 is the last step: no pass starts there. run() awaits the running one.
+        assert validation.started_steps == [2, 5]
+        assert not controller._validation_task.done()
+        validation.end(5)
+        await controller._validation_task
+
+    asyncio.run(run())
+    # The pass logged at step 5 joins row 5: the commit that pushes row 5 comes after it.
+    calls = [
+        (name, kwargs.get("step"), kwargs.get("is_validation"))
+        for name, _, kwargs in controller.metrics_processor.mock_calls
+        if name in ("log", "commit")
+    ]
+    validation_log = calls.index(("log", 5, True))
+    assert ("commit", None, None) not in calls[
+        calls.index(("log", 5, False)) : validation_log
+    ]
+    assert calls[validation_log + 1][0] == "commit"
+
+
+def test_overlapped_validation_failure_does_not_stop_training(caplog) -> None:
+    """A pass that raises logs its error and `validation/pass_failures` at the step it ends; training
+    goes on, and so do the next passes."""
+    controller, validation = _controller_for_validation(
+        ValidationConfig(freq=1, overlap_training=True)
+    )
+
+    async def run() -> None:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        trainer = asyncio.create_task(
+            controller._trainer_loop(queue, num_training_steps=3)
+        )
+        await _train(controller, queue, 1)
+        await _run_until(lambda: validation.started_steps == [1])
+        validation.end(1, error=RuntimeError("generator died"))
+        await _run_until(lambda: controller._validation_task.done())
+        await _train(controller, queue, 2)
+        await queue.put(_training_batch(3))
+        await asyncio.wait_for(trainer, timeout=5)
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(run())
+    assert _logged_steps(controller, is_validation=False) == [1, 2, 3]
+    assert validation.started_steps == [1, 2]
+    assert _validation_logs(controller) == [(2, ["validation/pass_failures"])]
+    assert "validation_step_1 failed" in caplog.text
+
+
+def test_blocking_validation_failure_stops_training() -> None:
+    """Unlike a pass beside training, a pass that training waits for fails the run."""
+    controller, validation = _controller_for_validation(ValidationConfig(freq=1))
+    validation.end(1, error=RuntimeError("generator died"))
+
+    async def run() -> None:
+        queue: asyncio.Queue = asyncio.Queue()
+        for step in (1, 2):
+            queue.put_nowait(_training_batch(step))
+        await controller._trainer_loop(queue, num_training_steps=2)
+
+    with pytest.raises(RuntimeError, match="generator died"):
+        asyncio.run(run())
+
+
+def test_overlapped_validation_starts_no_pass_at_the_last_step() -> None:
+    """A pass asked for while another runs does not start at the last step; the final pass
+    after training covers it. The last step leaves a finished pass for run() to log."""
+    controller, validation = _controller_for_validation(
+        ValidationConfig(freq=1, overlap_training=True)
+    )
+
+    async def run() -> None:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        trainer = asyncio.create_task(
+            controller._trainer_loop(queue, num_training_steps=3)
+        )
+        await _train(controller, queue, 1)
+        await _run_until(lambda: validation.started_steps == [1])
+        # Step 2 asks for a pass while step 1's runs.
+        await _train(controller, queue, 2)
+        validation.end(1)
+        await _run_until(lambda: controller._validation_task.done())
+        await queue.put(_training_batch(3))
+        await asyncio.wait_for(trainer, timeout=5)
+
+    asyncio.run(run())
+    # Step 3 started no pass and left step 1's for run().
+    assert validation.started_steps == [1]
+    assert _logged_steps(controller, is_validation=True) == []
+    assert controller._validation_task.done()
+
+
+def test_validation_pauses_training_by_default() -> None:
+    controller, validation = _controller_for_validation(ValidationConfig(freq=2))
+
+    async def run() -> None:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        trainer = asyncio.create_task(
+            controller._trainer_loop(queue, num_training_steps=3)
+        )
+        await queue.put(_training_batch(1))
+        await queue.put(_training_batch(2))
+        await _run_until(lambda: validation.started_steps == [2])
+
+        await queue.put(_training_batch(3))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert _logged_steps(controller, is_validation=False) == [1, 2]
+
+        validation.end(2)
+        await asyncio.wait_for(trainer, timeout=5)
+        assert _logged_steps(controller, is_validation=False) == [1, 2, 3]
+        assert _logged_steps(controller, is_validation=True) == [2]
+
+    asyncio.run(run())
+
+
+def _controller_for_run() -> tuple[Controller, _FakeValidation]:
+    """A `Controller` whose `run()` runs 4 steps with overlapped validation on fakes. Every loop but
+    `_trainer_loop` blocks; each test sets `_trainer_loop`."""
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=AsyncLoopConfig(
+            num_training_steps=4,
+            validation=ValidationConfig(overlap_training=True),
+        ),
+        trainer=SimpleNamespace(
+            training=SimpleNamespace(
+                num_tokens_per_microbatch_per_dp_rank=64, max_context_length=64
+            )
+        ),
+    )
+    controller.start_step = 0
+    controller.trainer = Mock()
+    controller.generator_router = SimpleNamespace(
+        wait_engine_loop=SimpleNamespace(call_one=_block_forever)
+    )
+    controller.trainer_dp_degree = 1
+    controller.tokenizer = SimpleNamespace(eos_id=0)
+    controller._sampling = SamplingConfig()
+    controller.metrics_processor = Mock()
+    controller._log_reward_delta = Mock()
+    controller._validation_task = None
+    controller._extra_validation_tasks = {}
+    controller._extra_validation_requested = set()
+    validation = _FakeValidation()
+    controller.validate = validation
+    controller._data_input_loop = _block_forever
+    controller._rollout_loop = _block_forever
+    controller._batcher_loop = _block_forever
+    return controller, validation
+
+
+@pytest.mark.parametrize(
+    "pass_3_ends_in_training, logged_steps", [(True, [2, 3, 4]), (False, [2, 4, 5])]
+)
+def test_overlapped_validation_before_and_after_training(
+    pass_3_ends_in_training, logged_steps
+) -> None:
+    """The pre-training pass runs while training starts. A pass still running when training
+    ends is awaited and logged at the last step; the final pass then logs one step later."""
+    controller, validation = _controller_for_run()
+
+    # Stands in for `_trainer_loop`'s overlap branch, which the tests above cover.
+    async def trainer_loop(queue, *, num_training_steps: int) -> None:
+        # Training starts while the pre-training pass runs.
+        assert validation.started_steps == [0]
+        assert not controller._validation_task.done()
+        validation.end(0)
+        await _run_until(lambda: controller._validation_task.done())
+        controller._log_finished_validation(step=2)
+        controller._start_validation(step=3)
+        await _run_until(lambda: validation.started_steps == [0, 3])
+        if pass_3_ends_in_training:
+            validation.end(3)
+            await _run_until(lambda: controller._validation_task.done())
+            controller._log_finished_validation(step=3)
+        else:
+            # Training ends with the step-3 pass still running.
+            asyncio.get_running_loop().call_later(0.05, validation.end, 3)
+
+    controller._trainer_loop = trainer_loop
+    validation.end(4)
+    validation.end(5)
+
+    asyncio.run(asyncio.wait_for(controller.run(), timeout=5))
+
+    final_pass_step = logged_steps[-1]
+    assert validation.events == [
+        ("start", 0),
+        ("end", 0),
+        ("start", 3),
+        ("end", 3),
+        ("start", final_pass_step),
+        ("end", final_pass_step),
+    ]
+    assert _logged_steps(controller, is_validation=True) == logged_steps
+    # Only the post-training pass blocks.
+    assert validation.overlapped == {0: True, 3: True, final_pass_step: False}
+    controller._log_reward_delta.assert_called_once_with(
+        {"validation_reward/mean": 0.0},
+        {"validation_reward/mean": float(final_pass_step)},
+    )
+
+
+def test_overlapped_validation_failures_do_not_fail_the_run() -> None:
+    """A failed pre-training pass leaves no pre score; a pass that fails after training logs
+    `validation/pass_failures` at the last step, and the final pass still runs one step later."""
+    controller, validation = _controller_for_run()
+
+    async def trainer_loop(queue, *, num_training_steps: int) -> None:
+        validation.end(0, error=RuntimeError("sandbox died"))
+        await _run_until(lambda: controller._validation_task.done())
+        controller._log_finished_validation(step=2)
+        controller._start_validation(step=3)
+        await _run_until(lambda: validation.started_steps == [0, 3])
+        # Training ends with the step-3 pass still running; it fails afterwards.
+        asyncio.get_running_loop().call_later(
+            0.05, validation.end, 3, RuntimeError("sandbox died")
+        )
+
+    controller._trainer_loop = trainer_loop
+    validation.end(5)
+
+    asyncio.run(asyncio.wait_for(controller.run(), timeout=5))
+
+    assert _validation_logs(controller) == [
+        (2, ["validation/pass_failures"]),
+        (4, ["validation/pass_failures"]),
+        (5, ["validation_reward"]),
+    ]
+    controller._log_reward_delta.assert_called_once_with(
+        {}, {"validation_reward/mean": 5.0}
+    )
+
+
+def test_close_cancels_a_running_pass_before_closing_the_rollouter() -> None:
+    """After a training crash, `close()` cancels the pass and waits for it, then closes the
+    rollouter the pass was using."""
+    controller = object.__new__(Controller)
+    controller.trainer = None
+    controller.generator_router = None
+    controller.metrics_processor = Mock()
+    controller.actor_system = None
+    controller._extra_validation_tasks = {}
+    validation = _FakeValidation()
+    controller.validate = validation
+    pass_done_at_rollouter_close: list[bool] = []
+
+    async def close_rollouter() -> None:
+        pass_done_at_rollouter_close.append(controller._validation_task.done())
+
+    controller._rollouter = SimpleNamespace(close=close_rollouter)
+
+    async def run() -> None:
+        controller._start_validation(step=0)
+        await _run_until(lambda: validation.started_steps == [0])
+        await asyncio.wait_for(controller.close(), timeout=5)
+
+    asyncio.run(run())
+    assert controller._validation_task.cancelled()
+    assert pass_done_at_rollouter_close == [True]
+
+
+@pytest.mark.parametrize(
+    "overlapped, key",
+    [
+        (False, "timing/validation/blocking"),
+        (True, "timing/validation/overlapped"),
+    ],
+)
+def test_validation_wall_time_says_whether_the_pass_blocked(overlapped, key) -> None:
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(validation=ValidationConfig(steps=1))
+    )
+    controller._rollouter = SimpleNamespace(
+        get_validation_samples=lambda steps: ["prompt"]
+    )
+    controller._sampling = SamplingConfig()
+    controller.rollout_recorder = Mock()
+
+    async def collect(*, samples, sampling, step, overlapped):
+        return [], []
+
+    controller._collect_validation_rollouts = collect
+    metrics = asyncio.run(controller.validate(step=5, overlapped=overlapped))
+    assert [metric.key for metric in metrics] == [key]
+
+
+def _scored_group(group_id: int, rewards: list[float]) -> RolloutGroup:
+    return RolloutGroup(
+        group_id=group_id,
+        rollouts=[
+            Rollout(
+                group_id=group_id,
+                rollout_id=rollout_id,
+                status=RolloutStatus.COMPLETED,
+                reward=reward,
+            )
+            for rollout_id, reward in enumerate(rewards)
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "num_samples_per_prompt, rewards, expected_mean, expected_best_of",
+    [
+        (1, [[1.0], [0.0]], 0.5, None),
+        (2, [[1.0, 0.0], [0.0, 0.0]], 0.25, 0.5),
+    ],
+)
+def test_validate_rolls_out_each_prompt_n_times(
+    num_samples_per_prompt: int,
+    rewards: list[list[float]],
+    expected_mean: float,
+    expected_best_of: float | None,
+) -> None:
+    """2 prompts x n rollouts at T=1: the mean covers all rollouts; best_of_n, logged only for
+    n > 1, the best rollout per prompt."""
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(
+            validation=ValidationConfig(
+                steps=2, num_samples_per_prompt=num_samples_per_prompt
+            )
+        )
+    )
+    controller._sampling = SamplingConfig(temperature=0.8, seed=7, stop_token_ids=[1])
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+    controller.rollout_recorder = SimpleNamespace(record=lambda **kwargs: None)
+    run_group_rollouts = AsyncMock(
+        side_effect=[
+            _scored_group(-(i + 1), group_rewards)
+            for i, group_rewards in enumerate(rewards)
+        ]
+    )
+    controller._rollouter = SimpleNamespace(
+        get_validation_samples=lambda steps: ["a", "b"],
+        run_group_rollouts=run_group_rollouts,
+    )
+
+    metrics = asyncio.run(controller.validate(step=0))
+
+    calls = run_group_rollouts.call_args_list
+    assert [call.kwargs["group_size"] for call in calls] == [num_samples_per_prompt] * 2
+    expected_sampling = SamplingConfig(temperature=1.0, seed=7, stop_token_ids=[1])
+    assert [call.kwargs["sampling"] for call in calls] == [expected_sampling] * 2
+    aggregated = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert aggregated["validation_reward/_mean"] == expected_mean
+    best_of_key = f"validation_reward/best_of_{num_samples_per_prompt}/mean"
+    assert aggregated.get(best_of_key) == expected_best_of
+
+
+def test_validation_config_rejects_bad_sampling() -> None:
+    with pytest.raises(ValueError, match="temperature"):
+        ValidationConfig(temperature=-1.0)
+    with pytest.raises(ValueError, match="num_samples_per_prompt"):
+        ValidationConfig(num_samples_per_prompt=0)
+    with pytest.raises(ValueError, match="greedy"):
+        ValidationConfig(temperature=0.0, num_samples_per_prompt=4)
