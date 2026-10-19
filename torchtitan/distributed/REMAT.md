@@ -23,7 +23,8 @@ applied to every transformer block with `config.apply(model)`:
   those matching `recompute_regions`, and recomputes everything else.
 - `FullActivationRematConfig` is a fixed policy with `save_regions=[]`. It
   recomputes every block operation except the regions model code always
-  retains with `recompute=False`, such as routing decisions and trailing adds.
+  retains with `recompute=False`, such as routing decisions, trailing adds,
+  and the token-dispatcher combines.
 - `DefaultActivationRematConfig` is the trainer's default policy:
   `save_regions=["*"]` and `recompute_regions=["*routed_experts.w13.*"]`.
   Its regions may change as measurements improve; use `ActivationRematConfig`
@@ -288,16 +289,21 @@ communication regions:
 
 - Routed-expert `w13` and `w2` grouped projections (`w13.grouped_mm`,
   `w2.grouped_mm`).
-- Token-dispatcher `dispatch` and `combine`. With the all-to-all dispatcher
-  (EP > 1), each is one region: `dispatch` covers expert sorting, the
-  token-count exchange and its device-to-host sync, the dispatch all-to-all
-  and the expert-major permute; `combine` covers the unpermute, the combine
-  all-to-all and the score-weighted scatter-add. The DeepEP and HybridEP
-  dispatchers instead declare `ep_communication.dispatch` and
-  `ep_communication.combine` around their kernels. DeepEP saves or replays
-  both together, following `ep_communication`. A replay must receive tokens
-  in the forward's order, so DeepEP then uses a deterministic buffer, which
-  adds a sort to every dispatch. `FullActivationRematConfig` replays them.
+- Token-dispatcher `dispatch` and `combine`. The combine is always saved
+  (never replayed), like the DeepEP combine: its region covers the unpermute,
+  the combine all-to-all (with EP > 1) and the score-weighted scatter-add,
+  so the `w2` output is read only by that saved body and no bare consumer on
+  the replay path needs it pinned. Saving it retains only the small
+  permutation indices and scores, so replaying it would re-run the combine
+  all-to-all without freeing anything. The `dispatch` region covers expert
+  sorting, the token-count exchange and its device-to-host sync, the dispatch
+  all-to-all and the expert-major permute, and follows the remat policy. The
+  DeepEP and HybridEP dispatchers instead declare
+  `ep_communication.dispatch` and `ep_communication.combine` around their
+  kernels; only the dispatch region follows the policy there. A DeepEP
+  replay must receive tokens in the forward's order, so DeepEP then uses a
+  deterministic buffer, which adds a sort to every dispatch.
+  `FullActivationRematConfig` replays the dispatch communication.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.
@@ -312,7 +318,6 @@ ActivationRematConfig(
         "moe.routed_experts.w13.grouped_mm",
         "moe.routed_experts.w2.grouped_mm",
         "moe.routed_experts.token_dispatcher.dispatch",
-        "moe.routed_experts.token_dispatcher.combine",
         "moe.shared_experts.*",
         "moe.tp_output_reduction",
     ]
@@ -320,7 +325,9 @@ ActivationRematConfig(
 ```
 
 Without EP there is no communication to save, so the local expert ordering
-and the score-weighted scatter-add are ordinary operations. Operations outside
+stays an ordinary recomputed operation; the local score-weighted
+scatter-add runs as the always-saved `token_dispatcher.combine` region, so
+the `w2` output needs no persistence marker. Operations outside
 these regions, including token-shard zero-fill and branch addition, are
 recomputed. Routing decisions are retained separately to keep expert selection
 identical during replay.
