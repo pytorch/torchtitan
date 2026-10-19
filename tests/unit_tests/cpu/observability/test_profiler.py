@@ -7,6 +7,8 @@
 import unittest
 from unittest import mock
 
+import torch
+
 from torchtitan.observability.profiler import Profiler
 
 
@@ -24,6 +26,7 @@ class TestProfilerConfig(unittest.TestCase):
         self.assertFalse(cfg.enable_memory_snapshot)
         self.assertEqual(cfg.save_memory_snapshot_folder, "profiling/memory_snapshot")
         self.assertIsNone(cfg.memory_snapshot_freq)
+        self.assertIsNone(cfg.profile_ranks)
 
     def test_custom_field_values(self):
         cfg = Profiler.Config(
@@ -203,6 +206,120 @@ class TestProfilerEnabledPaths(unittest.TestCase):
             ],
         )
         self.assertTrue(profile.call_args.kwargs["with_stack"])
+
+    def test_profile_ranks_none_profiles_every_rank(self):
+        """The default (None) keeps every rank profiling."""
+        import tempfile
+
+        for rank in (0, 7):
+            with mock.patch("torch.distributed.get_rank", return_value=rank):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    profiler = Profiler(
+                        Profiler.Config(
+                            enable_profiling=True,
+                            profile_freq=4,
+                            profiler_warmup=1,
+                            profiler_active=1,
+                        ),
+                        global_step=0,
+                        base_folder=tmpdir,
+                    )
+                    with profiler:
+                        self.assertIsNotNone(profiler.torch_profiler)
+
+    def test_profile_ranks_selects_listed_ranks(self):
+        """A rank in profile_ranks still builds a profiler."""
+        import tempfile
+
+        with mock.patch("torch.distributed.get_rank", return_value=3):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                profiler = Profiler(
+                    Profiler.Config(
+                        enable_profiling=True,
+                        profile_freq=4,
+                        profiler_warmup=1,
+                        profiler_active=1,
+                        profile_ranks=[0, 3],
+                    ),
+                    global_step=0,
+                    base_folder=tmpdir,
+                )
+                with profiler:
+                    self.assertIsNotNone(profiler.torch_profiler)
+
+    def test_profile_ranks_unlisted_rank_still_traces(self):
+        """An unlisted rank still traces, so profiling cost stays balanced,
+        but does not create the trace directory."""
+        import os
+        import tempfile
+
+        with mock.patch("torch.distributed.get_rank", return_value=5):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                profiler = Profiler(
+                    Profiler.Config(
+                        enable_profiling=True,
+                        profile_freq=4,
+                        profiler_warmup=1,
+                        profiler_active=1,
+                        profile_ranks=[0],
+                    ),
+                    global_step=0,
+                    base_folder=tmpdir,
+                )
+                with profiler:
+                    self.assertIsNotNone(profiler.torch_profiler)
+                    self.assertEqual(os.listdir(tmpdir), [])
+
+    def _run_export(self, rank, profile_ranks, tmpdir):
+        """Step a profiler through one active window so its trace is exported."""
+        with mock.patch("torch.distributed.get_rank", return_value=rank):
+            profiler = Profiler(
+                Profiler.Config(
+                    enable_profiling=True,
+                    profile_freq=3,
+                    profiler_warmup=1,
+                    profiler_active=1,
+                    profile_ranks=profile_ranks,
+                ),
+                global_step=0,
+                base_folder=tmpdir,
+            )
+            with profiler:
+                for _ in range(3):
+                    torch.ones(4).add_(1)
+                    profiler.step()
+
+    def test_profile_ranks_listed_rank_saves_gzipped_trace(self):
+        """A listed rank writes a readable gzipped chrome trace."""
+        import glob
+        import gzip
+        import json
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._run_export(rank=3, profile_ranks=[0, 3], tmpdir=tmpdir)
+            files = glob.glob(
+                os.path.join(tmpdir, "profiling/traces/*/rank3_trace.json.gz")
+            )
+            self.assertEqual(len(files), 1)
+            with gzip.open(files[0], "rt") as f:
+                self.assertIn("traceEvents", json.load(f))
+
+    def test_profile_ranks_unlisted_rank_gzips_to_devnull(self):
+        """An unlisted rank pays the same export and gzip cost, writing the
+        result to os.devnull and leaving nothing on disk."""
+        import gzip
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch(
+                "torchtitan.observability.profiler.gzip.open", wraps=gzip.open
+            ) as gzip_open:
+                self._run_export(rank=5, profile_ranks=[0], tmpdir=tmpdir)
+            gzip_open.assert_called_once_with(os.devnull, "wb")
+            self.assertEqual(os.listdir(tmpdir), [])
 
     def test_memory_snapshot_frequency_is_independent(self):
         import tempfile
