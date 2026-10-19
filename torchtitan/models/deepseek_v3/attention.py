@@ -166,10 +166,15 @@ class DeepSeekMLAAttention(Attention):
     # With RoPE in real arithmetic under compile, Inductor's default pointwise-cat
     # lowering turns the q_nope/q_pe concat into masked loads, which are slower than
     # a plain cat kernel.
+    # No pointwise autotuning, as in ComplexRoPE.forward: RoPE is inlined here, so this region's options apply.
     @local_compile(
         "mla_qk",
         batch_invariant=True,
-        options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
+        options={
+            "max_pointwise_cat_inputs": 0,
+            "max_complex_pointwise_cat_inputs": 0,
+            "triton.autotune_pointwise": False,
+        },
     )
     def _apply_rope_to_q_and_k_pe(
         self,
