@@ -18,6 +18,7 @@ from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.rl.generator.vllm.linear_attention import (
     TorchTitanLinearAttentionBackend,
 )
@@ -49,9 +50,13 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
             self.decode_dispatcher.initialize_cudagraph_keys(
                 CUDAGraphMode.FULL_DECODE_ONLY, uniform_decode_query_len
             )
+            self.max_decode_capture_size = 0
             for mode, descriptors in self.decode_dispatcher.get_capture_descs():
                 for descriptor in descriptors:
                     self.add_cudagraph_key(mode, descriptor)
+                    self.max_decode_capture_size = max(
+                        self.max_decode_capture_size, descriptor.num_tokens
+                    )
 
     def dispatch(
         self,
@@ -63,10 +68,20 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
         invalid_modes: Set[CUDAGraphMode] | None = None,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         dispatch = super().dispatch
+        # Decode batches above the largest decode graph replay the mixed graph:
+        # - DP>1: vLLM pads a decoding (or idle) rank to the busiest rank's token count and
+        #   allows only FULL, so the decode dispatcher fails "No matching cudagraph found".
+        # - Capture sizes that skip max_num_seqs leave a gap; eager there makes all DP ranks eager.
+        # Batch-invariant runs keep them eager on the decode kernels (see the TODO in
+        # linear_attention.py).
         if (
             self.keys_initialized
             and self.cudagraph_mode == CUDAGraphMode.FULL
             and uniform_decode
+            and (
+                num_tokens <= self.max_decode_capture_size
+                or is_in_batch_invariant_mode()
+            )
         ):
             dispatch = self.decode_dispatcher.dispatch
         return dispatch(

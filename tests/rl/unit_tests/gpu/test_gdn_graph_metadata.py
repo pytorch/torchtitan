@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 import torch
 
-from torchtitan.rl.generator.vllm import gdn
+from torchtitan.rl.generator.vllm import gdn, linear_attention, worker
 from torchtitan.rl.generator.vllm.linear_attention import (
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionMetadata,
@@ -24,7 +24,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import ForwardContext, override_forward_context
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -70,6 +70,52 @@ def test_gdn_supports_eager_and_full_decode_only_modes(graph_mode):
     assert (decode_mode, prefill_mode) == (expected_decode, CUDAGraphMode.NONE)
 
 
+@pytest.mark.parametrize(
+    "data_parallel_size,batch_invariant,expected",
+    [
+        (2, False, AttentionCGSupport.ALWAYS),
+        (2, True, AttentionCGSupport.UNIFORM_BATCH),
+        (1, True, AttentionCGSupport.ALWAYS),
+    ],
+)
+def test_dp_support_level(monkeypatch, data_parallel_size, batch_invariant, expected):
+    config = VllmConfig()
+    config.parallel_config.data_parallel_size = data_parallel_size
+    monkeypatch.setattr(
+        linear_attention, "is_in_batch_invariant_mode", lambda: batch_invariant
+    )
+    support = TorchTitanLinearAttentionMetadataBuilder.get_cudagraph_support(
+        config, None
+    )
+    assert support == expected
+
+
+def test_decode_batches_without_decode_graph_replay_mixed_graph(monkeypatch):
+    config = VllmConfig()
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_capture_sizes=[1, 2, 8],
+        max_cudagraph_capture_size=8,
+        cudagraph_num_of_warmups=1,
+    )
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=16,
+        max_num_seqs=4,
+        max_num_batched_tokens=8,
+        is_encoder_decoder=False,
+    )
+    dispatcher = TorchTitanCudagraphDispatcher(config)
+    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+    mixed = dispatcher.dispatch(8)
+    assert mixed[0] == CUDAGraphMode.FULL and not mixed[1].uniform
+    # 3 decodes fall between capture sizes 2 and 8.
+    assert dispatcher.dispatch(3, uniform_decode=True) == mixed
+    # Batch-invariant runs keep gap batches eager on the decode kernels.
+    monkeypatch.setattr(worker, "is_in_batch_invariant_mode", lambda: True)
+    assert dispatcher.dispatch(3, uniform_decode=True)[0] == CUDAGraphMode.NONE
+
+
 def test_full_metadata_and_native_dispatch_variants():
     config = VllmConfig()
     config.compilation_config = CompilationConfig(
@@ -99,6 +145,14 @@ def test_full_metadata_and_native_dispatch_variants():
                 descriptor.num_tokens, uniform_decode=descriptor.uniform
             ) == (mode, descriptor)
     assert dispatcher.dispatch(9)[0] == CUDAGraphMode.NONE
+    # After the DP sync vLLM allows only the agreed mode (FULL); a decoding rank padded
+    # past the largest decode graph (2) must still find a graph: the mixed one.
+    for num_tokens in (1, 2, 4, 8):
+        mode, descriptor = dispatcher.dispatch(
+            num_tokens, uniform_decode=True, valid_modes={CUDAGraphMode.FULL}
+        )
+        assert mode == CUDAGraphMode.FULL
+        assert descriptor.uniform == (num_tokens <= 2)
     assert (
         dispatcher.dispatch(2, uniform_decode=True, valid_modes={CUDAGraphMode.NONE})[0]
         == CUDAGraphMode.NONE
