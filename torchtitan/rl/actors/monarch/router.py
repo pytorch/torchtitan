@@ -74,6 +74,10 @@ class _InterGeneratorRouterActorEndpoints:
         await super().release_groups(group_ids)
 
     @concurrent_endpoint
+    async def get_session_kv_metrics(self) -> list[Any]:
+        return await super().get_session_kv_metrics()
+
+    @concurrent_endpoint
     async def pull_model_state_dict(self, policy_version: int) -> None:
         await super().pull_model_state_dict(policy_version)
 

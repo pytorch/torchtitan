@@ -20,6 +20,7 @@ from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ServiceHandle
 from torchtitan.rl.generator.generation_server import VerifiersGenerationMetadata
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.routing.strategies import (
     RoutingStrategy,
     StickySessionRoutingStrategy,
@@ -135,6 +136,8 @@ class InterGeneratorRouter(Configurable):
             raise ValueError("InterGeneratorRouter requires at least one generator")
 
         self._strategy = config.strategy.build()
+        # `_strategy.num_repins` at the last `get_session_kv_metrics`.
+        self._num_repins_logged = 0
         # Group id -> {generator index: leases its callers hold}. Lets `release_groups` give back
         # leases a caller never released (e.g. its process died mid-call).
         self._leases: dict[int, Counter[int]] = {}
@@ -313,6 +316,25 @@ class InterGeneratorRouter(Configurable):
             for index, num_leases in self._leases.pop(group_id, Counter()).items():
                 self._release(self._generators[index], cost=num_leases)
         await self._fanout("release_groups", group_ids)
+
+    async def get_session_kv_metrics(self) -> list[m.Metric]:
+        """Every generator replica's session-KV metrics, and the sessions re-pinned to another
+        generator since the last call."""
+        per_generator = await self._fanout("get_session_kv_metrics")
+        num_repins = self._strategy.num_repins
+        repinned_sessions = num_repins - self._num_repins_logged
+        self._num_repins_logged = num_repins
+        return [
+            *(
+                metric
+                for per_rank in per_generator
+                for metrics in per_rank.values()
+                for metric in metrics
+            ),
+            m.Metric(
+                "generator/session_kv/repinned_sessions", m.Sum(repinned_sessions)
+            ),
+        ]
 
     async def close_generators(self) -> list[Any | BaseException]:
         """Close every generator, returning each one's result or exception."""

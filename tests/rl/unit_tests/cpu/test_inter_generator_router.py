@@ -15,6 +15,7 @@ from torchtitan.rl.actors.monarch.router import (
 )
 from torchtitan.rl.actors.system import ServiceHandle
 from torchtitan.rl.generator.generation_server import GenerationServer
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
@@ -243,6 +244,7 @@ def test_sticky_session_repins_off_an_overloaded_generator():
         # The move is a re-pin: s0 stays on gen1 once gen0 recovers.
         router._generators[0].reserved_load = 0
         assert await _call(router, "s0") == 1
+        assert router._strategy.num_repins == 1
 
     asyncio.run(_run())
 
@@ -432,3 +434,37 @@ def test_router_actor_exposes_every_public_router_method():
         for name in vars(_InterGeneratorRouterActorEndpoints)
         if not name.startswith("_")
     }
+
+
+def test_session_kv_metrics_gather_every_replica_and_count_repins():
+    async def _run():
+        actors = [_Actor("gen0"), _Actor("gen1")]
+        # One value per rank, as a mesh call returns: gen1 has two DP replicas.
+        for per_rank, actor in zip([{0: [3]}, {0: [5], 1: [7]}], actors):
+            actor.get_session_kv_metrics = _Endpoint(
+                {
+                    rank: [
+                        m.Metric("generator/session_kv/held_sessions", m.Mean(value))
+                        for value in values
+                    ]
+                    for rank, values in per_rank.items()
+                }
+            )
+        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
+        router._strategy.num_repins = 2
+        first = await router.get_session_kv_metrics()
+        second = await router.get_session_kv_metrics()
+        return first, second
+
+    first, second = asyncio.run(_run())
+
+    assert m.MetricsProcessor._aggregate_metrics(first) == {
+        "generator/session_kv/held_sessions/mean": 5.0,
+        "generator/session_kv/repinned_sessions/sum": 2.0,
+    }
+    assert (
+        m.MetricsProcessor._aggregate_metrics(second)[
+            "generator/session_kv/repinned_sessions/sum"
+        ]
+        == 0.0
+    )

@@ -50,6 +50,7 @@ from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
 )
+from torchtitan.rl.observability import metrics as m
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,8 @@ class VLLMEngine(GenerationEngine):
             self._session_kv_holder = config.session_kv_holder.build(
                 scheduler=self._engine.engine_core.engine_core.scheduler
             )
+        # The holder's running totals at the last `session_kv_metrics`.
+        self._session_kv_totals: dict[str, int] = {}
 
     @staticmethod
     def _setup(
@@ -447,6 +450,47 @@ class VLLMEngine(GenerationEngine):
                 self._session_kv_holder.num_sessions,
                 self._session_kv_holder.num_evicted,
             )
+
+    def session_kv_metrics(self) -> list[m.Metric]:
+        """This replica's session-KV metrics: levels now, counts since the last call.
+
+        Example:
+
+            call 1: holder.num_evicted 3, num_sessions 80  ->  evicted_sessions 3, held_sessions 80
+            call 2: holder.num_evicted 5, num_sessions 78  ->  evicted_sessions 2, held_sessions 78
+
+        Levels get Mean and Max over replicas (the typical and the fullest one), counts a Sum.
+        """
+        holder = self._session_kv_holder
+        if holder is None:
+            return []
+        scheduler = self._engine.engine_core.engine_core.scheduler
+        levels = {
+            "gpu_used_fraction": scheduler.kv_cache_manager.usage,
+            "held_sessions": holder.num_sessions,
+        }
+        totals = {
+            "gpu_hit_prefix_tokens": holder.gpu_hit_prefix_tokens,
+            "recomputed_prefix_tokens": holder.recomputed_prefix_tokens,
+            "evicted_sessions": holder.num_evicted,
+            "stall_evicted_sessions": holder.num_stall_evicted,
+        }
+        counts = {
+            key: total - self._session_kv_totals.get(key, 0)
+            for key, total in totals.items()
+        }
+        self._session_kv_totals = totals
+        return [
+            *(
+                m.Metric(f"generator/session_kv/{key}", metric_type(value))
+                for key, value in levels.items()
+                for metric_type in (m.Mean, m.Max)
+            ),
+            *(
+                m.Metric(f"generator/session_kv/{key}", m.Sum(value))
+                for key, value in counts.items()
+            ),
+        ]
 
     def load_prefetched_model_state_dict(self) -> None:
         """Copy the prefetched model state dict from pinned CPU memory into the model, and

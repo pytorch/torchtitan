@@ -191,6 +191,52 @@ def _finished_turn(manager, holder, requests, session: str, tokens: list[int]) -
     holder.after_step()
 
 
+def test_a_later_turn_counts_its_prefix_as_gpu_hit_or_recomputed(manager):
+    """Turn 1 computed 64 tokens in full blocks; the hold keeps its prompt end (48)."""
+    requests = {}
+    holder = _holder(manager, requests)
+    turn1 = _request("t1", list(range(50)))
+    requests["t1"] = turn1
+    holder.track("t1", session_id="s", group_id=0)
+    _prefill(manager, turn1)
+    holder.after_step()
+    for t in range(20):
+        _schedule(manager, turn1, 1, sample=100 + t)
+    manager.free(turn1)
+    del requests["t1"]
+    holder.after_step()
+    # A session's first turn has nothing to reuse.
+    assert holder.gpu_hit_prefix_tokens == holder.recomputed_prefix_tokens == 0
+
+    turn2 = _request("t2", list(turn1.all_token_ids) + [5, 6, 7])
+    requests["t2"] = turn2
+    holder.track("t2", session_id="s", group_id=0)
+    gpu_hit_tokens = _prefill(manager, turn2)
+    # vLLM fills these at the first schedule; `_prefill` stands in for it.
+    turn2.prefill_stats.set(
+        num_prompt_tokens=turn2.num_prompt_tokens,
+        num_local_cached_tokens=gpu_hit_tokens,
+        num_external_cached_tokens=0,
+    )
+    holder.after_step()
+
+    assert gpu_hit_tokens == 48
+    # 64 reusable tokens (4 full blocks), 48 hit: the decode block was recomputed.
+    assert (holder.gpu_hit_prefix_tokens, holder.recomputed_prefix_tokens) == (48, 16)
+
+
+def test_group_release_drops_hashes_of_evicted_sessions(manager):
+    """An evicted session leaves `_group_sessions`; its group's release must still drop its hashes."""
+    requests = {}
+    holder = _holder(manager, requests)
+    _finished_turn(manager, holder, requests, "s", list(range(50)))
+    holder.free_floor_blocks = 10**6
+    holder._evict_until_free()
+    assert "s" not in holder._held and holder.num_evicted == 1
+    holder.release(group_ids=[0])
+    assert holder._session_hashes == {}
+
+
 def test_release_frees_sessions_in_sorted_order(manager):
     """Every TP rank frees a release's sessions in one order; set order depends on the process."""
     requests = {}
@@ -354,3 +400,33 @@ def test_a_waiting_turn_gets_room_when_held_sessions_fill_the_pool(manager, queu
         holder.after_step()
     else:
         pytest.fail("held sessions stalled the engine: the waiting turn never fit")
+
+
+def test_engine_session_kv_counts_are_deltas_since_the_last_call():
+    """Counts (e.g. evictions) cover the time since the previous call; levels are read as is."""
+    from types import SimpleNamespace
+
+    from torchtitan.rl.generator.vllm.engine import VLLMEngine
+
+    holder = SimpleNamespace(
+        num_sessions=80,
+        num_evicted=3,
+        num_stall_evicted=0,
+        gpu_hit_prefix_tokens=0,
+        recomputed_prefix_tokens=0,
+    )
+    engine = object.__new__(VLLMEngine)
+    engine._session_kv_holder = holder
+    engine._session_kv_totals = {}
+    scheduler = SimpleNamespace(kv_cache_manager=SimpleNamespace(usage=0.5))
+    engine._engine = SimpleNamespace(
+        engine_core=SimpleNamespace(engine_core=SimpleNamespace(scheduler=scheduler))
+    )
+
+    def evicted(metrics):
+        [metric] = [x for x in metrics if x.key == "generator/session_kv/evicted_sessions"]
+        return metric.value.value
+
+    assert evicted(engine.session_kv_metrics()) == 3
+    holder.num_evicted = 5
+    assert evicted(engine.session_kv_metrics()) == 2

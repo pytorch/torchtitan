@@ -65,6 +65,11 @@ class IntraGeneratorRouter(Configurable):
         # free the load on the same rank when the request's completion resolves.
         self._reservations: dict[str, int] = {}
 
+    @property
+    def num_repins(self) -> int:
+        """Sessions moved to another DP rank so far (sticky routing; 0 for other strategies)."""
+        return self._strategy.num_repins
+
     def reserve(self, request_id: str, *, routing_session_id: str | None) -> int:
         """Pick a DP rank for one request and reserve one load unit on it.
 

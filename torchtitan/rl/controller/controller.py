@@ -1713,6 +1713,9 @@ class Controller(Configurable):
                 data_metrics = await asyncio.to_thread(
                     self._rollouter.training_data_metrics
                 )
+                session_kv_metrics = (
+                    await self.generator_router.get_session_kv_metrics.call_one()
+                )
                 self.metrics_processor.log(
                     step=step,
                     is_validation=False,
@@ -1728,6 +1731,7 @@ class Controller(Configurable):
                         ],
                         *self._group_buffer.metrics(),
                         *data_metrics,
+                        *session_kv_metrics,
                         *time_metrics,
                         *gc_timer.flush(),
                         *loop_lag.flush(),

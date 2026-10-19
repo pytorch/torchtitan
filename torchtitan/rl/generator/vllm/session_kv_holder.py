@@ -91,13 +91,29 @@ class VLLMSessionKVHolder(Configurable):
         self._held: OrderedDict[str, list[Any]] = OrderedDict()
         self._session_groups: dict[str, int] = {}
         self._group_sessions: dict[int, set[str]] = {}
+        # Each session's latest request's block hashes (vLLM appends decode blocks to this list):
+        # the prefix its next turn can reuse, until `release`.
+        self._session_hashes: dict[str, list[bytes]] = {}
+        # Sessions with stored hashes, per group: an eviction drops the session from
+        # `_group_sessions`, so a group's `release` needs this to drop their hashes.
+        self._hashed_sessions: dict[int, set[str]] = {}
+        # Each tracked request's vLLM prefill stats (its hits at the first schedule), taken at
+        # `track`: vLLM detaches them at the first output, before `after_step` runs.
+        self._prefill_stats: dict[str, Any] = {}
         # Plain ints, so other threads (e.g. a logging endpoint) can read them safely.
         self.num_sessions = 0
         self.num_evicted = 0
+        self.num_stall_evicted = 0
+        # A later turn's prompt tokens that earlier turns computed: hit on GPU, or recomputed.
+        self.gpu_hit_prefix_tokens = 0
+        self.recomputed_prefix_tokens = 0
 
     def track(self, internal_request_id: str, session_id: str, group_id: int) -> None:
         """Hold this request's prefix once its prefill finishes."""
         self._live[internal_request_id] = (session_id, group_id, False)
+        self._prefill_stats[internal_request_id] = self._scheduler.requests[
+            internal_request_id
+        ].prefill_stats
 
     def after_step(self) -> None:
         """After each engine step: hold the prefix of requests whose prefill finished, mark sessions
@@ -106,10 +122,17 @@ class VLLMSessionKVHolder(Configurable):
             request = self._scheduler.requests.get(internal_id)
             if request is None:  # finished or aborted: the session is idle from now on
                 del self._live[internal_id]
+                self._prefill_stats.pop(internal_id, None)
                 if session_id in self._held:
                     self._held.move_to_end(session_id)
             elif not held and request.num_computed_tokens >= request.num_prompt_tokens:
                 self._live[internal_id] = (session_id, group_id, True)
+                prefill_stats = self._prefill_stats.pop(internal_id)
+                previous_hashes = self._session_hashes.get(session_id)
+                if previous_hashes is not None:
+                    self._count_prefix_tokens(request, previous_hashes, prefill_stats)
+                self._session_hashes[session_id] = request.block_hashes
+                self._hashed_sessions.setdefault(group_id, set()).add(session_id)
                 self._hold(request, session_id, group_id)
 
         # Nothing runs and requests wait: with an empty batch vLLM skips the watermark, so it refused
@@ -120,6 +143,7 @@ class VLLMSessionKVHolder(Configurable):
             for session_id in list(self._held):
                 self._release(session_id)
                 self.num_evicted += 1
+                self.num_stall_evicted += 1
                 # GRPO siblings share prompt blocks, so one release may free none.
                 if self._block_pool.get_num_free_blocks() > free_before:
                     break
@@ -159,10 +183,13 @@ class VLLMSessionKVHolder(Configurable):
         released = set(session_ids)
         for group_id in group_ids:
             released |= self._group_sessions.pop(group_id, set())
+            for session_id in self._hashed_sessions.pop(group_id, ()):
+                self._session_hashes.pop(session_id, None)
         # Sorted, not set order: string hashes differ per process, and every TP rank must free
         # blocks in the same order.
         for session_id in sorted(released):
             self._release(session_id)
+            self._session_hashes.pop(session_id, None)
         # A request still before its prefill must not re-hold a released session.
         dropped_groups = set(group_ids)
         for internal_id, (session_id, group_id, held) in list(self._live.items()):
@@ -195,3 +222,30 @@ class VLLMSessionKVHolder(Configurable):
         if blocks is not None:
             self.num_sessions -= 1
             self._block_pool.free_blocks(reversed(blocks))
+
+    def _count_prefix_tokens(
+        self, request: Any, previous_hashes: list[bytes], prefill_stats: Any
+    ) -> None:
+        """Split the prompt tokens this session's earlier turns computed into hit on GPU and recomputed.
+
+        Example, 16-token blocks:
+
+            turn 1  prompt 50 + completion 20 tokens   ->  4 full blocks: 64 tokens computed
+            turn 2  prompt = those 70 tokens + 3       ->  shares the 4 blocks: 64 reusable
+                    vLLM hits 48                       ->  gpu_hit 48, recomputed 16
+        """
+        num_shared_blocks = 0
+        for previous_hash, block_hash in zip(previous_hashes, request.block_hashes):
+            if previous_hash != block_hash:
+                break
+            num_shared_blocks += 1
+        shared_tokens = num_shared_blocks * self._block_pool.hash_block_size
+        # vLLM hits at most num_prompt_tokens - 1 tokens, in whole scheduler blocks.
+        alignment = self._coordinator.scheduler_block_size
+        reusable_tokens = (
+            min(shared_tokens, request.num_prompt_tokens - 1) // alignment * alignment
+        )
+        self.gpu_hit_prefix_tokens += prefill_stats.num_local_cached_tokens
+        self.recomputed_prefix_tokens += max(
+            0, reusable_tokens - prefill_stats.num_cached_tokens
+        )
