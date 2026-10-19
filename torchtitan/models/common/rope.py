@@ -185,8 +185,8 @@ class ComplexRoPE(RoPE):
     class Config(RoPE.Config):
         pass
 
-    # Cat options: the stack path (non-bf16 inputs) writes each half with one store,
-    # instead of one masked kernel over both.
+    # Cat options: only fp32/fp16 inputs reach the stack (bf16 writes int32 pairs); they write
+    # each half with one store, instead of one masked kernel over both.
     @local_compile(
         "rope",
         batch_invariant=True,
@@ -266,15 +266,15 @@ class ComplexRoPE(RoPE):
         """
         if positions is not None:
             _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
-        # Complex RoPE cache has width dim / 2 because each complex value
-        # represents a pair of real dimensions.
-        complex_query_shape = (*query.shape[:-1], query.shape[-1] // 2)
         if torch.compiler.is_compiling():
             # Gather rows of the real view, (T, 1, dim): Inductor can't load complex, so a complex
             # gather runs as its own kernel, while a float gather fuses into the rotation.
             return _reshape_for_broadcast(
                 torch.view_as_real(self.cache).flatten(-2), query.shape, positions
             )
+        # Complex RoPE cache has width dim / 2 because each complex value
+        # represents a pair of real dimensions.
+        complex_query_shape = (*query.shape[:-1], query.shape[-1] // 2)
         return _reshape_for_broadcast(self.cache, complex_query_shape, positions)
 
     @staticmethod
@@ -317,11 +317,14 @@ class ComplexRoPE(RoPE):
 
 
 class _RotatePairs(torch.autograd.Function):
-    """Rotate each ``(x[2i], x[2i + 1])`` pair by the angle with ``cos[i]``, ``sin[i]``.
+    """Rotate each ``(x[2i], x[2i + 1])`` pair by the angle with ``cos[i]``, ``sin[i]``::
 
-    The backward rotates the gradient by the opposite angle: one kernel each way, instead of
-    autograd's masked ``select_backward``. ``cos`` and ``sin`` get no gradient: they come from
-    the RoPE cache buffer.
+        out[2i]     = x[2i] * cos[i] - x[2i + 1] * sin[i]
+        out[2i + 1] = x[2i] * sin[i] + x[2i + 1] * cos[i]
+
+    A Function because the bf16 path's int32 views have no autograd. The backward is the
+    same rotation by the opposite angle, one kernel. ``cos`` and ``sin`` get no gradient:
+    they come from the RoPE cache buffer.
     """
 
     @staticmethod
@@ -338,36 +341,28 @@ class _RotatePairs(torch.autograd.Function):
 
     @staticmethod
     def rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        if x.dtype == torch.bfloat16 and x.is_contiguous():
+            # Read each pair as one int32 (x[2i] in the low half), so loads stay contiguous.
+            # A bf16 shifted into the high 16 bits is its exact fp32. The int32 view also
+            # ends the fusion with whatever produced x, which is written out first. It needs an
+            # even element offset: every caller slices q/k at even widths.
+            pairs = x.view(torch.int32)
+            x_real = (pairs << 16).view(torch.float32)
+            x_imag = (pairs & ~0xFFFF).view(torch.float32)
+        else:
+            # Split views and other dtypes: read the two halves. An int32 view of a split
+            # view would be copied first.
+            x_pairs = x.float().unflatten(-1, (-1, 2))
+            x_real, x_imag = x_pairs[..., 0], x_pairs[..., 1]
+        real = (x_real * cos - x_imag * sin).type_as(x)
+        imag = (x_real * sin + x_imag * cos).type_as(x)
         if x.dtype == torch.bfloat16:
-            if x.is_contiguous():
-                # Read each pair as one int32 (x[2i] in the low half), so loads stay contiguous.
-                # A bf16 shifted into the high 16 bits is its exact fp32. The int32 view also
-                # ends the fusion with whatever produced x, which is written out first.
-                pairs = x.view(torch.int32)
-                x_real = (pairs << 16).view(torch.float32)
-                x_imag = (pairs & ~0xFFFF).view(torch.float32)
-            else:
-                # A split view would be copied before an int32 view; read its halves instead.
-                x_pairs = x.float().unflatten(-1, (-1, 2))
-                x_real, x_imag = x_pairs[..., 0], x_pairs[..., 1]
-            real = (x_real * cos - x_imag * sin).to(torch.bfloat16)
-            imag = (x_real * sin + x_imag * cos).to(torch.bfloat16)
             # Write each rotated pair as one int32 so stores stay contiguous; a store per half
             # writes every other element.
             low = real.view(torch.int16).to(torch.int32) & 0xFFFF
             high = imag.view(torch.int16).to(torch.int32) << 16
             return (low | high).view(torch.bfloat16)
-        x_pairs = x.float().unflatten(-1, (-1, 2))
-        x_real, x_imag = x_pairs[..., 0], x_pairs[..., 1]
-        # Cast each half before the stack so the stack writes the output dtype directly.
-        rotated = torch.stack(
-            (
-                (x_real * cos - x_imag * sin).type_as(x),
-                (x_real * sin + x_imag * cos).type_as(x),
-            ),
-            dim=-1,
-        )
-        return rotated.flatten(-2)
+        return torch.stack((real, imag), dim=-1).flatten(-2)
 
 
 class CosSinRoPE(RoPE):
@@ -482,7 +477,8 @@ def _reshape_for_broadcast(
     positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reshape a RoPE cache for broadcasting with query/key tensors."""
-    # cache_width is `head_dim * 2` for CosSinRoPE, and `head_dim // 2` for ComplexRoPE
+    # cache_width: `head_dim * 2` for CosSinRoPE; `head_dim // 2` for ComplexRoPE's complex
+    # cache, `head_dim` for its real view under compile.
     cache_width = rope_cache.shape[-1]
     num_tokens = query_shape[0]
     if positions is None:
