@@ -7,6 +7,7 @@
 """Tests for Rollouter's controller-side worker dispatch."""
 
 import asyncio
+import gc
 from types import SimpleNamespace
 
 from torchtitan.observability import structured_logger as sl
@@ -17,7 +18,7 @@ from torchtitan.rl.actors.monarch import (
 from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 
-from torchtitan.rl.rollout import RolloutGroup
+from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 
 
@@ -26,6 +27,8 @@ class _ChooseRunGroupEndpoint:
         self.calls: list[dict] = []
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.error: Exception | None = None
 
     def choose(self, **kwargs) -> asyncio.Future[RolloutGroup]:
         self.calls.append(kwargs)
@@ -33,7 +36,13 @@ class _ChooseRunGroupEndpoint:
         return asyncio.create_task(self._execute(kwargs))
 
     async def _execute(self, kwargs) -> RolloutGroup:
-        await self.release.wait()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        if self.error is not None:
+            raise self.error
         return RolloutGroup(group_id=kwargs["group_id"], rollouts=[])
 
 
@@ -133,6 +142,7 @@ def _rollouter_without_datasets() -> Rollouter:
     )
     rollouter._worker_actors = None
     rollouter._actor_system = None
+    rollouter._inflight_run_group_calls = set()
     return rollouter
 
 
@@ -229,5 +239,69 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
         assert (await dispatch).group_id == 1
         await rollouter.close()
         assert actor_mesh.stopped
+
+    asyncio.run(run())
+
+
+async def _dispatch_then_cancel_caller(
+    rollouter: Rollouter, actor_mesh: _WorkerActorMesh
+) -> None:
+    """Start one `run_group` call, then cancel its caller as `Controller.run` does at the end."""
+    dispatch = asyncio.create_task(
+        rollouter.run_group_rollouts(
+            generate_fn="generate_fn",
+            release_session_fn="release_session_fn",
+            sample="sample",
+            group_id=1,
+            group_size=2,
+            sampling="sampling",
+        )
+    )
+    await actor_mesh.run_group.started.wait()
+    dispatch.cancel()
+    await asyncio.gather(dispatch, return_exceptions=True)
+
+
+def test_close_waits_for_run_group_of_cancelled_caller(monkeypatch) -> None:
+    async def run() -> None:
+        loop_errors: list[str] = []
+        asyncio.get_running_loop().set_exception_handler(
+            lambda loop, context: loop_errors.append(context["message"])
+        )
+        actor_mesh = _WorkerActorMesh()
+        rollouter = _rollouter_without_datasets()
+        worker_mesh = await _setup(rollouter, actor_mesh, monkeypatch)
+        await _dispatch_then_cancel_caller(rollouter, actor_mesh)
+
+        close = asyncio.create_task(rollouter.close())
+        await asyncio.sleep(0)
+        # The worker still runs the group, so the mesh stays up.
+        assert not worker_mesh.stopped
+
+        # Each rollout catches its own errors, but scoring can still make run_group raise.
+        actor_mesh.run_group.error = RuntimeError("scoring failed")
+        actor_mesh.run_group.release.set()
+        await close
+        assert worker_mesh.stopped
+        assert not actor_mesh.run_group.cancelled.is_set()
+        # The cancelled caller never reads the error; the done callback must, or asyncio logs it here.
+        gc.collect()
+        assert loop_errors == []
+
+    asyncio.run(run())
+
+
+def test_close_stops_waiting_after_drain_timeout(monkeypatch) -> None:
+    async def run() -> None:
+        monkeypatch.setattr(rollouter_module, "_RUN_GROUP_DRAIN_TIMEOUT_S", 0.0)
+        actor_mesh = _WorkerActorMesh()
+        rollouter = _rollouter_without_datasets()
+        worker_mesh = await _setup(rollouter, actor_mesh, monkeypatch)
+        await _dispatch_then_cancel_caller(rollouter, actor_mesh)
+
+        await rollouter.close()
+
+        assert worker_mesh.stopped
+        assert not rollouter._inflight_run_group_calls
 
     asyncio.run(run())
