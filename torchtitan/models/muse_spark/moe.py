@@ -101,11 +101,16 @@ class MuseSparkMoE(MoE):
         *,
         padding_mask_T: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
+        routed_expert_ids_TK: torch.Tensor | None = None,
         **router_kwargs,
     ) -> torch.Tensor:
         # EP uses TP token shards independently of dense sequence parallelism.
-        x_TD, padding_mask_T = self._maybe_shard_routed_branch_inputs_across_tp(
-            x_TD, padding_mask_T
+        (
+            x_TD,
+            padding_mask_T,
+            routed_expert_ids_TK,
+        ) = self._maybe_shard_routed_branch_inputs_across_tp(
+            x_TD, padding_mask_T, routed_expert_ids_TK
         )
         (topk_scores_TK, topk_expert_ids_TK, routing_map_TE,) = remat.region(
             self.router,
@@ -116,6 +121,7 @@ class MuseSparkMoE(MoE):
             self.expert_bias_E,
             padding_mask_T=padding_mask_T,
             aux_loss_denominator=aux_loss_denominator,
+            routed_expert_ids_TK=routed_expert_ids_TK,
             **router_kwargs,
         )
         remat.recompute_needs_tensor(routing_map_TE)

@@ -43,6 +43,7 @@ from torchtitan.models.common.moe import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
+from torchtitan.models.muse_spark.moe import MuseSparkMoE
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -94,6 +95,12 @@ def _forward_with_routed_mask(
         routed_down=lambda x: x,
         routed_norm=lambda x: x,
         routed_up=lambda x: x,
+        # MuseSparkMoE pools tokens around the routed experts, in remat regions.
+        pooler=lambda x: x,
+        pre_expert_norm=lambda x: x,
+        unpooler=lambda x: x,
+        remat_region_name=lambda name: name,
+        remat_should_recompute=lambda name: False,
         _maybe_zero_fill_routed_output_to_tp_partial=lambda out: out,
         shared_experts=None,
         _maybe_all_reduce_moe_output_across_tp=lambda out: out,
@@ -395,7 +402,7 @@ class TestMoE(unittest.TestCase):
         self.assertEqual(moe.routed_experts.num_tokens_per_expert_E.sum().item(), 6)
 
     def test_moe_hands_the_routed_padding_mask_to_the_experts(self):
-        for moe_cls in (MoE, KimiLatentMoE):
+        for moe_cls in (MoE, KimiLatentMoE, MuseSparkMoE):
             with self.subTest(moe_cls=moe_cls.__name__):
                 experts = _RecordingRoutedExperts()
                 routed_mask_T = _forward_with_routed_mask(
