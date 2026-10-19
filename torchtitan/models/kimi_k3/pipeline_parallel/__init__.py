@@ -100,8 +100,7 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
             model,
             parallelism_context=kwargs["parallelism_context"],
             training=kwargs["training"],
-            ac_config=kwargs["ac_config"],
-            dump_folder=kwargs["dump_folder"],
+            activation_remat=kwargs["activation_remat"],
             device=kwargs["device"],
         )
     parallelism = kwargs["parallelism"]

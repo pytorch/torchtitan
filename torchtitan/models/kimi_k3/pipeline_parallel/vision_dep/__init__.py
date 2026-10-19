@@ -19,8 +19,8 @@ from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
+from torchtitan.models.base.model import BaseModel
 from torchtitan.models.kimi_k2_7.vision_encoder import MoonViTEncoder
-from torchtitan.protocols.model import BaseModel
 
 from .runtime import VisionDep
 from .schedule import VisionDepSchedule
@@ -30,7 +30,7 @@ __all__ = ["build_vision_replica", "install_vision_dep", "pipeline_groups"]
 
 
 def build_vision_replica(
-    model: BaseModel, *, parallelism_context, training, ac_config, dump_folder, device
+    model: BaseModel, *, parallelism_context, training, activation_remat, device
 ):
     """A copy of the vision tower for every pipeline rank, parallelized like the original."""
     tower = getattr(model, "vision_encoder", None)
@@ -42,8 +42,8 @@ def build_vision_replica(
     with parallelism_context.activate_spmd():
         annotate_replicated_parameters(replica, parallelism_context)
         replica._parallelize(parallelism_context)
-        if ac_config is not None:
-            ac_config.build(dump_folder=dump_folder).apply(replica)
+        if activation_remat is not None:
+            activation_remat.apply(replica)
     replica.to_empty(device=device)
     # The first step overwrites these weights; drawing them must not move the model's seed.
     forked = [device] if torch.device(device).type == "cuda" else []

@@ -151,7 +151,9 @@ class VisionDep:
             assert self._tower is not None
             sources = {canonical_fqn(n): p for n, p in self._tower.named_parameters()}
             offset = 0
-            for i, (name, param) in enumerate(zip(self._names, self._params)):
+            for i, (name, param) in enumerate(
+                zip(self._names, self._params, strict=True)
+            ):
                 if name not in sources:
                     raise RuntimeError(f"The vision tower on stage 0 has no {name}.")
                 source = sources[name]

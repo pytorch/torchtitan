@@ -422,8 +422,7 @@ class TestVisionReplicaSeed(DTensorTestBase):
             training=SimpleNamespace(
                 enable_cpu_offload=False, mixed_precision_param="float32"
             ),
-            ac_config=None,
-            dump_folder="",
+            activation_remat=None,
             device=torch.device("cpu"),
         )
         torch.testing.assert_close(torch.rand(8), expected, rtol=0, atol=0)

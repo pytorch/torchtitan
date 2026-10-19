@@ -295,7 +295,7 @@ class TestVisionDepPlan(unittest.TestCase):
                             for (r, start, end) in plan.placed.values()
                             if r == rank
                         )
-                        for (_, end), (start, _) in zip(spans, spans[1:]):
+                        for (_, end), (start, _) in zip(spans, spans[1:], strict=False):
                             self.assertLessEqual(end, start)
                     self.assertEqual(sorted(plan.encode_rank), sorted(loads))
                     self.assertEqual(sorted(plan.backward_rank), sorted(loads))
