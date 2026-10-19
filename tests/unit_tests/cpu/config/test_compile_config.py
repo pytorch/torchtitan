@@ -9,7 +9,11 @@ import torch
 
 from torchtitan.components.loss import compute_logprobs, cross_entropy_loss, mse_loss
 from torchtitan.distributed.local_compile import apply_local_compile, local_compile
-from torchtitan.models.common.moe.moe import _microbatch_load_balance_local_stats
+from torchtitan.models.common.aux_loss import AuxLoss
+from torchtitan.models.common.moe.moe import (
+    _expert_counts,
+    _microbatch_load_balance_local_stats,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -132,8 +136,7 @@ def test_moe_aux_loss_uses_local_compile(monkeypatch) -> None:
     apply_local_compile(["moe_aux_loss"])
 
     assert compiled == [
-        (
-            _microbatch_load_balance_local_stats.__wrapped__,
-            {"fullgraph": True},
-        )
+        (AuxLoss._norm_sum_scores_over_tokens.__wrapped__, {"fullgraph": True}),
+        (_microbatch_load_balance_local_stats.__wrapped__, {"fullgraph": True}),
+        (_expert_counts.__wrapped__, {"fullgraph": True}),
     ]
