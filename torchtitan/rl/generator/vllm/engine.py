@@ -468,7 +468,6 @@ class VLLMEngine(GenerationEngine):
         levels = {
             "gpu_used_fraction": scheduler.kv_cache_manager.usage,
             "held_sessions": holder.num_sessions,
-            "held_blocks": holder.num_held_blocks,
         }
         totals = {
             "gpu_hit_prefix_tokens": holder.gpu_hit_prefix_tokens,

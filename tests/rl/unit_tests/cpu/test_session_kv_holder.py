@@ -225,20 +225,16 @@ def test_a_later_turn_counts_its_prefix_as_gpu_hit_or_recomputed(manager):
     assert (holder.gpu_hit_prefix_tokens, holder.recomputed_prefix_tokens) == (48, 16)
 
 
-def test_held_blocks_count_a_block_two_siblings_hold_once(manager):
+def test_group_release_drops_hashes_of_evicted_sessions(manager):
+    """An evicted session leaves `_group_sessions`; its group's release must still drop its hashes."""
     requests = {}
     holder = _holder(manager, requests)
-    _finished_turn(manager, holder, requests, "a", list(range(50)))
-    held_by_a = holder.num_held_blocks
-    # The same prompt: "b" hits and holds the blocks "a" holds.
-    _finished_turn(manager, holder, requests, "b", list(range(50)))
-
-    assert held_by_a > 0
-    assert holder.num_sessions == 2 and holder.num_held_blocks == held_by_a
-    holder.release(session_ids=["a"])
-    assert holder.num_held_blocks == held_by_a
-    holder.release(session_ids=["b"])
-    assert holder.num_held_blocks == 0
+    _finished_turn(manager, holder, requests, "s", list(range(50)))
+    holder.free_floor_blocks = 10**6
+    holder._evict_until_free()
+    assert "s" not in holder._held and holder.num_evicted == 1
+    holder.release(group_ids=[0])
+    assert holder._session_hashes == {}
 
 
 def test_release_frees_sessions_in_sorted_order(manager):
@@ -404,3 +400,33 @@ def test_a_waiting_turn_gets_room_when_held_sessions_fill_the_pool(manager, queu
         holder.after_step()
     else:
         pytest.fail("held sessions stalled the engine: the waiting turn never fit")
+
+
+def test_engine_session_kv_counts_are_deltas_since_the_last_call():
+    """Counts (e.g. evictions) cover the time since the previous call; levels are read as is."""
+    from types import SimpleNamespace
+
+    from torchtitan.rl.generator.vllm.engine import VLLMEngine
+
+    holder = SimpleNamespace(
+        num_sessions=80,
+        num_evicted=3,
+        num_stall_evicted=0,
+        gpu_hit_prefix_tokens=0,
+        recomputed_prefix_tokens=0,
+    )
+    engine = object.__new__(VLLMEngine)
+    engine._session_kv_holder = holder
+    engine._session_kv_totals = {}
+    scheduler = SimpleNamespace(kv_cache_manager=SimpleNamespace(usage=0.5))
+    engine._engine = SimpleNamespace(
+        engine_core=SimpleNamespace(engine_core=SimpleNamespace(scheduler=scheduler))
+    )
+
+    def evicted(metrics):
+        [metric] = [x for x in metrics if x.key == "generator/session_kv/evicted_sessions"]
+        return metric.value.value
+
+    assert evicted(engine.session_kv_metrics()) == 3
+    holder.num_evicted = 5
+    assert evicted(engine.session_kv_metrics()) == 2

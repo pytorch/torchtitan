@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -94,14 +94,14 @@ class VLLMSessionKVHolder(Configurable):
         # Each session's latest request's block hashes (vLLM appends decode blocks to this list):
         # the prefix its next turn can reuse, until `release`.
         self._session_hashes: dict[str, list[bytes]] = {}
+        # Sessions with stored hashes, per group: an eviction drops the session from
+        # `_group_sessions`, so a group's `release` needs this to drop their hashes.
+        self._hashed_sessions: dict[int, set[str]] = {}
         # Each tracked request's vLLM prefill stats (its hits at the first schedule), taken at
         # `track`: vLLM detaches them at the first output, before `after_step` runs.
         self._prefill_stats: dict[str, Any] = {}
-        # Sessions holding each block: GRPO siblings hold their shared prompt blocks once each.
-        self._held_block_refs: Counter[int] = Counter()
         # Plain ints, so other threads (e.g. a logging endpoint) can read them safely.
         self.num_sessions = 0
-        self.num_held_blocks = 0
         self.num_evicted = 0
         self.num_stall_evicted = 0
         # A later turn's prompt tokens that earlier turns computed: hit on GPU, or recomputed.
@@ -132,6 +132,7 @@ class VLLMSessionKVHolder(Configurable):
                 if previous_hashes is not None:
                     self._count_prefix_tokens(request, previous_hashes, prefill_stats)
                 self._session_hashes[session_id] = request.block_hashes
+                self._hashed_sessions.setdefault(group_id, set()).add(session_id)
                 self._hold(request, session_id, group_id)
 
         # Nothing runs and requests wait: with an empty batch vLLM skips the watermark, so it refused
@@ -182,6 +183,8 @@ class VLLMSessionKVHolder(Configurable):
         released = set(session_ids)
         for group_id in group_ids:
             released |= self._group_sessions.pop(group_id, set())
+            for session_id in self._hashed_sessions.pop(group_id, ()):
+                self._session_hashes.pop(session_id, None)
         # Sorted, not set order: string hashes differ per process, and every TP rank must free
         # blocks in the same order.
         for session_id in sorted(released):
@@ -207,8 +210,6 @@ class VLLMSessionKVHolder(Configurable):
         self._block_pool.touch(blocks)
         self._release(session_id)
         self._held[session_id] = blocks
-        self._held_block_refs.update(block.block_id for block in blocks)
-        self.num_held_blocks = len(self._held_block_refs)
         self._session_groups[session_id] = group_id
         self._group_sessions.setdefault(group_id, set()).add(session_id)
         self.num_sessions += 1
@@ -221,11 +222,6 @@ class VLLMSessionKVHolder(Configurable):
         if blocks is not None:
             self.num_sessions -= 1
             self._block_pool.free_blocks(reversed(blocks))
-            for block in blocks:
-                self._held_block_refs[block.block_id] -= 1
-                if not self._held_block_refs[block.block_id]:
-                    del self._held_block_refs[block.block_id]
-            self.num_held_blocks = len(self._held_block_refs)
 
     def _count_prefix_tokens(
         self, request: Any, previous_hashes: list[bytes], prefill_stats: Any
