@@ -510,8 +510,8 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
 
 
 class _FakeTrainerRanks:
-    """A trainer actor mesh of ranks laid out as (dp, cp_tp); ``get_dp_rank`` reports
-    ``reported_dp_ranks`` for those ranks."""
+    """A trainer actor mesh of ranks laid out as (pp, dp, cp_tp); ``get_dp_rank``
+    reports ``reported_dp_ranks`` for those ranks."""
 
     def __init__(self, reported_dp_ranks: list[int], ranks: list[int] | None = None):
         self.reported_dp_ranks = reported_dp_ranks
@@ -524,28 +524,34 @@ class _FakeTrainerRanks:
     def flatten(self, name):
         return self
 
-    def split(self, *, rank, dp):
+    def split(self, *, rank, pp, dp):
+        self.pp_degree = pp
         self.dp_degree = dp
         return self
 
     def slice(self, *, rank=None, dp=None):
         if rank is not None:
             return _FakeTrainerRanks(self.reported_dp_ranks, [self.ranks[rank]])
-        num_ranks_per_dp_rank = len(self.ranks) // self.dp_degree
-        start = dp * num_ranks_per_dp_rank
-        return _FakeTrainerRanks(
-            self.reported_dp_ranks, self.ranks[start : start + num_ranks_per_dp_rank]
-        )
+        num_ranks_per_stage = len(self.ranks) // self.pp_degree
+        num_ranks_per_dp_rank = num_ranks_per_stage // self.dp_degree
+        ranks_at_dp_rank = []
+        for stage in range(self.pp_degree):
+            start = stage * num_ranks_per_stage + dp * num_ranks_per_dp_rank
+            ranks_at_dp_rank.extend(self.ranks[start : start + num_ranks_per_dp_rank])
+        return _FakeTrainerRanks(self.reported_dp_ranks, ranks_at_dp_rank)
 
 
-def _spawn_trainer(trainer_ranks: _FakeTrainerRanks, *, dp_degree: int):
+def _spawn_trainer(
+    trainer_ranks: _FakeTrainerRanks, *, dp_degree: int, pp_degree: int = 1
+):
     actor_system = MonarchActorSystem(MonarchActorSystem.Config())
     actor_system._trainer_mesh = SimpleNamespace(
         spawn=lambda name, actor_cls, config, **kwargs: trainer_ranks
     )
-    return asyncio.run(
-        actor_system.spawn_trainer("trainer_config", dp_degree=dp_degree)
+    trainer_config = SimpleNamespace(
+        parallelism=SimpleNamespace(pipeline_parallel_degree=pp_degree)
     )
+    return asyncio.run(actor_system.spawn_trainer(trainer_config, dp_degree=dp_degree))
 
 
 def test_monarch_actor_system_groups_trainer_ranks_by_dp_rank():
@@ -556,12 +562,14 @@ def test_monarch_actor_system_groups_trainer_ranks_by_dp_rank():
     assert trainer.rank0.ranks == [0]
 
 
+def test_monarch_actor_system_spans_pipeline_stages_per_dp_rank():
+    """PP degree 2, DP degree 2, cp * tp = 1: each pipeline stage holds one rank
+    per DP rank, so DP rank 0 is ranks 0 and 2."""
+    trainer = _spawn_trainer(_FakeTrainerRanks([0, 1, 0, 1]), dp_degree=2, pp_degree=2)
+
+    assert [handle.ranks for handle in trainer.by_dp_rank] == [[0, 2], [1, 3]]
+
+
 def test_monarch_actor_system_rejects_a_trainer_not_laid_out_as_dp_cp_tp():
     with pytest.raises(RuntimeError, match="DP rank 0 report DP ranks"):
         _spawn_trainer(_FakeTrainerRanks([0, 1, 0, 1]), dp_degree=2)
-
-
-def test_controller_defaults_to_the_monarch_actor_system():
-    from torchtitan.rl.controller.controller import _default_actor_system_config
-
-    assert isinstance(_default_actor_system_config(), MonarchActorSystem.Config)
