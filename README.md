@@ -1,6 +1,10 @@
 <div align="center">
 
-# torchtitan
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/images/logo/torchtitan-rectangle-torch-white.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/images/logo/torchtitan-rectangle-torch-black.svg">
+  <img alt="torchtitan" src="assets/images/logo/torchtitan-rectangle-torch-black.svg" width="560">
+</picture>
 
 **A PyTorch-native platform for pretraining and post-training generative AI models at scale**
 
