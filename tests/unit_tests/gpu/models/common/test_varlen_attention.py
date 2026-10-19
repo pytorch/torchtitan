@@ -48,23 +48,27 @@ def _metadata():
 
 
 @pytest.mark.parametrize("compile_attention", [False, True])
-@pytest.mark.parametrize("missing_wheel", [False, True])
-def test_backend_setup_matches_explicit_backend(compile_attention, missing_wheel):
+@pytest.mark.parametrize(
+    "missing_backend",
+    [
+        pytest.param(None, id="installed"),
+        pytest.param(("FA3", "flash_attn_interface"), id="missing-fa3"),
+        pytest.param(("FA4", "flash_attn.cute.interface"), id="missing-fa4"),
+    ],
+)
+def test_backend_setup_matches_explicit_backend(compile_attention, missing_backend):
     from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
-    if torch.version.hip is not None or torch.cuda.get_device_capability()[0] not in (
-        9,
-        10,
-    ):
-        pytest.skip("requires a CUDA architecture using FA3/FA4")
+    if torch.version.hip is not None:
+        pytest.skip("requires CUDA FlashAttention")
     impl = get_cuda_flash_attention_impl()
-    if not missing_wheel and impl is None:
+    if missing_backend is None and impl is None:
         pytest.skip("requires the architecture's FlashAttention wheel")
     previous_impl = current_flash_attention_impl()
     try:
         if previous_impl is not None:
             restore_flash_attention_impl()
-        if not missing_wheel:
+        if missing_backend is None:
             activate_flash_attention_impl(impl)
 
         with DeterministicGuard(True):
@@ -76,16 +80,25 @@ def test_backend_setup_matches_explicit_backend(compile_attention, missing_wheel
                 for _ in range(3)
             ]
             metadata = _metadata()
-            kwargs = {"num_splits": 1} if missing_wheel else {}
+            kwargs = {"num_splits": 1} if missing_backend is not None else {}
             expected = varlen_attn(*inputs, *metadata, window_size=(-1, 0), **kwargs)
             expected_loss = expected.float().square().mean()
             expected_grads = torch.autograd.grad(expected_loss, inputs)
 
-            if missing_wheel:
-                with patch(
-                    "torchtitan.tools.utils.importlib.util.find_spec", return_value=None
+            if missing_backend is not None:
+                # Exercise missing-wheel fallback even on FA2-only CI GPUs.
+                with (
+                    patch(
+                        "torchtitan.tools.utils._cuda_flash_attention_backend",
+                        return_value=missing_backend,
+                    ),
+                    patch(
+                        "torchtitan.tools.utils.importlib.util.find_spec",
+                        return_value=None,
+                    ) as find_spec,
                 ):
                     attention = VarlenInnerAttention.Config().build()
+                find_spec.assert_called_once_with(missing_backend[1])
             else:
                 # A layer must not re-register an already active backend.
                 with patch(
@@ -93,7 +106,9 @@ def test_backend_setup_matches_explicit_backend(compile_attention, missing_wheel
                     side_effect=AssertionError,
                 ):
                     attention = VarlenInnerAttention.Config().build()
-            assert current_flash_attention_impl() == (None if missing_wheel else impl)
+            assert current_flash_attention_impl() == (
+                None if missing_backend is not None else impl
+            )
             if compile_attention:
                 attention = torch.compile(attention, fullgraph=True)
             actual = attention(*inputs, attention_metadata=metadata)
