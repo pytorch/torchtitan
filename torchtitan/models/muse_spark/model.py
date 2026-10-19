@@ -430,7 +430,7 @@ class MuseSparkModel(MultimodalModel):
             default_factory=lambda: [
                 "loss",
                 "fp32_to_bf16_split",
-                "complex_rope",
+                "rope",
                 "muse_spark_attention_output",
                 "muse_spark_attention_qk_norm",
                 "muse_spark_input_scaled_rmsnorm",
