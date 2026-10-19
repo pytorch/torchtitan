@@ -17,7 +17,7 @@ from torchtitan.models.qwen3_5.rope import MRoPE
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestRoPELocalCompile(unittest.TestCase):
     def setUp(self):
-        apply_local_compile(["cos_sin_rope"])
+        apply_local_compile(["rope"])
 
     def tearDown(self):
         apply_local_compile([])
@@ -285,7 +285,7 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
                 eager_outputs, eager_grads = self._run(
                     rope, query_base, key, positions, inverse
                 )
-                apply_local_compile(["complex_rope"])
+                apply_local_compile(["rope"])
                 outputs, grads = self._run(rope, query_base, key, positions, inverse)
                 for compiled, eager in zip(
                     (*outputs, *grads), (*eager_outputs, *eager_grads), strict=True
@@ -294,7 +294,7 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
 
     def test_compiled_is_batch_invariant(self):
         torch.manual_seed(42)
-        apply_local_compile(["complex_rope"])
+        apply_local_compile(["rope"])
         rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
         query = torch.randn(64, 8, 64, device="cuda", dtype=torch.bfloat16)
         key = torch.randn(64, 1, 64, device="cuda", dtype=torch.bfloat16)

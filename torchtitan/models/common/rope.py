@@ -185,10 +185,10 @@ class ComplexRoPE(RoPE):
     class Config(RoPE.Config):
         pass
 
-    # Cat options: _rotate_pairs writes its real/imag halves with one store each, not one masked
-    # kernel over both: 1.08-1.20x faster fwd+bwd on GB300 (needs the per-half cast there).
+    # Cat options: the stack path (split views, fp32) writes each half with one store,
+    # instead of one masked kernel over both.
     @local_compile(
-        "complex_rope",
+        "rope",
         batch_invariant=True,
         options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
     )
@@ -303,11 +303,42 @@ class ComplexRoPE(RoPE):
         key_out = torch.view_as_real(xk_ * rope_cache).flatten(-2).type_as(key)
         return query_out, key_out
 
+
+class _RotatePairs(torch.autograd.Function):
+    """Rotate each ``(x[2i], x[2i + 1])`` pair by the angle with ``cos[i]``, ``sin[i]``.
+
+    The backward rotates the gradient by the opposite angle: one kernel each way, instead of
+    autograd's masked ``select_backward``. ``cos`` and ``sin`` get no gradient: they come from
+    the RoPE cache buffer.
+    """
+
     @staticmethod
-    def _rotate_pairs(
-        x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     ) -> torch.Tensor:
-        """Rotate each ``(x[2i], x[2i + 1])`` pair by the angle with ``cos[i]``, ``sin[i]``."""
+        ctx.save_for_backward(cos, sin)
+        return _RotatePairs.rotate(x, cos, sin)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):  # pyrefly: ignore[bad-override]
+        cos, sin = ctx.saved_tensors
+        return _RotatePairs.rotate(grad, cos, -sin), None, None
+
+    @staticmethod
+    def rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        if x.dtype == torch.bfloat16 and x.is_contiguous():
+            # Read each pair as one int32 (x[2i] in the low half), so loads and stores stay
+            # contiguous; a store per half writes every other element. A bf16 shifted into the
+            # high 16 bits is its exact fp32. The int32 view also ends the fusion with whatever
+            # produced x, which is written out first.
+            pairs = x.view(torch.int32)
+            x_real = (pairs << 16).view(torch.float32)
+            x_imag = (pairs & ~0xFFFF).view(torch.float32)
+            real = (x_real * cos - x_imag * sin).to(torch.bfloat16)
+            imag = (x_real * sin + x_imag * cos).to(torch.bfloat16)
+            low = real.view(torch.int16).to(torch.int32) & 0xFFFF
+            high = imag.view(torch.int16).to(torch.int32) << 16
+            return (low | high).view(torch.bfloat16)
         x_pairs = x.float().unflatten(-1, (-1, 2))
         x_real, x_imag = x_pairs[..., 0], x_pairs[..., 1]
         # Cast each half before the stack so the stack writes the output dtype directly.
@@ -321,32 +352,12 @@ class ComplexRoPE(RoPE):
         return rotated.flatten(-2)
 
 
-class _RotatePairs(torch.autograd.Function):
-    """`ComplexRoPE._rotate_pairs` whose backward rotates the gradient by the opposite angle.
-
-    One strided kernel each way, instead of autograd's masked `select_backward`.
-    `cos` and `sin` get no gradient: they come from the RoPE cache buffer.
-    """
-
-    @staticmethod
-    def forward(  # pyrefly: ignore[bad-override]
-        ctx, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-    ) -> torch.Tensor:
-        ctx.save_for_backward(cos, sin)
-        return ComplexRoPE._rotate_pairs(x, cos, sin)
-
-    @staticmethod
-    def backward(ctx, grad: torch.Tensor):  # pyrefly: ignore[bad-override]
-        cos, sin = ctx.saved_tensors
-        return ComplexRoPE._rotate_pairs(grad, cos, -sin), None, None
-
-
 class CosSinRoPE(RoPE):
     @dataclass(kw_only=True, slots=True)
     class Config(RoPE.Config):
         pass
 
-    @local_compile("cos_sin_rope", batch_invariant=True)
+    @local_compile("rope", batch_invariant=True)
     def forward(
         self,
         query: torch.Tensor,
