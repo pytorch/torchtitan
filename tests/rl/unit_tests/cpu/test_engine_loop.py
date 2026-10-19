@@ -60,7 +60,9 @@ from torchtitan.rl.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 
-_TIMEOUT_S = 5
+# Upper bound, not the expected wait: a weight load's gc.collect() takes ~0.7 s in the full
+# suite, and on a busy host two load tests went past 5 s.
+_TIMEOUT_S = 30
 
 
 @pytest.fixture
