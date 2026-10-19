@@ -337,10 +337,12 @@ _PROCESS_ROLES = (
 
 
 def compute_host_memory_metrics() -> list[m.Metric]:
-    """Anonymous memory (`RssAnon`) per process role on this host, plus the cgroup total and the
-    node's `MemAvailable`.
+    """Anonymous memory per process role on this host, plus the cgroup total and the node's
+    `MemAvailable`.
 
-    `RssAnon` leaves out shared libraries, which summed RSS counts once per process.
+    Anonymous memory leaves out shared libraries, which summed RSS counts once per process. It is
+    read from `smaps_rollup` (a page-table walk, ~1 ms per 4 GiB): `status`'s `RssAnon` misses each
+    CPU's unflushed count (up to ~18 MiB per CPU on 144-CPU hosts), so it reads about 2x low.
     Scans every process in the controller's cgroup: trainer ranks need not be the
     controller's descendants. A process's role is `TORCHTITAN_RL_ROLE` in its spawn env:
 
@@ -365,13 +367,13 @@ def compute_host_memory_metrics() -> list[m.Metric]:
     for pid in (cgroup_dir / "cgroup.procs").read_text().split():
         # A process may exit after the cgroup listing, or be unreadable (hidepid).
         try:
-            status = Path(f"/proc/{pid}/status").read_text()
+            rollup = Path(f"/proc/{pid}/smaps_rollup").read_text()
             role = "controller" if int(pid) == os.getpid() else _process_role(pid)
         except OSError:
             continue
-        # "RssAnon:   123456 kB"; a zombie has no such line.
-        for line in status.splitlines():
-            if line.startswith("RssAnon:"):
+        # "Anonymous:   123456 kB"; a zombie or kernel thread has no such line.
+        for line in rollup.splitlines():
+            if line.startswith("Anonymous:"):
                 rss_anon_kib[role] += int(line.split()[1])
                 num_processes[role] += 1
                 break
