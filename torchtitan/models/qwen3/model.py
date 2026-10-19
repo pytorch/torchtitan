@@ -107,7 +107,7 @@ class Qwen3Model(Decoder):
             default_factory=lambda: [
                 "loss",
                 "fused_binary_activation",
-                "cos_sin_rope",
+                "rope",
                 "fp32_to_bf16_split",
             ]
         )
