@@ -14,6 +14,10 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from spmd_types.checker import typecheck
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    parametrize,
+)
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -29,7 +33,7 @@ from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import make_ffn_config
 from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
-    dense_sequence_parallel_placement,
+    residual_activation_placement,
 )
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import (
@@ -721,8 +725,9 @@ class TestLoRATensorParallelTypecheck(DTensorTestBase):
     def world_size(self) -> int:
         return 2
 
+    @parametrize("enable_sp", [True, False])
     @with_comms
-    def test_row_parallel_adapters_typecheck(self):
+    def test_row_parallel_adapters_typecheck(self, enable_sp: bool):
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
@@ -731,7 +736,7 @@ class TestLoRATensorParallelTypecheck(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=self.world_size,
-            enable_sequence_parallel=True,
+            enable_sequence_parallel=enable_sp,
         )
         with patch(
             "torchtitan.distributed.parallelism_context.device_type", self.device_type
@@ -743,7 +748,7 @@ class TestLoRATensorParallelTypecheck(DTensorTestBase):
             hidden_dim=32,
             w13_param_init=init,
             w2_param_init=init,
-            enable_sp=True,
+            enable_sp=enable_sp,
         )
         feed_forward = (
             LoRATransform(rank=2, alpha=4.0)
@@ -760,10 +765,15 @@ class TestLoRATensorParallelTypecheck(DTensorTestBase):
             sparse_mesh=None,
             dense_sp_enabled=parallelism_context.sp_enabled,
         )
+        residual = residual_activation_placement(enable_sp=enable_sp)
         with set_current_spmd_mesh(mesh), typecheck(local=False):
-            spmd.assert_type(x_local, dense_sequence_parallel_placement())
+            spmd.assert_type(x_local, residual)
             output = feed_forward(x_local)
+            spmd.assert_type(output, residual)
             output.sum().backward()
 
         self.assertEqual(output.shape, x_local.shape)
         self.assertIsNotNone(feed_forward.w2.lora_b.weight.grad)
+
+
+instantiate_parametrized_tests(TestLoRATensorParallelTypecheck)
