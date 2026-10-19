@@ -33,7 +33,11 @@ from torchtitan.models.common.attention import (
     LinearAttentionMetadata,
 )
 from torchtitan.models.common.attention.kda import KDA
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import (
+    Decoder,
+    routed_expert_ids_kwargs,
+    TransformerBlock,
+)
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
@@ -147,6 +151,7 @@ class KimiK3TransformerBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
+        routed_expert_ids_TK: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.first_layer_in_block:
             block_residual_TND = torch.cat(
@@ -184,6 +189,7 @@ class KimiK3TransformerBlock(TransformerBlock):
                 h_TD,
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
+                routed_expert_ids_TK=routed_expert_ids_TK,
             )
         else:
             h_TD = self.feed_forward(h_TD)
@@ -456,6 +462,7 @@ class KimiK3Model(MultimodalModel):
         padding_mask: torch.Tensor | None = None,
         vision_bank_indices_T: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
+        routed_expert_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
@@ -493,7 +500,7 @@ class KimiK3Model(MultimodalModel):
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        for block in self.layers.values():
+        for layer_name, block in self.layers.items():
             h_TD, block_residual_TND = block(
                 h_TD,
                 block_residual_TND,
@@ -505,6 +512,7 @@ class KimiK3Model(MultimodalModel):
                 positions,
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
+                **routed_expert_ids_kwargs(routed_expert_ids, layer_name),
             )
 
         if self.output_res_proj is None:

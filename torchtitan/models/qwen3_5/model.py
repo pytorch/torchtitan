@@ -36,7 +36,11 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.attention.gdn import GDN
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import (
+    Decoder,
+    routed_expert_ids_kwargs,
+    TransformerBlock,
+)
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
@@ -270,6 +274,7 @@ class Qwen35TransformerBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
+        routed_expert_ids_TK: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h_TD = self.attention_norm(x_TD)
         if self.full_attn:
@@ -284,6 +289,7 @@ class Qwen35TransformerBlock(TransformerBlock):
                 h_TD,
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
+                routed_expert_ids_TK=routed_expert_ids_TK,
             )
         else:
             h_TD = self.feed_forward(h_TD)
@@ -713,6 +719,7 @@ class Qwen35Model(MultimodalModel):
         image_vision_bank_indices_T: torch.Tensor | None = None,
         video_vision_bank_indices_T: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
+        routed_expert_ids: torch.Tensor | None = None,
     ):
         with spmd_local_context("dp"):
             if self.tok_embeddings is not None:
@@ -743,7 +750,7 @@ class Qwen35Model(MultimodalModel):
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        for layer in self.layers.values():
+        for layer_name, layer in self.layers.items():
             x = layer(
                 x,
                 (
@@ -754,6 +761,7 @@ class Qwen35Model(MultimodalModel):
                 positions,
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
+                **routed_expert_ids_kwargs(routed_expert_ids, layer_name),
             )
 
         x = self.norm(x) if self.norm is not None else x

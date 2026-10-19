@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -104,6 +105,10 @@ def test_torchtitan_response_round_trips_every_completion_field() -> None:
         _completion("r/http=0", token_logprobs=[-0.125, -1 / 3, float("-inf")]),
         _completion("r/http=1", token_ids=[], token_logprobs=[], finish_reason="abort"),
         _completion("r/http=2", token_logprobs=[float("nan"), 0.0, -2.5]),
+        _completion(
+            "r/http=3",
+            routed_expert_ids=np.arange(12, dtype=np.uint8).reshape(3, 2, 2),
+        ),
     ]
 
     async def run() -> list[Completion]:
@@ -130,9 +135,59 @@ def test_torchtitan_response_round_trips_every_completion_field() -> None:
             == np.asarray(want.token_logprobs, dtype=np.float64).tobytes()
         )
         assert _metric_fields(got.metrics) == _metric_fields(want.metrics)
-        assert replace(got, token_logprobs=[], metrics=[]) == replace(
-            want, token_logprobs=[], metrics=[]
-        )
+        if want.routed_expert_ids is None:
+            assert got.routed_expert_ids is None
+        else:
+            assert got.routed_expert_ids.dtype == want.routed_expert_ids.dtype
+            np.testing.assert_array_equal(got.routed_expert_ids, want.routed_expert_ids)
+        assert replace(
+            got, token_logprobs=[], metrics=[], routed_expert_ids=None
+        ) == replace(want, token_logprobs=[], metrics=[], routed_expert_ids=None)
+
+
+def test_verifiers_response_returns_routed_experts_from_the_prompt_start() -> None:
+    # Prompt [1, 2, 3] + completion [31, 32, 33]; the previous turn already returned position 0,
+    # so the generator returns the rows of positions 1..4.
+    rows = np.arange(4 * 2 * 2, dtype=np.uint8).reshape(4, 2, 2)
+
+    async def run() -> tuple[list[dict], int, bytes]:
+        calls = []
+
+        async def generate(prompt_token_ids, **kwargs):
+            calls.append(kwargs)
+            return _completion(kwargs["request_id"], routed_expert_ids=rows)
+
+        async with _Server(generate) as server:
+            body = _body(token_ids=[1, 2, 3])
+            body["sampling_params"]["routed_experts_prompt_start"] = 1
+            out_of_range = _body(token_ids=[1, 2, 3])
+            out_of_range["sampling_params"]["routed_experts_prompt_start"] = 3
+            async with ClientSession() as session:
+                async with session.post(
+                    f"{server.url}/inference/v1/generate",
+                    json=body,
+                    headers={"X-Session-ID": "s0"},
+                ) as response:
+                    raw = await response.read()
+            status, _ = await _post(server, out_of_range)
+        return calls, status, raw
+
+    calls, out_of_range_status, raw = asyncio.run(run())
+    assert [call["sampling_config"].routed_experts_prompt_start for call in calls] == [
+        1
+    ]
+    # A start outside the prompt would assert inside vLLM's engine step.
+    assert out_of_range_status == 400
+    # Compact JSON: Verifiers' client cuts the base64 out at this exact prefix.
+    assert b'"routed_experts":{"data":"' in raw
+    payload = json.loads(raw)["choices"][0]["routed_experts"]
+    assert (payload["shape"], payload["start"], payload["dtype"]) == (
+        [4, 2, 2],
+        1,
+        "uint8",
+    )
+    data = np.frombuffer(base64.b64decode(payload["data"]), dtype=np.uint8)
+    np.testing.assert_array_equal(data.reshape(payload["shape"]), rows)
 
 
 def test_server_mints_unique_request_ids_even_for_a_repeated_client_id() -> None:

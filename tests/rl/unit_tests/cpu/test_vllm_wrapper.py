@@ -213,3 +213,41 @@ def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
             assert param.equal(new_state_dict[name].to_local()), name
     finally:
         dist.destroy_process_group()
+
+
+def test_routers_report_their_experts_to_vllm_capture():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from torchtitan.models.common.activation import Sigmoid
+    from torchtitan.models.common.config_utils import make_router_config
+
+    for tp_enabled, num_captured_rows in ((False, 3), (True, 6)):
+        router = make_router_config(
+            dim=4,
+            num_experts=4,
+            score_func=Sigmoid.Config(),
+            gate_param_init={"weight": nn.init.zeros_},
+            top_k=2,
+        ).build()
+        router.init_states()
+        wrapper = VLLMModelWrapper.__new__(VLLMModelWrapper)
+        nn.Module.__init__(wrapper)
+        wrapper.model = nn.Module()
+        wrapper.model.layers = nn.ModuleDict({"0": nn.Linear(4, 4), "1": router})
+        wrapper.parallelism_context = SimpleNamespace(
+            ep_enabled=True, tp_enabled=tp_enabled
+        )
+        # Under EP x TP each rank routes half the tokens; the hook gathers them back.
+        tp_group = SimpleNamespace(all_gather=lambda t, dim: torch.cat([t, t], dim))
+        captured = []
+
+        with patch.object(model_wrapper, "get_tp_group", return_value=tp_group):
+            wrapper._expose_routed_experts_to_vllm()
+            assert router.layer_id == 1 and router.capture_fn is None
+            router(torch.randn(3, 4))  # vLLM has not bound capture_fn yet
+            router.capture_fn = captured.append
+            _, topk_expert_ids_TK, _ = router(torch.randn(3, 4))
+
+        assert len(captured) == 1 and captured[0].shape == (num_captured_rows, 2)
+        assert torch.equal(captured[0][:3], topk_expert_ids_TK)

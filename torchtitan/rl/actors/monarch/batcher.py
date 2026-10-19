@@ -34,6 +34,7 @@ class _BatcherActorEndpoints:
         temperature: float,
         output_dir: str,
         enable_structured_logging: bool,
+        replay_routed_experts: bool,
     ) -> None:
         init_logger()
         sl.init_structured_logger(
@@ -54,6 +55,7 @@ class _BatcherActorEndpoints:
             pad_id=pad_id,
             temperature=temperature,
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
+            replay_routed_experts=replay_routed_experts,
         )
 
     @endpoint

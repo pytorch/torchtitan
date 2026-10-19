@@ -613,6 +613,7 @@ class Controller(Configurable):
                 temperature=self._sampling.temperature,
                 output_dir=config.dump_folder,
                 enable_structured_logging=config.trainer.debug.enable_structured_logging,
+                replay_routed_experts=config.generator.engine.return_routed_experts,
             )
 
             await self._rollouter.setup_async(

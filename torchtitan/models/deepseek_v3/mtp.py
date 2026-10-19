@@ -30,7 +30,11 @@ from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import (
+    Decoder,
+    routed_expert_ids_kwargs,
+    TransformerBlock,
+)
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
@@ -347,6 +351,7 @@ class MTPDecoder(Decoder):
         *,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
+        routed_expert_ids: torch.Tensor | None = None,
     ):
         if self.mtp_layers is None:
             if not isinstance(tokens, torch.Tensor):
@@ -357,6 +362,7 @@ class MTPDecoder(Decoder):
                 attention_metadata,
                 padding_mask=padding_mask,
                 aux_loss_denominators=aux_loss_denominators,
+                routed_expert_ids=routed_expert_ids,
             )
         if self.tok_embeddings is None:
             raise ValueError("MTP decoder forward requires token embeddings.")
@@ -384,7 +390,7 @@ class MTPDecoder(Decoder):
             main_aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        for layer in self.layers.values():
+        for layer_name, layer in self.layers.items():
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
@@ -396,6 +402,7 @@ class MTPDecoder(Decoder):
                 positions,
                 padding_mask=padding_mask,
                 aux_loss_denominator=main_aux_loss_denominator,
+                **routed_expert_ids_kwargs(routed_expert_ids, layer_name),
             )
 
         prev_depth_hidden = h

@@ -408,6 +408,12 @@ class Generator(Configurable):
         assert (
             sampling.stop_token_ids is not None
         ), f"{request_id}: stop_token_ids must be set from the renderer"
+        # vLLM asserts this inside engine.step, where a failure stops the engine for every request.
+        if not 0 <= sampling.routed_experts_prompt_start < len(prompt_token_ids):
+            raise ValueError(
+                f"{request_id}: routed_experts_prompt_start="
+                f"{sampling.routed_experts_prompt_start} must be in [0, {len(prompt_token_ids)})"
+            )
         return await self._engine_loop.generate(
             EngineRequest(
                 request_id=request_id,

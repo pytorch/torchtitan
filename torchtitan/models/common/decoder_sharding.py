@@ -55,10 +55,11 @@ def dense_activation_placement(
     )
 
 
-def token_id_placement(*, enable_sp: bool = False) -> SpmdType:
-    """Placement for decoder token IDs with shape ``(tokens,)``.
+def token_id_placement(*, enable_sp: bool = False, ndim: int = 1) -> SpmdType:
+    """Placement for per-token tensors ``(tokens, ...)``, e.g. token IDs.
 
     When sequence parallelism is enabled, TP also shards the token dimension.
+    The other ``ndim - 1`` dims are replicated.
     """
     return SpmdType(
         {
@@ -66,7 +67,9 @@ def token_id_placement(*, enable_sp: bool = False) -> SpmdType:
             CP: spmd.V,
             TP: spmd.V if enable_sp else spmd.R,
         },
-        partition_spec=spmd.PartitionSpec((DP, CP, TP) if enable_sp else (DP, CP)),
+        partition_spec=spmd.PartitionSpec(
+            (DP, CP, TP) if enable_sp else (DP, CP), *([None] * (ndim - 1))
+        ),
     )
 
 
@@ -110,6 +113,7 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
         "input": token_id_placement(),
         "positions": token_id_placement(),
         "padding_mask": token_id_placement(),
+        "routed_expert_ids": token_id_placement(ndim=3),
         "labels": SpmdType(
             {DP: spmd.V, CP: spmd.V, TP: spmd.I},
             partition_spec=spmd.PartitionSpec((DP, CP)),

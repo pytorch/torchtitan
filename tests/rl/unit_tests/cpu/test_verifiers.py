@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 
 pytest.importorskip("verifiers")
@@ -395,6 +396,7 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
                 nodes=[node],
                 token_ids=[10, 11, 12, 13],
                 logprobs=[0.0, 0.0, -0.2, -0.3],
+                routed_experts=None,
             )
         ],
     )
@@ -444,6 +446,8 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
                 nodes=[first_node, second_node],
                 token_ids=[10, 11, 12, 13],
                 logprobs=[0.0, -0.1, 0.0, -0.2],
+                # Row i holds the experts of position i.
+                routed_experts=np.arange(4).reshape(4, 1, 1),
             )
         ],
     )
@@ -466,6 +470,11 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
     ]
     assert stored == [(0, [10]), (2, [12])]
     assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13]]
+    # Like the prompt, a delta: turn 1's rows start at 11, which only its prefill ran.
+    assert [turn.routed_expert_ids.flatten().tolist() for turn in turns] == [
+        [0],
+        [1, 2],
+    ]
     assert [turn.completion_logprobs.tolist() for turn in turns] == [
         pytest.approx([-0.1]),
         pytest.approx([-0.2]),
@@ -491,11 +500,13 @@ def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> 
                 nodes=[shared, first_leaf],
                 token_ids=[10, 11, 12, 13],
                 logprobs=[0.0, -0.1, 0.0, -0.2],
+                routed_experts=None,
             ),
             SimpleNamespace(
                 nodes=[shared, second_leaf],
                 token_ids=[10, 11, 14, 15],
                 logprobs=[0.0, -0.1, 0.0, -0.3],
+                routed_experts=None,
             ),
         ],
     )
@@ -549,6 +560,7 @@ def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
                 nodes=branch_nodes,
                 token_ids=[0] * len(branch_nodes),
                 logprobs=[0.0] * len(branch_nodes),
+                routed_experts=None,
             )
             for branch_nodes in (
                 [task, first, out, second],
@@ -1086,7 +1098,12 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
         calls=[],
         nodes=[node],
         branches=[
-            SimpleNamespace(nodes=[node], token_ids=[10, 11], logprobs=[0.0, -0.1])
+            SimpleNamespace(
+                nodes=[node],
+                token_ids=[10, 11],
+                logprobs=[0.0, -0.1],
+                routed_experts=None,
+            )
         ],
     )
     worker = object.__new__(VerifiersRolloutWorker)
