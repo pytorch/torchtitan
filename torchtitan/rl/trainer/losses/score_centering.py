@@ -14,7 +14,7 @@ import torch
 
 from torchtitan.components.loss import BaseLoss, compute_logprobs, compute_topk_logprobs
 from torchtitan.distributed.spmd_types import spmd_mesh_group
-from torchtitan.rl.trainer.losses.dapo import _MAX_LOG_RATIO, _normalize
+from torchtitan.rl.trainer.losses.common import MAX_LOG_RATIO, normalize
 
 # Floor for the probability mass outside the top-k: `1 - sum_H` can round to <= 0 in fp32.
 _MIN_TAIL_MASS = 1e-6
@@ -124,7 +124,7 @@ class ScoreCenteringLoss(BaseLoss):
                 effective_loss_mask, trainer_logprobs - generator_logprobs, 0.0
             )
             ratio = torch.exp(
-                torch.clamp(masked_log_ratio, -_MAX_LOG_RATIO, _MAX_LOG_RATIO)
+                torch.clamp(masked_log_ratio, -MAX_LOG_RATIO, MAX_LOG_RATIO)
             )
             trainer_topk_probs = torch.exp(trainer_topk_logprobs)
             generator_topk_probs = torch.exp(generator_topk_logprobs)
@@ -155,47 +155,47 @@ class ScoreCenteringLoss(BaseLoss):
 
         correction = (coefficients * trainer_topk_logprobs).sum(-1)
         token_loss = -advantages * (token_weight * trainer_logprobs - correction)
-        loss = _normalize(
+        loss = normalize(
             (token_loss * effective_loss_mask).sum(), global_loss_token_counts
         )
 
         with torch.no_grad():
             metrics = {
                 "loss/mean": loss.detach(),
-                "loss/ratio_mean": _normalize(
+                "loss/ratio_mean": normalize(
                     (ratio * effective_loss_mask).sum(), global_loss_token_counts
                 ),
                 # Mean of log p - log q over loss tokens: the k1 estimate of -KL(q || p).
-                "bit_wise/logprob_diff/mean": _normalize(
+                "bit_wise/logprob_diff/mean": normalize(
                     masked_log_ratio.float().sum(), global_loss_token_counts
                 ),
-                "bit_wise/ratio_tokens_different/mean": _normalize(
+                "bit_wise/ratio_tokens_different/mean": normalize(
                     (masked_log_ratio.abs() > 1e-6).float().sum(),
                     global_loss_token_counts,
                 ),
                 "bit_wise/logprob_diff/max": masked_log_ratio.abs().max(),
                 # Mean entropy of softmax(logits / temperature) over tokens used by the loss.
-                "trainer/entropy/mean": _normalize(
+                "trainer/entropy/mean": normalize(
                     (token_entropy * effective_loss_mask).sum(),
                     global_loss_token_counts,
                 ),
                 # Share of q (and p) inside the generator's top-k; the paper sees > 99.9% at k=128.
-                "score_centering/generator_head_mass/mean": _normalize(
+                "score_centering/generator_head_mass/mean": normalize(
                     torch.where(effective_loss_mask, generator_head_mass, 0.0).sum(),
                     global_loss_token_counts,
                 ),
-                "score_centering/trainer_head_mass/mean": _normalize(
+                "score_centering/trainer_head_mass/mean": normalize(
                     torch.where(effective_loss_mask, trainer_head_mass, 0.0).sum(),
                     global_loss_token_counts,
                 ),
                 # sum_H |q * w - alpha * p|: 0 when trainer and generator agree, and with
                 # max_ratio whenever no head or tail ratio is truncated.
-                "score_centering/coefficient_l1/mean": _normalize(
+                "score_centering/coefficient_l1/mean": normalize(
                     coefficients.abs().sum(-1).sum(), global_loss_token_counts
                 ),
             }
             if self.max_ratio is not None:
-                metrics["loss/ratio_truncated_frac"] = _normalize(
+                metrics["loss/ratio_truncated_frac"] = normalize(
                     ((ratio > self.max_ratio) & effective_loss_mask).float().sum(),
                     global_loss_token_counts,
                 )
