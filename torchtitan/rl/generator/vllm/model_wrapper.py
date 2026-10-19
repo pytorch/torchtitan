@@ -22,7 +22,7 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import FSDPModule
-from torch.distributed._state_dict_utils import _create_cpu_state_dict
+from torch.distributed._state_dict_utils import _copy_state_dict, _create_cpu_state_dict
 from torch.distributed.tensor import DTensor, Replicate
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -414,10 +414,14 @@ class VLLMModelWrapper(Module):
         # is still sharded. Bind first so first-touch places them on the
         # NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
+        model_state_dict = self.model.state_dict()
         with torch.device("cpu"):
             self._prefetched_model_state_dict = _create_cpu_state_dict(
-                self.model.state_dict(), pin_memory=True
+                model_state_dict, pin_memory=True
             )
+        # A sync overwrites only the keys the trainer publishes; the rest
+        # (e.g. vLLM's attention scales) keep the values copied here.
+        _copy_state_dict(model_state_dict, self._prefetched_model_state_dict)
 
         # Unshard the model here so vLLM performs its GPU memory profiling
         # based on the model's actual representation used during forward
