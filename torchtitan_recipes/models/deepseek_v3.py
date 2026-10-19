@@ -254,6 +254,11 @@ def _deepseek_v3_671b_mtp1_mlperf(
         "torchtitan_recipes.overrides.dense_causal_sdpa.dense_causal_fused_mla",
         "torchtitan_recipes.overrides.dense_causal_sdpa.unmasked_text_rows",
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
+        (
+            "torchtitan_recipes.overrides.fused_dsv3_router."
+            + ("fused_dsv3_round_robin_router" if performance else "fused_dsv3_router"),
+            {"require_fusion": True},
+        ),
     ]
     return config
 
