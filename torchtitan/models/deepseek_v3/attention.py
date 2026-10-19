@@ -165,10 +165,15 @@ class DeepSeekMLAAttention(Attention):
 
     # Cat options: rotate_tail concatenates q's untouched int32 words with the rotated ones;
     # Inductor's default pointwise cat makes that masked loads, slower than a plain cat.
+    # No pointwise autotuning, as in ComplexRoPE.forward: RoPE is inlined here, so this region's options apply.
     @local_compile(
         "mla_qk",
         batch_invariant=True,
-        options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
+        options={
+            "max_pointwise_cat_inputs": 0,
+            "max_complex_pointwise_cat_inputs": 0,
+            "triton.autotune_pointwise": False,
+        },
     )
     def _apply_rope_to_q_and_k_pe(
         self,

@@ -206,10 +206,16 @@ class ComplexRoPE(RoPE):
 
     # Cat options: only fp32/fp16 inputs reach the stack (bf16 writes int32 pairs); they write
     # each half with one store, instead of one masked kernel over both.
+    # No pointwise autotuning: the rotation's kernel configs can round differently (likely FMA
+    # contraction), so picking one by timing could change numerics from run to run.
     @local_compile(
         "rope",
         batch_invariant=True,
-        options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
+        options={
+            "max_pointwise_cat_inputs": 0,
+            "max_complex_pointwise_cat_inputs": 0,
+            "triton.autotune_pointwise": False,
+        },
     )
     def forward(
         self,
