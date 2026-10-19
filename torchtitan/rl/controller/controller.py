@@ -1465,6 +1465,9 @@ class Controller(Configurable):
         """
         # Policy version that will train the batch being assembled: batches train in order, one per version.
         consuming_policy_version = self.start_step
+        # Same filters as the batcher's builder: tells which rollouts it will leave out.
+        sample_builder = self.config.async_loop.batcher.training_sample_builder.build()
+        replay_routed_experts = self.config.generator.engine.return_routed_experts
         while True:
             rollout_group = await self._group_buffer.take_finalized(
                 consuming_policy_version=consuming_policy_version
@@ -1472,6 +1475,12 @@ class Controller(Configurable):
             if rollout_group is None:  # closed and drained
                 logger.info("Buffer drained; batcher loop stopping")
                 break
+            if replay_routed_experts:
+                # The batcher won't train these rollouts, so don't send their router-replay expert
+                # ids: ~320 bytes per token, most of a group's message.
+                for rollout in sample_builder.rollouts_left_out(rollout_group):
+                    for rollout_turn in rollout.turns:
+                        rollout_turn.routed_expert_ids = None
             # We put a group in. We may get a batch back
             # if there are enough accumulated trainable groups to return one.
             with sl.log_trace_span("batcher_add_group"):

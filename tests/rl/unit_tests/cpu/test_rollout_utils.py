@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import replace
 
 import numpy as np
@@ -490,3 +491,123 @@ def test_topk_rows_follow_loss_tokens_across_turns() -> None:
     np.testing.assert_allclose(
         training_sample.topk_logprobs, [[-0.1, -2.0], [-0.2, -3.0], [-0.3, -1.5]]
     )
+
+
+def _replayed_rollout(
+    rollout_id: int,
+    *,
+    reward: float,
+    status: RolloutStatus = RolloutStatus.COMPLETED,
+    completions: tuple[list[int], ...] = ([5],),
+) -> Rollout:
+    """Turns of prompt [1, 2] (then the previous turn's tokens) with routed expert ids, one row per
+    trainer input; a turn's rows start at its prompt prefix's last token."""
+    turns = []
+    token_ids = [1, 2]
+    for completion in completions:
+        turns.append(
+            _turn(
+                prompt_token_ids=token_ids, completion_token_ids=completion, version=1
+            )
+        )
+        token_ids = token_ids + completion
+    rollout = _scored_rollout(turns, reward=reward, advantage=reward - 0.5)
+    for rollout_turn in rollout.turns:
+        rollout_turn.rollout_id = replace(
+            rollout_turn.rollout_id, rollout_id=rollout_id
+        )
+        end = (
+            rollout_turn.prompt_prefix_len
+            + len(rollout_turn.prompt_delta_token_ids)
+            + len(rollout_turn.completion_token_ids)
+        )
+        num_rows = end - 1 - max(rollout_turn.prompt_prefix_len - 1, 0)
+        rollout_turn.routed_expert_ids = np.full((num_rows, 2, 1), rollout_id, np.uint8)
+    rollout.rollout_id = rollout_id
+    rollout.status = status
+    return rollout
+
+
+@pytest.mark.parametrize(
+    "rollouts",
+    [
+        # Zero reward spread: the whole group is left out.
+        [_replayed_rollout(i, reward=1.0) for i in range(3)],
+        # An ERROR_SYSTEM rollout and one whose second turn has no completion are left out;
+        # the other two train.
+        [
+            _replayed_rollout(0, reward=1.0),
+            _replayed_rollout(1, reward=0.0),
+            _replayed_rollout(2, reward=0.0, status=RolloutStatus.ERROR_SYSTEM),
+            _replayed_rollout(3, reward=1.0, completions=([5], [])),
+        ],
+    ],
+    ids=["zero_std", "mixed"],
+)
+def test_rollouts_left_out_get_no_training_samples(rollouts) -> None:
+    """Stripping the routed expert ids of every rollout `rollouts_left_out` names leaves the training
+    samples the same, and doesn't make router replay drop the group."""
+    builder = TrainingSampleBuilder.Config().build(replay_routed_experts=True)
+    reference = builder.build_from_group(
+        rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=rollouts)
+    )
+    stripped_rollouts = [
+        replace(
+            rollout,
+            turns=[replace(rollout_turn) for rollout_turn in rollout.turns],
+        )
+        for rollout in rollouts
+    ]
+    stripped_group = RolloutGroup(group_id=_GROUP_ID, rollouts=stripped_rollouts)
+    left_out = builder.rollouts_left_out(stripped_group)
+    assert left_out
+    for rollout in left_out:
+        for rollout_turn in rollout.turns:
+            rollout_turn.routed_expert_ids = None
+
+    stripped = builder.build_from_group(rollout_group=stripped_group)
+
+    assert not {rollout.rollout_id for rollout in left_out} & {
+        sample.rollout_id.rollout_id for sample in reference.training_samples
+    }
+    assert len(stripped.training_samples) == len(reference.training_samples)
+    for got, want in zip(
+        stripped.training_samples, reference.training_samples, strict=True
+    ):
+        assert got.rollout_id == want.rollout_id
+        assert np.array_equal(got.token_ids, want.token_ids)
+        assert np.array_equal(got.routed_expert_ids, want.routed_expert_ids)
+
+
+def test_rollouts_left_out_matches_build_from_group_on_random_groups() -> None:
+    """Over random groups and configs, a rollout gets training samples iff `rollouts_left_out`
+    doesn't name it."""
+    rng = random.Random(0)
+    statuses = [
+        RolloutStatus.COMPLETED,
+        RolloutStatus.TRUNCATED_LENGTH,
+        RolloutStatus.ERROR_SYSTEM,
+    ]
+    completions = [([5],), ([5], [6]), ([5], []), ([],)]
+    for _ in range(500):
+        builder = TrainingSampleBuilder.Config(
+            drop_zero_std_reward_groups=rng.random() < 0.5
+        ).build(replay_routed_experts=True)
+        rollouts = [
+            _replayed_rollout(
+                rollout_id,
+                reward=rng.choice([0.0, 0.5, 1.0]),
+                status=rng.choice(statuses),
+                completions=rng.choice(completions),
+            )
+            for rollout_id in range(rng.randint(1, 4))
+        ]
+        group = RolloutGroup(group_id=_GROUP_ID, rollouts=rollouts)
+
+        left_out = {rollout.rollout_id for rollout in builder.rollouts_left_out(group)}
+        sampled = {
+            sample.rollout_id.rollout_id
+            for sample in builder.build_from_group(rollout_group=group).training_samples
+        }
+        assert not left_out & sampled
+        assert left_out | sampled == {rollout.rollout_id for rollout in rollouts}

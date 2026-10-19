@@ -1416,6 +1416,12 @@ def test_batcher_passes_the_version_that_trains_each_group() -> None:
         return ("batch" if len(trainable_seen) % 2 == 0 else None), True
 
     controller = SimpleNamespace(
+        config=SimpleNamespace(
+            async_loop=SimpleNamespace(batcher=Batcher.Config()),
+            generator=SimpleNamespace(
+                engine=SimpleNamespace(return_routed_experts=False)
+            ),
+        ),
         start_step=5,
         _group_buffer=_Buffer(),
         batcher=SimpleNamespace(add_group=SimpleNamespace(call_one=add_group)),
