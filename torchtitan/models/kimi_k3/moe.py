@@ -55,35 +55,25 @@ class KimiLatentMoE(MoE):
                 dtype=torch.float32,
             )
 
-    def forward(
+    def _forward_routed_experts(
         self,
         x_TD: torch.Tensor,
+        scores_TK: torch.Tensor,
+        expert_ids_TK: torch.Tensor,
+        counts_E: torch.Tensor,
         *,
-        padding_mask_T: torch.Tensor | None = None,
-        **router_kwargs,
+        padding_mask_T: torch.Tensor | None,
     ) -> torch.Tensor:
-        (
-            routed_x_TD,
-            routed_padding_mask_T,
-        ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
-
-        weights_TK, expert_ids_TK, routing_map_TE = self.router(
-            routed_x_TD,
-            self.expert_bias_E,
-            padding_mask_T=routed_padding_mask_T,
-            **router_kwargs,
-        )
-        num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
-
-        routed_down_TD = self.routed_down(routed_x_TD)
+        """Preserve latent projections inside the common routed-expert boundary."""
+        routed_down_TD = self.routed_down(x_TD)
         # The token dispatcher reads the routed_down projection output with bare ops.
         remat.recompute_needs_tensor(routed_down_TD)
         routed_TD = self.routed_experts(
             routed_down_TD,
-            weights_TK,
+            scores_TK,
             expert_ids_TK,
-            num_tokens_per_expert_E,
-            padding_mask_T=routed_padding_mask_T,
+            counts_E,
+            padding_mask_T=padding_mask_T,
         )
         # routed_norm reads the routed experts' combined output with bare ops.
         remat.recompute_needs_tensor(routed_TD)
@@ -91,12 +81,4 @@ class KimiLatentMoE(MoE):
         # The TP zero-fill and the shared-expert add read the routed_up projection
         # output with bare ops.
         remat.recompute_needs_tensor(out_TD)
-        out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
-        if self.shared_experts is not None:
-            shared_TD = self.shared_experts(x_TD)
-            # Trailing add, always saved: it saves nothing for backward, so replay skips
-            # it and its inputs need no persisting, matching checkpoint early stop.
-            out_TD = remat.region(
-                torch.add, self.remat_region_name("shared_add"), recompute=False
-            )(out_TD, shared_TD)
-        return self._maybe_all_reduce_moe_output_across_tp(out_TD)
+        return out_TD
