@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 
 from torchtitan.models.common.linear import Linear
 
@@ -84,6 +85,12 @@ class MLAAttention(InnerAttention):
         self.packed_kv_head_dim = config.packed_kv_head_dim
         self.inner_attention = config.inner_attention.build()
 
+    def remat_region_name(self, local_name: str) -> str:
+        # Preserve the outer attention's kernel policy name inside the MLA backend.
+        if local_name == "inner_attention":
+            return self._remat_module_fqn or local_name
+        return super().remat_region_name(local_name)
+
     def project_mla_kv(
         self,
         kv_c_normed_TL: torch.Tensor,
@@ -105,5 +112,11 @@ class MLAAttention(InnerAttention):
     ) -> torch.Tensor:
         """Project and run attention from compact Q/KV inputs."""
         kv_THP = self.project_mla_kv(kv_c_normed_TL)
+        # Materialization reads saved projection/communication outputs outside a region.
+        remat.recompute_needs_tensor(kv_THP, k_shared_TR)
         k_THK, v_THV = materialize_mla_kv(q_THK, kv_THP, k_shared_TR)
-        return self.inner_attention(q_THK, k_THK, v_THV, **kwargs)
+        return remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(q_THK, k_THK, v_THV, **kwargs)

@@ -225,8 +225,7 @@ class AllGatherKVFlexInnerAttention(
 
 
 class AllGatherKVSlidingWindowFlexInnerAttention(
-    AllGatherKVFlex,
-    SlidingWindowFlexInnerAttention,
+    AllGatherKVFlex, SlidingWindowFlexInnerAttention
 ):
     """SlidingWindowFlexInnerAttention with sharded Q and all-gathered K/V."""
 

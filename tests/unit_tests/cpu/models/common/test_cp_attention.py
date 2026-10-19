@@ -1121,8 +1121,8 @@ class TestMLAContextParallelAttention(unittest.TestCase):
         out_THV = torch.randn(8, 4, 3)
         calls = []
 
-        def record(x, group, *, src, dst, backward_options=None):
-            calls.append((x, group, src, dst, backward_options))
+        def record(x, group, *, src, dst, backward_options=None, async_op=False):
+            calls.append((x, group, src, dst, backward_options, async_op))
             return x
 
         config = UlyssesMLAAttention.Config(**_mla_config_kwargs())
@@ -1156,6 +1156,7 @@ class TestMLAContextParallelAttention(unittest.TestCase):
         self.assertEqual((8, 4, 13), calls[1][0].shape)
         self.assertEqual((spmd.S(0), spmd.S(1)), calls[1][2:4])
         self.assertEqual((spmd.S(1), spmd.S(0)), calls[2][2:4])
+        self.assertTrue(all(call[5] for call in calls))
         inner_forward.assert_called_once()
         args = inner_forward.call_args.args
         self.assertIs(args[0], kernel.inner_attention)

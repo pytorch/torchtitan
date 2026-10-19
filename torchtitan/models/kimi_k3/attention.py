@@ -118,11 +118,7 @@ class KimiMLAAttention(Attention):
             dim=-1,
         )
         kv_c_normed_TL = self.kv_norm(kv_latent_TC)
-        out_THV = remat.region(
-            self.inner_attention,
-            self.remat_region_name("inner_attention"),
-            recompute=self.remat_should_recompute("inner_attention"),
-        )(
+        out_THV = self.inner_attention(
             q_THK,
             kv_c_normed_TL,
             k_shared_TR,

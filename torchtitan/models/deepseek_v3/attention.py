@@ -146,11 +146,7 @@ class DeepSeekMLAAttention(Attention):
         with spmd.local():
             k_shared_TR = k_pe.squeeze(1)
 
-        output = remat.region(
-            self.inner_attention,
-            self.remat_region_name("inner_attention"),
-            recompute=self.remat_should_recompute("inner_attention"),
-        )(
+        output = self.inner_attention(
             q,
             kv_c_normed,
             k_shared_TR,

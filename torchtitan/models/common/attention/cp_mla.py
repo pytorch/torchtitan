@@ -11,6 +11,7 @@ from typing import Literal
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.context_parallel import cp_all_gather_tensors
@@ -64,9 +65,11 @@ class AllGatherKVMLAFlexAttention(AllGatherKVFlex, MLAAttention):
         k_shared_TR: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        kv_c_normed_TL, k_shared_TR = cp_all_gather_tensors(
-            (kv_c_normed_TL, k_shared_TR), reduce_dtype=self.reduce_dtype
-        )
+        kv_c_normed_TL, k_shared_TR = remat.region(
+            cp_all_gather_tensors,
+            self.remat_region_name("cp_all_gather"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )((kv_c_normed_TL, k_shared_TR), reduce_dtype=self.reduce_dtype)
         # Gathering compressed KV reduces communication volume. Each rank then
         # repeats the KV projection and shared-key expansion locally, trading
         # extra computation for the typically more expensive communication.
@@ -93,35 +96,57 @@ class UlyssesMLAAttention(Ulysses, MLAAttention):
                 "CP attention requires an active multi-rank CP mesh axis."
             )
 
-        kv_THP = self.project_mla_kv(kv_c_normed_TL)
+        recompute = self.remat_should_recompute("inner_attention")
 
         # Q and packed KV have heads, so move their CP shard from T to H with
         # one all-to-all. The shared key has no H dimension and is all-gathered.
-        k_shared_TR = spmd.redistribute(
+        k_shared_TR = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("cp_all_gather"),
+            recompute=recompute,
+        )(
             k_shared_TR,
             cp_group,
             src=spmd.S(_TOKEN_DIM),
             dst=spmd.R,
             backward_options={"op_dtype": k_shared_TR.dtype},
+            async_op=True,
         )
-        qk_head_dim = q_THK.shape[-1]
+        kv_THP = self.project_mla_kv(kv_c_normed_TL)
+        remat.recompute_needs_tensor(q_THK, kv_THP)
         packed_q_kv_THF = torch.cat((q_THK, kv_THP), dim=-1)
-        packed_q_kv_THF = spmd.redistribute(
+        packed_q_kv_THF = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("cp_all_to_all_in"),
+            recompute=recompute,
+        )(
             packed_q_kv_THF,
             cp_group,
             src=spmd.S(_TOKEN_DIM),
             dst=spmd.S(_HEAD_DIM),
+            async_op=True,
         )
         q_THK, kv_THP = torch.split(
             packed_q_kv_THF,
-            [qk_head_dim, kv_THP.shape[-1]],
+            [q_THK.shape[-1], kv_THP.shape[-1]],
             dim=-1,
         )
+        # Materialization reads saved communication outputs outside a region.
+        remat.recompute_needs_tensor(kv_THP, k_shared_TR)
         k_THK, v_THV = materialize_mla_kv(q_THK, kv_THP, k_shared_TR)
-        out_THV = self.inner_attention(q_THK, k_THK, v_THV, **kwargs)
-        return spmd.redistribute(
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=recompute,
+        )(q_THK, k_THK, v_THV, **kwargs)
+        return remat.region(
+            spmd.redistribute,
+            self.remat_region_name("cp_all_to_all_out"),
+            recompute=recompute,
+        )(
             out_THV,
             cp_group,
             src=spmd.S(_HEAD_DIM),
             dst=spmd.S(_TOKEN_DIM),
+            async_op=True,
         )
