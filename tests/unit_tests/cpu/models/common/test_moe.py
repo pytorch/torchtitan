@@ -38,14 +38,18 @@ from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import (
     MoE,
     RoundRobinTokenChoiceTopKRouter,
+    RoutedExperts,
     sharding as moe_sharding,
     TokenChoiceTopKRouter,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
+from torchtitan.models.muse_spark.moe import MuseSparkMoE
 
 
 class _PassthroughRoutedExperts(nn.Module):
+    count_tokens = RoutedExperts.count_tokens
+
     def __init__(self):
         super().__init__()
         self.num_tokens_per_expert_E = None
@@ -64,10 +68,17 @@ class _PassthroughRoutedExperts(nn.Module):
 
 
 class _RecordingRoutedExperts:
+    """Dist-MoE-like: skips the count and records what the MoE passes."""
+
     def __init__(self) -> None:
+        self.counts_E: torch.Tensor | None | str = "unset"
         self.kwargs: dict | None = None
 
+    def count_tokens(self, routing_map_TE):
+        return None
+
     def __call__(self, x_TD, scores_TK, expert_ids_TK, counts_E, **kwargs):
+        self.counts_E = counts_E
         self.kwargs = kwargs
         return x_TD
 
@@ -90,6 +101,12 @@ def _forward_with_routed_mask(
         routed_down=lambda x: x,
         routed_norm=lambda x: x,
         routed_up=lambda x: x,
+        # MuseSparkMoE pools tokens around the routed experts, in remat regions.
+        pooler=lambda x: x,
+        pre_expert_norm=lambda x: x,
+        unpooler=lambda x: x,
+        remat_region_name=lambda name: name,
+        remat_should_recompute=lambda name: False,
         _maybe_zero_fill_routed_output_to_tp_partial=lambda out: out,
         shared_experts=None,
         _maybe_all_reduce_moe_output_across_tp=lambda out: out,
@@ -399,6 +416,16 @@ class TestMoE(unittest.TestCase):
                 )
                 self.assertEqual(experts.kwargs, {"padding_mask_T": routed_mask_T})
                 self.assertIs(experts.kwargs["padding_mask_T"], routed_mask_T)
+
+    def test_moe_passes_the_count_the_experts_return(self):
+        """Routed experts that skip the count get ``None``, not a sum."""
+        for moe_cls in (MoE, KimiLatentMoE, MuseSparkMoE):
+            with self.subTest(moe_cls=moe_cls.__name__):
+                experts = _RecordingRoutedExperts()
+                _forward_with_routed_mask(
+                    moe_cls, experts, torch.zeros(4, dtype=torch.bool)
+                )
+                self.assertIsNone(experts.counts_E)
 
     def test_router_masks_padding_only_for_aux_loss(self):
         router = make_router_config(
