@@ -225,6 +225,8 @@ class GptOssModel(Decoder):
                 "fused_binary_activation",
                 "cos_sin_rope",
                 "fp32_to_bf16_split",
+                "moe_router_topk",
+                "moe_aux_loss",
             ]
         )
 
