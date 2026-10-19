@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import call, patch
 
+import pytest
 import spmd_types as spmd
 import torch
 import torch.nn as nn
@@ -37,6 +38,7 @@ from torchtitan.models.common.linear import (
 )
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import (
+    collect_routing_mismatch_metrics,
     MoE,
     RoundRobinTokenChoiceTopKRouter,
     RoutedExperts,
@@ -596,6 +598,48 @@ class TestMoE(unittest.TestCase):
         self.assertEqual(sorted(topk_expert_ids_TK[2].tolist()), [0, 1])
         # The gate weights still come from this router's scores: sigmoid(0).
         torch.testing.assert_close(topk_scores_TK, torch.full((3, 2), 0.5))
+        # Own {0, 1} vs replayed {2, 3} and {0, 3}: 2 real tokens, 2 differing sets, 3 experts.
+        self.assertEqual(router.routing_mismatch_counts.tolist(), [2.0, 2.0, 3.0])
+
+    def test_collect_routing_mismatch_metrics_reads_and_resets_every_router(self):
+        routers = {}
+        for layer_id, counts in [
+            ("1", [1000.0, 30.0, 34.0]),
+            ("2", [1000.0, 50.0, 60.0]),
+        ]:
+            router = make_router_config(
+                dim=4,
+                num_experts=16,
+                score_func=Sigmoid.Config(),
+                gate_param_init={"weight": nn.init.zeros_},
+                top_k=8,
+            ).build()
+            router.routing_mismatch_counts.copy_(torch.tensor(counts))
+            routers[layer_id] = nn.ModuleDict({"router": router})
+        model = nn.ModuleDict({"layers": nn.ModuleDict(routers)})
+        parallelism_context = SimpleNamespace(
+            ep_enabled=False, tp=1, get_optional_mesh=lambda name: None
+        )
+
+        metrics = collect_routing_mismatch_metrics(
+            [model], parallelism_context, per_layer=True
+        )
+
+        self.assertEqual(
+            metrics,
+            pytest.approx(
+                {
+                    "moe_routing/set_mismatch_frac": 0.04,
+                    "moe_routing/expert_mismatch_frac": 94 / 16000,
+                    "moe_routing/set_mismatch_frac/layer_1": 0.03,
+                    "moe_routing/set_mismatch_frac/layer_2": 0.05,
+                }
+            ),
+        )
+        # Reset: no replayed ids since this read -> nothing to log.
+        self.assertEqual(
+            collect_routing_mismatch_metrics([model], parallelism_context), {}
+        )
 
     def test_routed_expert_ids_shard_across_tp_like_the_padding_mask(self):
         moe = MoE.__new__(MoE)

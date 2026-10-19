@@ -553,6 +553,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
                 )
             ),
             parallelism_context=SimpleNamespace(non_data_parallel_size=1),
+            model_parts=[],  # no MoE routers: no routing-mismatch metrics
             num_completed_steps=4,
             ntokens_seen=12,
             num_flops_per_token=200,
@@ -568,6 +569,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             torch.tensor(2.0),
         )[1]
         trainer.engine = engine
+        trainer.config = SimpleNamespace(log_routing_mismatch_per_layer=False)
         trainer._controller_state = MirroredState()
         trainer.gpu_peak_flops = 1000
         trainer._step_compute_start = 0.0
