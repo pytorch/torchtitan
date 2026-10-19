@@ -18,13 +18,13 @@ from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from torchtitan.models.common.attn_gym import (
     _ContextParallelChunk,
-    _MissingKernel,
     ContextParallelRouting,
+    is_missing_kernel,
 )
 
 from .linear_attention import LinearAttentionMetadata
 
-if _ContextParallelChunk is not _MissingKernel:
+if not is_missing_kernel(_ContextParallelChunk):
     spmd.register_local_autograd_function(_ContextParallelChunk)
 
 

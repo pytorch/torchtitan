@@ -287,7 +287,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         self, token_str: str, token_config: dict, token_id: int | None = None
     ) -> AddedToken:
         """
-        Process a special token and update BOS/EOS attributes if applicable.
+        Process a configured added token and update BOS/EOS attributes if applicable.
 
         Args:
             token_str: The token string content
@@ -343,12 +343,12 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
     def _infer_special_tokens(self):
         """
-        Read special tokens from config and add them to the underlying tokenizer.
+        Read configured tokens and preserve their special-token flags.
         Store BOS/EOS tokens as class attributes since they are frequently used.
 
         This method handles multiple token configuration formats:
         1. Standard top-level keys (bos_token, eos_token, etc.)
-        2. added_tokens_decoder dictionary (used by models like Llama 3.1)
+        2. added_tokens_decoder dictionary (including non-special added tokens)
         """
         standard_keys = [
             "bos_token",
@@ -386,9 +386,10 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 )
                 added_tokens_to_add.append(added_token)
 
-        # Update the underlying tokenizer with special tokens
+        # add_tokens keeps each AddedToken.special flag; add_special_tokens would
+        # set special=True on all of them.
         if added_tokens_to_add:
-            self.tokenizer.add_special_tokens(added_tokens_to_add)
+            self.tokenizer.add_tokens(added_tokens_to_add)
 
             # Update BOS/EOS token IDs after adding to tokenizer (in case they changed)
             if self.bos_token:
