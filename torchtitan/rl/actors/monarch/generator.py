@@ -80,8 +80,8 @@ class _GeneratorActorEndpoints:
         await super().release_sessions(session_ids)
 
     @concurrent_endpoint
-    async def load_model_state_dict(self, version: int) -> None:
-        await super().load_model_state_dict(version)
+    async def load_model_state_dict(self, version: int, *, drain: bool = False) -> None:
+        await super().load_model_state_dict(version, drain=drain)
 
     @concurrent_endpoint
     async def prefetch_model_state_dict(self) -> None:

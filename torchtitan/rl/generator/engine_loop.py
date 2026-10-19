@@ -109,11 +109,12 @@ class EngineLoop:
 
     A model state dict load rides the same loop: `load_model_state_dict` puts a
     `ModelStateDictLoadMessage` on the queue, which rank 0 turns into a
-    `LoopDecision(LoopAction.LOAD_MODEL_STATE_DICT)` applied between step bursts. The engine does
-    NOT drain in-flight requests first ("hotswap"). This behavior can be changed in the
-    inter-generator router, by blocking new requests until the engine is drained. The network
-    transfer into the engine's pinned CPU buffers happens before this loop action, which then
-    performs the local CPU-to-GPU copy.
+    `LoopDecision(LoopAction.LOAD_MODEL_STATE_DICT)` applied between step bursts. By default the
+    engine does NOT drain in-flight requests first ("hotswap"). A load with `drain=True` instead
+    stops admitting new requests, keeps stepping the admitted ones, and applies once none is left;
+    requests that arrive meanwhile are admitted right after it. The network transfer into the
+    engine's pinned CPU buffers happens before this loop action, which then performs the local
+    CPU-to-GPU copy.
 
     Args:
         engine: The inference engine, built on the engine loop thread. The loop releases it on exit.
@@ -197,12 +198,15 @@ class EngineLoop:
         )
         return await asyncio.wrap_future(reply)
 
-    async def load_model_state_dict(self, version: int) -> None:
+    async def load_model_state_dict(self, version: int, *, drain: bool = False) -> None:
         """RANK 0: queue a model state dict load for `version` and wait until the loop has applied
-        it. Loads queued together are applied once, at the highest version."""
+        it. Loads queued together are applied once, at the highest version. With `drain`, the loop
+        first finishes every admitted request and admits no new one until the load lands."""
         self._rank0_check_running("load_model_state_dict")
         reply: concurrent.futures.Future[None] = concurrent.futures.Future()
-        self._queue.put(ModelStateDictLoadMessage(version=version, reply=reply))
+        self._queue.put(
+            ModelStateDictLoadMessage(version=version, reply=reply, drain=drain)
+        )
         await asyncio.wrap_future(reply)
 
     def release_groups(self, group_ids: list[int]) -> None:
@@ -403,17 +407,28 @@ class EngineLoop:
     ) -> LoopDecision:
         """RANK 0: takes everything off the queue and picks the next action. Sleeps until there is
         something to do.
+
+        A draining load stays pending across decisions until no admitted request is running:
+
+            admitted running, load(drain=True) queued  -->  STEP, admitting nothing new
+            none running                                -->  LOAD_MODEL_STATE_DICT
+            requests that arrived meanwhile             -->  admitted by the next STEP
         """
-        if pending_load_messages:
+        if pending_load_messages and not any(
+            load.drain for load in pending_load_messages
+        ):
             raise AssertionError(
-                "the engine loop applies or fails every load before deciding again"
+                "the engine loop applies or fails every non-draining load before deciding again"
             )
 
-        # * If there are outstanding generations, we drain the queue and make the next decision right away,
-        #   so outstanding generations can keep stepping.
+        # * If there are outstanding generations or a draining load, we take what is on the queue without
+        #   waiting and decide right away, so outstanding generations keep stepping and the load can land.
         # * If there are none, there is nothing to step, so we wait on the queue for the next decision.
         messages: list[EngineLoopMessage]
-        if self._request_dispatcher.rank0_has_outstanding_generations():
+        if (
+            pending_load_messages
+            or self._request_dispatcher.rank0_has_outstanding_generations()
+        ):
             messages = []
         else:
             if pending_engine_requests:
@@ -454,7 +469,18 @@ class EngineLoop:
         # A model state dict load takes priority over admitting new requests. Loads taken off the queue
         # together are coalesced into one, at the highest version: every load reads the latest push from
         # one TorchStore key, so the weights read are at least as new as any version requested.
-        if pending_load_messages:
+        # A draining load first lets the admitted requests finish. Outstanding generations include the
+        # requests taken off the queue but not admitted yet, so subtract those.
+        num_admitted = (
+            self._request_dispatcher.rank0_num_outstanding_generations()
+            - len(pending_engine_requests)
+        )
+        if any(load.drain for load in pending_load_messages) and num_admitted > 0:
+            decision = LoopDecision(
+                action=LoopAction.STEP,
+                requests_per_dp_rank=self._request_dispatcher.rank0_route([]),
+            )
+        elif pending_load_messages:
             decision = LoopDecision(
                 action=LoopAction.LOAD_MODEL_STATE_DICT,
                 requests_per_dp_rank=[],
@@ -533,6 +559,8 @@ class ModelStateDictLoadMessage:
 
     version: int
     reply: concurrent.futures.Future[None]
+    drain: bool = False
+    """Apply only once no admitted request is running, and admit none until then."""
 
 
 def _fail_loads(

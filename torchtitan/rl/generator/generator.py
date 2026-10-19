@@ -424,20 +424,20 @@ class Generator(Configurable):
         await ts.client(role=RankRole.REQUESTER, group=requester_index)
 
     @sl.log_trace_span("load_model_state_dict")
-    async def load_model_state_dict(self, version: int) -> None:
+    async def load_model_state_dict(self, version: int, *, drain: bool = False) -> None:
         """Queues a model state dict load for `version` and blocks until the engine loop has finished loading.
         Loads queued together are applied once, at the highest version.
 
         The network transfer has already completed and this load applies the
         prefetched weights to the GPU.
 
-        NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
-        an idle engine holds off new `generate` calls until the queue drains, then calls this.
-
         Args:
             version: Policy version to load
+            drain: False applies the load between step bursts while in-flight requests keep decoding.
+                True first finishes every admitted request; `generate` calls that arrive meanwhile wait
+                and are admitted after the load, so they run on the new weights.
         """
-        await self._engine_loop.load_model_state_dict(version)
+        await self._engine_loop.load_model_state_dict(version, drain=drain)
 
     @sl.log_trace_span("prefetch_model_state_dict")
     async def prefetch_model_state_dict(self) -> None:
