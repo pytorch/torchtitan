@@ -6,6 +6,7 @@
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -60,7 +61,7 @@ class Optim(Configurable):
         parallelism_context: ParallelismContext,
         training_steps: int,
         pp_has_last_stage: bool,
-        cuda_graph_annotation_config: dict[str, str] | None = None,
+        cuda_graph_annotation_config: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
         self.parallelism_context = parallelism_context
