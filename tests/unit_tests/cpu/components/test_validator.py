@@ -61,6 +61,7 @@ def _generic_validator(loader):
     validator._cuda_graph_enabled = False
     validator._run_eval = None
     validator.parallelism_context = SimpleNamespace(
+        cp=1,
         dp_enabled=False,
         pp_enabled=False,
         dp_cp_enabled=False,

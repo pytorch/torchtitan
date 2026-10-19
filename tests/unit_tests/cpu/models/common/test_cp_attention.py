@@ -379,7 +379,9 @@ class TestDecoderCpSharding(unittest.TestCase):
                             context_parallel_load_balancer=None,
                         ),
                     )
-                prepare.assert_called_once_with(global_metadata, permutation=None)
+                prepare.assert_called_once_with(
+                    global_metadata, permutation=None, cu_seqlens=None, fragments=None
+                )
                 metadata = input_dict["attention_metadata"]
                 self.assertIs(metadata[backend], local_metadata)
                 self.assertIs(metadata[FlexInnerAttention], global_metadata)
@@ -508,7 +510,9 @@ class TestDecoderCpSharding(unittest.TestCase):
                         )
 
                     build_load_balancer.assert_not_called()
-                    prepare_metadata.assert_called_once_with(metadata, permutation=None)
+                    prepare_metadata.assert_called_once_with(
+                        metadata, permutation=None, cu_seqlens=None, fragments=None
+                    )
                     self.assertIsNone(shard_tensors.call_args.kwargs["permutation"])
                     warn.assert_called_once()
                     self.assertIn("no full attention", warn.call_args.args[1])
@@ -586,33 +590,54 @@ class TestDecoderCpSharding(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             ContextParallelLoadBalancer.Config().build()
 
-    def test_contiguous_token_fragments(self):
+    def test_identity_permutation_fragments(self):
         self.assertEqual(
-            context_parallel.get_token_fragments(
-                8,
+            PTRRFlexAttentionCPLoadBalancer.get_token_fragments(
+                mock.Mock(spec=PTRRFlexAttentionCPLoadBalancer),
+                torch.arange(8).unsqueeze(0),
                 cp_size=2,
-                permutation=None,
             ),
             [[(0, 4)], [(4, 8)]],
         )
 
     def test_headtail_token_fragments(self):
         self.assertEqual(
-            context_parallel.get_token_fragments(
-                8,
+            PTRRFlexAttentionCPLoadBalancer.get_token_fragments(
+                mock.Mock(spec=PTRRFlexAttentionCPLoadBalancer),
+                torch.tensor([[0, 1, 6, 7, 2, 3, 4, 5]]),
                 cp_size=2,
-                permutation=torch.tensor([[0, 1, 6, 7, 2, 3, 4, 5]]),
             ),
             [[(0, 2), (6, 8)], [(2, 6)]],
         )
 
     def test_token_fragments_reject_uneven_partition(self):
         with self.assertRaisesRegex(ValueError, "divisible by the CP degree"):
-            context_parallel.get_token_fragments(
-                7,
+            PTRRFlexAttentionCPLoadBalancer.get_token_fragments(
+                mock.Mock(spec=PTRRFlexAttentionCPLoadBalancer),
+                torch.arange(7).unsqueeze(0),
                 cp_size=2,
-                permutation=None,
             )
+
+    def test_token_fragments_preserve_non_monotonic_order(self):
+        self.assertEqual(
+            PTRRFlexAttentionCPLoadBalancer.get_token_fragments(
+                mock.Mock(spec=PTRRFlexAttentionCPLoadBalancer),
+                torch.tensor([[5, 4, 6, 7, 2, 3, 0, 1]]),
+                cp_size=2,
+            ),
+            [[(5, 6), (4, 5), (6, 8)], [(2, 4), (0, 2)]],
+        )
+
+    def test_token_fragments_reject_invalid_permutation_shape(self):
+        for permutation in (torch.arange(8), torch.arange(8).reshape(2, 4)):
+            with self.subTest(shape=permutation.shape), self.assertRaisesRegex(
+                ValueError, "permutation with shape"
+            ):
+                PTRRFlexAttentionCPLoadBalancer.get_token_fragments(
+                    mock.Mock(spec=PTRRFlexAttentionCPLoadBalancer),
+                    permutation,
+                    cp_size=2,
+                )
 
     def test_no_shardable_inputs_is_a_noop(self):
         batch = {"attention_metadata": object()}

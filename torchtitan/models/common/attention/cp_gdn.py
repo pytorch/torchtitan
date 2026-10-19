@@ -57,10 +57,16 @@ class ContextParallelInnerGDN(
         attention_metadata: LinearAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
+        cu_seqlens: tuple[int, ...] | None = None,
+        fragments: tuple[tuple[tuple[int, int], ...], ...] | None = None,
     ) -> ContextParallelLinearAttentionMetadata:
         """Build rank-local routing from global Gated DeltaNet sequence metadata."""
         return prepare_linear_attention_cp_metadata(
-            attention_metadata, permutation=permutation, family="Gated DeltaNet"
+            attention_metadata,
+            permutation=permutation,
+            family="Gated DeltaNet",
+            cu_seqlens=cu_seqlens,
+            fragments=fragments,
         )
 
     def forward(

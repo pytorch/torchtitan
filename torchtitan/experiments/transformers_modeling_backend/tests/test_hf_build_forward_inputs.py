@@ -89,6 +89,9 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
             calls.append("permutation")
             return expected_permutation
 
+        def get_token_fragments(self, permutation, *, cp_size):
+            raise NotImplementedError
+
     load_balancer = TestLoadBalancer()
     load_balancer_config = Mock()
     load_balancer_config.build.return_value = load_balancer
@@ -135,6 +138,7 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         "input": torch.zeros(2, 4),
         "labels": torch.zeros(2, 4),
         "positions": torch.arange(4).repeat(2, 1),
+        "cu_seqlens": (0, 4, 8),
     }
     parallelism_context = cast(
         ParallelismContext,
@@ -156,3 +160,4 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     assert "cp_mesh" not in build_kwargs
     assert calls == ["permutation", "cp_metadata", "cp_input", "spmd"]
     assert extra_kwargs["attention_metadata"] is dense_attention_mask
+    assert "cu_seqlens" not in extra_kwargs

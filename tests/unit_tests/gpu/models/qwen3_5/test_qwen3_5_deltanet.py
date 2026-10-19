@@ -189,9 +189,9 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
         routing = cast(ContextParallelRouting, object())
 
         with (
-            mock.patch.object(
-                ContextParallelRouting,
-                "from_fragments",
+            mock.patch(
+                "torchtitan.models.common.attention.cp_linear_attention."
+                "ContextParallelRouting.from_fragments",
                 return_value=routing,
             ) as build_routing,
             mock.patch(
@@ -206,14 +206,16 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
             metadata = ContextParallelInnerGDN.prepare_cp_metadata(
                 attention_metadata,
                 permutation=None,
+                cu_seqlens=(0, 2, 4),
+                fragments=(((0, 2),), ((2, 4),)),
             )
 
         self.assertIs(metadata.cp_routing, routing)
         build_routing.assert_called_once_with(
-            cu_seqlens_global=[0, 2, 4],
-            fragments=[[(0, 2)], [(2, 4)]],
-            cp_rank=0,
-            device=varlen.cu_seq_q.device,
+            (0, 2, 4),
+            (((0, 2),), ((2, 4),)),
+            0,
+            varlen.cu_seq_q.device,
             conv_history=3,
         )
 

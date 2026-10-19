@@ -12,7 +12,6 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 
-from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
@@ -55,21 +54,27 @@ def prepare_linear_attention_cp_metadata(
     *,
     permutation: torch.Tensor | None,
     family: str,
+    cu_seqlens: tuple[int, ...] | None = None,
+    fragments: tuple[tuple[tuple[int, int], ...], ...] | None = None,
 ) -> ContextParallelLinearAttentionMetadata:
-    """Build rank-local routing from global linear-attention sequence metadata.
+    """Build rank-local routing from CPU document boundaries and token ranges.
 
+    ``cu_seqlens`` and ``fragments`` are required for linear attention.
     ``family`` names the attention (e.g. "KDA") in error messages.
     """
+    if cu_seqlens is None or fragments is None:
+        raise ValueError(
+            f"{family} context parallelism requires CPU document boundaries "
+            "and token fragments."
+        )
     if attention_metadata.varlen is None:
         if permutation is None:
             raise ValueError(
                 f"{family} context parallelism requires global "
                 "VarlenAttentionMetadata when using contiguous CP sharding."
             )
-        cu_seqlens_global = [0, permutation.shape[1]]
         device = permutation.device
     else:
-        cu_seqlens_global = attention_metadata.varlen.cu_seq_q.tolist()
         device = attention_metadata.varlen.cu_seq_q.device
 
     group = spmd_mesh_group(MeshAxisName.CP)
@@ -79,14 +84,10 @@ def prepare_linear_attention_cp_metadata(
             "mesh axis."
         )
     routing = ContextParallelRouting.from_fragments(
-        cu_seqlens_global=cu_seqlens_global,
-        fragments=get_token_fragments(
-            cu_seqlens_global[-1],
-            cp_size=group.size(),
-            permutation=permutation,
-        ),
-        cp_rank=dist.get_rank(group),
-        device=device,
+        cu_seqlens,
+        fragments,
+        dist.get_rank(group),
+        device,
         conv_history=attention_metadata.num_conv_history_tokens,
     )
     return ContextParallelLinearAttentionMetadata(

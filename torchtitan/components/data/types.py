@@ -36,16 +36,32 @@ class TrainingMicrobatch(ABC):
         ...
 
     def to_input_dict(
-        self, device: torch.device | str, *, non_blocking: bool = False
+        self,
+        device: torch.device | str,
+        *,
+        non_blocking: bool = False,
+        include_cu_seqlens: bool = False,
     ) -> dict[str, Any]:
-        """Return model inputs with top-level tensors moved to ``device``."""
+        """Move tensors to ``device``, optionally retaining CPU document boundaries.
+
+        ``include_cu_seqlens`` adds a tuple of document offsets from the original
+        CPU positions for CP preprocessing, before uploading the input tensors.
+        """
+        input_dict = dict(self.as_input_dict())
+        positions = input_dict.get("positions")
+        if include_cu_seqlens and positions is not None:
+            if positions.device.type != "cpu" or positions.ndim != 1:
+                raise ValueError("CP document boundaries require 1D CPU positions.")
+            input_dict["cu_seqlens"] = tuple(
+                (positions == 0).nonzero().flatten().tolist()
+            ) + (positions.numel(),)
         return {
             key: (
                 value.to(device, non_blocking=non_blocking)
                 if isinstance(value, torch.Tensor)
                 else value
             )
-            for key, value in self.as_input_dict().items()
+            for key, value in input_dict.items()
         }
 
     def loss_kwargs(self) -> dict[str, Any]:

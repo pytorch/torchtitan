@@ -1239,6 +1239,7 @@ class HFTransformerModel(BaseModel):
 
         input_shardings = decoder_input_sharding()
         input_dict.pop("padding_mask", None)
+        input_dict.pop("cu_seqlens", None)
         if "attention_metadata" not in input_dict:
             positions = input_dict.get("positions")
             if positions is not None:

@@ -317,7 +317,10 @@ class Validator(BaseValidator):
                         self.metrics_processor.ntokens_since_last_log += (
                             microbatch.labels.numel()
                         )
-                        input_dict = microbatch.to_input_dict(device_type)
+                        input_dict = microbatch.to_input_dict(
+                            device_type,
+                            include_cu_seqlens=parallelism_context.cp > 1,
+                        )
                         microbatch_group.append(input_dict)
                 except StopIteration:
                     break

@@ -103,10 +103,18 @@ class _DictTrainingMicrobatch(TrainingMicrobatch):
         return dict(self._input_dict)
 
     def to_input_dict(
-        self, device: torch.device | str, *, non_blocking: bool = False
+        self,
+        device: torch.device | str,
+        *,
+        non_blocking: bool = False,
+        include_cu_seqlens: bool = False,
     ) -> dict[str, Any]:
         self.to_input_dict_calls.append((device, non_blocking))
-        return super().to_input_dict(device, non_blocking=non_blocking)
+        return super().to_input_dict(
+            device,
+            non_blocking=non_blocking,
+            include_cu_seqlens=include_cu_seqlens,
+        )
 
     def loss_kwargs(self) -> dict[str, Any]:
         return dict(self._loss_kwargs)

@@ -681,7 +681,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 self.parallelism_context.activate_spmd(),
             ):
                 inputs, labels, model_kwargs = self.model_parts[0].preprocess_inputs(
-                    microbatch.to_input_dict(self.device, non_blocking=True),
+                    microbatch.to_input_dict(
+                        self.device,
+                        non_blocking=True,
+                        include_cu_seqlens=self.parallelism_context.cp > 1,
+                    ),
                     parallelism_context=self.parallelism_context,
                     parallelism=self.config.parallelism,
                     max_num_documents=self.max_num_documents,

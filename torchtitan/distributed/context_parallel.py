@@ -42,33 +42,11 @@ __all__ = [
     "HeadTailCPLoadBalancer",
     "PTRRFlexAttentionCPLoadBalancer",
     "get_cp_input_seq_len",
-    "get_token_fragments",
     "shard_tensors",
     "supports_cp_inner_attention",
 ]
 
 _TOKEN_DIM = 0
-
-
-def cp_all_gather_tensors(
-    tensors: tuple[torch.Tensor, ...],
-    *,
-    reduce_dtype: torch.dtype,
-) -> tuple[torch.Tensor, ...]:
-    """All-gather token-sharded tensors across the CP mesh axis."""
-    cp_group = spmd_mesh_group(MeshAxisName.CP)
-    if cp_group is None:
-        raise RuntimeError("CP attention requires an active multi-rank CP mesh axis.")
-    return tuple(
-        spmd.redistribute(
-            tensor,
-            cp_group,
-            src=spmd.S(_TOKEN_DIM),
-            dst=spmd.R,
-            backward_options={"op_dtype": reduce_dtype},
-        )
-        for tensor in tensors
-    )
 
 
 class ContextParallelLoadBalancer(Configurable, ABC):
@@ -77,6 +55,16 @@ class ContextParallelLoadBalancer(Configurable, ABC):
     @abstractmethod
     def generate_permutation(self) -> torch.Tensor:
         """Generate the global token permutation for this batch."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_token_fragments(
+        self, permutation: torch.Tensor, *, cp_size: int
+    ) -> list[list[tuple[int, int]]]:
+        """Return each CP rank's contiguous global token ranges in local order.
+
+        Ranges use [start, stop) and merge consecutive token indices.
+        """
         raise NotImplementedError
 
 
@@ -116,6 +104,24 @@ class HeadTailCPLoadBalancer(ContextParallelLoadBalancer):
             self.seq_len, self.cp_size, self.device
         )._generate_indices()
         return permutation
+
+    def get_token_fragments(
+        self, permutation: torch.Tensor, *, cp_size: int
+    ) -> list[list[tuple[int, int]]]:
+        del permutation
+        chunk_size = self.seq_len // (2 * cp_size)
+        fragments = []
+        for rank in range(cp_size):
+            start = rank * chunk_size
+            stop = start + chunk_size
+            tail_start = self.seq_len - stop
+            tail_stop = self.seq_len - start
+            fragments.append(
+                [(start, tail_stop)]
+                if stop == tail_start
+                else [(start, stop), (tail_start, tail_stop)]
+            )
+        return fragments
 
 
 class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
@@ -160,6 +166,41 @@ class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
             self.block_mask, self.cp_size
         )._generate_indices()
         return permutation
+
+    def get_token_fragments(
+        self, permutation: torch.Tensor, *, cp_size: int
+    ) -> list[list[tuple[int, int]]]:
+        """Return each CP rank's contiguous global token ranges in local order.
+
+        Ranges use [start, stop) and merge consecutive token indices.
+        """
+        if permutation.ndim != 2 or permutation.shape[0] != 1:
+            raise ValueError(
+                "CP routing requires a permutation with shape [1, num_tokens], "
+                f"but got {tuple(permutation.shape)}."
+            )
+        num_tokens = permutation.shape[1]
+        if num_tokens % cp_size:
+            raise ValueError(
+                f"The token count ({num_tokens}) must be divisible by the CP degree "
+                f"({cp_size})."
+            )
+        local_num_tokens = num_tokens // cp_size
+        fragments: list[list[tuple[int, int]]] = []
+        for token_indices in permutation[0].reshape(cp_size, local_num_tokens).tolist():
+            rank_fragments: list[tuple[int, int]] = []
+            start = token_indices[0]
+            stop = start + 1
+            for token_idx in token_indices[1:]:
+                if token_idx == stop:
+                    stop += 1
+                else:
+                    rank_fragments.append((start, stop))
+                    start = token_idx
+                    stop = token_idx + 1
+            rank_fragments.append((start, stop))
+            fragments.append(rank_fragments)
+        return fragments
 
 
 def supports_cp_inner_attention(
@@ -207,83 +248,6 @@ def _cp_shard_dims(input_shardings: dict[str, SpmdType]) -> dict[str, int]:
         if isinstance(axis_type, spmd.Shard):
             dims[name] = axis_type.dim
     return dims
-
-
-def get_cp_input_seq_len(
-    input_dict: Mapping[str, Any],
-    *,
-    input_shardings: dict[str, SpmdType],
-) -> int:
-    """Return the pre-sharding sequence length shared by the CP inputs."""
-    seq_lens: dict[str, int] = {}
-    for name, seq_dim in _cp_shard_dims(input_shardings).items():
-        value = input_dict.get(name)
-        if isinstance(value, torch.Tensor):
-            seq_lens[name] = value.size(seq_dim)
-
-    if not seq_lens:
-        raise ValueError("CP requires at least one declared sequence tensor.")
-    if len(set(seq_lens.values())) != 1:
-        raise ValueError(
-            "All CP-sharded tensors must have the same sequence length, "
-            f"but got {seq_lens}."
-        )
-    return next(iter(seq_lens.values()))
-
-
-def get_token_fragments(
-    num_tokens: int,
-    *,
-    cp_size: int,
-    permutation: torch.Tensor | None,
-) -> list[list[tuple[int, int]]]:
-    """Describe each CP rank's global token ranges after input sharding.
-
-    Args:
-        num_tokens: Number of tokens in the global sequence before CP sharding.
-        cp_size: Number of CP ranks sharing the sequence.
-        permutation: Optional global token order applied before splitting the
-            sequence into equal rank-local shards. Its shape must be
-            ``[1, num_tokens]``.
-
-    Returns:
-        One list per CP rank containing maximal half-open global token ranges
-        ``[start, stop)`` in the order they appear in that rank's local shard.
-    """
-    if num_tokens % cp_size:
-        raise ValueError(
-            f"The token count ({num_tokens}) must be divisible by the CP degree "
-            f"({cp_size})."
-        )
-
-    local_num_tokens = num_tokens // cp_size
-    if permutation is None:
-        return [
-            [(rank * local_num_tokens, (rank + 1) * local_num_tokens)]
-            for rank in range(cp_size)
-        ]
-    if permutation.ndim != 2 or permutation.shape != (1, num_tokens):
-        raise ValueError(
-            "CP routing requires a permutation with shape [1, num_tokens], "
-            f"but got {tuple(permutation.shape)}."
-        )
-
-    fragments: list[list[tuple[int, int]]] = []
-    for rank_indices in permutation[0].split(local_num_tokens):
-        token_indices = rank_indices.tolist()
-        rank_fragments: list[tuple[int, int]] = []
-        start = token_indices[0]
-        stop = start + 1
-        for token_idx in token_indices[1:]:
-            if token_idx == stop:
-                stop += 1
-            else:
-                rank_fragments.append((start, stop))
-                start = token_idx
-                stop = token_idx + 1
-        rank_fragments.append((start, stop))
-        fragments.append(rank_fragments)
-    return fragments
 
 
 def _permute_tensor(
@@ -341,6 +305,28 @@ def _permute_tensor(
     return tensor
 
 
+def get_cp_input_seq_len(
+    input_dict: Mapping[str, Any],
+    *,
+    input_shardings: dict[str, SpmdType],
+) -> int:
+    """Return the pre-sharding sequence length shared by the CP inputs."""
+    seq_lens: dict[str, int] = {}
+    for name, seq_dim in _cp_shard_dims(input_shardings).items():
+        value = input_dict.get(name)
+        if isinstance(value, torch.Tensor):
+            seq_lens[name] = value.size(seq_dim)
+
+    if not seq_lens:
+        raise ValueError("CP requires at least one declared sequence tensor.")
+    if len(set(seq_lens.values())) != 1:
+        raise ValueError(
+            "All CP-sharded tensors must have the same sequence length, "
+            f"but got {seq_lens}."
+        )
+    return next(iter(seq_lens.values()))
+
+
 def shard_tensors(
     input_dict: dict[str, Any],
     *,
@@ -390,3 +376,24 @@ def shard_tensors(
             dst=spmd.S(seq_dim),
         )
     return input_dict
+
+
+def cp_all_gather_tensors(
+    tensors: tuple[torch.Tensor, ...],
+    *,
+    reduce_dtype: torch.dtype,
+) -> tuple[torch.Tensor, ...]:
+    """All-gather token-sharded tensors across the CP mesh axis."""
+    cp_group = spmd_mesh_group(MeshAxisName.CP)
+    if cp_group is None:
+        raise RuntimeError("CP attention requires an active multi-rank CP mesh axis.")
+    return tuple(
+        spmd.redistribute(
+            tensor,
+            cp_group,
+            src=spmd.S(_TOKEN_DIM),
+            dst=spmd.R,
+            backward_options={"op_dtype": reduce_dtype},
+        )
+        for tensor in tensors
+    )

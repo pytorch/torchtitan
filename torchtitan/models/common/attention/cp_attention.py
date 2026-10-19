@@ -73,6 +73,8 @@ class CPInnerAttention(
         attention_metadata: _GlobalAttentionMetadataT,
         *,
         permutation: torch.Tensor | None,
+        cu_seqlens: tuple[int, ...] | None = None,
+        fragments: tuple[tuple[tuple[int, int], ...], ...] | None = None,
     ) -> _LocalAttentionMetadataT:
         """Prepare this backend's metadata for rank-local CP execution."""
         raise NotImplementedError
@@ -90,6 +92,8 @@ class AllGatherKVFlex(CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetad
         attention_metadata: FlexAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
+        cu_seqlens: tuple[int, ...] | None = None,
+        fragments: tuple[tuple[tuple[int, int], ...], ...] | None = None,
     ) -> FlexAttentionMetadata:
         """Prepare a rank-local BlockMask for K/V all-gather CP.
 
@@ -104,6 +108,8 @@ class AllGatherKVFlex(CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetad
             permutation: Global token permutation applied before CP sharding,
                 with shape ``[1, seq_len]`` or ``[batch, seq_len]``. ``None``
                 selects contiguous sharding without token reordering.
+            cu_seqlens: CPU document boundaries, unused by FlexAttention.
+            fragments: Per-rank global token ranges, unused by FlexAttention.
 
         Returns:
             A local-Q/global-KV BlockMask for the current CP rank.
@@ -116,6 +122,7 @@ class AllGatherKVFlex(CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetad
         """
         block_mask = attention_metadata
         global_q_len, global_kv_len = block_mask.seq_lengths
+        del cu_seqlens, fragments
         cp_group = spmd_mesh_group(MeshAxisName.CP)
         if cp_group is None:
             raise RuntimeError(
@@ -266,8 +273,10 @@ class Ulysses(CPInnerAttention[_GlobalAttentionMetadataT, _GlobalAttentionMetada
         attention_metadata: _GlobalAttentionMetadataT,
         *,
         permutation: torch.Tensor | None,
+        cu_seqlens: tuple[int, ...] | None = None,
+        fragments: tuple[tuple[tuple[int, int], ...], ...] | None = None,
     ) -> _GlobalAttentionMetadataT:
-        del permutation
+        del permutation, cu_seqlens, fragments
         return attention_metadata
 
 

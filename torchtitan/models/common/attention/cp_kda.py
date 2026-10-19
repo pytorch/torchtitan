@@ -53,10 +53,16 @@ class ContextParallelInnerKDA(
         attention_metadata: LinearAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
+        cu_seqlens: tuple[int, ...] | None = None,
+        fragments: tuple[tuple[tuple[int, int], ...], ...] | None = None,
     ) -> ContextParallelLinearAttentionMetadata:
         """Build rank-local routing from global KDA sequence metadata."""
         return prepare_linear_attention_cp_metadata(
-            attention_metadata, permutation=permutation, family="KDA"
+            attention_metadata,
+            permutation=permutation,
+            family="KDA",
+            cu_seqlens=cu_seqlens,
+            fragments=fragments,
         )
 
     def forward(

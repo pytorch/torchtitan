@@ -10,11 +10,12 @@ import importlib.util
 import unittest
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from attn_gym.linear.context_parallel import ContextParallelRouting
 
+from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, Sigmoid
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
@@ -82,12 +83,12 @@ def _kda_config() -> KDA.Config:
 
 class TestKDAContextParallelMetadata(unittest.TestCase):
     def test_fragments_follow_the_explicit_permutation(self):
-        from torchtitan.distributed.context_parallel import get_token_fragments
-
         permutation = torch.tensor([[0, 1, 6, 7, 2, 3, 4, 5]])
 
         self.assertEqual(
-            get_token_fragments(8, cp_size=2, permutation=permutation),
+            PTRRFlexAttentionCPLoadBalancer.get_token_fragments(
+                Mock(spec=PTRRFlexAttentionCPLoadBalancer), permutation, cp_size=2
+            ),
             [[(0, 2), (6, 8)], [(2, 6)]],
         )
 
@@ -102,7 +103,8 @@ class TestKDAContextParallelMetadata(unittest.TestCase):
         routing = cast(ContextParallelRouting, object())
 
         with patch(
-            "torchtitan.models.common.attention.cp_linear_attention.ContextParallelRouting.from_fragments",
+            "torchtitan.models.common.attention.cp_linear_attention."
+            "ContextParallelRouting.from_fragments",
             return_value=routing,
         ) as build_routing, patch(
             "torchtitan.models.common.attention.cp_linear_attention.spmd_mesh_group",
@@ -114,14 +116,16 @@ class TestKDAContextParallelMetadata(unittest.TestCase):
             kda_metadata = ContextParallelInnerKDA.prepare_cp_metadata(
                 attention_metadata,
                 permutation=permutation,
+                cu_seqlens=(0, 2, 4),
+                fragments=(((0, 1), (3, 4)), ((1, 3),)),
             )
 
         self.assertIs(kda_metadata.cp_routing, routing)
         build_routing.assert_called_once_with(
-            cu_seqlens_global=[0, 2, 4],
-            fragments=[[(0, 1), (3, 4)], [(1, 3)]],
-            cp_rank=0,
-            device=varlen.cu_seq_q.device,
+            (0, 2, 4),
+            (((0, 1), (3, 4)), ((1, 3),)),
+            0,
+            varlen.cu_seq_q.device,
             conv_history=3,
         )
 

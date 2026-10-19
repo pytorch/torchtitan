@@ -23,6 +23,7 @@ from torchtitan.models.common.attention import (
     AttentionMetadata,
     AttentionMetadataMap,
     InnerAttention,
+    LinearAttentionMetadata,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -357,17 +358,47 @@ class Decoder(BaseModel):
         permutation = (
             load_balancer.generate_permutation() if load_balancer is not None else None
         )
+        cu_seqlens = input_dict.pop("cu_seqlens", None)
+        fragments = None
         if "attention_metadata" in input_dict:
             attention_metadata = input_dict["attention_metadata"]
             assert isinstance(attention_metadata, dict)
             for inner_attention, metadata in attention_metadata.items():
                 if not issubclass(inner_attention, CPInnerAttention):
                     continue
+                if fragments is None and isinstance(metadata, LinearAttentionMetadata):
+                    if cu_seqlens is None:
+                        raise ValueError(
+                            "Linear-attention CP requires CPU document boundaries in "
+                            "the batch. Use to_input_dict(include_cu_seqlens=True)."
+                        )
+                    num_tokens = context_parallel.get_cp_input_seq_len(
+                        input_dict, input_shardings=input_shardings
+                    )
+                    if load_balancer is not None and permutation is not None:
+                        token_fragments = load_balancer.get_token_fragments(
+                            permutation, cp_size=parallelism_context.cp
+                        )
+                    else:
+                        cp_size = parallelism_context.cp
+                        if num_tokens % cp_size:
+                            raise ValueError(
+                                f"The token count ({num_tokens}) must be divisible by the "
+                                f"CP degree ({cp_size})."
+                            )
+                        local_num_tokens = num_tokens // cp_size
+                        token_fragments = [
+                            [(rank * local_num_tokens, (rank + 1) * local_num_tokens)]
+                            for rank in range(cp_size)
+                        ]
+                    fragments = tuple(tuple(row) for row in token_fragments)
                 attention_metadata[
                     inner_attention
                 ] = inner_attention.prepare_cp_metadata(
                     metadata,
                     permutation=permutation,
+                    cu_seqlens=cu_seqlens,
+                    fragments=fragments,
                 )
         return context_parallel.shard_tensors(
             input_dict,

@@ -249,7 +249,11 @@ class GraphTrainingEngine(TrainingEngine):
             kwarg_mbs: list[dict[str, Any]] = []
             target_mbs: list[torch.Tensor | tuple[torch.Tensor, ...]] = []
             for microbatch in microbatch_group:
-                input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
+                input_dict = microbatch.to_input_dict(
+                    self.device,
+                    non_blocking=True,
+                    include_cu_seqlens=self.parallelism_context.cp > 1,
+                )
                 with (
                     sl.log_trace_span("preprocess_inputs"),
                     self.parallelism_context.activate_spmd(),
