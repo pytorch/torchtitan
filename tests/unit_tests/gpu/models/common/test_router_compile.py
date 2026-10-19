@@ -137,7 +137,10 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                 for n in (16384, 14336, 34, 1)
             }
         for n in (34, 1):
-            for actual, expected in zip(outputs[n], outputs[16384], strict=True):
+            # The last output, the replay mismatch counts, is None without routed expert ids.
+            for actual, expected in zip(
+                outputs[n][:-1], outputs[16384][:-1], strict=True
+            ):
                 self.assertTrue(torch.equal(actual, expected[:n]))
 
     def test_flavor_routers_match_eager(self):
@@ -185,7 +188,7 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                 torch._dynamo.reset()
                 for n in (256, 34, 3, 1):
                     for actual, expected in zip(
-                        outputs[n], outputs[16384], strict=True
+                        outputs[n][:-1], outputs[16384][:-1], strict=True
                     ):
                         self.assertTrue(torch.equal(actual, expected[:n]))
 
