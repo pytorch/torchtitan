@@ -61,7 +61,7 @@ def _replace_vllm_layer_configs(model_config):
     # models do not acquire its vLLM-specific dependencies.
     from torchtitan.rl.generator.vllm.attention import (
         get_attention_dimensions,
-        VLLMAttentionWrapper,
+        VLLMInnerAttention,
     )
 
     new_layers = []
@@ -78,12 +78,13 @@ def _replace_vllm_layer_configs(model_config):
                 head_dim,
                 value_head_dim,
             ) = get_attention_dimensions(attention_cfg, model_config.dim)
-            vllm_attention_cfg = VLLMAttentionWrapper.Config(
+            vllm_attention_cfg = VLLMInnerAttention.Config(
                 hidden_size=model_config.dim,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
                 value_head_dim=value_head_dim,
+                scale=attention_cfg.softmax_scale,
                 sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
                 sharding_config=attention_cfg.inner_attention.sharding_config,
             )
