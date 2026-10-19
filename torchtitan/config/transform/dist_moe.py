@@ -20,7 +20,7 @@ from torchtitan.models.common.dist_moe import (
     MXFP8DistMoeRoutedExperts,
 )
 from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.moe import MoE, RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from .base import ModelConfigTransform
 
@@ -155,18 +155,22 @@ class DistMoeTransform(ModelConfigTransform):
     def transform(self, model: Module.Config) -> Module.Config:
         """Replace each stock routed-expert config with the selected precision."""
         if self.expert_precision == "bf16":
-            return _replace_routed_experts(
+            model = _replace_routed_experts(
                 model,
                 DistMoeRoutedExperts,
                 inplace_wgrad_accum=self.inplace_wgrad_accum,
                 bf16_grouped_gemm_preset=self.bf16_grouped_gemm_preset,
             )
-        return _replace_routed_experts(
-            model,
-            MXFP8DistMoeRoutedExperts,
-            inplace_wgrad_accum=self.inplace_wgrad_accum,
-            block_scaled_config=(
-                self.block_scaled_config or dist_moe.BlockScaledConfig()
-            ),
-            mega_fused_inference=self.mxfp8_mega_fused_inference,
-        )
+        else:
+            model = _replace_routed_experts(
+                model,
+                MXFP8DistMoeRoutedExperts,
+                inplace_wgrad_accum=self.inplace_wgrad_accum,
+                block_scaled_config=(
+                    self.block_scaled_config or dist_moe.BlockScaledConfig()
+                ),
+                mega_fused_inference=self.mxfp8_mega_fused_inference,
+            )
+        for _, moe, _, _ in model.traverse(MoE.Config):
+            moe.overlap_shared_experts = True
+        return model

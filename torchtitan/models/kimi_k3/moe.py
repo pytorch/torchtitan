@@ -55,34 +55,25 @@ class KimiLatentMoE(MoE):
                 dtype=torch.float32,
             )
 
-    def forward(
+    def _forward_routed_experts(
         self,
         x_TD: torch.Tensor,
+        scores_TK: torch.Tensor,
+        expert_ids_TK: torch.Tensor,
+        routing_map_TE: torch.Tensor,
         *,
-        padding_mask_T: torch.Tensor | None = None,
-        **router_kwargs,
+        padding_mask_T: torch.Tensor | None,
     ) -> torch.Tensor:
-        (
-            routed_x_TD,
-            routed_padding_mask_T,
-        ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
-
-        weights_TK, expert_ids_TK, routing_map_TE = self.router(
-            routed_x_TD,
-            self.expert_bias_E,
-            padding_mask_T=routed_padding_mask_T,
-            **router_kwargs,
-        )
-
-        routed_down_TD = self.routed_down(routed_x_TD)
+        """Preserve latent projections inside the common routed-expert boundary."""
+        routed_down_TD = self.routed_down(x_TD)
         # The token dispatcher reads the routed_down projection output with bare ops.
         remat.recompute_needs_tensor(routed_down_TD)
         routed_TD = self.routed_experts(
             routed_down_TD,
-            weights_TK,
+            scores_TK,
             expert_ids_TK,
             routing_map_TE,
-            padding_mask_T=routed_padding_mask_T,
+            padding_mask_T=padding_mask_T,
         )
         # routed_norm reads the routed experts' combined output with bare ops.
         remat.recompute_needs_tensor(routed_TD)
@@ -90,4 +81,4 @@ class KimiLatentMoE(MoE):
         # The TP zero-fill and the shared-expert add read the routed_up projection
         # output with bare ops.
         remat.recompute_needs_tensor(out_TD)
-        return self._add_shared_experts_and_reduce_across_tp(out_TD, x_TD)
+        return out_TD
