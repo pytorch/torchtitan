@@ -24,11 +24,11 @@ from torchtitan.models.base.module import Module
 
 from torchtitan.models.common.attn_gym import (
     _ChunkGDN,
-    _MissingKernel,
     causal_conv1d,
     chunk_gdn,
     ChunkGdnCudnnPacked,
     ContextParallelRouting,
+    is_missing_kernel,
     l2norm,
     recurrent_gdn,
     require_attn_gym,
@@ -51,7 +51,7 @@ from .linear_attention import (
 # ContextParallelInnerGDN handles cross-rank sequence dependencies
 # before invoking them.
 for _kernel_function in (_ChunkGDN, ChunkGdnCudnnPacked):
-    if _kernel_function is not _MissingKernel:
+    if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
 
 
@@ -220,7 +220,8 @@ class GDNKernel(Module):
         pass
 
     def __init__(self, config: Config):
-        require_attn_gym()
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(chunk_gdn, recurrent_gdn, l2norm)
         super().__init__()
 
     def forward(
@@ -298,6 +299,8 @@ class InnerGDN(InnerAttention):
             )
 
     def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(causal_conv1d)
         super().__init__()
         self.kernel = config.kernel.build()
 
