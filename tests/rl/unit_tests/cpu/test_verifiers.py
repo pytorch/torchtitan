@@ -37,7 +37,20 @@ from torchtitan.rl.examples.verifiers.rollouter import (
 )
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import Completion, RolloutStatus
+from torchtitan.rl.rollout.advantage import AdvantageEstimator
+from torchtitan.rl.rollout.rubric import RubricOutput
+from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
+
+
+def _recorded_error(error_type: str, status_code: int | None = None) -> SimpleNamespace:
+    """An error as Verifiers records it on a trace or an episode (`verifiers.v1.trace.Error`)."""
+    fields = {
+        "type": error_type,
+        "message": f"{error_type} happened",
+        "status_code": status_code,
+        "traceback": None,
+    }
+    return SimpleNamespace(**fields, model_dump=lambda mode: fields)
 
 
 def test_train_client_config_carries_an_in_tree_renderer() -> None:
@@ -809,18 +822,28 @@ def test_validate_token_ids(token_ids, accepted) -> None:
         _validate_token_ids(token_ids, field_name="token_ids")
 
 
-def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
-    # The first model call fails for context length, so the rollout has no turns.
+@pytest.mark.parametrize(
+    "trace_ok, trace_errors, expected",
+    [
+        # The prompt is past the context: the data's problem, flagged and kept as ERROR.
+        (True, [], RolloutStatus.ERROR),
+        # The generator unreachable: not the policy's doing, so its group still trains.
+        (False, [_recorded_error("ProviderError", 503)], RolloutStatus.ERROR_SYSTEM),
+    ],
+)
+def test_rollout_whose_first_model_call_failed_has_no_turns(
+    caplog, trace_ok, trace_errors, expected
+) -> None:
     span = SimpleNamespace(duration=0.0)
     trace = SimpleNamespace(
         id="trace",
         task=SimpleNamespace(key="huge-task"),
         agent=SimpleNamespace(trainable=True),
-        ok=True,
+        ok=trace_ok,
         is_truncated=False,
         is_timeout=False,
         stop_condition="agent_completed",
-        errors=[],
+        errors=trace_errors,
         timing=SimpleNamespace(
             setup=span,
             agent=SimpleNamespace(duration=0.0, model=span, harness=span),
@@ -861,8 +884,9 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
             )
         )
 
-    assert rollout.status is RolloutStatus.ERROR
-    assert "first prompt of task huge-task does not fit" in caplog.text
+    assert rollout.status is expected and rollout.turns == []
+    is_flagged = "first prompt of task huge-task does not fit" in caplog.text
+    assert is_flagged == (expected is RolloutStatus.ERROR)
 
 
 @pytest.mark.parametrize(
@@ -879,8 +903,44 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
 def test_rollout_status_maps_timeouts_to_error_timeout(
     ok: bool, is_timeout: bool, episode_is_timeout: bool, expected: RolloutStatus
 ) -> None:
-    trace = SimpleNamespace(ok=ok, is_timeout=is_timeout, is_truncated=False)
-    episode = SimpleNamespace(ok=not episode_is_timeout, is_timeout=episode_is_timeout)
+    trace = SimpleNamespace(ok=ok, is_timeout=is_timeout, is_truncated=False, errors=[])
+    episode = SimpleNamespace(
+        ok=not episode_is_timeout, is_timeout=episode_is_timeout, errors=[]
+    )
+
+    status = VerifiersRollouter.rollout_status(verifiers_episode=episode, trace=trace)
+
+    assert status is expected
+
+
+@pytest.mark.parametrize(
+    "trace_errors, episode_errors, expected",
+    [
+        # The generator unreachable (Verifiers surfaces a failed connection as 503).
+        ([_recorded_error("ProviderError", 503)], [], RolloutStatus.ERROR_SYSTEM),
+        ([_recorded_error("SandboxError")], [], RolloutStatus.ERROR_SYSTEM),
+        # An untyped error is a bug in the code around the policy.
+        ([_recorded_error("RuntimeError")], [], RolloutStatus.ERROR_SYSTEM),
+        # The env's own `run()` raised: recorded on the episode, not the trace.
+        ([], [_recorded_error("EnvError")], RolloutStatus.ERROR_SYSTEM),
+        # A prompt past the context, or the agent's own exit: the policy's doing.
+        ([_recorded_error("ProviderError", 400)], [], RolloutStatus.ERROR),
+        ([_recorded_error("HarnessError")], [], RolloutStatus.ERROR),
+        # The first error stopped the rollout; a later teardown error doesn't change it.
+        (
+            [_recorded_error("ProviderError", 400), _recorded_error("SandboxError")],
+            [],
+            RolloutStatus.ERROR,
+        ),
+    ],
+)
+def test_rollout_status_maps_recorded_infra_errors_to_error_system(
+    trace_errors, episode_errors, expected: RolloutStatus
+) -> None:
+    trace = SimpleNamespace(
+        ok=False, is_timeout=False, is_truncated=False, errors=trace_errors
+    )
+    episode = SimpleNamespace(ok=False, is_timeout=False, errors=episode_errors)
 
     status = VerifiersRollouter.rollout_status(verifiers_episode=episode, trace=trace)
 
@@ -1008,33 +1068,53 @@ def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) 
     assert rollout.group_id == 1
 
 
-def test_a_failing_rollout_fails_its_group_only_after_every_sibling_finished() -> None:
-    """The caller releases the group once this raises; no sibling may still be generating."""
+@pytest.mark.parametrize(
+    "num_raised, advantages",
+    [
+        # Centered on the mean of the two scored rollouts (rewards 1 and 2).
+        (1, [-0.5, 0.5]),
+        (3, []),
+    ],
+)
+def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage(
+    num_raised, advantages
+) -> None:
+    async def run_single_rollout(*, group_id, rollout_id, **kwargs):
+        if rollout_id < num_raised:
+            raise RuntimeError("env server request failed")
+        return Rollout(
+            group_id=group_id, rollout_id=rollout_id, status=RolloutStatus.COMPLETED
+        )
 
-    async def run_test() -> list[int]:
-        finished = []
+    async def score_group(rollouts, sample):
+        return [
+            RubricOutput(reward=float(rollout.rollout_id), reward_breakdown={})
+            for rollout in rollouts
+        ]
 
-        async def run_single_rollout(*, rollout_id: int, **kwargs) -> None:
-            if rollout_id == 0:
-                raise RuntimeError("rollout 0 failed")
-            await asyncio.sleep(0.01)
-            finished.append(rollout_id)
+    rollouter = object.__new__(VerifiersRollouter)
+    rollouter._generation_server = SimpleNamespace(set_generate_fn=lambda fn: None)
+    rollouter._run_single_rollout = run_single_rollout
+    rollouter._rubric = SimpleNamespace(score_group=score_group)
+    rollouter._advantage_estimator = AdvantageEstimator.Config().build()
 
-        rollouter = object.__new__(VerifiersRollouter)
-        rollouter._generation_server = SimpleNamespace(set_generate_fn=lambda fn: None)
-        rollouter._run_single_rollout = run_single_rollout
-        with pytest.raises(RuntimeError, match="rollout 0 failed"):
-            await rollouter.run_group_rollouts(
-                generate_fn=AsyncMock(),
-                release_session_fn=AsyncMock(),
-                sample=None,
-                group_id=1,
-                group_size=2,
-                sampling=SamplingConfig(),
-            )
-        return finished
+    group = asyncio.run(
+        rollouter.run_group_rollouts(
+            generate_fn=AsyncMock(),
+            release_session_fn=AsyncMock(),
+            sample=None,
+            group_id=1,
+            group_size=3,
+            sampling=SamplingConfig(),
+        )
+    )
 
-    assert asyncio.run(run_test()) == [1]
+    failed, scored = group.rollouts[:num_raised], group.rollouts[num_raised:]
+    for rollout in failed:
+        assert rollout.status is RolloutStatus.ERROR_SYSTEM
+        assert "env server request failed" in rollout.logs["error"]
+        assert (rollout.reward, rollout.advantage) == (None, None)
+    assert [rollout.advantage for rollout in scored] == advantages
 
 
 def test_parse_sampling_config_requires_temperature_top_p_max_tokens() -> None:

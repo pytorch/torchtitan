@@ -90,6 +90,14 @@ def test_default_filter_logs_only_highest_and_lowest_per_group(tmp_path) -> None
     assert all("step" not in record for record in records)  # training omits step
 
 
+def test_default_filter_also_keeps_error_system_rollouts() -> None:
+    # A rollout whose code raised is unscored, so the reward ranking never picks it.
+    group = _group(0, rewards=[0.1, 0.9, None])
+    group.rollouts[2].status = RolloutStatus.ERROR_SYSTEM
+    picked = KeepExtremeRewardsFilter.Config().build()([group])
+    assert [rollout.rollout_id for rollout in picked] == [0, 1, 2]
+
+
 def test_keep_errors_records_every_failure_with_its_logs(tmp_path) -> None:
     group = _group(0, rewards=[0.1, 0.9, 0.5, 0.2])
     group.rollouts[0].status = RolloutStatus.ERROR  # also the lowest: recorded once
