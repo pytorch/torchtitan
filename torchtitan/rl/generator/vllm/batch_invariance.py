@@ -42,10 +42,10 @@ def force_logprobs_fn_for_batch_invariance() -> None:
         Returns:
             ``[N, K]`` logprob of each of the K token ids at each position.
         """
-        # vLLM gives token_ids [N, K]. SamplingParams(logprobs=0) makes real
-        # requests K=1, but we can't assert that: vLLM's kernel warmup probes
-        # this patched fn with K>1 (e.g. K=6), so we must handle any K. Reuse
-        # the trainer's compute_logprobs once per column.
+        # vLLM gives token_ids [N, K]: the sampled token plus
+        # SamplingConfig.num_topk_logprobs columns, and kernel warmup also probes
+        # K>1 (e.g. K=6), so we must handle any K. Reuse the trainer's
+        # compute_logprobs once per column.
         #
         # NOTE: each element of token_ids is scored independently, after the
         # whole generated sequence is marterialized. We iterate column-by-column

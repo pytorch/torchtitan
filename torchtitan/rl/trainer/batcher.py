@@ -51,23 +51,57 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
     temperature: torch.Tensor  # [T]
     loss_mask: torch.Tensor  # [T]
     advantages: torch.Tensor  # [T]
+    generator_topk_token_ids: torch.Tensor | None = None  # [num_loss_tokens, k]
+    """One row per True in loss_mask; `to_input_dict` expands them to [T, k] for the loss."""
+    generator_topk_logprobs: torch.Tensor | None = None  # [num_loss_tokens, k]
 
     def as_input_dict(self) -> dict[str, Any]:
         """Return the model inputs plus the per-token RL loss arguments.
 
         ``preprocess_inputs`` shards ``loss_kwargs`` like the labels and
-        returns them separately for the loss.
+        returns them separately for the loss. Top-k rows stay one per loss
+        token until ``to_input_dict``.
         """
+        loss_kwargs = {
+            "generator_logprobs": self.generator_logprobs,
+            "temperature": self.temperature,
+            "loss_mask": self.loss_mask,
+            "advantages": self.advantages,
+        }
+        if self.generator_topk_token_ids is not None:
+            loss_kwargs["generator_topk_token_ids"] = self.generator_topk_token_ids
+            loss_kwargs["generator_topk_logprobs"] = self.generator_topk_logprobs
         # Explicit base call: zero-argument super() fails in slots=True dataclasses.
         return {
             **TokenizedTrainingMicrobatch.as_input_dict(self),
-            "loss_kwargs": {
-                "generator_logprobs": self.generator_logprobs,
-                "temperature": self.temperature,
-                "loss_mask": self.loss_mask,
-                "advantages": self.advantages,
-            },
+            "loss_kwargs": loss_kwargs,
         }
+
+    def to_input_dict(
+        self, device: torch.device | str, *, non_blocking: bool = False
+    ) -> dict[str, Any]:
+        """Move the inputs to ``device``, then expand the top-k to one row per token.
+
+        Expanding after the move copies only the loss-token rows to ``device``.
+
+        Example:
+
+            loss_mask                = [False, True, True, False]
+            generator_topk_token_ids = [[5, 6], [7, 8]]
+            # -> generator_topk_token_ids = [[0, 0], [5, 6], [7, 8], [0, 0]]
+        """
+        input_dict = TokenizedTrainingMicrobatch.to_input_dict(
+            self, device, non_blocking=non_blocking
+        )
+        if self.generator_topk_token_ids is not None:
+            loss_kwargs = input_dict["loss_kwargs"]
+            loss_mask = loss_kwargs["loss_mask"].unsqueeze(-1)
+            for key in ("generator_topk_token_ids", "generator_topk_logprobs"):
+                loss_rows = loss_kwargs[key]
+                rows = loss_rows.new_zeros(loss_mask.shape[0], loss_rows.shape[1])
+                # masked_scatter_, unlike indexing with the mask, needs no host sync on CUDA.
+                loss_kwargs[key] = rows.masked_scatter_(loss_mask, loss_rows)
+        return input_dict
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +279,7 @@ class Batcher(Configurable):
         num_pp_microbatches: int = 1,
         pad_id: int,
         temperature: float,
+        num_topk_logprobs: int = 0,
         register_rdma_microbatch: RegisterRDMAMicrobatch | None = None,
     ) -> None:
         if (
@@ -269,6 +304,7 @@ class Batcher(Configurable):
             )
         self.pad_id = pad_id
         self._temperature = temperature
+        self._num_topk_logprobs = num_topk_logprobs
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
         self._max_num_documents = config.max_num_documents
         self._num_mtp_layers = config.num_mtp_layers
@@ -884,6 +920,39 @@ class Batcher(Configurable):
         }
         generator_logprobs = packed["generator_logprobs"]
         loss_mask = packed["loss_mask"]
+        topk_token_ids = topk_logprobs = None
+        if self._num_topk_logprobs > 0:
+            for training_sample in training_samples:
+                # to_input_dict scatters one row per True in loss_mask; a wrong count shifts later rows.
+                # The rows need no [1:] shift like the fields above: a sample's first token is a
+                # prompt token, which has no row.
+                num_loss_tokens = int(training_sample.loss_mask[1:].sum())
+                num_rows = (
+                    0
+                    if training_sample.topk_token_ids is None
+                    else len(training_sample.topk_token_ids)
+                )
+                if num_rows != num_loss_tokens:
+                    raise ValueError(
+                        f"{training_sample.rollout_id.to_string()} has {num_rows} top-k rows "
+                        f"for {num_loss_tokens} loss tokens"
+                    )
+            # The [0, k] seed gives an empty microbatch [0, k] rows; np.concatenate rejects an empty list.
+            k = self._num_topk_logprobs
+            topk_token_ids = torch.from_numpy(
+                np.concatenate(
+                    [np.zeros((0, k), dtype=np.int32)]
+                    + [sample.topk_token_ids for sample in training_samples],
+                    dtype=np.int32,
+                )
+            )
+            topk_logprobs = torch.from_numpy(
+                np.concatenate(
+                    [np.zeros((0, k), dtype=np.float32)]
+                    + [sample.topk_logprobs for sample in training_samples],
+                    dtype=np.float32,
+                )
+            )
         target_mask = loss_mask & torch.isfinite(generator_logprobs)
         positions_tensor = torch.from_numpy(np.concatenate(positions))
         padding_mask_tensor = torch.from_numpy(np.concatenate(padding_mask))
@@ -906,6 +975,8 @@ class Batcher(Configurable):
             padding_mask=padding_mask_tensor,
             loss_token_counts=loss_token_counts,
             routing_token_counts=routing_token_counts,
+            generator_topk_token_ids=topk_token_ids,
+            generator_topk_logprobs=topk_logprobs,
         )
 
     def _padding_fraction(
