@@ -121,9 +121,6 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2() -> Trainer.Config:
     )
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
-    config.override.imports = [
-        "torchtitan_recipes.overrides.helion_rope.helion_complex_rope",
-    ]
     config.training.disable_cuda_graphs = True
     return config
 
@@ -660,9 +657,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="DeepSeek V3 MTP FSDP+EP",
             test_name="deepseek_v3_mtp_fsdp+ep",
             ngpu=4,
-            # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
-            # H100/GB200; skip on ROCm where they are unvalidated.
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_debugmodel_mtp_tp2_cp2],
