@@ -122,8 +122,9 @@ _EXPORTS = {
 
 
 # Import errors raised from inside attn_gym, keyed by the attn_gym module that
-# raised them. The package is installed, but a kernel backend it imports at
-# module import time (cutlass, triton, ...) is not available on this platform.
+# raised them, or by "<module>.<export>" for an export the module resolves on
+# first access. The package is installed, but a kernel backend it imports
+# (cutlass, triton, ...) is not available on this platform.
 _BACKEND_ERRORS: dict[str, ModuleNotFoundError] = {}
 
 
@@ -139,9 +140,10 @@ def _raise_for(error: ModuleNotFoundError | None) -> NoReturn:
         raise ModuleNotFoundError(
             str(error), name=error.name, path=error.path
         ) from error
+    # Keep the version in sync with the attn-gym pin in .ci/docker/requirements.txt.
     raise ModuleNotFoundError(
         "Attention Gym kernels require attn_gym. "
-        "Install it with: python -m pip install 'attn-gym[linear,cudnn]==0.0.16'.",
+        "Install it with: python -m pip install 'attn-gym[linear,cudnn]==0.0.17'.",
         name="attn_gym",
     )
 
@@ -189,15 +191,22 @@ def is_missing_kernel(kernel: object) -> TypeGuard[type[_MissingKernel]]:
     return isinstance(kernel, type) and issubclass(kernel, _MissingKernel)
 
 
+def _is_backend_error(error: ModuleNotFoundError) -> bool:
+    """Whether ``error`` is a kernel backend (cutlass, triton, ...) missing.
+
+    A missing attn_gym module (moved in a release, or a typo in _EXPORTS) is
+    breakage rather than an unsupported platform, so it is not deferred.
+    """
+    return error.name is not None and error.name.split(".")[0] != "attn_gym"
+
+
 def _load_module(name: str) -> ModuleType | None:
     try:
         return import_module(name)
     except ModuleNotFoundError as error:
         if error.name == "attn_gym":
             return None
-        if error.name is None or error.name.split(".")[0] == "attn_gym":
-            # An attn_gym module itself is missing (moved in a release, or a
-            # typo in _EXPORTS): that is breakage, so it stays loud.
+        if not _is_backend_error(error):
             raise
         # attn_gym is installed but this module needs a backend (cutlass,
         # triton, ...) that is not. Keep the models importable and report the
@@ -206,13 +215,31 @@ def _load_module(name: str) -> ModuleType | None:
         return None
 
 
+def _load_export(module: ModuleType, name: str) -> Any:
+    """Return ``module.<name>``, or a placeholder when its backend is missing.
+
+    attn_gym resolves backend-backed exports on first access (see
+    ``attn_gym.linear._lazy``) and wraps the backend's ModuleNotFoundError in
+    an ImportError, so for those the backend fails here, not in _load_module.
+    """
+    try:
+        return getattr(module, name)
+    except ImportError as error:
+        cause = error.__cause__ or error
+        if not isinstance(cause, ModuleNotFoundError) or not _is_backend_error(cause):
+            raise
+        key = f"{module.__name__}.{name}"
+        _BACKEND_ERRORS.setdefault(key, cause)
+        return _missing_backend_kernel(key)
+
+
 def __getattr__(name: str) -> Any:
     if name not in _EXPORTS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     module_name = _EXPORTS[name]
     module = _load_module(module_name)
     if module is not None:
-        value = getattr(module, name)
+        value = _load_export(module, name)
     elif module_name in _BACKEND_ERRORS:
         value = _missing_backend_kernel(module_name)
     else:
