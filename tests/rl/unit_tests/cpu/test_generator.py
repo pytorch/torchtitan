@@ -37,7 +37,7 @@ from torchtitan.components.optim import AdamW
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
-from torchtitan.models.common.attention import VarlenInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.rl.generator.dispatcher import (
     _prepare_generation_request_metrics,
     _RejectedRequests,
@@ -53,6 +53,7 @@ from torchtitan.rl.generator.vllm.engine import (
     _extract_request_metrics_inputs,
     _finished_request,
     add_extra_vllm_engine_args,
+    vllm_attention_backend,
     VLLMEngine,
 )
 from torchtitan.rl.generator.vllm.registry import register_to_vllm
@@ -68,6 +69,7 @@ from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 class _FakeRenderer:
@@ -724,6 +726,46 @@ def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):
     with pytest.raises(ValueError, match=match):
         add_extra_vllm_engine_args(engine_kwargs, {key: 1})
     assert engine_kwargs == {"scheduling_policy": "fcfs"}
+
+
+# --- Attention backend selection (vllm_attention_backend) ---
+
+
+def _pin_platform(monkeypatch, *, rocm: bool):
+    monkeypatch.setattr(
+        vllm_engine_module,
+        "current_platform",
+        SimpleNamespace(is_rocm=lambda: rocm),
+    )
+
+
+@pytest.mark.parametrize("rocm", [False, True])
+def test_flex_attention_backend_is_platform_independent(monkeypatch, rocm):
+    _pin_platform(monkeypatch, rocm=rocm)
+
+    assert (
+        vllm_attention_backend(FlexInnerAttention.Config())
+        is AttentionBackendEnum.FLEX_ATTENTION
+    )
+
+
+def test_varlen_attention_backend_is_custom_off_rocm(monkeypatch):
+    _pin_platform(monkeypatch, rocm=False)
+
+    assert (
+        vllm_attention_backend(VarlenInnerAttention.Config())
+        is AttentionBackendEnum.CUSTOM
+    )
+
+
+def test_varlen_attention_backend_defers_to_vllm_on_rocm(monkeypatch):
+    # None is AttentionConfig's "select automatically". Naming a ROCm backend
+    # here would bypass vLLM's own gating (AITER FlashAttention needs CDNA3+ and
+    # one of its supported head sizes) and fail where vLLM would have fallen
+    # back.
+    _pin_platform(monkeypatch, rocm=True)
+
+    assert vllm_attention_backend(VarlenInnerAttention.Config()) is None
 
 
 # --- CUDA graph config (VLLMCudaGraphConfig.get_vllm_compilation_config) ---
