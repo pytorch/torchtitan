@@ -265,6 +265,17 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
                 assert torch.equal(actual[:, -128:], untouched[:, -128:])
 
 
+def _qwen3_5_gdn_layer() -> gdn.VLLMInnerGDN:
+    """Build a ``VLLMInnerGDN`` with Qwen3.5-0.8B's local TP=1 shapes, without vLLM."""
+    layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "gdn"
+    layer.local_num_k_heads = layer.local_num_v_heads = 16
+    layer.head_k_dim = layer.head_v_dim = 128
+    layer.local_key_dim = 2048
+    return layer
+
+
 def test_batch_invariant_decode_matches_prefill(monkeypatch) -> None:
     """Batch-invariant GDN: 20 decode steps give the bits of one 20-token prefill.
 
@@ -277,11 +288,7 @@ def test_batch_invariant_decode_matches_prefill(monkeypatch) -> None:
     # Qwen3.5-0.8B's local TP=1 shapes. With decode offsets, 32 rows x 16 heads
     # would take L2Norm's decode-tuned launch on Blackwell.
     num_sequences, num_tokens, heads = 32, 20, 16
-    layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
-    torch.nn.Module.__init__(layer)
-    layer.local_num_k_heads = layer.local_num_v_heads = heads
-    layer.head_k_dim = layer.head_v_dim = 128
-    layer.local_key_dim = 2048
+    layer = _qwen3_5_gdn_layer()
     qkv = torch.randn(
         num_sequences, num_tokens, 6144, device=device, dtype=torch.bfloat16
     )
@@ -313,6 +320,97 @@ def test_batch_invariant_decode_matches_prefill(monkeypatch) -> None:
         prefilled = run(tokens_per_step=num_tokens)
     for actual, expected in zip(decoded, prefilled, strict=True):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="needs Attention Gym's short-conv fix (a window that reads cached history "
+    "sums newest tap first); not in attn-gym 0.0.17",
+)
+def test_batch_invariant_bits_ignore_step_composition(monkeypatch) -> None:
+    """A token's output and state must not depend on how its sequence was scheduled.
+
+    Reference: every token decodes alone. Schedule: a 4-token prefill, a 2-token
+    second chunk, then decode tokens that each share a packed step with a fresh
+    prefill. Mismatches are rare per element, so 64 batches of 32 sequences run.
+    """
+    monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: True)
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    num_sequences, num_tokens, channels, heads = 32, 16, 6144, 16
+    layer = _qwen3_5_gdn_layer()
+    weight = torch.randn(channels, 4, device=device, dtype=torch.bfloat16)
+    A_log, bias = torch.randn(2, heads, device=device)
+    slots = list(range(1, num_sequences + 1))
+    filler_slot = num_sequences + 1
+
+    def step(x, a, b, start, stop, single_token):
+        """Run positions [start, stop) of every sequence as one step."""
+        length = stop - start
+        rows = [t[:, start:stop].flatten(0, 1) for t in (x, a, b)]
+        if single_token:
+            path = LinearAttentionExecutionPath.SINGLE_TOKEN
+            offsets, step_slots = list(range(num_sequences + 1)), slots
+            initial = [start > 0] * num_sequences
+        else:
+            # A fresh 2-token prefill shares the step, then the null interval.
+            path = LinearAttentionExecutionPath.PACKED
+            offsets = [length * i for i in range(num_sequences + 1)]
+            offsets += [offsets[-1] + 2] * 2
+            step_slots = slots + [filler_slot, 0]
+            initial = [start > 0] * num_sequences + [False, False]
+            rows = [torch.cat([t, torch.randn_like(t[:2])]) for t in rows]
+        metadata = TorchTitanLinearAttentionMetadata(
+            execution_path=path,
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_spec_decodes=0,
+            num_spec_decode_tokens=0,
+            num_actual_tokens=rows[0].shape[0],
+            non_spec_query_start_loc=torch.tensor(
+                offsets, device=device, dtype=torch.int32
+            ),
+            non_spec_state_indices_tensor=torch.tensor(
+                step_slots, device=device, dtype=torch.int32
+            ),
+            has_initial_state=torch.tensor(initial, device=device),
+        )
+        output = rows[0].new_zeros(rows[0].shape[0], heads, 128)
+        context = ForwardContext(
+            no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
+        )
+        with override_forward_context(context):
+            layer._forward(*rows, weight, None, A_log, bias, output)
+        return output[: num_sequences * length].unflatten(0, (num_sequences, length))
+
+    def run(x, a, b, schedule):
+        layer.kv_cache = tuple(
+            torch.full((filler_slot + 1, *shape), torch.nan, device=device, dtype=dtype)
+            for shape, dtype in (
+                ((3, channels), torch.bfloat16),
+                ((heads, 128, 128), torch.float32),
+            )
+        )
+        outputs = [step(x, a, b, *chunk) for chunk in schedule]
+        return torch.cat(outputs, 1), *[
+            state[1:filler_slot] for state in layer.kv_cache
+        ]
+
+    decode_only = [(t, t + 1, True) for t in range(num_tokens)]
+    chunked_then_mixed = [(0, 4, False), (4, 6, False)]
+    chunked_then_mixed += [(t, t + 1, False) for t in range(6, num_tokens)]
+    with torch.inference_mode():
+        for _ in range(64):
+            x = torch.randn(
+                num_sequences, num_tokens, channels, device=device, dtype=torch.bfloat16
+            )
+            a, b = torch.randn(2, num_sequences, num_tokens, heads, device=device)
+            reference = run(x, a, b, decode_only)
+            scheduled = run(x, a, b, chunked_then_mixed)
+            for actual, expected in zip(scheduled, reference, strict=True):
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
