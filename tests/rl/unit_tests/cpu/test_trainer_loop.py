@@ -158,7 +158,7 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
             SimpleNamespace(
                 microbatch_groups=[],
                 global_loss_token_counts=[1],
-                global_routing_token_counts=None,
+                global_routing_token_counts=[1],
                 group_ids=[],
                 min_policy_versions=[0],
                 metrics=[],

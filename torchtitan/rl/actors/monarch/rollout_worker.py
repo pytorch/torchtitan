@@ -17,6 +17,7 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.rollouter import RolloutWorker
 from torchtitan.rl.rollout.types import RolloutGroup
 
@@ -39,6 +40,7 @@ class RolloutWorkerActor(Actor):
             ThreadPoolExecutor(max_workers=num_threads)
         )
         self._worker = worker_config.build()
+        self._gc_timer = m.GCTimer("rollout_worker")
         # group id -> the `run_group` call running it here, for `cancel_group`.
         self._group_tasks: dict[int, asyncio.Task] = {}
 
@@ -70,7 +72,7 @@ class RolloutWorkerActor(Actor):
         task = asyncio.current_task()
         self._group_tasks[group_id] = task
         try:
-            return await self._worker.run_group(
+            group = await self._worker.run_group(
                 generate_fn=generate_fn,
                 release_session_fn=release_session_fn,
                 sample=sample,
@@ -78,6 +80,11 @@ class RolloutWorkerActor(Actor):
                 group_size=group_size,
                 sampling=sampling,
             )
+            # This process's GC time since the last finished training group; summed over a step's
+            # groups. Validation (negative group ids) ignores group metrics, so it keeps the time.
+            if group_id >= 0:
+                group.metrics += self._gc_timer.flush()
+            return group
         finally:
             # Validation reuses group ids, and a `run_group` can outlive a failed `cancel_group`:
             # don't drop a newer call's entry.

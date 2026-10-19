@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import inspect
 import logging
 from types import SimpleNamespace
@@ -839,9 +840,12 @@ def test_generation_server_forwards_token_request() -> None:
         assert generation_metadata is not None
         assert generation_metadata.min_policy_version == 6
         assert generation_metadata.max_policy_version == 9
-        # Both generations folded into one Mean and one Max
-        assert len(generation_metadata.metrics) == 2
-        assert m.MetricsProcessor._aggregate_metrics(generation_metadata.metrics) == {
+        # Both generations folded into one Mean and one Max, plus the server's GC Sum and Max
+        assert len(generation_metadata.metrics) == 4
+        metrics = m.MetricsProcessor._aggregate_metrics(generation_metadata.metrics)
+        assert {
+            key: value for key, value in metrics.items() if key.startswith("generator/")
+        } == {
             "generator/queue_time_ms/mean": 0.5,
             "generator/queue_time_ms/max": 1.0,
         }
@@ -1415,3 +1419,17 @@ def test_cancelled_run_group_waits_for_every_sibling_release() -> None:
         assert released == [[], []]
 
     asyncio.run(run())
+
+
+def test_env_server_worker_logs_gc_time(capsys) -> None:
+    from torchtitan.rl.examples.verifiers import worker_setup
+
+    callbacks = list(gc.callbacks)
+    worker_setup._log_gc_time(pause_s=0.0, summary_every_s=0.0)
+    try:
+        gc.collect(2)
+    finally:
+        gc.callbacks[:] = callbacks
+    stderr = capsys.readouterr().err
+    assert "GC gen 2 paused" in stderr
+    assert "collections over the last" in stderr

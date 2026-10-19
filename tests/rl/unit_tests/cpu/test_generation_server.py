@@ -254,6 +254,7 @@ def test_only_the_default_format_folds_session_metadata() -> None:
                 ("trace-a", 1, None),
                 ("trace-b", 2, None),
                 ("retried", 2, None),
+                ("validation", -1, None),
             ]:
                 extra = (
                     {}
@@ -265,11 +266,29 @@ def test_only_the_default_format_folds_session_metadata() -> None:
                 )
                 assert status == 200
 
-            assert set(server.generation_metadata) == {"trace-a", "trace-b", "retried"}
+            assert set(server.generation_metadata) == {
+                "trace-a",
+                "trace-b",
+                "retried",
+                "validation",
+            }
+            # Validation logs at the training step under the same keys: no GC time on it.
+            validation = server.pop_generation_metadata(["validation"])["validation"]
+            assert not [x for x in validation.metrics if x.key.startswith("perf/")]
             popped = server.pop_generation_metadata(["trace-a", "native"])
             assert set(popped) == {"trace-a"}
             assert popped["trace-a"].min_policy_version == 3
-            assert m.MetricsProcessor._aggregate_metrics(popped["trace-a"].metrics) == {
+            metrics = m.MetricsProcessor._aggregate_metrics(popped["trace-a"].metrics)
+            # The server adds its process's GC time to every training completion.
+            assert metrics.keys() >= {
+                "perf/generator/gc_seconds/sum",
+                "perf/generator/gc_seconds/max",
+            }
+            assert {
+                key: value
+                for key, value in metrics.items()
+                if key.startswith("generator/")
+            } == {
                 "generator/queue_time_ms/mean": 2.5,
                 "generator/queue_time_ms/max": 4.0,
             }
