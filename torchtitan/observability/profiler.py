@@ -18,7 +18,10 @@ import torch
 import torch._C._profiler
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.cuda_graph import get_cuda_graph_annotations
+from torchtitan.distributed.cuda_graph import (
+    get_cuda_graph_annotations,
+    get_cuspy_cuda_graph_annotation_config,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.always_on_profiler import (
     AlwaysOnProfiler,
@@ -347,6 +350,16 @@ class Profiler(Configurable):
                     "profiler.always_on records with Cuspy, so scheduled profiling "
                     "must set profiler.cuspy too."
                 )
+
+        def maybe_cuda_graph_annotation_config(self) -> dict[str, Any] | None:
+            """``torch.cuda.graph`` annotation options for a Cuspy-profiled run, or
+            ``None`` when this config does not profile with Cuspy."""
+            if not self.enable_profiling or self.cuspy is None:
+                return None
+            return get_cuspy_cuda_graph_annotation_config(
+                enable_event_node_ids=self.cuspy.enable_event_node_ids,
+                record_py_stacks=self.cuspy.record_py_stacks,
+            )
 
     def __init__(
         self,
