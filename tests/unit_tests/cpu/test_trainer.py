@@ -1049,11 +1049,17 @@ def test_engine_prepares_pp_metadata_before_cuda_graph(disable_cuda_graphs, per_
             return
         wrap = wrap_group if per_group else wrap_update
         inputs, labels = torch.ones(1, 4), torch.zeros(1, 4)
-        group = ([(inputs,)], [{}], [labels])
-        wrap.call_args.kwargs["prepare_for_capture"]([group], torch.tensor(4))
+        advantages, global_loss_token_counts = torch.ones(1, 4), torch.tensor(4)
+        # PP layout: (arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs).
+        group = ([(inputs,)], [{}], [labels], [{"advantages": advantages}])
+        wrap.call_args.kwargs["prepare_for_capture"]([group], global_loss_token_counts)
         assert prepare.call_args.args == (engine.pp_schedule,)
         assert prepare.call_args.kwargs["args"] == (inputs,)
         assert prepare.call_args.kwargs["target"] is labels
+        loss_kwargs = prepare.call_args.kwargs["loss_kwargs"]
+        assert loss_kwargs.keys() == {"advantages", "global_loss_token_counts"}
+        assert loss_kwargs["advantages"] is advantages
+        assert loss_kwargs["global_loss_token_counts"] is global_loss_token_counts
 
 
 def test_engine_replay_checks_whole_accumulation() -> None:

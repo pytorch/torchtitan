@@ -235,10 +235,16 @@ class GraphTrainingEngine(TrainingEngine):
                 "GraphRuntime yet."
             )
         if self.parallelism_context.pp_enabled:
-            return super()._preprocess_microbatch_groups(
+            pp_microbatch_groups = super()._preprocess_microbatch_groups(
                 microbatch_groups,
                 global_routing_token_counts=global_routing_token_counts,
             )
+            # Drop the per-microbatch loss arguments, rejected above, so both
+            # paths return (arg_mbs, kwarg_mbs, target_mbs).
+            return [
+                (arg_mbs, kwarg_mbs, target_mbs)
+                for arg_mbs, kwarg_mbs, target_mbs, _ in pp_microbatch_groups
+            ]
 
         preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
         for microbatch_group in microbatch_groups:

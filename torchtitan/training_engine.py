@@ -534,16 +534,21 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             Eval can change the schedule mode after training warmup. Rebuilding
             metadata can synchronize with the CPU, which capture does not allow.
             """
-            arg_mbs, kwarg_mbs, target_mbs = microbatch_groups[0]
+            arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs = microbatch_groups[0]
             with self.parallelism_context.activate_spmd(
                 typechecking=self.config.debug.spmd_typechecking,
             ):
+                # Initialization calls the loss on the first microbatch, so it
+                # needs that microbatch's loss arguments, as in the real step.
                 prepare_pipeline_schedule_for_cuda_graph(
                     self.pp_schedule,
                     args=arg_mbs[0] if arg_mbs is not None else (),
                     kwargs=kwarg_mbs[0],
                     target=target_mbs[0] if target_mbs is not None else None,
-                    loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
+                    loss_kwargs={
+                        **loss_kwarg_mbs[0],
+                        "global_loss_token_counts": global_loss_token_counts,
+                    },
                 )
 
         if self.config.training.cuda_graph_per_microbatch_group:
