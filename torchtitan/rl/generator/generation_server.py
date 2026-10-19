@@ -290,7 +290,10 @@ class GenerationServer:
                 {"error": "completion token IDs and logprobs have different lengths"},
                 status=500,
             )
-        completion.metrics = [*completion.metrics, *self._gc_timer.flush()]
+        # Validation (negative group ids) logs at the same W&B step under these keys: leave this
+        # process's GC time for the next training completion.
+        if group_id >= 0:
+            completion.metrics = [*completion.metrics, *self._gc_timer.flush()]
         if response_format == TORCHTITAN_RESPONSE_FORMAT:
             return web.json_response(completion_to_response(completion))
         if completion.finish_reason not in ("stop", "length"):

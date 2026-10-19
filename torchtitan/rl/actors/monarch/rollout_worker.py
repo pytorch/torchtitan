@@ -80,8 +80,10 @@ class RolloutWorkerActor(Actor):
                 group_size=group_size,
                 sampling=sampling,
             )
-            # This process's GC time since the last finished group; summed over a step's groups.
-            group.metrics += self._gc_timer.flush()
+            # This process's GC time since the last finished training group; summed over a step's
+            # groups. Validation (negative group ids) ignores group metrics, so it keeps the time.
+            if group_id >= 0:
+                group.metrics += self._gc_timer.flush()
             return group
         finally:
             # Validation reuses group ids, and a `run_group` can outlive a failed `cancel_group`:
