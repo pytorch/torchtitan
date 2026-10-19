@@ -279,10 +279,12 @@ def test_only_the_default_format_folds_session_metadata() -> None:
             assert set(popped) == {"trace-a"}
             assert popped["trace-a"].min_policy_version == 3
             metrics = m.MetricsProcessor._aggregate_metrics(popped["trace-a"].metrics)
-            # The server adds its process's GC time to every training completion.
+            # The server adds its process's GC time and event-loop lag to every training completion.
             assert metrics.keys() >= {
                 "perf/generator/gc_seconds/sum",
                 "perf/generator/gc_seconds/max",
+                "perf/generator/event_loop_lag_ms/sum",
+                "perf/generator/event_loop_lag_ms/max",
             }
             assert {
                 key: value

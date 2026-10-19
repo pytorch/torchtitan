@@ -41,6 +41,7 @@ class RolloutWorkerActor(Actor):
         )
         self._worker = worker_config.build()
         self._gc_timer = m.GCTimer("rollout_worker")
+        self._loop_lag = m.EventLoopLag("rollout_worker")
         # group id -> the `run_group` call running it here, for `cancel_group`.
         self._group_tasks: dict[int, asyncio.Task] = {}
 
@@ -80,10 +81,11 @@ class RolloutWorkerActor(Actor):
                 group_size=group_size,
                 sampling=sampling,
             )
-            # This process's GC time since the last finished training group; summed over a step's
-            # groups. Validation (negative group ids) ignores group metrics, so it keeps the time.
+            # This process's GC time and event-loop lag since the last finished training group;
+            # summed over a step's groups. Validation (negative group ids) ignores group metrics,
+            # so it keeps them.
             if group_id >= 0:
-                group.metrics += self._gc_timer.flush()
+                group.metrics += [*self._gc_timer.flush(), *self._loop_lag.flush()]
             return group
         finally:
             # Validation reuses group ids, and a `run_group` can outlive a failed `cancel_group`:
