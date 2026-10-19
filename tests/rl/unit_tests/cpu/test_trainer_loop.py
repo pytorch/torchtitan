@@ -118,7 +118,8 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     controller.metrics_processor = SimpleNamespace(
         log=lambda *, step, is_validation, metrics: controller.logged_metrics.append(
             {metric.key: metric for metric in metrics}
-        )
+        ),
+        commit=lambda: None,
     )
     return controller
 
