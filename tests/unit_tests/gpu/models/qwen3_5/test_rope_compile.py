@@ -324,6 +324,23 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
         for whole, *parts in zip(full, first, second, strict=True):
             self.assertTrue(torch.equal(whole, torch.cat(parts)))
 
+    def test_compiled_accepts_complex_cache(self):
+        # Direct callers (the vision encoders) pass the complex cache, not the real view.
+        torch.manual_seed(42)
+        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        query, key = (
+            torch.randn(64, 8, 64, device="cuda", dtype=torch.bfloat16)
+            for _ in range(2)
+        )
+        cache = rope.cache[torch.randperm(128, device="cuda")[:64]].unsqueeze(1)
+        compiled = torch.compile(ComplexRoPE.apply_rotary_emb, fullgraph=True)
+        for out, ref in zip(
+            compiled(query, key, cache),
+            ComplexRoPE.apply_rotary_emb(query, key, cache),
+            strict=True,
+        ):
+            torch.testing.assert_close(out, ref)
+
 
 if __name__ == "__main__":
     unittest.main()
