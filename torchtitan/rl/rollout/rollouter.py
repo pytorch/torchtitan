@@ -312,7 +312,8 @@ class RolloutWorker(Configurable):
             default_factory=AdvantageEstimator.Config
         )
         """Post-scoring advantage estimator. Default = Dr.GRPO (mean-baseline only);
-        set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO."""
+        set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO. It gets the
+        scored rollouts only, without the `ERROR_SYSTEM` ones (so possibly none)."""
 
         rollout_timeout_s: float | None = None
         """Wall-clock limit of one rollout (env init and every turn, not `score_group`): a
@@ -374,7 +375,8 @@ class RolloutWorker(Configurable):
         reward shaping.
 
         Args:
-            rollouts: Sibling rollouts in one prompt group, already stepped.
+            rollouts: Sibling rollouts in one prompt group, already stepped, without the
+                `ERROR_SYSTEM` ones (so possibly empty).
             env_input: the env initial input shared by the group.
 
         Returns:
@@ -446,25 +448,26 @@ class RolloutWorker(Configurable):
         finally:
             # close the envs
             await asyncio.gather(*(env.close() for env in envs), return_exceptions=True)
-        # Raise only after every sibling finished, as the Verifiers rollouter does: the caller
-        # releases the group next.
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
-        rollouts = results
+        rollouts = rollouts_from_gather(results, group_id=group_id)
 
-        # score
-        outputs = await self.score_group(rollouts, sample)
-        for rollout, output in zip(rollouts, outputs, strict=True):
+        # score, all but the ERROR_SYSTEM rollouts
+        scored = [
+            rollout
+            for rollout in rollouts
+            if rollout.status is not RolloutStatus.ERROR_SYSTEM
+        ]
+        outputs = await self.score_group(scored, sample)
+        for rollout, output in zip(scored, outputs, strict=True):
             rollout.reward = output.reward
             rollout.reward_breakdown = output.reward_breakdown
 
         # Post-scoring: turn group rewards into per-rollout advantages.
-        group = RolloutGroup(group_id=group_id, rollouts=rollouts)
-        advantages = self.advantage_estimator(group)
-        for rollout, advantage in zip(group.rollouts, advantages, strict=True):
+        advantages = self.advantage_estimator(
+            RolloutGroup(group_id=group_id, rollouts=scored)
+        )
+        for rollout, advantage in zip(scored, advantages, strict=True):
             rollout.advantage = advantage
-        return group
+        return RolloutGroup(group_id=group_id, rollouts=rollouts)
 
     async def _run_single_rollout(
         self,
@@ -477,7 +480,9 @@ class RolloutWorker(Configurable):
         rollout_id: int,
     ) -> Rollout:
         """Produce a single rollout, alternating between env and generator calls,
-        until the env is terminal (env `done`, truncation, errors).
+        until the env is terminal (env `done`, truncation, errors). An exception ends it as
+        `ERROR_SYSTEM`, which keeps it out of the advantage and training; past
+        `rollout_timeout_s` it ends as `ERROR_TIMEOUT` and trains.
 
         For custom logic, users can override this method.
 
@@ -501,6 +506,7 @@ class RolloutWorker(Configurable):
         ).to_string(include_turn=False)
         turns: list[RolloutTurn] = []
         status = RolloutStatus.ERROR
+        logs: dict[str, Any] = {}
         timeout = asyncio.timeout(self._rollout_timeout_s)
         try:
             async with timeout:
@@ -550,7 +556,7 @@ class RolloutWorker(Configurable):
                     env_step = next_env_step
 
             status = env_step.status
-        except Exception:
+        except Exception as error:
             if timeout.expired():
                 logger.warning(
                     "rollout %s/rollout=%d timed out after %d turn(s); marking ERROR_TIMEOUT",
@@ -561,12 +567,13 @@ class RolloutWorker(Configurable):
                 status = RolloutStatus.ERROR_TIMEOUT
             else:
                 logger.exception(
-                    "rollout %s/rollout=%d failed after %d turn(s); marking ERROR",
+                    "rollout %s/rollout=%d failed after %d turn(s); marking ERROR_SYSTEM",
                     group_id,
                     rollout_id,
                     len(turns),
                 )
-                status = RolloutStatus.ERROR
+                status = RolloutStatus.ERROR_SYSTEM
+                logs["error"] = repr(error)
         finally:
             # Also on a cancel, so a cancelled rollout releases its session like a failed one.
             try:
@@ -581,4 +588,32 @@ class RolloutWorker(Configurable):
             rollout_id=rollout_id,
             status=status,
             turns=turns,
+            logs=logs,
         )
+
+
+def rollouts_from_gather(
+    results: list[Rollout | BaseException], *, group_id: int
+) -> list[Rollout]:
+    """Return a group's rollouts from `gather(..., return_exceptions=True)`. A rollout that raised
+    becomes an `ERROR_SYSTEM` rollout: not the policy's doing, so it's kept for logs but not trained.
+    Anything else (e.g. KeyboardInterrupt) is raised."""
+    rollouts: list[Rollout] = []
+    for rollout_id, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error(
+                "rollout group=%d/rollout=%d raised; marking ERROR_SYSTEM",
+                group_id,
+                rollout_id,
+                exc_info=result,
+            )
+            result = Rollout(
+                group_id=group_id,
+                rollout_id=rollout_id,
+                status=RolloutStatus.ERROR_SYSTEM,
+                logs={"error": repr(result)},
+            )
+        elif isinstance(result, BaseException):
+            raise result
+        rollouts.append(result)
+    return rollouts

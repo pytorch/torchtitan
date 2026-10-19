@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import Rollout
+from torchtitan.rl.rollout.types import Rollout, RolloutStatus
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +260,9 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     ]
 
     truncated = [float(rollout.status.is_truncated()) for rollout in rollouts]
+    system_errors = [
+        float(rollout.status is RolloutStatus.ERROR_SYSTEM) for rollout in rollouts
+    ]
     rewards = [rollout.reward for rollout in rollouts if rollout.reward is not None]
     num_turns = [float(len(rollout.turns)) for rollout in rollouts]
 
@@ -276,6 +279,7 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         m.Metric(f"{prefix}/num_turns", m.Mean.from_list(num_turns)),
         m.Metric(f"{prefix}/num_turns", m.Max.from_list(num_turns)),
         m.Metric(f"{prefix}/truncation_rate", m.Mean.from_list(truncated)),
+        m.Metric(f"{prefix}/system_error_rate", m.Mean.from_list(system_errors)),
         m.Metric(f"{prefix}_reward", m.SummaryStats.from_list(rewards)),
     ]
 
