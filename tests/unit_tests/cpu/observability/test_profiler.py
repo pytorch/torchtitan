@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import re
 import unittest
 from unittest import mock
 
@@ -292,7 +293,8 @@ class TestProfilerEnabledPaths(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(
-                ValueError, "Cuspy cannot run here:\n  - reason one\n  - reason two"
+                ValueError,
+                re.escape("Cuspy cannot run here:\n  - reason one\n  - reason two"),
             ):
                 profiler.build_torch_profiler(
                     global_step=0, base_folder=tmpdir, leaf_folder=""

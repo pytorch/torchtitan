@@ -113,12 +113,15 @@ class MonarchActorSystem(ActorSystem):
         trainer = self._trainer_mesh.spawn("trainer", TrainerActor, config, **kwargs)
         self._trainer = trainer
         # Torch ranks follow this mesh's order and the trainer lays them out as
-        # (dp, cp, tp) with no PP, so each DP rank's cp * tp ranks are consecutive.
-        trainer_dp_cp_tp = trainer.flatten("rank").split(
-            rank=("dp", "cp_tp"), dp=dp_degree
+        # (pp, dp, cp, tp), so each DP rank owns cp * tp consecutive ranks in
+        # every pipeline stage.
+        trainer_pp_dp_cp_tp = trainer.flatten("rank").split(
+            rank=("pp", "dp", "cp_tp"),
+            pp=config.parallelism.pipeline_parallel_degree,
+            dp=dp_degree,
         )
         trainer_by_dp_rank = [
-            trainer_dp_cp_tp.slice(dp=dp_rank) for dp_rank in range(dp_degree)
+            trainer_pp_dp_cp_tp.slice(dp=dp_rank) for dp_rank in range(dp_degree)
         ]
         # Check that layout once: if it drifts, one TP group's ranks get different columns.
         for dp_rank, trainer_at_dp_rank in enumerate(trainer_by_dp_rank):
@@ -129,7 +132,7 @@ class MonarchActorSystem(ActorSystem):
                 raise RuntimeError(
                     f"Trainer ranks at DP rank {dp_rank} report DP ranks "
                     f"{reported_dp_ranks}; the actor system assumes the trainer orders "
-                    "ranks as (dp, cp, tp)."
+                    "ranks as (pp, dp, cp, tp)."
                 )
         return TrainerHandle(
             all_ranks=trainer,
