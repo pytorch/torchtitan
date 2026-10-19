@@ -12,17 +12,17 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from torchtitan.rl.examples.dapo_math.data import _CyclingDataset, DapoMathSample
+from torchtitan.rl.examples.verifiers.data import (
+    VerifiersTaskDataset,
+    VerifiersTaskSample,
+)
 
 from torchtitan.rl.rollout.data import (
     GroupOutcome,
     IterableRLDataLoader,
     RLDataset,
     ZeroSpreadSkip,
-)
-from torchtitan.rl.examples.dapo_math.data import _CyclingDataset, DapoMathSample
-from torchtitan.rl.examples.verifiers.data import (
-    VerifiersTaskDataset,
-    VerifiersTaskSample,
 )
 from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import RolloutStatus
@@ -168,7 +168,9 @@ def test_resume_keeps_skips_and_replays_pending_samples_unfiltered() -> None:
 
 
 def test_resume_from_a_state_saved_with_the_skip_off_starts_empty() -> None:
-    state = IterableRLDataLoader.Config(dataset=_TaskCycle.Config()).build().state_dict()
+    state = (
+        IterableRLDataLoader.Config(dataset=_TaskCycle.Config()).build().state_dict()
+    )
     loader = _loader()
     loader.load_state_dict(state)
     assert [task for _, task in _draw(loader, 4)] == ["t0", "t1", "t2", "t3"]
@@ -214,7 +216,9 @@ def test_rollouter_records_outcomes_unless_a_rollout_errored() -> None:
         _group(3, _rollout(0.0), _rollout(0.0, status=RolloutStatus.TRUNCATED_LENGTH))
     )
     rollouter.record_group_outcome(_group(4))  # a failed group has no rollouts
-    rollouter.record_group_outcome(_group(5, _rollout(0.0), _rollout(0.0, completion=())))
+    rollouter.record_group_outcome(
+        _group(5, _rollout(0.0), _rollout(0.0, completion=()))
+    )
     assert rollouter._group_outcomes == {
         0: ALL_PASS,
         1: MIXED,
@@ -229,7 +233,9 @@ def test_rollouter_records_outcomes_unless_a_rollout_errored() -> None:
 def test_a_truncated_rollout_counts_with_its_rubric_reward() -> None:
     rollouter = _rollouter(_loader())
     rollouter.record_group_outcome(
-        _group(0, _rollout(1.0), _rollout(0.0, status=RolloutStatus.TRUNCATED_MAX_TURNS))
+        _group(
+            0, _rollout(1.0), _rollout(0.0, status=RolloutStatus.TRUNCATED_MAX_TURNS)
+        )
     )
     assert rollouter._group_outcomes == {0: MIXED}
 
@@ -242,13 +248,19 @@ def test_outcomes_are_in_the_state_saved_right_after_acknowledgement() -> None:
     # Group 1 was dropped by the buffer as too old: it was scored, so it still marks its task.
     rollouter.record_group_outcome(_group(1, _rollout(1.0), _rollout(1.0)))
     rollouter.acknowledge_training_sample_ids(index for index, _ in drawn)
-    assert dict(loader.state_dict()["zero_spread_skip"]["skipped"]) == {"t0": 0, "t1": 0}
+    assert dict(loader.state_dict()["zero_spread_skip"]["skipped"]) == {
+        "t0": 0,
+        "t1": 0,
+    }
 
 
 def test_when_only_skipped_tasks_come_up_the_last_one_is_rechecked() -> None:
     loader = _loader(num_tasks=2, recheck_after_skips=10, min_active_frac=0.1)
     _draw(loader, 2)
-    loader._skipped = {"t0": 0, "t1": 0}  # beyond what the floor allows, to reach the fallback
+    loader._skipped = {
+        "t0": 0,
+        "t1": 0,
+    }  # beyond what the floor allows, to reach the fallback
     _, task = next(loader)
     assert task == "t0"  # t0, t1 skipped; the third draw (t0 again) is re-checked
     metrics = {metric.key: metric.value.value for metric in loader.metrics()}
@@ -269,8 +281,12 @@ def test_real_sample_keys_are_stable_per_task_and_distinct_across_tasks() -> Non
     same_task = {"info": {"id": 7, "repo": "a/b"}, "prompt": "fix bug"}
     other_task = {"prompt": "fix bug", "info": {"repo": "a/b", "id": 8}}
     key = verifiers_key(None, VerifiersTaskSample(verifiers_task_data=task))
-    assert key == verifiers_key(None, VerifiersTaskSample(verifiers_task_data=same_task))
-    assert key != verifiers_key(None, VerifiersTaskSample(verifiers_task_data=other_task))
+    assert key == verifiers_key(
+        None, VerifiersTaskSample(verifiers_task_data=same_task)
+    )
+    assert key != verifiers_key(
+        None, VerifiersTaskSample(verifiers_task_data=other_task)
+    )
 
     math_key = _CyclingDataset.sample_key
     first = math_key(None, DapoMathSample(prompt="1+1?", ground_truth="2"))

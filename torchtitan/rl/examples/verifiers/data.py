@@ -40,6 +40,10 @@ class VerifiersTaskSample:
 
     verifiers_task_data: dict[str, Any]
 
+    validation_set: str | None = None
+    """Extra validation set the task came from; it runs on that set's EnvServer. None: the
+    training EnvServer (training and the main validation set)."""
+
 
 class VerifiersTaskDataset(RLDataset):
     """Adapt one Verifiers taskset to a resumable Grain iterator."""

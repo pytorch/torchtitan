@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
@@ -84,6 +85,36 @@ class RewardFromVerifiers(RewardFn):
         return 0.0
 
 
+@dataclass(kw_only=True, slots=True)
+class VerifiersValidationSet:
+    """An extra validation set with its own taskset, hence its own EnvServer (e.g. a benchmark
+    whose environment, images or grader differ from the training taskset's)."""
+
+    dataset: VerifiersTaskDataset.Config
+    """Verifiers taskset used for this set's validation samples."""
+
+    verifiers_env_server: VerifiersEnvServer.Config
+    """EnvServer for this set; its taskset is derived from `dataset`."""
+
+    def __post_init__(self) -> None:
+        configured_taskset = self.verifiers_env_server.environment.taskset
+        if configured_taskset not in (
+            VerifiersTasksetConfig(),
+            self.dataset.verifiers_taskset,
+        ):
+            raise ValueError(
+                "an extra validation set's verifiers_env_server.environment.taskset is derived "
+                "from its dataset.verifiers_taskset and must not configure a different taskset"
+            )
+        self.verifiers_env_server = replace(
+            self.verifiers_env_server,
+            environment=self.verifiers_env_server.environment.model_copy(
+                update={"taskset": self.dataset.verifiers_taskset}
+            ),
+            local_taskset_module=_local_taskset_module(self.dataset.verifiers_taskset),
+        )
+
+
 class VerifiersRollouter(Rollouter):
     """Adapt Verifiers execution to TitanRL's ``Rollouter`` contract.
 
@@ -107,6 +138,13 @@ class VerifiersRollouter(Rollouter):
 
         validation_dataset: VerifiersTaskDataset.Config
         """Verifiers taskset used for validation samples."""
+
+        extra_validation_sets: dict[str, VerifiersValidationSet] = field(
+            default_factory=dict
+        )
+        """Named validation sets on their own EnvServers, run by `AsyncLoopConfig.extra_validations`
+        entries of the same name. Unlike `validation_dataset`, their taskset may differ from the
+        training one."""
 
         worker: RolloutWorker.Config | None = None
         """Must stay None: the rollouter builds a `VerifiersRolloutWorker.Config` at setup,
@@ -169,6 +207,10 @@ class VerifiersRollouter(Rollouter):
         super().__init__(config)
         self._verifiers_config = config
         self._verifiers_env_server = config.verifiers_env_server.build()
+        self._extra_env_servers = {
+            name: validation_set.verifiers_env_server.build()
+            for name, validation_set in config.extra_validation_sets.items()
+        }
 
     async def setup_async(
         self,
@@ -178,7 +220,7 @@ class VerifiersRollouter(Rollouter):
         renderer_config: RendererConfig,
         hf_assets_path: str,
     ) -> None:
-        """Start the EnvServer, then the rollout workers that connect to it."""
+        """Start the EnvServers, then the rollout workers that connect to them."""
         if not isinstance(renderer_config, RenderersConfigAdapter):
             raise ValueError(
                 "Verifiers requires a renderer configured with from_renderers(...) "
@@ -188,6 +230,10 @@ class VerifiersRollouter(Rollouter):
         config = self._verifiers_config
         try:
             env_server_address = await self._verifiers_env_server.start()
+            extra_env_server_addresses = {
+                name: await env_server.start()
+                for name, env_server in self._extra_env_servers.items()
+            }
             await super().setup_async(
                 actor_system=actor_system,
                 tokenizer_config=tokenizer_config,
@@ -199,6 +245,7 @@ class VerifiersRollouter(Rollouter):
                     renderer_multiplex=config.renderer_multiplex,
                     connection_timeout_sec=config.connection_timeout_sec,
                     env_server_address=env_server_address,
+                    extra_env_server_addresses=extra_env_server_addresses,
                 ),
             )
         except BaseException:
@@ -206,11 +253,35 @@ class VerifiersRollouter(Rollouter):
             raise
 
     async def close(self) -> None:
-        """Stop the rollout workers, then the EnvServer."""
+        """Stop the rollout workers, then the EnvServers."""
         try:
             await super().close()
         finally:
+            for env_server in self._extra_env_servers.values():
+                await env_server.close()
             await self._verifiers_env_server.close()
+
+    def get_validation_samples(
+        self, steps: int, validation_set: str | None = None
+    ) -> list[object]:
+        """Materialize one validation pass; an extra set's tasks are tagged with its name so they
+        run on its EnvServer."""
+        if validation_set is None:
+            return Rollouter.get_validation_samples(self, steps)
+        try:
+            dataset = self._verifiers_config.extra_validation_sets[
+                validation_set
+            ].dataset
+        except KeyError:
+            raise ValueError(
+                f"unknown validation set {validation_set!r}; extra_validation_sets has "
+                f"{sorted(self._verifiers_config.extra_validation_sets)}"
+            ) from None
+        iterator = iter(dataset.build())
+        samples = (
+            list(iterator) if steps == -1 else list(itertools.islice(iterator, steps))
+        )
+        return [replace(sample, validation_set=validation_set) for sample in samples]
 
 
 class VerifiersRolloutWorker(RolloutWorker):
@@ -234,11 +305,16 @@ class VerifiersRolloutWorker(RolloutWorker):
         env_server_address: str
         """Address of the rollouter's running EnvServer."""
 
+        extra_env_server_addresses: dict[str, str] = field(default_factory=dict)
+        """Address of each extra validation set's EnvServer, by set name."""
+
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self._verifiers_config = config
         # Never closed: the worker process exits with the pool.
         self._verifiers_env_client: VerifiersEnvClient | None = None
+        # Extra validation sets' EnvServer clients, by set name.
+        self._extra_env_clients: dict[str, VerifiersEnvClient] = {}
         self._verifiers_train_client_config: VerifiersTrainClientConfig | None = None
 
     async def setup_async(
@@ -248,15 +324,20 @@ class VerifiersRolloutWorker(RolloutWorker):
         renderer_config: RendererConfig,
         hf_assets_path: str,
     ) -> None:
-        """Connect to the EnvServer. Verifiers renders in the env server, so no tokenizer here."""
+        """Connect to the EnvServers. Verifiers renders in the env server, so no tokenizer here."""
         del tokenizer_config
         verifiers_env_client = VerifiersEnvClient(
             self._verifiers_config.env_server_address
         )
+        extra_env_clients = {
+            name: VerifiersEnvClient(address)
+            for name, address in self._verifiers_config.extra_env_server_addresses.items()
+        }
         try:
-            await verifiers_env_client.wait_for_server_startup(
-                timeout=self._verifiers_config.connection_timeout_sec
-            )
+            for client in (verifiers_env_client, *extra_env_clients.values()):
+                await client.wait_for_server_startup(
+                    timeout=self._verifiers_config.connection_timeout_sec
+                )
             verifiers_train_client_config = VerifiersTrainClientConfig(
                 # Each rollout sets its generator's URL; see `_run_single_rollout`.
                 base_url="",
@@ -268,9 +349,11 @@ class VerifiersRolloutWorker(RolloutWorker):
                 renderer_model_name=hf_assets_path,
             )
         except BaseException:
-            await verifiers_env_client.close()
+            for client in (verifiers_env_client, *extra_env_clients.values()):
+                await client.close()
             raise
         self._verifiers_env_client = verifiers_env_client
+        self._extra_env_clients = extra_env_clients
         self._verifiers_train_client_config = verifiers_train_client_config
 
     async def run_group(
@@ -354,7 +437,12 @@ class VerifiersRolloutWorker(RolloutWorker):
         endpoint = await generator_client.acquire_rollout(group_id=group_id)
         verifiers_episode = None
         try:
-            verifiers_episode = await self._verifiers_env_client.run(
+            env_client = (
+                self._verifiers_env_client
+                if sample.validation_set is None
+                else self._extra_env_clients[sample.validation_set]
+            )
+            verifiers_episode = await env_client.run(
                 task_data=sample.verifiers_task_data,
                 # The same JSON for every rollout on a generator, so Verifiers keeps one HTTP
                 # client per generator.

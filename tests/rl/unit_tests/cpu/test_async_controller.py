@@ -16,6 +16,13 @@ from unittest.mock import AsyncMock, Mock, patch
 import numpy as np
 import pytest
 import torch
+from torchtitan.rl.controller.adaptive_demand import (
+    estimate_next_unavailable_upper_bound,
+    mean_age_ceiling,
+    prediction_multiplier,
+    smooth_demand_toward_needed,
+    StallDrivenDemand,
+)
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -26,21 +33,14 @@ from torchtitan.rl.controller.metrics import (
     compute_policy_age_metrics,
     MetricsTimer,
 )
-from torchtitan.rl.controller.adaptive_demand import (
-    estimate_next_unavailable_upper_bound,
-    mean_age_ceiling,
-    prediction_multiplier,
-    smooth_demand_toward_needed,
-    StallDrivenDemand,
-)
 from torchtitan.rl.controller.work_buffer import (
     AdaptiveRolloutGroupWorkBuffer,
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
-from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout.types import (
     Rollout,
     RolloutStatus,
@@ -810,6 +810,7 @@ async def _block_forever(*args, **kwargs) -> None:
 def _run_with_generator_watcher(watcher) -> None:
     """Run Controller.run with every stage but the engine-loop watcher stubbed to block."""
     controller = object.__new__(Controller)
+    controller._extra_validation_tasks = {}
     controller.config = SimpleNamespace(
         async_loop=SimpleNamespace(
             num_training_steps=1,
@@ -823,6 +824,7 @@ def _run_with_generator_watcher(watcher) -> None:
                 build=lambda **kwargs: SimpleNamespace(close=AsyncMock())
             ),
             validation=ValidationConfig(),
+            extra_validations=[],
         ),
         trainer=SimpleNamespace(
             training=SimpleNamespace(
@@ -915,8 +917,6 @@ def test_cancelled_rollout_loop_releases_its_group() -> None:
         group_buffer.finalize_work.assert_not_awaited()
 
     asyncio.run(run())
-
-
 
 
 def test_fixed_buffer_ignores_the_adaptive_hooks() -> None:
@@ -1559,6 +1559,8 @@ def _controller_for_validation(
     controller.config.async_loop.validation = validation
     controller.metrics_processor = Mock()
     controller._validation_task = None
+    controller._extra_validation_tasks = {}
+    controller._extra_validation_requested = set()
     fake_validation = _FakeValidation()
     controller.validate = fake_validation
     return controller, fake_validation
@@ -1796,6 +1798,8 @@ def _controller_for_run() -> tuple[Controller, _FakeValidation]:
     controller.metrics_processor = Mock()
     controller._log_reward_delta = Mock()
     controller._validation_task = None
+    controller._extra_validation_tasks = {}
+    controller._extra_validation_requested = set()
     validation = _FakeValidation()
     controller.validate = validation
     controller._data_input_loop = _block_forever
@@ -1895,6 +1899,7 @@ def test_close_cancels_a_running_pass_before_closing_the_rollouter() -> None:
     controller.generator_router = None
     controller.metrics_processor = Mock()
     controller.actor_system = None
+    controller._extra_validation_tasks = {}
     validation = _FakeValidation()
     controller.validate = validation
     pass_done_at_rollouter_close: list[bool] = []

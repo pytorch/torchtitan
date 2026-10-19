@@ -82,8 +82,11 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
             max_offpolicy_steps=None,
             num_prompts_per_train_step=5,
             validation=ValidationConfig(),
+            extra_validations=[],
         )
     )
+    controller._extra_validation_tasks = {}
+    controller._extra_validation_requested = set()
     controller.start_step = 0
     controller._trainer_policy_version = 0
     trainer = SimpleNamespace(
@@ -113,6 +116,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         state_dict=lambda: {},
         training_data_metrics=list,
     )
+
     async def record_step_start(*, trainer_policy_version):
         pass
 

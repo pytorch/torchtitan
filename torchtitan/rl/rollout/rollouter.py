@@ -21,8 +21,8 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
-from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import GroupOutcome, RLDataLoader, RLDataset
 from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
@@ -107,6 +107,12 @@ class Rollouter(Configurable):
 
         validation_dataset: RLDataset.Config
         """Builds an iterable validation dataset."""
+
+        extra_validation_datasets: dict[str, RLDataset.Config] = field(
+            default_factory=dict
+        )
+        """Named validation sets beside `validation_dataset`, run by
+        `AsyncLoopConfig.extra_validations` entries of the same name."""
 
         worker: RolloutWorker.Config
         """How a rollout group is built, driven, scored and advantaged. Selects the
@@ -203,9 +209,14 @@ class Rollouter(Configurable):
         with self._training_dataloader_lock:
             return self._training_dataloader.metrics()
 
-    def get_validation_samples(self, steps: int) -> list[object]:
-        """Materialize one fresh validation pass, optionally bounded by steps."""
-        validation_data = self._config.validation_dataset.build()
+    def get_validation_samples(
+        self, steps: int, validation_set: str | None = None
+    ) -> list[object]:
+        """Materialize one fresh validation pass, optionally bounded by steps.
+
+        `validation_set` names an `extra_validation_datasets` entry; None is `validation_dataset`.
+        """
+        validation_data = self._validation_dataset_config(validation_set).build()
         try:
             iterator = iter(validation_data)
         except TypeError as error:
@@ -213,6 +224,19 @@ class Rollouter(Configurable):
         if steps == -1:
             return list(iterator)
         return list(itertools.islice(iterator, steps))
+
+    def _validation_dataset_config(
+        self, validation_set: str | None
+    ) -> RLDataset.Config:
+        if validation_set is None:
+            return self._config.validation_dataset
+        try:
+            return self._config.extra_validation_datasets[validation_set]
+        except KeyError:
+            raise ValueError(
+                f"unknown validation set {validation_set!r}; extra_validation_datasets has "
+                f"{sorted(self._config.extra_validation_datasets)}"
+            ) from None
 
     async def setup_async(
         self,

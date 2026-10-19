@@ -46,9 +46,11 @@ class SamplingConfig:
             )
 
 
-
 # Overlapped validation group ids count down from here; `vllm_priority` puts them after all training.
 OVERLAPPED_VALIDATION_FIRST_GROUP_ID = -1_000_000
+# Extra validation set k counts down from OVERLAPPED_VALIDATION_FIRST_GROUP_ID - (k + 1) * stride:
+# disjoint from training, the main set and each other, and also after all training.
+EXTRA_VALIDATION_GROUP_ID_STRIDE = 1_000_000
 
 
 def vllm_priority(group_id: int) -> int:
@@ -63,6 +65,7 @@ def vllm_priority(group_id: int) -> int:
         return 2**31 - 1
     return max(group_id, -1)
 
+
 @dataclass(kw_only=True, slots=True)
 class EngineRequest:
     """One `generate` call's request for the engine, awaiting admission; what a `LoopDecision` broadcasts."""
@@ -75,7 +78,8 @@ class EngineRequest:
     last. Training ids grow as groups start. Validation ids count down and restart every pass, so a
     pass runs in arrival order (not newest first):
     - blocking validation: -1, -2, ... -> priority -1, before training;
-    - overlapped validation: -1_000_000, -1_000_001, ... -> priority 2**31 - 1, after training.
+    - overlapped validation: -1_000_000, -1_000_001, ... -> priority 2**31 - 1, after training;
+    - extra validation set k: -1_000_000 - (k + 1) * 1_000_000, ... -> priority 2**31 - 1.
 
         waiting, in arrival order:  g7 turn 1   g9 turn 1   g4 turn 2   val -1      val -2
         priority:                   7           9           4           -1          -1

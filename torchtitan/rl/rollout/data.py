@@ -171,7 +171,8 @@ class IterableRLDataLoader(RLDataLoader):
         self._skipped: dict[Hashable, int] = {}
         self._seen_keys: set[Hashable] = set()
         self._step_counts = dict.fromkeys(
-            ("skips", "rechecks", "floor_admits", "marked_all_pass", "marked_all_fail"), 0
+            ("skips", "rechecks", "floor_admits", "marked_all_pass", "marked_all_fail"),
+            0,
         )
 
     def __iter__(self) -> IterableRLDataLoader:
@@ -226,7 +227,9 @@ class IterableRLDataLoader(RLDataLoader):
             return
         for index, outcome in outcomes.items():
             if index not in self._pending:
-                raise RuntimeError(f"cannot record an outcome for an unyielded index {index}")
+                raise RuntimeError(
+                    f"cannot record an outcome for an unyielded index {index}"
+                )
             key = self._sample_key(self._pending[index])
             self._skipped.pop(key, None)
             if not outcome.zero_spread:
@@ -256,7 +259,9 @@ class IterableRLDataLoader(RLDataLoader):
         if self._zero_spread_skip is None:
             return []
         metrics = [
-            m.Metric("data/zero_spread_skip/skipped_tasks", m.NoReduce(len(self._skipped))),
+            m.Metric(
+                "data/zero_spread_skip/skipped_tasks", m.NoReduce(len(self._skipped))
+            ),
             *[
                 m.Metric(f"data/zero_spread_skip/{name}", m.Sum(float(count)))
                 for name, count in self._step_counts.items()

@@ -446,7 +446,9 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
             if self.generation_capacity is not None:
                 return self.generation_capacity
             if self.target_offpolicy_steps is not None:
-                return 2 * (self.target_offpolicy_steps + 1) * num_prompts_per_train_step
+                return (
+                    2 * (self.target_offpolicy_steps + 1) * num_prompts_per_train_step
+                )
             if num_generator_dp_shards is None or num_samples_per_prompt is None:
                 raise ValueError(
                     "generation_capacity defaults to filling vLLM without target_offpolicy_steps, "

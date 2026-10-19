@@ -350,7 +350,9 @@ def test_admission_passes_group_id_as_priority_and_arrival_time():
             _engine_request("train", min_policy_version=6, group_id=3),
             _engine_request("val_1", min_policy_version=6, group_id=-1),
             _engine_request("val_5", min_policy_version=6, group_id=-5),
-            _engine_request("val_overlapped", min_policy_version=6, group_id=-1_000_000),
+            _engine_request(
+                "val_overlapped", min_policy_version=6, group_id=-1_000_000
+            ),
         ]
     )
 
