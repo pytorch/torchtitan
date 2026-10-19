@@ -1420,7 +1420,8 @@ class Controller(Configurable):
                         group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
                     )
-                group.metrics = compute_rollout_metrics(
+                # Extend: the group arrives with its rollout worker's GC metrics.
+                group.metrics += compute_rollout_metrics(
                     prefix="rollout", rollouts=group.rollouts
                 )
                 self._rollouter.record_group_outcome(group)
@@ -1533,6 +1534,7 @@ class Controller(Configurable):
         push_task: asyncio.Task[float] | None = None
         pull_task: asyncio.Task[float] | None = None
         step_timer = MetricsTimer()
+        gc_timer = m.GCTimer("controller", per_generation=True)
         step_start = time.perf_counter()
         # With `validation.overlap_training`: a pass is due, but waits for the running one to end.
         validation_requested = False
@@ -1726,6 +1728,7 @@ class Controller(Configurable):
                         *self._group_buffer.metrics(),
                         *data_metrics,
                         *time_metrics,
+                        *gc_timer.flush(),
                         *policy_age_panel,
                         # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
                         m.Metric(
@@ -1739,6 +1742,9 @@ class Controller(Configurable):
                         *compute_perf_ratio_metrics(
                             num_global_valid_tokens=int(
                                 packed.global_loss_token_counts[0]
+                            ),
+                            num_global_tokens=int(
+                                packed.global_routing_token_counts[0]
                             ),
                             time_metrics=time_metrics,
                         ),
@@ -1781,6 +1787,7 @@ class Controller(Configurable):
             await self._step_extra_validations(
                 step=step, num_training_steps=num_training_steps, pull_task=pull_task
             )
+        gc_timer.close()
 
         # Finish the last push and pull so generators hold the final weights for post-validation.
         if push_task is not None:

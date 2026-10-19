@@ -87,11 +87,18 @@ def combine_microbatch_metrics(
 
 
 def compute_perf_ratio_metrics(
-    *, num_global_valid_tokens: int, time_metrics: list[m.Metric]
+    *,
+    num_global_valid_tokens: int,
+    num_global_tokens: int,
+    time_metrics: list[m.Metric],
 ) -> list[m.Metric]:
     """Return trainer throughput and each loop phase's share of `timing/step/total`.
 
-    Example: num_global_valid_tokens=100, timing/step/total = 20 s:
+    `num_global_valid_tokens` counts the loss tokens; `num_global_tokens` counts every non-padding
+    token, prompts included, so `all_tokens_per_second_*` compares across runs whatever their loss
+    masks.
+
+    Example: num_global_valid_tokens=100, num_global_tokens=400, timing/step/total = 20 s:
 
         timing/step/<phase>                        seconds   perf/trainer/step_time_ratio/<phase>
         metrics_log (the previous step's)          1         0.05
@@ -104,8 +111,10 @@ def compute_perf_ratio_metrics(
         blocking_generator_pull_model_state_dict   1         0.05
         (in no phase)                              1         unaccounted: 0.05
 
-        tokens_per_second_full_step         = 100 / 20 = 5
-        tokens_per_second_forward_backward  = 100 / 8  = 12.5
+        tokens_per_second_full_step             = 100 / 20 = 5
+        tokens_per_second_forward_backward      = 100 / 8  = 12.5
+        all_tokens_per_second_full_step         = 400 / 20 = 20
+        all_tokens_per_second_forward_backward  = 400 / 8  = 50
 
     A phase not recorded this step gets no ratio, and `unaccounted` is skipped.
     """
@@ -128,6 +137,9 @@ def compute_perf_ratio_metrics(
     _add_metric(
         "perf/trainer/tokens_per_second_full_step", num_global_valid_tokens / step_s
     )
+    _add_metric(
+        "perf/trainer/all_tokens_per_second_full_step", num_global_tokens / step_s
+    )
 
     # Throughput over forward/backward only (no optimizer step or checkpoint save).
     forward_backward_s = seconds.get("timing/step/forward_backward")
@@ -135,6 +147,10 @@ def compute_perf_ratio_metrics(
         _add_metric(
             "perf/trainer/tokens_per_second_forward_backward",
             num_global_valid_tokens / forward_backward_s,
+        )
+        _add_metric(
+            "perf/trainer/all_tokens_per_second_forward_backward",
+            num_global_tokens / forward_backward_s,
         )
 
     # Each phase's share of the step (skip a phase that was not recorded).

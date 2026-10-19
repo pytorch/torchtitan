@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from monarch.actor import Actor, endpoint
 
 from torchtitan.observability import structured_logger as sl
@@ -16,6 +18,7 @@ from torchtitan.rl.actors.monarch.rdma_microbatch import (
     create_cuda_context_to_silence_monarch_log,
     MonarchRDMAMicrobatch,
 )
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import RolloutGroup
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 
@@ -59,6 +62,7 @@ class _BatcherActorEndpoints:
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
             replay_routed_experts=replay_routed_experts,
         )
+        self._gc_timer = m.GCTimer("batcher")
 
     @endpoint
     async def add_group(
@@ -66,7 +70,13 @@ class _BatcherActorEndpoints:
     ) -> tuple[TrainerStepBatch | None, bool]:
         """Plain `@endpoint`, not `@concurrent_endpoint`: calls run one at a time, so groups reach the
         stateful batcher in arrival order. `async` because Monarch rejects mixing sync and async endpoints."""
-        return super().add_group(rollout_group=rollout_group)
+        batch, has_samples = super().add_group(rollout_group=rollout_group)
+        if batch is not None:
+            # This process's GC time since the previous batch, logged with the step it trains.
+            batch = dataclasses.replace(
+                batch, metrics=[*batch.metrics, *self._gc_timer.flush()]
+            )
+        return batch, has_samples
 
     @endpoint
     async def maybe_release_oldest_batch(self) -> None:
