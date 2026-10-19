@@ -178,6 +178,7 @@ class DeepSeekV4Model(Decoder):
                 "loss",
                 "fused_binary_activation",
                 "fp32_to_bf16_split",
+                "moe_router_topk",
             ]
         )
         hc_mult: int = 4
