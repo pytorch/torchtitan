@@ -161,7 +161,8 @@ def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
         captured["config_data"] = pickle.dumps(kwargs["config_data"])
 
     monkeypatch.setattr(env_server, "serve_env", serve_env)
-    # _run_env_server_process replaces __main__ and edits no_proxy; restore both after the test.
+    # _run_env_server_process replaces __main__ and edits no_proxy and the role env var;
+    # restore all three after the test.
     monkeypatch.setitem(sys.modules, "__main__", sys.modules["__main__"])
     monkeypatch.setenv("no_proxy", "")
     monkeypatch.setenv("NO_PROXY", "")
@@ -169,6 +170,7 @@ def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
     monkeypatch.setenv("MALLOC_ARENA_MAX", "2")
     monkeypatch.setenv("MALLOC_MMAP_THRESHOLD_", "65536")
     monkeypatch.setenv("MALLOC_TRIM_THRESHOLD_", "0")
+    monkeypatch.setenv(env_server.RL_ROLE_ENV, "")
     config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET).verifiers_env_server
     env_server._run_env_server_process(
         environment=env_config_data(config.environment),

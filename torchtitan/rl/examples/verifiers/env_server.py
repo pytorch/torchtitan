@@ -26,6 +26,7 @@ from verifiers.v1.serve import env_config_data, serve_env
 from verifiers.v1.utils.loaders import resolve_env_config
 
 from torchtitan.config import Configurable
+from torchtitan.rl._env import RL_ROLE_ENV
 from torchtitan.rl.examples.verifiers.worker_setup import (
     register_local_taskset_alias,
     setup_env_server_worker,
@@ -52,6 +53,10 @@ def _run_env_server_process(
     os.environ.setdefault("MALLOC_MMAP_THRESHOLD_", "65536")
     # Give free memory at the top of each heap back to the OS at once (glibc's default keeps up to 128 KB).
     os.environ.setdefault("MALLOC_TRIM_THRESHOLD_", "0")
+
+    # Tag the pool workers spawned below as `env_server_worker` for host memory metrics.
+    # This process itself stays `other`: /proc/<pid>/environ keeps the env it started with.
+    os.environ[RL_ROLE_ENV] = "env_server_worker"
 
     # Registered here too: resolve_env_config imports the taskset before serve_env runs log_setup.
     if local_taskset_module is not None:

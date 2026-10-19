@@ -11,13 +11,18 @@ from __future__ import annotations
 import logging
 import math
 import os
+import subprocess
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
 from torchtitan.observability.metrics import BaseLogger, TensorBoardLogger, WandBLogger
-from torchtitan.rl.controller.metrics import compute_rollout_metrics
+from torchtitan.rl._env import RL_ROLE_ENV
+from torchtitan.rl.controller.metrics import (
+    compute_host_memory_metrics,
+    compute_rollout_metrics,
+)
 
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
@@ -859,3 +864,27 @@ class TestIsValidationSwitch:
             is_validation=True,
         )
         assert [step for _, step in backend.calls] == [0, 1]
+
+
+def test_compute_host_memory_metrics_groups_processes_by_role() -> None:
+    def host_memory() -> dict[str, float]:
+        return {
+            metric.key: metric.value.value for metric in compute_host_memory_metrics()
+        }
+
+    before = host_memory()
+    if not before:
+        pytest.skip("needs cgroup v2")
+    # A child inherits this process's cgroup; tag it as a trainer.
+    sleeper = subprocess.Popen(
+        ["sleep", "60"], env={**os.environ, RL_ROLE_ENV: "trainer"}
+    )
+    try:
+        after = host_memory()
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    trainer_count_key = "host_memory/num_processes/trainer"
+    assert after["host_memory/num_processes/controller"] == 1
+    assert after[trainer_count_key] == before[trainer_count_key] + 1
+    assert after["host_memory/rss_anon_gib/trainer"] > 0
