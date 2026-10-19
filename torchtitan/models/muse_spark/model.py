@@ -148,7 +148,13 @@ class MuseSparkAttention(GQAttention):
         return output_TD
 
     # Limit 16: RoPE and no-RoPE layers share this region and use 8 graphs, exactly the default limit.
-    @local_compile("muse_spark_attention_qk", batch_invariant=False, recompile_limit=16)
+    # No pointwise autotuning, as in ComplexRoPE.forward: RoPE is inlined here, so this region's options apply.
+    @local_compile(
+        "muse_spark_attention_qk",
+        batch_invariant=False,
+        recompile_limit=16,
+        options={"triton.autotune_pointwise": False},
+    )
     def _prepare_query_and_key(
         self,
         query_TNH: torch.Tensor,
