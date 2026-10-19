@@ -40,7 +40,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             # Attention Module
             "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": "layers.{}.attention.wkv_a.weight",
             "model.layers.{}.self_attn.kv_a_layernorm.weight": "layers.{}.attention.kv_norm.weight",
-            "model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.wkv_b.weight",
+            "model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.inner_attention.wkv_b.weight",
             "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             # MLP Module
             "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",

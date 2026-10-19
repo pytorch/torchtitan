@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 
 __all__ = [
+    "cp_all_gather_tensors",
     "ContextParallelLoadBalancer",
     "HeadTailCPLoadBalancer",
     "PTRRFlexAttentionCPLoadBalancer",
@@ -45,6 +46,29 @@ __all__ = [
     "shard_tensors",
     "supports_cp_inner_attention",
 ]
+
+_TOKEN_DIM = 0
+
+
+def cp_all_gather_tensors(
+    tensors: tuple[torch.Tensor, ...],
+    *,
+    reduce_dtype: torch.dtype,
+) -> tuple[torch.Tensor, ...]:
+    """All-gather token-sharded tensors across the CP mesh axis."""
+    cp_group = spmd_mesh_group(MeshAxisName.CP)
+    if cp_group is None:
+        raise RuntimeError("CP attention requires an active multi-rank CP mesh axis.")
+    return tuple(
+        spmd.redistribute(
+            tensor,
+            cp_group,
+            src=spmd.S(_TOKEN_DIM),
+            dst=spmd.R,
+            backward_options={"op_dtype": reduce_dtype},
+        )
+        for tensor in tensors
+    )
 
 
 class ContextParallelLoadBalancer(Configurable, ABC):
@@ -147,15 +171,18 @@ def supports_cp_inner_attention(
         AllGatherKVFlexInnerAttention,
         AllGatherKVSlidingWindowFlexInnerAttention,
     )
+    from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 
     supported_cp_inner_attentions: dict[type, tuple[type, ...]] = {
         HeadTailCPLoadBalancer: (
             AllGatherKVFlexInnerAttention,
             AllGatherKVSlidingWindowFlexInnerAttention,
+            AllGatherKVMLAFlexAttention,
         ),
         PTRRFlexAttentionCPLoadBalancer: (
             AllGatherKVFlexInnerAttention,
             AllGatherKVSlidingWindowFlexInnerAttention,
+            AllGatherKVMLAFlexAttention,
         ),
     }
     load_balancer_type = load_balancer_config._owner

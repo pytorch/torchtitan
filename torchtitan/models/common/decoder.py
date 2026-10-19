@@ -385,7 +385,8 @@ class Decoder(BaseModel):
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
         for layer_config in self.config.layers:
-            for _, config, _, _ in layer_config.traverse(InnerAttention.Config):
+            for _, attention, _, _ in layer_config.traverse(Attention.Config):
+                config = attention.inner_attention
                 backend = config._owner
                 assert backend is not None and issubclass(backend, InnerAttention)
                 if backend in attention_metadata:
