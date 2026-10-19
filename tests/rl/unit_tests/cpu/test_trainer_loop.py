@@ -111,8 +111,14 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         acknowledge_training_sample_ids=lambda group_ids: None,
         state_dict=lambda: {},
     )
+    async def record_step_start(*, trainer_policy_version):
+        pass
+
     controller._group_buffer = SimpleNamespace(
-        metrics=lambda: [], release_active_groups=release_active_groups
+        metrics=lambda: [],
+        release_active_groups=release_active_groups,
+        record_step_start=record_step_start,
+        pop_dropped_group_ids=list,
     )
     controller.logged_metrics = []
     controller.metrics_processor = SimpleNamespace(
