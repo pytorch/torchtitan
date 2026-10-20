@@ -299,6 +299,7 @@ def build_mla_moe_layers(
         ..., TokenChoiceTopKRouter.Config
     ] = make_router_config,
     first_layer_sharding_config: ShardingConfig | None = None,
+    norm_eps: float = 1e-6,
     enable_sp: bool,
     enable_ep: bool,
 ) -> list[TransformerBlock.Config]:
@@ -312,7 +313,9 @@ def build_mla_moe_layers(
     architecture variants select their routing policy without changing this
     shared layer builder; it must return a sharded router config.
     ``first_layer_sharding_config`` sets layer 0's own boundary, for decoders
-    whose embedding output is not in the residual layout.
+    whose embedding output is not in the residual layout. ``norm_eps`` is the
+    epsilon of each block's ``attention_norm`` and ``ffn_norm`` (HF
+    ``rms_norm_eps``); the MLA q/kv norms keep 1e-6.
     """
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     layers = []
@@ -382,13 +385,13 @@ def build_mla_moe_layers(
                 attention=attn_cfg,
                 attention_norm=RMSNorm.Config(
                     normalized_shape=dim,
-                    eps=1e-6,
+                    eps=norm_eps,
                     param_init=norm_init,
                     sharding_config=norm_sharding,
                 ),
                 ffn_norm=RMSNorm.Config(
                     normalized_shape=dim,
-                    eps=1e-6,
+                    eps=norm_eps,
                     param_init=norm_init,
                     sharding_config=norm_sharding,
                 ),
