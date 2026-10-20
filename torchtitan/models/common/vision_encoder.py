@@ -28,6 +28,7 @@ import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
+from torchtitan.distributed.local_compile import compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
@@ -35,7 +36,7 @@ from torchtitan.models.common.attention import FlexInnerAttention, local_head_sp
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 
-compiled_create_block_mask = torch.compile(create_block_mask)
+compiled_create_block_mask = compile(create_block_mask)
 
 # Applies rotary position embedding: (query, key, rope_cache) -> (query, key).
 RopeApply = Callable[

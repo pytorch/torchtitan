@@ -18,7 +18,7 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_replicated_parameters,
@@ -104,7 +104,9 @@ class FluxModel(BaseModel):
     class Config(BaseModel.Config):
         img_in: Linear.Config
         txt_in: Linear.Config
-        local_compile_regions: list[str] = field(default_factory=lambda: ["loss"])
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(regions=["loss"])
+        )
         in_channels: int = 64
         out_channels: int = 64
         vec_in_dim: int = 768
@@ -236,13 +238,13 @@ class FluxModel(BaseModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> Self:
         """Apply Flux's AC-before-SPMD parallelization lifecycle."""
         # Bind local implementations early; torch.compile traces on first use.
-        apply_local_compile(local_compile_regions)
+        local_compile.apply()
         with parallelism_context.activate_spmd():
             if activation_remat is not None:
                 # Flux saves no regions under any policy: each block is

@@ -305,6 +305,6 @@ def muse_spark_debugmodel_ultradata_lora_sft() -> Trainer.Config:
     )
     config.comm.train_timeout_seconds = 1800
     config.activation_remat = FullActivationRematConfig()
-    config.model.local_compile_regions = ["loss"]
+    config.model.local_compile.regions = ["loss"]
     config.debug.seed = 42
     return apply_transforms(config, [_ultradata_lora_sft_transform()])

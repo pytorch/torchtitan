@@ -173,7 +173,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
 def rl_grpo_qwen3_0_6b_varlen_no_compile(*, seq_len: int = 2048) -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return config
 
 
@@ -298,7 +298,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     block_size = config.trainer.model.layers[0].attention.inner_attention.block_size
     config.async_loop.batcher = dataclasses.replace(
         config.async_loop.batcher, per_sample_pad_multiple=block_size
@@ -669,7 +669,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return Controller.Config(
         hf_assets_path="./assets/hf/Qwen3-0.6B",
         num_generators=3,
@@ -854,7 +854,7 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return config
 
 

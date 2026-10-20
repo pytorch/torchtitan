@@ -14,6 +14,7 @@ from torch import nn
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import ModuleList
 from torchtitan.models.common.attention import (
@@ -173,13 +174,15 @@ class DeepSeekV4Model(Decoder):
     class Config(Decoder.Config):
         dim: int
         vocab_size: int
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "fused_binary_activation",
-                "fp32_to_bf16_split",
-                "rope",
-            ]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "fp32_to_bf16_split",
+                    "rope",
+                ]
+            )
         )
         hc_mult: int = 4
         n_mtp_layers: int = 0

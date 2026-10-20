@@ -8,14 +8,14 @@ import unittest
 
 import torch
 
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.qwen3_5.moe import sigmoid_gate
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestSigmoidGateLocalCompile(unittest.TestCase):
     def setUp(self):
-        apply_local_compile(["shared_expert_gate"])
+        LocalCompileConfig(regions=["shared_expert_gate"]).apply()
         # A local generator leaves the global RNG stream unchanged for later tests.
         generator = torch.Generator(device="cuda").manual_seed(0)
 
@@ -29,7 +29,7 @@ class TestSigmoidGateLocalCompile(unittest.TestCase):
         self.grad_output = randn(64, 128)
 
     def tearDown(self):
-        apply_local_compile([])
+        LocalCompileConfig().apply()
         torch._dynamo.reset()
 
     def test_forward_and_backward_match_reference(self):

@@ -11,6 +11,7 @@ import torch
 import torch_remat as remat
 from torch import nn
 
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
@@ -117,15 +118,17 @@ class DeepSeekV3Model(MTPDecoder):
     class Config(MTPDecoder.Config):
         dim: int = 2048
         vocab_size: int = 102400
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "fused_binary_activation",
-                "fp32_to_bf16_split",
-                "moe_aux_loss",
-                "rope",
-                "mla_qk",
-            ]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "fp32_to_bf16_split",
+                    "moe_aux_loss",
+                    "rope",
+                    "mla_qk",
+                ]
+            )
         )
 
         def get_nparams_and_flops(
