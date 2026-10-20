@@ -38,7 +38,6 @@ from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import (
     MoE,
     RoundRobinTokenChoiceTopKRouter,
-    RoutedExperts,
     sharding as moe_sharding,
     TokenChoiceTopKRouter,
 )
@@ -48,37 +47,30 @@ from torchtitan.models.muse_spark.moe import MuseSparkMoE
 
 
 class _PassthroughRoutedExperts(nn.Module):
-    count_tokens = RoutedExperts.count_tokens
-
     def __init__(self):
         super().__init__()
-        self.num_tokens_per_expert_E = None
+        self.routing_map_TE = None
 
     def forward(
         self,
         x_TD,
         topk_scores_TK,
         topk_expert_ids_TK,
-        num_local_tokens_per_expert_E,
+        routing_map_TE,
         *,
         padding_mask_T=None,
     ):
-        self.num_tokens_per_expert_E = num_local_tokens_per_expert_E
+        self.routing_map_TE = routing_map_TE
         return x_TD
 
 
 class _RecordingRoutedExperts:
-    """Dist-MoE-like: skips the count and records what the MoE passes."""
-
     def __init__(self) -> None:
-        self.counts_E: torch.Tensor | None | str = "unset"
+        self.routing_map_TE: torch.Tensor | None = None
         self.kwargs: dict | None = None
 
-    def count_tokens(self, routing_map_TE):
-        return None
-
-    def __call__(self, x_TD, scores_TK, expert_ids_TK, counts_E, **kwargs):
-        self.counts_E = counts_E
+    def __call__(self, x_TD, scores_TK, expert_ids_TK, routing_map_TE, **kwargs):
+        self.routing_map_TE = routing_map_TE
         self.kwargs = kwargs
         return x_TD
 
@@ -140,10 +132,10 @@ class _IdentityDispatcher(nn.Module):
         x_TD,
         topk_scores_TK,
         topk_expert_ids_TK,
-        num_local_tokens_per_expert_E,
+        routing_map_TE,
     ):
         del topk_scores_TK, topk_expert_ids_TK
-        return x_TD, num_local_tokens_per_expert_E, None
+        return x_TD, routing_map_TE.sum(dim=0), None
 
     def combine(self, routed_output_RD, metadata, x_TD):
         del metadata, x_TD
@@ -244,7 +236,7 @@ class TestMoE(unittest.TestCase):
             x_TD,
             torch.ones(2, 1),
             torch.zeros(2, 1, dtype=torch.int64),
-            torch.tensor([2, 0]),
+            torch.tensor([[True, False], [True, False]]),
         )
         expected_TD = F.rms_norm(
             x_TD + 1,
@@ -405,7 +397,7 @@ class TestMoE(unittest.TestCase):
         moe(x_TD, padding_mask_T=padding_mask_T)
 
         self.assertEqual(moe.router.tokens_per_expert_E.sum().item(), 3)
-        self.assertEqual(moe.routed_experts.num_tokens_per_expert_E.sum().item(), 6)
+        self.assertEqual(moe.routed_experts.routing_map_TE.sum().item(), 6)
 
     def test_moe_hands_the_routed_padding_mask_to_the_experts(self):
         for moe_cls in (MoE, KimiLatentMoE):
@@ -417,15 +409,16 @@ class TestMoE(unittest.TestCase):
                 self.assertEqual(experts.kwargs, {"padding_mask_T": routed_mask_T})
                 self.assertIs(experts.kwargs["padding_mask_T"], routed_mask_T)
 
-    def test_moe_passes_the_count_the_experts_return(self):
-        """Routed experts that skip the count get ``None``, not a sum."""
+    def test_moe_hands_the_routing_map_to_the_experts(self):
+        """The experts get the router's ``(T, E)`` map; the MoE sums nothing."""
         for moe_cls in (MoE, KimiLatentMoE, MuseSparkMoE):
             with self.subTest(moe_cls=moe_cls.__name__):
                 experts = _RecordingRoutedExperts()
                 _forward_with_routed_mask(
                     moe_cls, experts, torch.zeros(4, dtype=torch.bool)
                 )
-                self.assertIsNone(experts.counts_E)
+                self.assertEqual(experts.routing_map_TE.dtype, torch.bool)
+                self.assertEqual(experts.routing_map_TE.shape, (4, 4))
 
     def test_router_masks_padding_only_for_aux_loss(self):
         router = make_router_config(
