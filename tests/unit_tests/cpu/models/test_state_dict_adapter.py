@@ -10,6 +10,11 @@ import unittest
 
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint import (
+    HuggingFaceStorageReader,
+    HuggingFaceStorageWriter,
+)
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.testing._internal.distributed.fake_pg import FakeStore
@@ -276,6 +281,104 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         if cls._owns_process_group:
             dist.destroy_process_group()
         cls._temporary_directory.cleanup()
+
+    def test_released_index_drops_unsaved_entries(self) -> None:
+        build_config, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
+        for num_mtp_layers in (0, 1):
+            config = build_config(
+                attn_backend="flex",
+                seq_len=max_context_length,
+                num_mtp_layers=num_mtp_layers,
+                parallelism=ParallelismConfig(),
+            )
+            mtp_layer = f"model.layers.{len(config.layers)}"
+            weight_map = {
+                "model.layers.0.self_attn.q_a_proj.weight": "model-00001-of-00002.safetensors",
+                "model.layers.0.self_attn.q_a_proj.weight_scale_inv": (
+                    "model-00001-of-00002.safetensors"
+                ),
+                f"{mtp_layer}.eh_proj.weight": "model-00002-of-00002.safetensors",
+                "model.norm.weight": "model-00002-of-00002.safetensors",
+            }
+            with tempfile.TemporaryDirectory() as hf_assets_path:
+                with open(f"{hf_assets_path}/model.safetensors.index.json", "w") as f:
+                    json.dump({"weight_map": weight_map}, f)
+                adapter = DeepSeekV3StateDictAdapter(
+                    config, hf_assets_path=hf_assets_path
+                )
+
+            expected = {
+                "model.layers.0.self_attn.q_a_proj.weight": 1,
+                "model.norm.weight": 2,
+            }
+            if num_mtp_layers:
+                expected[f"{mtp_layer}.eh_proj.weight"] = 2
+            with self.subTest(num_mtp_layers=num_mtp_layers):
+                self.assertEqual(adapter.fqn_to_index_mapping, expected)
+
+    def test_mtp_layers_save_independent_embedding_and_head_copies(self) -> None:
+        build_config, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
+        for num_mtp_layers in (1, 2):
+            with self.subTest(num_mtp_layers=num_mtp_layers):
+                config = build_config(
+                    attn_backend="flex",
+                    seq_len=max_context_length,
+                    num_mtp_layers=num_mtp_layers,
+                    parallelism=ParallelismConfig(),
+                )
+                model = config.build()
+                model.init_states()
+                state_dict = model.state_dict()
+                adapter = DeepSeekV3StateDictAdapter(config, hf_assets_path=None)
+
+                hf_state_dict = adapter.to_hf(state_dict)
+                copy_sources = {
+                    f"model.layers.{len(config.layers) + mtp_layer}.{suffix}": tt_key
+                    for mtp_layer in range(num_mtp_layers)
+                    for suffix, tt_key in (
+                        ("embed_tokens.weight", "tok_embeddings.weight"),
+                        ("shared_head.head.weight", "lm_head.weight"),
+                    )
+                }
+                # Exercise serialization of the shared tensors independently of
+                # unrelated expert-weight layout conversions.
+                exported = {
+                    key: hf_state_dict[key]
+                    for key in (
+                        "model.embed_tokens.weight",
+                        "lm_head.weight",
+                        *copy_sources,
+                    )
+                }
+                with tempfile.TemporaryDirectory() as checkpoint_dir:
+                    dcp.save(
+                        exported,
+                        storage_writer=HuggingFaceStorageWriter(
+                            path=checkpoint_dir,
+                            save_distributed=True,
+                            enable_consolidation=True,
+                        ),
+                    )
+                    restored = {
+                        key: torch.empty_like(value) for key, value in exported.items()
+                    }
+                    dcp.load(
+                        restored,
+                        storage_reader=HuggingFaceStorageReader(checkpoint_dir),
+                    )
+                for key, value in exported.items():
+                    torch.testing.assert_close(restored[key], value, rtol=0, atol=0)
+                for hf_key, tt_key in copy_sources.items():
+                    self.assertNotEqual(
+                        hf_state_dict[hf_key].untyped_storage().data_ptr(),
+                        state_dict[tt_key].untyped_storage().data_ptr(),
+                    )
+                    torch.testing.assert_close(
+                        hf_state_dict[hf_key], state_dict[tt_key], rtol=0, atol=0
+                    )
+                self.assertEqual(
+                    adapter.from_hf(hf_state_dict).keys(), state_dict.keys()
+                )
 
     def test_to_hf_handles_replicated_grouped_experts(self) -> None:
         build_config, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
