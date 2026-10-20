@@ -92,30 +92,22 @@ class _DictTrainingMicrobatch(TrainingMicrobatch):
         loss_kwargs: dict[str, Any] | None = None,
     ) -> None:
         self._input_dict = input_dict
-        self._loss_kwargs = loss_kwargs or {}
+        self._loss_kwargs = loss_kwargs
         self.labels = input_dict["labels"]
         self.loss_token_counts = torch.tensor(self.labels.numel())
         self.routing_token_counts = self.loss_token_counts.unsqueeze(0)
         self.to_input_dict_calls: list[tuple[torch.device | str, bool]] = []
-        self.to_loss_kwargs_calls: list[tuple[torch.device | str, bool]] = []
 
     def as_input_dict(self) -> dict[str, Any]:
-        return dict(self._input_dict)
+        if self._loss_kwargs is None:
+            return dict(self._input_dict)
+        return {**self._input_dict, "loss_kwargs": dict(self._loss_kwargs)}
 
     def to_input_dict(
         self, device: torch.device | str, *, non_blocking: bool = False
     ) -> dict[str, Any]:
         self.to_input_dict_calls.append((device, non_blocking))
         return super().to_input_dict(device, non_blocking=non_blocking)
-
-    def loss_kwargs(self) -> dict[str, Any]:
-        return dict(self._loss_kwargs)
-
-    def to_loss_kwargs(
-        self, device: torch.device | str, *, non_blocking: bool = False
-    ) -> dict[str, Any]:
-        self.to_loss_kwargs_calls.append((device, non_blocking))
-        return super().to_loss_kwargs(device, non_blocking=non_blocking)
 
 
 def _dict_microbatch(
@@ -282,6 +274,7 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
                 input_dict["input"] + 1,
                 input_dict["labels"] + 2,
                 {"positions": input_dict["positions"] + 3},
+                input_dict["loss_kwargs"],
             )
 
     trainer = cast(
@@ -351,7 +344,6 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
     for microbatch in microbatches:
         assert isinstance(microbatch, _DictTrainingMicrobatch)
         assert microbatch.to_input_dict_calls == [(trainer.device, True)]
-        assert microbatch.to_loss_kwargs_calls == [(trainer.device, True)]
 
 
 def test_pp_forward_backward_copies_global_counts_and_nests_metrics() -> None:
@@ -410,12 +402,14 @@ def test_forward_backward_runs_whole_accumulation(
             return iter(())
 
         def preprocess_inputs(self, input_dict, *, global_routing_token_counts, **kw):
+            loss_kwargs = input_dict["loss_kwargs"]
             captured["preprocess_kwargs"] = kw
             events.append(f"preprocess {input_dict['input']}")
             return (
                 "INPUTS",
                 torch.ones(7),
                 {"positions": 1, "aux_loss_denominators": global_routing_token_counts},
+                loss_kwargs,
             )
 
     losses = iter((torch.tensor(1.0), torch.tensor(2.0)))
@@ -500,7 +494,6 @@ def test_forward_backward_runs_whole_accumulation(
     for microbatch in microbatches:
         assert isinstance(microbatch, _DictTrainingMicrobatch)
         assert microbatch.to_input_dict_calls == [(engine.device, True)]
-        assert microbatch.to_loss_kwargs_calls == [(engine.device, True)]
     for inputs, labels, model_kwargs in captured["fwd_bwd_args"]:
         assert inputs == "INPUTS"
         assert model_kwargs["positions"] == 1
@@ -1369,7 +1362,7 @@ class _RecordingFSDPPart:
         return iter(())
 
     def preprocess_inputs(self, input_dict, **kwargs):
-        return input_dict["input"], input_dict["labels"], {}
+        return input_dict["input"], input_dict["labels"], {}, {}
 
 
 def _run_forward_backward_recording_all_reduce(
