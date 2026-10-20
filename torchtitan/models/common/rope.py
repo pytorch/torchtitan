@@ -170,25 +170,6 @@ class RoPE(Module):
         reshaped_cache = self._reshape_cache(query, positions)
         return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
-    def rotate_tail(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Rotate the last ``dim`` dims of each ``query`` row and all of ``key``.
-
-        Example:
-            # config.dim = 64, q: [T, H, 192], k_pe: [T, 1, 64]
-            q, k_pe = rope.rotate_tail(q, k_pe, positions)
-            # q[..., :128] unchanged; q[..., 128:] and k_pe rotated
-        """
-        kept, tail = query.split(
-            [query.shape[-1] - self.config.dim, self.config.dim], dim=-1
-        )
-        tail, key = self(tail, key, positions)
-        return torch.cat([kept, tail], dim=-1), key
-
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device
         if buffer_device is None:
@@ -340,23 +321,6 @@ class ComplexRoPE(RoPE):
         key_out = torch.view_as_real(xk_ * rope_cache).flatten(-2).type_as(key)
         return query_out, key_out
 
-    def rotate_tail(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Compiled, contiguous bf16 query: rotate inside the row viewed as int32 pairs (_RotateTail).
-        if (
-            torch.compiler.is_compiling()
-            and query.dtype == torch.bfloat16
-            and query.is_contiguous()
-        ):
-            cache = self._reshape_cache(query, positions).unflatten(-1, (-1, 2))
-            cos, sin = cache[..., 0], cache[..., 1]
-            return _RotateTail.apply(query, cos, sin), _RotatePairs.apply(key, cos, sin)
-        return super().rotate_tail(query, key, positions)
-
 
 class _RotatePairs(torch.autograd.Function):
     """Rotate each ``(x[2i], x[2i + 1])`` pair by the angle with ``cos[i]``, ``sin[i]``::
@@ -387,7 +351,7 @@ class _RotatePairs(torch.autograd.Function):
         packed = x.dtype == torch.int32
         out_dtype = torch.bfloat16 if packed else x.dtype
         if packed or (x.dtype == torch.bfloat16 and x.is_contiguous()):
-            # Read each pair as one int32 (x[2i] in the low half), so loads stay contiguous.
+            # Read each pair as one int32 (little-endian: x[2i] in the low half), so loads stay contiguous.
             # A bf16 shifted into the high 16 bits is its exact fp32. The int32 view also
             # ends the fusion with whatever produced x, which is written out first. It needs an
             # even element offset: every caller slices q/k at even widths.
@@ -408,35 +372,6 @@ class _RotatePairs(torch.autograd.Function):
             high = imag.view(torch.int16).to(torch.int32) << 16
             return low | high if packed else (low | high).view(torch.bfloat16)
         return torch.stack((real, imag), dim=-1).flatten(-2)
-
-
-class _RotateTail(torch.autograd.Function):
-    """Rotate the last ``2 * cos.shape[-1]`` dims of contiguous bf16 rows; copy the rest.
-
-    The rotation runs on the whole row viewed as int32 pairs: slicing the tail out first gives
-    a strided view, which ``_RotatePairs`` can only read as halves. A Function because the int32
-    views have no autograd. Needs an even storage offset; q comes straight from its projection.
-    """
-
-    @staticmethod
-    def forward(  # pyrefly: ignore[bad-override]
-        ctx, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-    ) -> torch.Tensor:
-        ctx.save_for_backward(cos, sin)
-        return _RotateTail.rotate(x, cos, sin)
-
-    @staticmethod
-    def backward(ctx, grad: torch.Tensor):  # pyrefly: ignore[bad-override]
-        cos, sin = ctx.saved_tensors
-        return _RotateTail.rotate(grad, cos, -sin), None, None
-
-    @staticmethod
-    def rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        words = x.view(torch.int32)
-        num_pairs = cos.shape[-1]
-        kept, tail = words.split([words.shape[-1] - num_pairs, num_pairs], dim=-1)
-        rotated = _RotatePairs.rotate(tail, cos, sin)
-        return torch.cat([kept, rotated], dim=-1).view(torch.bfloat16)
 
 
 class CosSinRoPE(RoPE):
