@@ -22,6 +22,10 @@ from torchtitan.distributed.cuda_graph import (
     get_cuspy_cuda_graph_annotation_config,
 )
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.always_on_profiler import (
+    AlwaysOnProfiler,
+    AlwaysOnProfilerConfig,
+)
 from torchtitan.tools.utils import device_module, device_type
 
 # torch's export_chrome_trace gained cuda_graph_annotations when the offline joiner
@@ -338,6 +342,10 @@ class Profiler(Configurable):
         cuspy: CuspyProfilerConfig | None = None
         """Cuspy profiler settings; ``None`` profiles CUDA with Kineto."""
 
+        always_on: AlwaysOnProfilerConfig | None = None
+        """Always-on kernel timeline settings; ``None`` disables it. Records every
+        step's GPU kernels with Cuspy, independent of ``enable_profiling``."""
+
         cuda_graph_lanes: bool = True
         """Draw replayed CUDA graph work on logical lanes (one per process group for
         collectives, one per ``mark_stream`` stream, one for the rest) instead of the
@@ -351,6 +359,16 @@ class Profiler(Configurable):
                 raise ValueError(
                     "profiler.profile_freq must be greater than or equal to "
                     "profiler_warmup + profiler_active."
+                )
+            if (
+                self.always_on is not None
+                and self.enable_profiling
+                and self.cuspy is None
+            ):
+                # Kineto cannot initialize CUPTI while Cuspy holds it.
+                raise ValueError(
+                    "profiler.always_on records with Cuspy, so scheduled profiling "
+                    "must set profiler.cuspy too."
                 )
 
         def maybe_cuda_graph_annotation_config(self) -> dict[str, Any] | None:
@@ -377,6 +395,7 @@ class Profiler(Configurable):
         self._leaf_folder = leaf_folder
         self.torch_profiler = None
         self.memory_profiler = None
+        self.always_on_profiler: AlwaysOnProfiler | None = None
 
     def active(
         self,
@@ -401,6 +420,22 @@ class Profiler(Configurable):
         return self
 
     def __enter__(self) -> "Profiler":
+        always_on = self._config.always_on
+        if always_on is not None:
+            if not torch.cuda.is_available():
+                raise ValueError("profiler.always_on requires CUDA.")
+            if reasons := _cuspy_unavailable_reasons(CuspyProfilerConfig()):
+                raise ValueError(
+                    "profiler.always_on is set, but Cuspy cannot run here:\n  - "
+                    + "\n  - ".join(reasons)
+                )
+            self.always_on_profiler = AlwaysOnProfiler(
+                always_on,
+                trace_dir=os.path.join(
+                    self._base_folder, always_on.save_folder, self._leaf_folder
+                ),
+                global_step=self._global_step,
+            )
         self.torch_profiler = self.build_torch_profiler(
             global_step=self._global_step,
             base_folder=self._base_folder,
@@ -431,6 +466,9 @@ class Profiler(Configurable):
         if self.torch_profiler is not None:
             self.torch_profiler.__exit__(exc_type, exc_val, exc_tb)
             self.torch_profiler = None
+        if self.always_on_profiler is not None:
+            self.always_on_profiler.close()
+            self.always_on_profiler = None
         if self.memory_profiler is not None:
             if caused_by_oom(exc_val):
                 self.memory_profiler.step(exit_ctx=True)
@@ -446,6 +484,9 @@ class Profiler(Configurable):
         if self.memory_profiler is not None:
             with sl.log_trace_span("memory_profiler_step_call"):
                 self.memory_profiler.step()
+        if self.always_on_profiler is not None:
+            with sl.log_trace_span("always_on_profiler_step_call"):
+                self.always_on_profiler.step()
 
     def build_torch_profiler(
         self,
