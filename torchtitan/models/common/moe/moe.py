@@ -711,12 +711,14 @@ def _shared_experts_side_stream() -> torch.cuda.Stream | None:
     """Side stream for the shared experts, or None to run them inline.
 
     None when:
-    - grad is enabled (the backward would need matching streams),
-    - torch.compile is tracing,
-    - no CUDA graph is being captured (the overlap was measured only under graphs), or
-    - dense SP is on (the shared experts would gather their input on the side stream).
-    EP and TP without SP are fine: the shared output stays TP-partial, and EP dispatch,
-    combine and the final TP all-reduce stay on the main stream.
+    - grad is enabled: the shared backward would run on the side stream too,
+    - torch.compile is tracing: keeps Dynamo off the stream calls,
+    - no CUDA graph is being captured: the overlap was measured only under graphs, or
+    - dense SP is on: the shared experts would all-gather and reduce-scatter on it.
+    Any dispatcher that a CUDA graph can capture takes the side stream (EP = 1,
+    Dist-MoE, DeepEP expand, HybridEP non-blocking): EP dispatch, combine and the
+    final TP all-reduce are launched from the main stream. With EP > 1 the
+    all-to-all dispatcher copies its splits to the host, so it can't be captured.
     """
     if (
         torch.is_grad_enabled()

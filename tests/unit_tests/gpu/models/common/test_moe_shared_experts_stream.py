@@ -93,7 +93,9 @@ class TestSharedExpertsSideStream(unittest.TestCase):
 class _LocalRoutedExperts(nn.Module):
     """Routed experts without dispatch, so the MoE captures without an EP backend."""
 
-    def forward(self, x_TD, topk_scores_TK, topk_expert_ids_TK, counts_E, **kwargs):
+    def forward(
+        self, x_TD, topk_scores_TK, topk_expert_ids_TK, routing_map_TE, **kwargs
+    ):
         return x_TD * topk_scores_TK.sum(dim=-1, keepdim=True).to(x_TD.dtype)
 
 
