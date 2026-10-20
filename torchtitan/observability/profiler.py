@@ -158,7 +158,9 @@ def _cuspy_unavailable_reasons(config: CuspyProfilerConfig) -> list[str]:
     return reasons
 
 
-def _get_cuspy_activity_config(config: CuspyProfilerConfig) -> dict[Any, Any]:
+def _get_cuspy_activity_config(
+    config: CuspyProfilerConfig, *, graph_lanes: bool = False
+) -> dict[Any, Any]:
     """Build the ``torch.profiler.profile`` activity that collects CUDA with Cuspy,
     used in place of ``ProfilerActivity.CUDA``."""
     profiler_configs: list[Any] = [
@@ -167,6 +169,7 @@ def _get_cuspy_activity_config(config: CuspyProfilerConfig) -> dict[Any, Any]:
             enable_environment_counters=config.enable_environment_counters,
             enable_graph_dependencies=config.enable_graph_dependencies,
             enable_event_node_ids=config.enable_event_node_ids,
+            **({"graph_lanes": "all"} if graph_lanes else {}),
         )
     ]
     if config.performance_metrics:
@@ -335,6 +338,12 @@ class Profiler(Configurable):
         cuspy: CuspyProfilerConfig | None = None
         """Cuspy profiler settings; ``None`` profiles CUDA with Kineto."""
 
+        cuda_graph_lanes: bool = True
+        """Draw replayed CUDA graph work on logical lanes (one per process group for
+        collectives, one per ``mark_stream`` stream, one for the rest) instead of the
+        hundreds of driver streams a replay runs on. Moved events keep their stream
+        as ``original_stream``. Needs a torch with ``CuspyConfig.graph_lanes``."""
+
         def __post_init__(self) -> None:
             if self.enable_profiling and self.profile_freq < (
                 self.profiler_warmup + self.profiler_active
@@ -463,6 +472,12 @@ class Profiler(Configurable):
         )
 
         rank = torch.distributed.get_rank()
+        # CuspyConfig.graph_lanes landed with process group lanes for collectives in
+        # both backends; on older torch, Kineto's graph_lanes would pile collectives
+        # onto one lane.
+        graph_lanes = cfg.cuda_graph_lanes and hasattr(
+            getattr(torch.profiler, "CuspyConfig", None), "graph_lanes"
+        )
 
         def trace_handler(prof):
             curr_trace_dir_name = PROFILE_ITER_DIR.format(step=prof.step_num)
@@ -479,6 +494,13 @@ class Profiler(Configurable):
                 else PROFILE_FILE
             )
             output_file = os.path.join(curr_trace_dir, profile_file.format(rank=rank))
+            annotations = get_cuda_graph_annotations()
+            if annotations and cfg.cuda_graph_lanes and not graph_lanes:
+                logger.warning(
+                    "profiler.cuda_graph_lanes needs a torch with "
+                    "CuspyConfig.graph_lanes; the trace keeps CUDA graph work on its "
+                    "replay streams."
+                )
             if cuspy is not None:
                 # Cuspy picks its Perfetto encoder from the ".pftrace" in the path.
                 prof.export_chrome_trace(output_file)
@@ -499,7 +521,6 @@ class Profiler(Configurable):
                 # CUDA graph annotations are baked in during the export rather than
                 # joined onto the written file afterwards: re-reading and rewriting a
                 # gzipped trace paid the compression cost twice.
-                annotations = get_cuda_graph_annotations()
                 if annotations and not _EXPORT_SUPPORTS_ANNOTATIONS:
                     logger.warning(
                         "This torch does not support cuda_graph_annotations on "
@@ -507,7 +528,11 @@ class Profiler(Configurable):
                         "annotations."
                     )
                     annotations = None
-                extra = {"cuda_graph_annotations": annotations} if annotations else {}
+                extra: dict[str, Any] = {}
+                if annotations:
+                    extra["cuda_graph_annotations"] = annotations
+                    if graph_lanes:
+                        extra["graph_lanes"] = "all"
                 prof.export_chrome_trace(output_file, **extra)
 
             logger.info(
@@ -549,7 +574,9 @@ class Profiler(Configurable):
                     "kernels replayed from CUDA graphs will not carry mark_kernels "
                     "metadata in the Cuspy trace."
                 )
-            activities.append(_get_cuspy_activity_config(cuspy))
+            activities.append(
+                _get_cuspy_activity_config(cuspy, graph_lanes=graph_lanes)
+            )
         elif torch.cuda.is_available():
             activities.append(torch.profiler.ProfilerActivity.CUDA)
         elif torch.xpu.is_available():
