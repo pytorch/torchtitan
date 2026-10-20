@@ -170,7 +170,7 @@ class TestEMACpuOffload(unittest.TestCase):
         torch.cuda.synchronize()
 
         # hold the offload stream so its read of the params happens late
-        with torch.cuda.stream(ema._offload_stream):
+        with ema._offload_stream:
             torch.cuda._sleep(1_500_000_000)
         ema.step(2)
         with torch.no_grad():  # the conflicting write, on the compute stream

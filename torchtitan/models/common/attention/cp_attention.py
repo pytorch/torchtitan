@@ -19,6 +19,7 @@ import torch
 import torch.distributed as dist
 
 from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.distributed.context_parallel import cp_all_gather_tensors
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
@@ -37,6 +38,7 @@ __all__ = [
     "AllGatherKVFlex",
     "AllGatherKVFlexInnerAttention",
     "AllGatherKVSlidingWindowFlexInnerAttention",
+    "Ulysses",
     "UlyssesInnerAttention",
     "UlyssesFlexInnerAttention",
     "UlyssesSlidingWindowFlexInnerAttention",
@@ -77,14 +79,7 @@ class CPInnerAttention(
 
 
 class AllGatherKVFlex(CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata]):
-    """Share K/V all-gather CP logic across the FlexAttention variants.
-
-    This base handles BlockMask sharding and K/V redistribution for
-    the full and sliding-window FlexAttention backends. It is not a standalone
-    attention backend.
-    """
-
-    reduce_dtype: torch.dtype
+    """Base for K/V all-gather CP attention using FlexAttention masks."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config):
@@ -197,31 +192,6 @@ class AllGatherKVFlex(CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetad
             separate_full_blocks=block_mask.full_kv_num_blocks is not None,
         )
 
-    def forward(
-        self,
-        q_THK: torch.Tensor,
-        k_THK: torch.Tensor,
-        v_THV: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        cp_group = spmd_mesh_group(MeshAxisName.CP)
-        if cp_group is None:
-            raise RuntimeError(
-                "CP attention requires an active multi-rank CP mesh axis."
-            )
-        k_THK, v_THV = (
-            spmd.redistribute(
-                x,
-                cp_group,
-                src=spmd.S(_TOKEN_DIM),
-                dst=spmd.R,
-                backward_options={"op_dtype": self.reduce_dtype},
-            )
-            for x in (k_THK, v_THV)
-        )
-        assert isinstance(self, FlexInnerAttention)
-        return FlexInnerAttention.forward(self, q_THK, k_THK, v_THV, **kwargs)
-
 
 class AllGatherKVFlexInnerAttention(
     AllGatherKVFlex,
@@ -241,6 +211,18 @@ class AllGatherKVFlexInnerAttention(
         super().__init__(config)
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        k_THK, v_THV = cp_all_gather_tensors(
+            (k_THK, v_THV), reduce_dtype=self.reduce_dtype
+        )
+        return super().forward(q_THK, k_THK, v_THV, **kwargs)
+
 
 class AllGatherKVSlidingWindowFlexInnerAttention(
     AllGatherKVFlex, SlidingWindowFlexInnerAttention
@@ -259,11 +241,21 @@ class AllGatherKVSlidingWindowFlexInnerAttention(
         super().__init__(config)
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        k_THK, v_THV = cp_all_gather_tensors(
+            (k_THK, v_THV), reduce_dtype=self.reduce_dtype
+        )
+        return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
-class UlyssesInnerAttention(
-    CPInnerAttention[_GlobalAttentionMetadataT, _GlobalAttentionMetadataT]
-):
-    """Move CP sharding from tokens to heads while keeping metadata global."""
+
+class Ulysses(CPInnerAttention[_GlobalAttentionMetadataT, _GlobalAttentionMetadataT]):
+    """Base for Ulysses CP attention with global attention metadata."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config):
@@ -277,6 +269,14 @@ class UlyssesInnerAttention(
     ) -> _GlobalAttentionMetadataT:
         del permutation
         return attention_metadata
+
+
+class UlyssesInnerAttention(Ulysses[_GlobalAttentionMetadataT]):
+    """Move CP sharding from tokens to heads while keeping metadata global."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Ulysses.Config):
+        pass
 
     def forward(
         self,
