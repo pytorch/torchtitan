@@ -201,6 +201,7 @@ def test_trainer_keeps_scheduled_eval_during_warmup(
     validator.config = Validator.Config(steps=1, freq=freq)
     validator._cuda_graph_enabled = capture_mode == "enabled"
     validator._run_eval = None
+    validator._cuda_graph_annotation_config = None
     validator.parallelism_context = SimpleNamespace(pp_enabled=False)
     validator._validate_body = MagicMock()
 
