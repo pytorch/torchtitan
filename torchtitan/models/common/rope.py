@@ -189,9 +189,13 @@ class ComplexRoPE(RoPE):
     # each half with one store, instead of one masked kernel over both.
     # No pointwise autotuning: the rotation's kernel configs can round differently (likely FMA
     # contraction), so picking one by timing could change numerics from run to run.
+    # Limit 32, not the default 8: DeepSeek-V4 calls this from 4 sites. Recipes (fixed-length
+    # packing) compile 4 graphs; mixing token counts, no_grad and positions=None calls in one
+    # process takes up to 26.
     @local_compile(
         "rope",
         batch_invariant=True,
+        recompile_limit=32,
         options={
             "max_pointwise_cat_inputs": 0,
             "max_complex_pointwise_cat_inputs": 0,
