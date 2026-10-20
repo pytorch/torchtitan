@@ -11,13 +11,22 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
 
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
+from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.moe import MoE
+from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
+
+
+class _InspectionSensitiveShardedTensor(_ShardedFSDPTensor):
+    def _build_operands(self, logical_tensor, out=None):
+        del logical_tensor, out
+        raise AssertionError("parameter inspection built unsharded operands")
 
 
 class _RoutedExperts(nn.Module):
@@ -129,6 +138,17 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         )
 
         self.assertIs(type(model), VarlenInnerAttention)
+
+    def test_reapplying_data_parallel_does_not_materialize_parameters(self):
+        linear = nn.Linear(8, 8, bias=False)
+        linear.num_linears = 2
+        linear.weight = nn.Parameter(
+            _InspectionSensitiveShardedTensor(linear.weight.detach())
+        )
+        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("fsdp",))
+
+        data_parallel(linear, mesh, mode="fully_shard")
+        data_parallel(linear, mesh, mode="fully_shard")
 
 
 class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
