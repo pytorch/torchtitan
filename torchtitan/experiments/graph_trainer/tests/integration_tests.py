@@ -144,26 +144,6 @@ def deepseek_v3_fsdp_tp_ep_regional_inductor():
     return config
 
 
-def _deepseek_v3_ep_overlap(*, inductor_compilation: str):
-    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel(
-        parallelism=ParallelismConfig(expert_parallel_degree=4)
-    )
-    config.training.disable_cuda_graphs = True
-    config.compile.inductor_compilation = inductor_compilation
-    config.compile.ep_overlap.enabled = True
-    config.parallelism.data_parallel_shard_degree = 8
-    config.parallelism.tensor_parallel_degree = 1
-    return config
-
-
-def deepseek_v3_regional_ep_overlap_moe_tokens():
-    return _deepseek_v3_ep_overlap(inductor_compilation="regional")
-
-
-def deepseek_v3_full_ep_overlap_moe_tokens():
-    return _deepseek_v3_ep_overlap(inductor_compilation="full")
-
-
 def deepseek_v3_graph_pp_interleaved_1f1b():
     return _deepseek_v3_graph_pp("Interleaved1F1B")
 
@@ -358,21 +338,6 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
 
 def _build_deepseek_v3_tests() -> list[IntegrationTestDefinition]:
     """DeepSeek-v3-based integration tests (require H100 machines)."""
-    ep_overlap_flex_tests = [
-        (
-            deepseek_v3_regional_ep_overlap_moe_tokens,
-            "regional",
-            "moe_tokens",
-            True,
-        ),
-        (
-            deepseek_v3_full_ep_overlap_moe_tokens,
-            "full",
-            "moe_tokens",
-            True,
-        ),
-    ]
-
     return [
         # === GraphRuntime tests ===
         IntegrationTestDefinition(
@@ -425,30 +390,6 @@ def _build_deepseek_v3_tests() -> list[IntegrationTestDefinition]:
             # cyclic region for this DeepSeekV3 FSDP+TP+EP configuration.
             disabled=True,
         ),
-        *[
-            IntegrationTestDefinition(
-                configs=[config_fn],
-                test_descr=(
-                    "aot_fx_trace deepseek_v3 FlexAttn "
-                    f"{inductor_compilation}_inductor ep_overlap {variant}"
-                ),
-                test_name=(
-                    "aot_fx_trace_deepseek_v3_flexattn_"
-                    f"{inductor_compilation}_inductor_ep_overlap_{variant}"
-                ),
-                ngpu=8,
-                # TODO(#4052): These were disabled under graph chunking with
-                # dense-region FSDP overlap; re-validate the MoE variants with
-                # eager chunking before re-enabling.
-                disabled=disabled,
-            )
-            for (
-                config_fn,
-                inductor_compilation,
-                variant,
-                disabled,
-            ) in ep_overlap_flex_tests
-        ],
         IntegrationTestDefinition(
             configs=[deepseek_v3_graph_pp_interleaved_1f1b],
             test_descr=(

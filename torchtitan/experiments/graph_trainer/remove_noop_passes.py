@@ -44,6 +44,25 @@ _FORCE_PURE_TARGETS = (
 )
 
 
+def _replace_identity_value(node: torch.fx.Node, replacement: torch.fx.Node) -> None:
+    """Rewire an identity value while retaining its parameter-gradient identities.
+
+    Other source annotations belong to the producing operation, not its alias.
+    Only gradient identities describe the value and survive this replacement.
+    """
+    custom = node.meta.get("custom", {})
+    if PARAMETER_GRADIENT_FQNS_META in custom:
+        replacement_custom = replacement.meta.setdefault("custom", {})
+        existing = replacement_custom.get(PARAMETER_GRADIENT_FQNS_META, ())
+        identities = custom[PARAMETER_GRADIENT_FQNS_META]
+        if not isinstance(existing, tuple) or not isinstance(identities, tuple):
+            raise RuntimeError("Parameter-gradient metadata must be a tuple of FQNs")
+        replacement_custom[PARAMETER_GRADIENT_FQNS_META] = tuple(
+            dict.fromkeys((*existing, *identities))
+        )
+    node.replace_all_uses_with(replacement)
+
+
 def remove_parameter_gradient_markers_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
@@ -72,19 +91,7 @@ def remove_parameter_gradient_markers_pass(
             raise RuntimeError(
                 f"Parameter-gradient marker {marker.name} has no FX value input"
             )
-        gradient_custom = gradient.meta.setdefault("custom", {})
-        existing_fqns = gradient_custom.get(PARAMETER_GRADIENT_FQNS_META, ())
-        marker_fqns = marker.meta["custom"][PARAMETER_GRADIENT_FQNS_META]
-        if not isinstance(existing_fqns, tuple) or not isinstance(marker_fqns, tuple):
-            raise RuntimeError("Parameter-gradient metadata must be a tuple of FQNs")
-        gradient_custom.update(
-            {
-                PARAMETER_GRADIENT_FQNS_META: tuple(
-                    dict.fromkeys((*existing_fqns, *marker_fqns))
-                )
-            }
-        )
-        marker.replace_all_uses_with(gradient)
+        _replace_identity_value(marker, gradient)
         gm.graph.erase_node(marker)
     if markers:
         gm.graph.lint()
@@ -178,7 +185,7 @@ def remove_detach_pass(
     count = 0
     for node in list(gm.graph.nodes):
         if node.op == "call_function" and node.target is torch.ops.aten.detach.default:
-            node.replace_all_uses_with(node.args[0])
+            _replace_identity_value(node, node.args[0])
             gm.graph.erase_node(node)
             count += 1
 
@@ -236,7 +243,7 @@ def remove_identity_view_pass(
             continue
 
         if _same_shape(inp_val.shape, out_val.shape):
-            node.replace_all_uses_with(inp)
+            _replace_identity_value(node, inp)
             gm.graph.erase_node(node)
             count += 1
 
@@ -274,7 +281,7 @@ def remove_b2b_transpose_pass(
         inp = node.args[0]
         if isinstance(inp, torch.fx.Node) and inp.target is torch.ops.aten.t.default:
             original = inp.args[0]
-            node.replace_all_uses_with(original)
+            _replace_identity_value(node, original)
             gm.graph.erase_node(node)
             count += 1
             # The inner transpose may still feed other consumers; only erase
@@ -343,7 +350,7 @@ def remove_identity_slice_pass(
         dim_size = shape[dim]
 
         if guard_or_false(end >= dim_size):
-            node.replace_all_uses_with(input_node)
+            _replace_identity_value(node, input_node)
             gm.graph.erase_node(node)
             count += 1
 

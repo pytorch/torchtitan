@@ -9,9 +9,13 @@
 from typing import Literal
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import apply_transforms, TokenDispatcherTransform
 from torchtitan.experiments.graph_trainer.common_utils import (
     disable_inplace_wgrad_accum,
 )
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
+
+from torchtitan_recipes.data import c4_document_capacity
 
 from torchtitan_recipes.tests.graph_trainer.b200 import (
     graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
@@ -34,6 +38,53 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
 )
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 from torchtitan_recipes.tests.models.qwen3 import qwen3_debugmodel, qwen3_moe_debug
+
+
+def _deepseek_v3_hybridep_chunks(*, overlap: bool):
+    """Build matched four-rank production recipes for eager HybridEP chunking."""
+    config = graph_trainer_deepseek_v3_debugmodel(
+        attn_backend="varlen",
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=2,
+        ),
+    )
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.training.num_tokens_per_train_step = 4096
+    config.dataloader.max_num_documents = c4_document_capacity(
+        config.training.num_tokens_per_microbatch_per_dp_rank
+    )
+    config.training.disable_cuda_graphs = False
+    config.compile.ep_overlap.enabled = True
+    config.compile.inductor_compilation = "regional"
+    if not overlap:
+        config.compile.disable_passes = ["ep_overlap_schedule_pass"]
+    config.debug.seed = 42
+    config.debug.deterministic = True
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // config.parallelism.tensor_parallel_degree
+                ),
+                kwargs={"non_blocking_capacity_factor": 4.0},
+            )
+        ],
+    )
+
+
+def deepseek_v3_hybridep_chunk_control():
+    """Run eager token chunks with the overlap scheduler disabled."""
+    return _deepseek_v3_hybridep_chunks(overlap=False)
+
+
+def deepseek_v3_hybridep_overlap():
+    """Run scheduled eager token chunks without paged stashing."""
+    return _deepseek_v3_hybridep_chunks(overlap=True)
 
 
 def _without_inplace_wgrad_accum(config):

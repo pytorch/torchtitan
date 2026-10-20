@@ -134,9 +134,9 @@ execution. Users can disable CUDA graphs with
 
 ### Expert Parallel Overlap
 
-EP overlap is an experimental graph-trainer optimization for MoE models with
-real expert-parallel collectives. Enable it only with
-`expert_parallel_degree > 1`:
+Eager EP overlap supports non-blocking HybridEP in non-pipeline GraphTrainer.
+Configure the model's `HybridEPTokenDispatcher` with a positive
+`non_blocking_capacity_factor` and enable the two-chunk scheduler:
 
 ```python
 config.compile.ep_overlap.enabled = True
@@ -146,19 +146,73 @@ config.parallelism.expert_parallel_degree = 2
 ```
 
 Selected MoE forwards are split into two equal chunks of the token axis before
-tracing. The input has shape `(T, D)` and its optional padding mask has shape
-`(T,)`; both are split together. Dense feed-forward modules are not chunked.
-The chunk annotations recorded during tracing are the contract consumed by
-the EP-overlap scheduler. Transformer-block chunking and the `chunk_dim`
-setting have been removed.
+tracing. Activations have shape `(T, D)`; padding masks remain replicated across
+TP even when activations are sequence-sharded. Masks are split within each TP
+shard and flattened back to replicated chunks, matching the local activations.
+Router arguments and the full-call auxiliary-loss denominator are shared.
+Dense feed-forward modules are not chunked.
+
+The workflow is eager chunking -> tracing -> unshard normalization -> memory
+policy -> collective bucketing -> EP scheduling -> regional
+attention compilation -> whole forward/backward CUDA capture and replay.
+Shared parametrized weights are read once outside chunk ownership, so both
+chunks accumulate through one parameter-gradient reduction edge.
+
+Each chunk owns an immutable native routing handle through dispatch, combine
+and both backward exchanges. Expert payload outputs are separate allocations;
+only native transport and preprocessing scratch are shared. Exchanges use one
+communication stream with the same launch order on every EP rank. Native
+device-side generation barriers protect shared storage; they are not CPU/GPU
+size-discovery synchronizations. Every chunk has a group-uniform input row count.
+
+Native EP exchanges use a high-priority side stream. Set the same
+`TORCHTITAN_HYBRIDEP_DISPATCH_SMS` and `TORCHTITAN_HYBRIDEP_COMBINE_SMS` values
+on every rank before initialization to override the native SM targets
+(16 each). Compute keeps its normal launch geometry; these targets do not
+reserve compute SMs or change token capacity. CUDA priority does not preempt
+already-running CTAs, so communication must be issued before independent
+compute.
+
+Each exchange has explicit launch, phase, chunk and completion-wait annotations.
+Waits retain the exact tensor input storage as graph arguments. Launch adapters
+accept compiler layouts and normalize native contiguous inputs internally;
+waits preserve storage rather than making independent layout copies. The
+scheduler issues the second chunk's launch
+before the first chunk's wait, then prefers ready launches, independent work
+and finally waits. It preserves data and mutation dependencies;
+it does not infer scheduling roles from node names or tensor shapes.
+Among ready computations, launch ancestors go first so input gradients expose
+their exchange before independent weight gradients. The latter can then cover
+the final backward combine rather than being drained before it launches.
+
+Chunked and unchunked training are not promised bitwise equal: chunking changes
+expert-gradient accumulation order, and partitioned capacities can retain
+different tokens. Scheduling-only validation compares the same two chunks,
+routing and capacities with overlap disabled versus enabled. Numerical
+differences must not substitute for checking completion and storage ownership.
+
+The focused integration recipes use full forward/backward CUDA graphs for
+the two-chunk control and overlap. They select native
+varlen attention, which uses the existing FA4 provider on Blackwell, without
+compiling attention through Inductor. They check actual
+capture and compare ten training steps of full-precision loss and gradient
+norm, including repeated replay; chunked-versus-unchunked equality is not the
+comparison contract.
+
+Varlen backend selection is explicit: use
+`VarlenInnerAttention.Config(sdpa_backend=SDPBackend.FLASH_ATTENTION)` to select
+the registered Flash implementation. Registering FA4 alone does not prevent
+PyTorch from choosing cuDNN. The optional per-op preference preserves PyTorch's
+automatic priority by default and restores backend flags after each call.
 
 Current limitations:
 
-- EP overlap is only meaningful when `expert_parallel_degree > 1`.
+- `expert_parallel_degree > 1` and `pipeline_parallel_degree == 1` are required.
+- DeepEP and GraphPP overlap are outside this feature's scope.
+- Full-graph Inductor is outside this feature's scope; expert ops
+  execute natively. CUDA graphs capture the whole forward/backward callable.
 - The token count must be even.
-- EP overlap is validated against the tested DP/EP configurations in the
-  graph-trainer numerics and integration suites. Composability with additional
-  overlap or sharding modes should be validated with loss comparison before use.
+- Additional overlap or sharding modes require their own loss and trace checks.
 
 ### Experimental AutoParallel Sharding
 

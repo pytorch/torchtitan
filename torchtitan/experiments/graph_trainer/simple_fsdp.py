@@ -7,6 +7,7 @@
 import sys
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from itertools import count
 
@@ -43,6 +44,40 @@ from torchtitan.quantization._fsdp_tensor import (
 _active_parametrization = True
 FSDP_PARAM_FQNS_META = "fsdp_param_fqns"
 FSDP_MESH_AXIS_NAMES_META = "fsdp_mesh_axis_names"
+_unshard_cache: ContextVar[
+    dict[tuple[nn.Module, str], torch.Tensor] | None
+] = ContextVar("simple_fsdp_unshard_cache", default=None)
+
+
+@contextmanager
+def _cached_unshard_parameters(module: nn.Module) -> Generator[None, None, None]:
+    """Materialize parameters once before a shared multi-call forward region.
+
+    The scoped cache leaves sharded _parameters and checkpoint layout unchanged.
+    Priming outside chunk annotations gives every shared weight one unshard
+    and one autograd edge that accumulates all chunk contributions.
+    """
+    token = _unshard_cache.set({})
+    try:
+        for child in module.modules():
+            for name, _ in child.named_parameters(recurse=False):
+                getattr(child, name)
+        yield
+    finally:
+        _unshard_cache.reset(token)
+
+
+def _get_unsharded_parameter(
+    module: nn.Module, name: str, parametrization: nn.Module
+) -> torch.Tensor:
+    """Read a DCP-safe parameter getter, sharing its edge within a cache scope."""
+    cache = _unshard_cache.get()
+    if cache is None:
+        return parametrization(module._parameters[name])
+    key = (module, name)
+    if key not in cache:
+        cache[key] = parametrization(module._parameters[name])
+    return cache[key]
 
 
 @contextmanager
@@ -227,7 +262,9 @@ def _register_parametrization(
     for param_name in param_names:
         parametrization = parametrization_init(param_name)
         param_name_to_property[param_name] = property(
-            lambda self, pn=param_name, p=parametrization: p(self._parameters[pn])
+            lambda self, pn=param_name, p=parametrization: _get_unsharded_parameter(
+                self, pn, p
+            )
         )
     module_cls = type(
         f"SimpleFSDP{module.__class__.__name__}_{next(_wrap_class_id)}",

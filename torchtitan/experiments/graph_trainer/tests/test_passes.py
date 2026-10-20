@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import inspect
 import operator
 import sys
 from collections import Counter, defaultdict
@@ -34,13 +33,8 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
-    _EP_TOKEN_COUNT_EXCHANGE,
-    _EP_TOKEN_COUNT_SYNC,
-    _EP_TOKEN_EXCHANGE,
-    _EP_TOKEN_EXCHANGE_WAIT,
     _MODULE_FQN,
     annotate_module_fqns,
-    annotate_moe_ep_regions,
     apply_simple_fsdp,
     get_default_transformer_block_buckets,
     get_simple_fsdp_mesh,
@@ -57,20 +51,7 @@ from torchtitan.experiments.graph_trainer.cuda_graph import (
 from torchtitan.experiments.graph_trainer.decompositions import (
     apply_decompositions_pass,
 )
-from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
-    _apply_schedule,
-    _schedule_ep_overlap_regions,
-    _ScheduledRegion,
-)
-from torchtitan.experiments.graph_trainer.ep_pass_utils import (
-    _chunk_owner,
-    ChunkBody,
-    ChunkedRegion,
-    ChunkOwner,
-)
-from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
-    isolate_ep_process_group_pass,
-)
+from torchtitan.experiments.graph_trainer.ep_pass_utils import _chunk_owner, ChunkOwner
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     _FSDP_BUCKET_META,
     _validate_transformer_block_bucket_counts,
@@ -164,7 +145,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                     layers=[SimpleNamespace(feed_forward=None) for _ in range(2)],
                     mtp_layers=[object()],
                 ),
-                parallelism=SimpleNamespace(),
+                parallelism=ParallelismConfig(),
                 training=SimpleNamespace(disable_cuda_graphs=False),
             )
 
@@ -275,7 +256,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 model=SimpleNamespace(
                     layers=[SimpleNamespace(feed_forward=None) for _ in range(2)]
                 ),
-                parallelism=SimpleNamespace(),
+                parallelism=ParallelismConfig(),
                 training=SimpleNamespace(disable_cuda_graphs=disable_cuda_graphs),
             )
 
@@ -1008,15 +989,6 @@ class TestReassignCollectivePgsPass(FSDPTest):
             and node.args[3] == pg_name
         )
 
-    def _count_ep_a2a_nodes_with_pg(self, gm, pg_name):
-        return sum(
-            1
-            for node in gm.graph.nodes
-            if node.op == "call_function"
-            and "all_to_all_single" in str(node.target)
-            and node.args[3] == pg_name
-        )
-
     def test_overlap_rewrites_ag_nodes(self):
         """Apply reassign_collective_pgs_pass on the traced joint graph and verify
         that FSDP AG nodes are rewritten to the auto-created extra PG."""
@@ -1118,49 +1090,6 @@ class TestReassignCollectivePgsPass(FSDPTest):
         # All AG nodes should use their respective extra PGs.
         self.assertEqual(self._count_ag_nodes_with_pg(gm, extra_pg1), ag_pg1_before)
         self.assertEqual(self._count_ag_nodes_with_pg(gm, extra_pg2), ag_pg2_before)
-
-    def test_overlap_rewrites_ep_a2a_on_fsdp_pg_to_separate_pg(self):
-        from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
-            _EXTRA_EP_PG_REGISTRY,
-        )
-        from torchtitan.experiments.graph_trainer.fsdp_passes import (
-            _EXTRA_FSDP_PG_REGISTRY,
-        )
-
-        self._setup()
-        fsdp_pg_name = self._get_fsdp_pg_name()
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        c10d = torch.ops._c10d_functional
-        ag = graph.call_function(
-            c10d.all_gather_into_tensor.default, args=(x, 1, fsdp_pg_name)
-        )
-        wait = graph.call_function(c10d.wait_tensor.default, args=(ag,))
-        rs = graph.call_function(
-            c10d.reduce_scatter_tensor.default, args=(x, "sum", 1, fsdp_pg_name)
-        )
-        rs_wait = graph.call_function(c10d.wait_tensor.default, args=(rs,))
-        a2a = graph.call_function(
-            c10d.all_to_all_single.default, args=(x, [], [], fsdp_pg_name)
-        )
-        a2a.meta["custom"] = {
-            _MODULE_FQN: "layers.0.feed_forward",
-            "EP": "dispatch",
-            _EP_TOKEN_EXCHANGE: "dispatch",
-        }
-        graph.output((wait, rs_wait, a2a))
-        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-
-        _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
-        _EXTRA_EP_PG_REGISTRY.pop(fsdp_pg_name, None)
-        reassign_collective_pgs_pass(gm, ())
-        isolate_ep_process_group_pass(gm, ())
-
-        fsdp_extra_pg = _EXTRA_FSDP_PG_REGISTRY[fsdp_pg_name]
-        ep_extra_pg = _EXTRA_EP_PG_REGISTRY[fsdp_pg_name]
-        self.assertNotEqual(fsdp_extra_pg, ep_extra_pg)
-        self.assertEqual(self._count_ag_nodes_with_pg(gm, fsdp_extra_pg), 1)
-        self.assertEqual(self._count_ep_a2a_nodes_with_pg(gm, ep_extra_pg), 1)
 
 
 class TestFsdpDenseSchedulerPass(TestCase):
@@ -2428,135 +2357,6 @@ class TestFsdpDenseSchedulerPass(TestCase):
         self.assertLess(order[ag1], order[dense0])
 
 
-class TestOverlapPgIsolationPass(FSDPTest):
-    def _setup(self):
-        self.parallelism_context = ParallelismContext(
-            dp_shard=-1,
-            dp_replicate=1,
-            cp=1,
-            tp=1,
-            pp=1,
-            ep=1,
-            world_size=self.world_size,
-            enable_sequence_parallel=False,
-        )
-
-    def _get_fsdp_pg_name(self):
-        from torchtitan.experiments.graph_trainer.common_utils import (
-            get_simple_fsdp_mesh,
-        )
-
-        fsdp_mesh = get_simple_fsdp_mesh(self.parallelism_context)
-        return fsdp_mesh.get_group().group_name
-
-    def _count_all_ag_nodes(self, gm):
-        return sum(1 for node in gm.graph.nodes if is_all_gather(node))
-
-    def _count_ep_a2a_nodes_with_pg(self, gm, pg_name):
-        return sum(
-            1
-            for node in gm.graph.nodes
-            if node.op == "call_function"
-            and "all_to_all_single" in str(node.target)
-            and node.args[3] == pg_name
-        )
-
-    def test_overlap_preserves_distinct_ep_pg_with_same_fsdp_ranks(self):
-        import torch.distributed as dist
-
-        from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
-            _EXTRA_EP_PG_REGISTRY,
-        )
-        from torchtitan.experiments.graph_trainer.fsdp_passes import (
-            _EXTRA_FSDP_PG_REGISTRY,
-        )
-
-        self._setup()
-        fsdp_pg_name = self._get_fsdp_pg_name()
-        ep_pg = dist.new_group(
-            ranks=list(range(self.world_size)),
-            use_local_synchronization=True,
-        )
-        ep_pg_name = ep_pg.group_name
-
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        c10d = torch.ops._c10d_functional
-        ag = graph.call_function(
-            c10d.all_gather_into_tensor.default, args=(x, 1, fsdp_pg_name)
-        )
-        wait = graph.call_function(c10d.wait_tensor.default, args=(ag,))
-        rs = graph.call_function(
-            c10d.reduce_scatter_tensor.default, args=(x, "sum", 1, fsdp_pg_name)
-        )
-        rs_wait = graph.call_function(c10d.wait_tensor.default, args=(rs,))
-        a2a = graph.call_function(
-            c10d.all_to_all_single.default, args=(x, [], [], ep_pg_name)
-        )
-        a2a.meta["custom"] = {
-            _MODULE_FQN: "layers.0.feed_forward",
-            "EP": "combine",
-            _EP_TOKEN_EXCHANGE: "combine",
-        }
-        graph.output((wait, rs_wait, a2a))
-        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-
-        _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
-        _EXTRA_EP_PG_REGISTRY.pop(ep_pg_name, None)
-        reassign_collective_pgs_pass(gm, ())
-        isolate_ep_process_group_pass(gm, ())
-
-        self.assertNotIn(ep_pg_name, _EXTRA_EP_PG_REGISTRY)
-        self.assertEqual(self._count_ep_a2a_nodes_with_pg(gm, ep_pg_name), 1)
-
-    def test_ep_pg_pass_rewrites_all_ep_a2a_on_tp_pg_to_separate_pg(self):
-        from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
-            _EXTRA_EP_PG_REGISTRY,
-        )
-
-        self._setup()
-        tp_pg_name = self._get_fsdp_pg_name()
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        c10d = torch.ops._c10d_functional
-        ag = graph.call_function(
-            c10d.all_gather_into_tensor.default, args=(x, 1, tp_pg_name)
-        )
-        a2a = graph.call_function(
-            c10d.all_to_all_single.default, args=(x, [], [], tp_pg_name)
-        )
-        a2a.meta["custom"] = {
-            _MODULE_FQN: "layers.0.feed_forward",
-            "EP": "dispatch",
-        }
-        generic_ep_a2a = graph.call_function(
-            c10d.all_to_all_single.default, args=(x, [], [], tp_pg_name)
-        )
-        generic_ep_a2a.meta["custom"] = {
-            _MODULE_FQN: "layers.0.feed_forward",
-            "EP": "combine",
-        }
-        graph.output((ag, a2a, generic_ep_a2a))
-        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-
-        _EXTRA_EP_PG_REGISTRY.pop(tp_pg_name, None)
-        isolate_ep_process_group_pass(gm, ())
-
-        ep_extra_pg = _EXTRA_EP_PG_REGISTRY[tp_pg_name]
-        self.assertEqual(self._count_ep_a2a_nodes_with_pg(gm, ep_extra_pg), 2)
-
-    def test_overlap_is_noop_when_no_fsdp_ag(self):
-        """If the graph has no FSDP all-gathers, the pass is a no-op."""
-        self._setup()
-        # Plain (non-FSDP) module: a graph without FSDP all-gathers.
-        gm = torch.fx.symbolic_trace(torch.nn.Linear(4, 4))
-        ag_before = self._count_all_ag_nodes(gm)
-        reassign_collective_pgs_pass(gm, ())
-        ag_after = self._count_all_ag_nodes(gm)
-        self.assertEqual(ag_before, 0)
-        self.assertEqual(ag_after, 0)
-
-
 class TestApplySACPass(TestCase):
     """Unit tests for the tag_sac_policy joint graph pass."""
 
@@ -3683,189 +3483,8 @@ class TestRemoveDetachPass(TestCase):
         self.assertEqual(gm(x), expected)
 
 
-class TestChunkPasses(TestCase):
-    def _mark_chunk_body(
-        self,
-        node,
-        *,
-        fqn: str = "layers.0.feed_forward",
-        chunk_id: int,
-        backward: bool = False,
-        ep: str | None = None,
-        token_exchange: bool = False,
-        producer: str | None = None,
-    ):
-        custom = dict(node.meta.get("custom", {}))
-        custom[_MODULE_FQN] = fqn
-        if ep is not None:
-            custom["EP"] = ep
-            if token_exchange:
-                custom[_EP_TOKEN_EXCHANGE] = ep
-        node.meta["custom"] = custom
-        node.meta["chunk_id"] = chunk_id
-        node.meta["chunked_region_fqn"] = fqn
-        node.meta["chunked_region_role"] = "body"
-        if producer is not None:
-            node.meta["chunked_region_producer"] = producer
-        if backward:
-            node.meta["autograd_backward"] = True
-        return node
-
-    def _build_ep_overlap_schedule_gm(self, *, backward: bool = False):
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        c10d = torch.ops._c10d_functional
-        outputs = []
-        for chunk_id in (1, 0) if backward else (0, 1):
-            pre = graph.call_function(torch.ops.aten.relu.default, args=(x,))
-            first_launch = graph.call_function(
-                c10d.all_to_all_single.default,
-                args=(pre, [], [], "ep"),
-            )
-            first_wait = graph.call_function(
-                c10d.wait_tensor.default, args=(first_launch,)
-            )
-            compute = graph.call_function(
-                torch.ops.aten.neg.default, args=(first_wait,)
-            )
-            second_launch = graph.call_function(
-                c10d.all_to_all_single.default,
-                args=(compute, [], [], "ep"),
-            )
-            second_wait = graph.call_function(
-                c10d.wait_tensor.default, args=(second_launch,)
-            )
-            tail = graph.call_function(torch.ops.aten.neg.default, args=(second_wait,))
-            outputs.append(tail)
-
-            first_ep = "combine" if backward else "dispatch"
-            second_ep = "dispatch" if backward else "combine"
-            self._mark_chunk_body(
-                pre, chunk_id=chunk_id, backward=backward, ep=first_ep
-            )
-            self._mark_chunk_body(
-                first_launch,
-                chunk_id=chunk_id,
-                backward=backward,
-                ep=first_ep,
-                token_exchange=True,
-            )
-            self._mark_chunk_body(
-                first_wait, chunk_id=chunk_id, backward=backward, ep=first_ep
-            )
-            self._mark_chunk_body(compute, chunk_id=chunk_id, backward=backward)
-            self._mark_chunk_body(
-                second_launch,
-                chunk_id=chunk_id,
-                backward=backward,
-                ep=second_ep,
-                token_exchange=True,
-            )
-            self._mark_chunk_body(
-                second_wait, chunk_id=chunk_id, backward=backward, ep=second_ep
-            )
-            self._mark_chunk_body(tail, chunk_id=chunk_id, backward=backward)
-
-        graph.output(tuple(outputs))
-        return torch.fx.GraphModule(torch.nn.Module(), graph)
-
-    def _schedule_ep_overlap_and_order(
-        self,
-        gm,
-        *,
-        module_pattern: str = "layers.*.feed_forward",
-    ):
-        _schedule_ep_overlap_regions(
-            gm,
-            module_pattern=module_pattern,
-            require_all_to_all=True,
-        )
-        return {node: idx for idx, node in enumerate(gm.graph.nodes)}
-
-    def _assert_nodes_in_order(self, order, nodes):
-        for before, after in zip(nodes, nodes[1:]):
-            self.assertLess(order[before], order[after])
-
-    def _build_ep_sync_copy_schedule_gm(
-        self,
-        *,
-        fqn: str = "layers.0.feed_forward",
-        copies_per_chunk: int = 2,
-        cpu_destination: bool = True,
-    ):
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        c10d = torch.ops._c10d_functional
-        refs = {}
-        for chunk_id in (0, 1):
-            router = graph.call_function(torch.ops.aten.relu.default, args=(x,))
-            count = graph.call_function(
-                c10d.all_to_all_single.default, args=(router, [], [], "ep")
-            )
-            body_nodes = [router, count]
-            copies = []
-            consumers = []
-            consumer_value = None
-            for copy_idx in range(copies_per_chunk):
-                producer = count
-                if copy_idx:
-                    producer = graph.call_function(
-                        torch.ops.aten.neg.default, args=(count,)
-                    )
-                    body_nodes.append(producer)
-
-                copy_kwargs = {"non_blocking": False}
-                if cpu_destination:
-                    copy_kwargs["device"] = torch.device("cpu")
-                copy = graph.call_function(
-                    torch.ops.aten._to_copy.default,
-                    args=(producer,),
-                    kwargs=copy_kwargs,
-                )
-                if cpu_destination:
-                    copy.meta["val"] = torch.empty(2, device="cpu")
-                consumer = graph.call_function(
-                    torch.ops.aten._local_scalar_dense.default, args=(copy,)
-                )
-                copies.append(copy)
-                consumers.append(consumer)
-                body_nodes.extend((copy, consumer))
-                consumer_value = (
-                    consumer
-                    if consumer_value is None
-                    else graph.call_function(
-                        torch.ops.aten.add.Tensor, args=(consumer_value, consumer)
-                    )
-                )
-                if consumer_value is not consumer:
-                    body_nodes.append(consumer_value)
-
-            if consumer_value is None:
-                consumer_value = count
-            dispatch = graph.call_function(
-                c10d.all_to_all_single.default, args=(consumer_value, [], [], "ep")
-            )
-            wait = graph.call_function(c10d.wait_tensor.default, args=(dispatch,))
-            body_nodes.extend((dispatch, wait))
-            for node in body_nodes:
-                self._mark_chunk_body(
-                    node,
-                    fqn=fqn,
-                    chunk_id=chunk_id,
-                    ep="dispatch",
-                    token_exchange=node is dispatch,
-                )
-            for copy in copies:
-                copy.meta["custom"][_EP_TOKEN_COUNT_SYNC] = "dispatch"
-            refs[chunk_id] = {
-                "copies": tuple(copies),
-                "consumers": tuple(consumers),
-                "dispatch": dispatch,
-                "wait": wait,
-            }
-
-        graph.output((refs[0]["wait"], refs[1]["wait"]))
-        return torch.fx.GraphModule(torch.nn.Module(), graph), refs
+class TestEagerEPConfiguration(TestCase):
+    """Check eager token input, configuration and bucket contracts."""
 
     def test_padding_masks_follow_local_tp_token_chunks(self):
         from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
@@ -3895,8 +3514,10 @@ class TestChunkPasses(TestCase):
         )
         config = SimpleNamespace(
             model=SimpleNamespace(layers=[SimpleNamespace(feed_forward=None)]),
-            parallelism=SimpleNamespace(
-                expert_parallel_degree=1,
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
+                expert_parallel_degree=2,
                 fsdp_reshard_after_forward="default",
                 pipeline_parallel_degree=1,
             ),
@@ -3910,7 +3531,7 @@ class TestChunkPasses(TestCase):
                 cpu_offload_defer_n_layers=1,
                 cpu_offload_budget_gb=1.0,
                 memory_policy="default",
-                inductor_compilation="full",
+                inductor_compilation="regional",
                 numerics_changing_optim=False,
                 enable_fsdp_ag_rs_overlap=False,
                 enable_fsdp_dense_region_overlap=False,
@@ -3929,45 +3550,22 @@ class TestChunkPasses(TestCase):
             pass_name(pass_fn) for pass_fn in compile_time_passes(traced_result, config)
         ]
 
-    def test_ep_overlap_pass_pipeline_order(self):
-        traced_result, config = self._compile_config_for_ep_overlap_test()
-        names = self._compile_pass_names(traced_result, config)
-        dead_code_indices = [
-            i for i, name in enumerate(names) if name == "eliminate_dead_code_pass"
-        ]
-        populate_idx = names.index("populate_eager_chunk_metadata_pass")
-        post_chunk_dce = min(i for i in dead_code_indices if i > populate_idx)
-
-        self.assertLess(
-            names.index("canonicalize_graph_pass"),
-            names.index("deduplicate_fsdp_unshard_chains_pass"),
-        )
-        self.assertLess(
-            names.index("deduplicate_fsdp_unshard_chains_pass"),
-            names.index("tag_with_memory_policy_pass"),
-        )
-        self.assertLess(
-            names.index("apply_cpu_offload_pass"),
-            names.index("selective_activation_remat_pass"),
-        )
-        self.assertLess(names.index("selective_activation_remat_pass"), populate_idx)
-        self.assertLess(populate_idx, names.index("isolate_ep_process_group_pass"))
-        self.assertLess(
-            names.index("isolate_ep_process_group_pass"),
-            post_chunk_dce,
-        )
-        self.assertLess(
-            post_chunk_dce,
-            names.index("joint_transformer_block_bucketing_reordering_pass"),
-        )
-        self.assertLess(
-            names.index("joint_transformer_block_bucketing_reordering_pass"),
-            names.index("ep_overlap_schedule_pass"),
-        )
-        self.assertLess(
-            names.index("ep_overlap_schedule_pass"),
-            names.index("full_inductor_compilation_pass"),
-        )
+    def test_unsupported_ep_overlap_configuration_is_rejected(self):
+        for field, value, message in (
+            ("expert_parallel_degree", 1, "expert_parallel_degree > 1"),
+            ("pipeline_parallel_degree", 2, "pipeline parallelism"),
+            ("inductor_compilation", "full", "full-graph Inductor"),
+        ):
+            with self.subTest(field=field):
+                traced_result, config = self._compile_config_for_ep_overlap_test()
+                owner = (
+                    config.compile
+                    if field == "inductor_compilation"
+                    else config.parallelism
+                )
+                setattr(owner, field, value)
+                with self.assertRaisesRegex(ValueError, message):
+                    self._compile_pass_names(traced_result, config)
 
     def test_fsdp_dense_region_scheduler_pass_gating(self):
         def moe_ep_default(config):
@@ -4054,830 +3652,6 @@ class TestChunkPasses(TestCase):
                 ["norm", "lm_head"],
             ],
         )
-
-    def test_moe_ep_annotations_cover_all_to_all_dispatcher(self):
-        from torchtitan.models.common.moe.token_dispatcher import (
-            AllToAllTokenDispatcher,
-        )
-
-        annotate_moe_ep_regions()
-
-        expected_annotations = [
-            (AllToAllTokenDispatcher.dispatch, {"EP": "dispatch"}),
-            (
-                AllToAllTokenDispatcher._token_count_exchange,
-                {_EP_TOKEN_COUNT_EXCHANGE: "dispatch"},
-            ),
-            (
-                AllToAllTokenDispatcher._sync_token_count_exchange,
-                {_EP_TOKEN_COUNT_SYNC: "dispatch"},
-            ),
-            (
-                AllToAllTokenDispatcher._dispatch_token_exchange,
-                {_EP_TOKEN_EXCHANGE: "dispatch"},
-            ),
-            (
-                AllToAllTokenDispatcher._combine_token_exchange,
-                {_EP_TOKEN_EXCHANGE: "combine"},
-            ),
-            (AllToAllTokenDispatcher.combine, {"EP": "combine"}),
-        ]
-        for method, annotation in expected_annotations:
-            self.assertEqual(
-                inspect.getclosurevars(method).nonlocals["annotation_dict"],
-                annotation,
-            )
-
-    def test_ep_overlap_reorders_forward_and_backward_token_exchange_blocks(self):
-        for backward, first_chunk in ((False, 0), (True, 1)):
-            with self.subTest(backward=backward):
-                gm = self._build_ep_overlap_schedule_gm(backward=backward)
-                order = self._schedule_ep_overlap_and_order(gm)
-                nodes = list(gm.graph.nodes)
-
-                def named(chunk_id, target, ep=None):
-                    matches = [
-                        node
-                        for node in nodes
-                        if node.meta.get("chunk_id") == chunk_id
-                        and node.target == target
-                        and (
-                            ep is None
-                            or node.meta.get("custom", {}).get(_EP_TOKEN_EXCHANGE) == ep
-                            or node.meta.get("custom", {}).get("EP") == ep
-                        )
-                    ]
-                    self.assertEqual(len(matches), 1)
-                    return matches[0]
-
-                second_chunk = 1 - first_chunk
-                c10d = torch.ops._c10d_functional
-                first_dispatch_launch = named(
-                    first_chunk,
-                    c10d.all_to_all_single.default,
-                    ep="dispatch",
-                )
-                second_dispatch_launch = named(
-                    second_chunk,
-                    c10d.all_to_all_single.default,
-                    ep="dispatch",
-                )
-                first_dispatch_wait = next(iter(first_dispatch_launch.users))
-                first_combine_launch = named(
-                    first_chunk,
-                    c10d.all_to_all_single.default,
-                    ep="combine",
-                )
-                second_combine_launch = named(
-                    second_chunk,
-                    c10d.all_to_all_single.default,
-                    ep="combine",
-                )
-
-                self.assertLess(
-                    order[first_dispatch_launch], order[second_dispatch_launch]
-                )
-                self.assertLess(
-                    order[second_dispatch_launch], order[first_dispatch_wait]
-                )
-                self.assertLess(
-                    order[first_combine_launch], order[second_combine_launch]
-                )
-                if not backward:
-                    self.assertLess(
-                        order[first_combine_launch],
-                        order[next(iter(second_dispatch_launch.users))],
-                    )
-                else:
-                    self.assertLess(
-                        order[second_dispatch_launch],
-                        order[next(iter(first_dispatch_launch.users))],
-                    )
-
-    def test_ep_overlap_schedules_moe_shaped_forward_and_backward_order(self):
-        c10d = torch.ops._c10d_functional
-
-        def build_forward_gm():
-            graph = torch.fx.Graph()
-            x = graph.placeholder("x")
-            refs = {}
-            for chunk_id in (0, 1):
-                router = graph.call_function(torch.ops.aten.relu.default, args=(x,))
-                count = graph.call_function(
-                    c10d.all_to_all_single.default, args=(router, [], [], "ep")
-                )
-                sync = graph.call_function(
-                    torch.ops.aten._local_scalar_dense.default, args=(count,)
-                )
-                dispatch = graph.call_function(
-                    c10d.all_to_all_single.default, args=(sync, [], [], "ep")
-                )
-                shared = graph.call_function(torch.ops.aten.neg.default, args=(x,))
-                dispatch_wait = graph.call_function(
-                    c10d.wait_tensor.default, args=(dispatch,)
-                )
-                grouped_mm = graph.call_function(
-                    torch.ops.aten.relu.default, args=(dispatch_wait,)
-                )
-                combine = graph.call_function(
-                    c10d.all_to_all_single.default, args=(grouped_mm, [], [], "ep")
-                )
-                combine_wait = graph.call_function(
-                    c10d.wait_tensor.default, args=(combine,)
-                )
-                refs[chunk_id] = {
-                    "router": router,
-                    "count": count,
-                    "sync": sync,
-                    "dispatch": dispatch,
-                    "shared": shared,
-                    "dispatch_wait": dispatch_wait,
-                    "grouped_mm": grouped_mm,
-                    "combine": combine,
-                    "combine_wait": combine_wait,
-                }
-                for node in (router, count, sync, dispatch, dispatch_wait):
-                    self._mark_chunk_body(
-                        node,
-                        chunk_id=chunk_id,
-                        ep="dispatch",
-                        token_exchange=node is dispatch,
-                    )
-                for node in (shared, grouped_mm):
-                    self._mark_chunk_body(node, chunk_id=chunk_id)
-                for node in (combine, combine_wait):
-                    self._mark_chunk_body(
-                        node,
-                        chunk_id=chunk_id,
-                        ep="combine",
-                        token_exchange=node is combine,
-                    )
-            graph.output((refs[0]["combine_wait"], refs[1]["combine_wait"]))
-            return torch.fx.GraphModule(torch.nn.Module(), graph), refs
-
-        def build_backward_gm():
-            graph = torch.fx.Graph()
-            x = graph.placeholder("x")
-            refs = {}
-            for chunk_id in (0, 1):
-                combine = graph.call_function(
-                    c10d.all_to_all_single.default, args=(x, [], [], "ep")
-                )
-                remat_grouped_mm = graph.call_function(
-                    torch.ops.aten.neg.default, args=(x,)
-                )
-                combine_wait = graph.call_function(
-                    c10d.wait_tensor.default, args=(combine,)
-                )
-                input_grad = graph.call_function(
-                    torch.ops.aten.relu.default, args=(combine_wait,)
-                )
-                dispatch = graph.call_function(
-                    c10d.all_to_all_single.default, args=(input_grad, [], [], "ep")
-                )
-                wgrad = graph.call_function(
-                    torch.ops.aten.neg.default, args=(dispatch,)
-                )
-                dispatch_wait = graph.call_function(
-                    c10d.wait_tensor.default, args=(dispatch,)
-                )
-                refs[chunk_id] = {
-                    "combine": combine,
-                    "remat_grouped_mm": remat_grouped_mm,
-                    "combine_wait": combine_wait,
-                    "input_grad": input_grad,
-                    "dispatch": dispatch,
-                    "wgrad": wgrad,
-                    "dispatch_wait": dispatch_wait,
-                }
-                for node in (combine, combine_wait):
-                    self._mark_chunk_body(
-                        node,
-                        chunk_id=chunk_id,
-                        backward=True,
-                        ep="combine",
-                        token_exchange=node is combine,
-                    )
-                for node in (remat_grouped_mm, input_grad, wgrad):
-                    self._mark_chunk_body(node, chunk_id=chunk_id, backward=True)
-                for node in (dispatch, dispatch_wait):
-                    self._mark_chunk_body(
-                        node,
-                        chunk_id=chunk_id,
-                        backward=True,
-                        ep="dispatch",
-                        token_exchange=node is dispatch,
-                    )
-            graph.output((refs[1]["dispatch_wait"], refs[0]["dispatch_wait"]))
-            return torch.fx.GraphModule(torch.nn.Module(), graph), refs
-
-        fwd_gm, fwd = build_forward_gm()
-        fwd_order = self._schedule_ep_overlap_and_order(fwd_gm)
-        self._assert_nodes_in_order(
-            fwd_order,
-            [
-                fwd[0]["router"],
-                fwd[0]["count"],
-                fwd[0]["sync"],
-                fwd[1]["router"],
-                fwd[1]["count"],
-                fwd[1]["sync"],
-                fwd[0]["dispatch"],
-                fwd[1]["dispatch"],
-                fwd[0]["shared"],
-                fwd[1]["shared"],
-                fwd[0]["dispatch_wait"],
-                fwd[0]["grouped_mm"],
-                fwd[0]["combine"],
-                fwd[1]["dispatch_wait"],
-                fwd[1]["grouped_mm"],
-                fwd[1]["combine"],
-                fwd[0]["combine_wait"],
-                fwd[1]["combine_wait"],
-            ],
-        )
-
-        bwd_gm, bwd = build_backward_gm()
-        bwd_order = self._schedule_ep_overlap_and_order(bwd_gm)
-        self._assert_nodes_in_order(
-            bwd_order,
-            [
-                bwd[1]["combine"],
-                bwd[0]["combine"],
-                bwd[1]["remat_grouped_mm"],
-                bwd[0]["remat_grouped_mm"],
-                bwd[1]["combine_wait"],
-                bwd[1]["input_grad"],
-                bwd[1]["dispatch"],
-                bwd[0]["combine_wait"],
-                bwd[0]["input_grad"],
-                bwd[0]["dispatch"],
-                bwd[1]["wgrad"],
-                bwd[0]["wgrad"],
-                bwd[1]["dispatch_wait"],
-                bwd[0]["dispatch_wait"],
-            ],
-        )
-
-    def test_ep_overlap_pairs_token_count_sync_cpu_copies_before_consumers(self):
-        gm, refs = self._build_ep_sync_copy_schedule_gm()
-
-        order = self._schedule_ep_overlap_and_order(gm)
-
-        copies = refs[0]["copies"] + refs[1]["copies"]
-        consumers = refs[0]["consumers"] + refs[1]["consumers"]
-        self.assertEqual(
-            [copy.kwargs["non_blocking"] for copy in copies],
-            [True, True, True, False],
-        )
-        self.assertLess(
-            max(order[copy] for copy in copies),
-            min(order[consumer] for consumer in consumers),
-        )
-        self.assertLess(
-            max(order[consumer] for consumer in consumers),
-            min(order[refs[chunk_id]["dispatch"]] for chunk_id in (0, 1)),
-        )
-
-    def test_ep_overlap_rejects_malformed_token_count_sync_copy_count(self):
-        gm, _refs = self._build_ep_sync_copy_schedule_gm(copies_per_chunk=1)
-
-        with self.assertRaisesRegex(ValueError, "exactly two token-count sync"):
-            _schedule_ep_overlap_regions(
-                gm,
-                module_pattern="layers.*.feed_forward",
-                require_all_to_all=True,
-            )
-
-    def test_ep_overlap_rejects_ambiguous_token_count_sync_copy_destination(self):
-        gm, _refs = self._build_ep_sync_copy_schedule_gm(cpu_destination=False)
-
-        with self.assertRaisesRegex(ValueError, "CPU _to_copy destinations"):
-            _schedule_ep_overlap_regions(
-                gm,
-                module_pattern="layers.*.feed_forward",
-                require_all_to_all=True,
-            )
-
-    def test_ep_overlap_rejects_unannotated_all_to_all_markers(self):
-        gm = self._build_ep_overlap_schedule_gm()
-        c10d = torch.ops._c10d_functional
-        launches = [
-            node
-            for node in gm.graph.nodes
-            if node.op == "call_function"
-            and node.target == c10d.all_to_all_single.default
-        ]
-        for node in launches:
-            custom = dict(node.meta.get("custom", {}))
-            custom.pop(_EP_TOKEN_EXCHANGE, None)
-            node.meta["custom"] = custom
-
-        with self.assertRaises(ValueError, msg="did not find any chunked EP"):
-            _schedule_ep_overlap_regions(
-                gm,
-                module_pattern="layers.*.feed_forward",
-                require_all_to_all=True,
-            )
-
-    def test_ep_overlap_rejects_token_exchange_metadata_on_compute(self):
-        gm = self._build_ep_overlap_schedule_gm()
-        compute = next(
-            node
-            for node in gm.graph.nodes
-            if node.target == torch.ops.aten.neg.default
-            and node.meta.get("chunked_region_role") == "body"
-        )
-        compute.meta.setdefault("custom", {})[_EP_TOKEN_EXCHANGE] = "dispatch"
-
-        with self.assertRaisesRegex(ValueError, "non-marker node"):
-            _schedule_ep_overlap_regions(
-                gm,
-                module_pattern="layers.*.feed_forward",
-                require_all_to_all=True,
-            )
-
-    def test_ep_overlap_rejects_mismatched_token_exchange_labels(self):
-        gm = self._build_ep_overlap_schedule_gm()
-        launch = next(
-            node
-            for node in gm.graph.nodes
-            if node.op == "call_function"
-            and node.target == torch.ops._c10d_functional.all_to_all_single.default
-            and node.meta.get("chunk_id") == 0
-            and node.meta.get("custom", {}).get(_EP_TOKEN_EXCHANGE) == "dispatch"
-        )
-        launch.meta["custom"][_EP_TOKEN_EXCHANGE] = "combine"
-
-        with self.assertRaisesRegex(ValueError, "matching token-exchange labels"):
-            _schedule_ep_overlap_regions(
-                gm,
-                module_pattern="layers.*.feed_forward",
-                require_all_to_all=True,
-            )
-
-    def test_ep_overlap_rejects_wait_before_token_exchange_launch(self):
-        gm = self._build_ep_overlap_schedule_gm()
-        launch = next(
-            node
-            for node in gm.graph.nodes
-            if node.op == "call_function"
-            and node.target == torch.ops._c10d_functional.all_to_all_single.default
-            and node.meta.get("custom", {}).get(_EP_TOKEN_EXCHANGE) == "dispatch"
-        )
-        wait = next(
-            user
-            for user in launch.users
-            if user.target == torch.ops._c10d_functional.wait_tensor.default
-        )
-        launch.prepend(wait)
-
-        with self.assertRaisesRegex(ValueError, "wait to appear after its launch"):
-            _schedule_ep_overlap_regions(
-                gm,
-                module_pattern="layers.*.feed_forward",
-                require_all_to_all=True,
-            )
-
-    def test_ep_overlap_uses_future_closure_prefix_before_wait(self):
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        c10d = torch.ops._c10d_functional
-        refs = {}
-
-        # Build the graph in the opposite order from the desired backward
-        # schedule. This catches accidental sorting by original graph order when
-        # a ready filler phase intentionally contains chunk1 work before chunk0.
-        for chunk_id in (0, 1):
-            combine_pre = graph.call_function(torch.ops.aten.relu.default, args=(x,))
-            combine = graph.call_function(
-                c10d.all_to_all_single.default,
-                args=(combine_pre, [], [], "ep"),
-            )
-            dispatch_prefix = graph.call_function(torch.ops.aten.neg.default, args=(x,))
-            combine_wait = graph.call_function(
-                c10d.wait_tensor.default, args=(combine,)
-            )
-            dispatch_pre = graph.call_function(
-                torch.ops.aten.add.Tensor, args=(dispatch_prefix, combine_wait)
-            )
-            dispatch = graph.call_function(
-                c10d.all_to_all_single.default,
-                args=(dispatch_pre, [], [], "ep"),
-            )
-            dispatch_wait = graph.call_function(
-                c10d.wait_tensor.default, args=(dispatch,)
-            )
-            tail = graph.call_function(
-                torch.ops.aten.relu.default, args=(dispatch_wait,)
-            )
-            refs[chunk_id] = {
-                "combine": combine,
-                "dispatch_prefix": dispatch_prefix,
-                "combine_wait": combine_wait,
-                "dispatch_pre": dispatch_pre,
-                "dispatch": dispatch,
-                "dispatch_wait": dispatch_wait,
-                "tail": tail,
-            }
-
-            for node in (combine_pre, combine, combine_wait):
-                node.meta["custom"] = {
-                    _MODULE_FQN: "layers.0.feed_forward",
-                    "EP": "combine",
-                }
-            combine.meta["custom"][_EP_TOKEN_EXCHANGE] = "combine"
-            dispatch_prefix.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
-            dispatch_pre.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
-            for node in (dispatch, dispatch_wait):
-                node.meta["custom"] = {
-                    _MODULE_FQN: "layers.0.feed_forward",
-                    "EP": "dispatch",
-                }
-            dispatch.meta["custom"][_EP_TOKEN_EXCHANGE] = "dispatch"
-            tail.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
-            for node in (
-                combine_pre,
-                combine,
-                dispatch_prefix,
-                combine_wait,
-                dispatch_pre,
-                dispatch,
-                dispatch_wait,
-                tail,
-            ):
-                node.meta["chunk_id"] = chunk_id
-                node.meta["chunked_region_fqn"] = "layers.0.feed_forward"
-                node.meta["chunked_region_role"] = "body"
-                node.meta["autograd_backward"] = True
-
-        graph.output((refs[1]["tail"], refs[0]["tail"]))
-        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-        order = self._schedule_ep_overlap_and_order(gm)
-
-        self.assertEqual(
-            refs[1]["combine_wait"].meta["custom"][_EP_TOKEN_EXCHANGE_WAIT],
-            "combine",
-        )
-        self.assertLess(order[refs[1]["combine"]], order[refs[0]["combine"]])
-        self.assertLess(order[refs[0]["combine"]], order[refs[1]["dispatch_prefix"]])
-        self.assertLess(
-            order[refs[1]["dispatch_prefix"]],
-            order[refs[0]["dispatch_prefix"]],
-        )
-        self.assertLess(
-            order[refs[0]["dispatch_prefix"]], order[refs[1]["combine_wait"]]
-        )
-        self.assertLess(order[refs[1]["combine_wait"]], order[refs[1]["dispatch"]])
-        self.assertLess(order[refs[1]["dispatch"]], order[refs[0]["combine_wait"]])
-        self.assertLess(order[refs[0]["combine_wait"]], order[refs[0]["dispatch"]])
-        self.assertLess(order[refs[0]["dispatch"]], order[refs[1]["dispatch_wait"]])
-        self.assertLess(order[refs[1]["dispatch_wait"]], order[refs[1]["tail"]])
-        self.assertLess(order[refs[1]["tail"]], order[refs[0]["dispatch_wait"]])
-        self.assertLess(order[refs[0]["dispatch_wait"]], order[refs[0]["tail"]])
-
-    def test_ep_overlap_does_not_hoist_non_token_collectives_as_filler(self):
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        c10d = torch.ops._c10d_functional
-        refs = {}
-
-        for chunk_id in (0, 1):
-            dispatch_pre = graph.call_function(torch.ops.aten.relu.default, args=(x,))
-            dispatch = graph.call_function(
-                c10d.all_to_all_single.default,
-                args=(dispatch_pre, [], [], "ep"),
-            )
-            dispatch_wait = graph.call_function(
-                c10d.wait_tensor.default, args=(dispatch,)
-            )
-            all_reduce = graph.call_function(
-                c10d.all_reduce.default, args=(x, "sum", "dp")
-            )
-            combine_pre = graph.call_function(
-                torch.ops.aten.add.Tensor, args=(dispatch_wait, all_reduce)
-            )
-            combine = graph.call_function(
-                c10d.all_to_all_single.default,
-                args=(combine_pre, [], [], "ep"),
-            )
-            combine_wait = graph.call_function(
-                c10d.wait_tensor.default, args=(combine,)
-            )
-            refs[chunk_id] = {
-                "dispatch": dispatch,
-                "dispatch_wait": dispatch_wait,
-                "all_reduce": all_reduce,
-                "combine": combine,
-                "combine_wait": combine_wait,
-            }
-
-            for node in (dispatch_pre, dispatch, dispatch_wait):
-                node.meta["custom"] = {
-                    _MODULE_FQN: "layers.0.feed_forward",
-                    "EP": "dispatch",
-                }
-            dispatch.meta["custom"][_EP_TOKEN_EXCHANGE] = "dispatch"
-            all_reduce.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
-            combine_pre.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
-            for node in (combine, combine_wait):
-                node.meta["custom"] = {
-                    _MODULE_FQN: "layers.0.feed_forward",
-                    "EP": "combine",
-                }
-            combine.meta["custom"][_EP_TOKEN_EXCHANGE] = "combine"
-
-            for node in (
-                dispatch_pre,
-                dispatch,
-                dispatch_wait,
-                all_reduce,
-                combine_pre,
-                combine,
-                combine_wait,
-            ):
-                node.meta["chunk_id"] = chunk_id
-                node.meta["chunked_region_fqn"] = "layers.0.feed_forward"
-                node.meta["chunked_region_role"] = "body"
-
-        graph.output((refs[0]["combine_wait"], refs[1]["combine_wait"]))
-        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-
-        order = self._schedule_ep_overlap_and_order(gm)
-
-        self.assertLess(order[refs[0]["dispatch"]], order[refs[1]["dispatch"]])
-        self.assertLess(order[refs[1]["dispatch"]], order[refs[0]["dispatch_wait"]])
-        for chunk_id in (0, 1):
-            self.assertLess(
-                order[refs[chunk_id]["dispatch_wait"]],
-                order[refs[chunk_id]["all_reduce"]],
-            )
-            self.assertLess(
-                order[refs[chunk_id]["all_reduce"]],
-                order[refs[chunk_id]["combine"]],
-            )
-
-    def test_ep_overlap_rejects_mismatched_all_to_all_count(self):
-        gm = self._build_ep_overlap_schedule_gm(backward=True)
-        c10d = torch.ops._c10d_functional
-        for node in gm.graph.nodes:
-            if (
-                node.op == "call_function"
-                and node.target == c10d.all_to_all_single.default
-                and node.meta.get("chunk_id") == 0
-            ):
-                node.target = c10d.all_reduce.default
-                node.args = (node.args[0], "sum", "ep")
-                node.meta["custom"].pop(_EP_TOKEN_EXCHANGE, None)
-                break
-        with self.assertRaisesRegex(ValueError, "matching EP all-to-all counts"):
-            _schedule_ep_overlap_regions(
-                gm,
-                module_pattern="layers.*.feed_forward",
-                require_all_to_all=True,
-            )
-
-    def test_ep_overlap_schedules_arbitrary_matching_token_exchange_sequence(self):
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        c10d = torch.ops._c10d_functional
-        outputs = []
-        launches = {}
-        exchange_kinds = ("combine", "dispatch", "combine")
-        for chunk_id in (1, 0):
-            value = x
-            body_nodes = []
-            for idx, kind in enumerate(exchange_kinds):
-                pre = graph.call_function(torch.ops.aten.relu.default, args=(value,))
-                launch = graph.call_function(
-                    c10d.all_to_all_single.default,
-                    args=(pre, [], [], "ep"),
-                )
-                wait = graph.call_function(c10d.wait_tensor.default, args=(launch,))
-                launches[(chunk_id, idx)] = launch
-                for node in (pre, launch, wait):
-                    node.meta["custom"] = {
-                        _MODULE_FQN: "layers.0.feed_forward",
-                        "EP": kind,
-                    }
-                launch.meta["custom"][_EP_TOKEN_EXCHANGE] = kind
-                value = graph.call_function(torch.ops.aten.neg.default, args=(wait,))
-                value.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
-                body_nodes.extend((pre, launch, wait, value))
-            outputs.append(value)
-            for node in body_nodes:
-                node.meta["chunk_id"] = chunk_id
-                node.meta["chunked_region_fqn"] = "layers.0.feed_forward"
-                node.meta["chunked_region_role"] = "body"
-                node.meta["autograd_backward"] = True
-
-        graph.output(tuple(outputs))
-        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-        order = self._schedule_ep_overlap_and_order(gm)
-        for idx in range(len(exchange_kinds)):
-            self.assertLess(order[launches[(1, idx)]], order[launches[(0, idx)]])
-            if idx + 1 < len(exchange_kinds):
-                self.assertLess(
-                    order[launches[(0, idx)]], order[launches[(1, idx + 1)]]
-                )
-
-    def test_ep_overlap_reorders_non_body_setup_dependencies(self):
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        c10d = torch.ops._c10d_functional
-        outputs = []
-        setup_nodes = {}
-        first_waits = {}
-        for chunk_id in (0, 1):
-            setup = graph.call_function(torch.ops.aten.clone.default, args=(x,))
-            pre = graph.call_function(torch.ops.aten.relu.default, args=(setup,))
-            dispatch = graph.call_function(
-                c10d.all_to_all_single.default,
-                args=(pre, [], [], "ep"),
-            )
-            dispatch_wait = graph.call_function(
-                c10d.wait_tensor.default, args=(dispatch,)
-            )
-            compute = graph.call_function(
-                torch.ops.aten.neg.default, args=(dispatch_wait,)
-            )
-            combine = graph.call_function(
-                c10d.all_to_all_single.default,
-                args=(compute, [], [], "ep"),
-            )
-            combine_wait = graph.call_function(
-                c10d.wait_tensor.default, args=(combine,)
-            )
-            outputs.append(combine_wait)
-            setup_nodes[chunk_id] = setup
-            first_waits[chunk_id] = dispatch_wait
-
-            setup.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
-            for node in (pre, dispatch, dispatch_wait):
-                node.meta["custom"] = {
-                    _MODULE_FQN: "layers.0.feed_forward",
-                    "EP": "dispatch",
-                }
-            dispatch.meta["custom"][_EP_TOKEN_EXCHANGE] = "dispatch"
-            compute.meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
-            for node in (combine, combine_wait):
-                node.meta["custom"] = {
-                    _MODULE_FQN: "layers.0.feed_forward",
-                    "EP": "combine",
-                }
-            combine.meta["custom"][_EP_TOKEN_EXCHANGE] = "combine"
-            for node in (pre, dispatch, dispatch_wait, compute, combine, combine_wait):
-                node.meta["chunk_id"] = chunk_id
-                node.meta["chunked_region_fqn"] = "layers.0.feed_forward"
-                node.meta["chunked_region_role"] = "body"
-
-        graph.output(tuple(outputs))
-        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-
-        order = self._schedule_ep_overlap_and_order(gm)
-
-        self.assertLess(order[setup_nodes[1]], order[first_waits[0]])
-        self.assertLess(order[first_waits[0]], order[first_waits[1]])
-
-    def test_ep_overlap_apply_schedule_interleaves_cross_region_boundaries(self):
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        region0_start = graph.call_function(torch.ops.aten.relu.default, args=(x,))
-        region1_start = graph.call_function(
-            torch.ops.aten.neg.default, args=(region0_start,)
-        )
-        boundary = graph.call_function(
-            torch.ops.aten.clone.default, args=(region1_start,)
-        )
-        region0_tail = graph.call_function(
-            torch.ops.aten.relu.default, args=(boundary,)
-        )
-        region1_tail = graph.call_function(
-            torch.ops.aten.add.Tensor, args=(region1_start, region0_tail)
-        )
-        graph.output(region1_tail)
-        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-
-        def scheduled_region(
-            root_fqn: str,
-            phases: tuple[tuple[torch.fx.Node, ...], ...],
-        ) -> _ScheduledRegion:
-            bodies = {
-                idx: ChunkBody(
-                    owner=ChunkOwner(root_fqn, False, idx),
-                    nodes=(),
-                    node_set=frozenset(),
-                    live_ins=frozenset(),
-                    producer="graph",
-                )
-                for idx in (0, 1)
-            }
-            return _ScheduledRegion(
-                region=ChunkedRegion(root_fqn, False, bodies),
-                phases=phases,
-            )
-
-        _apply_schedule(
-            gm,
-            [
-                scheduled_region("layers.0", ((region0_start,), (region0_tail,))),
-                scheduled_region("layers.1", ((region1_start,), (region1_tail,))),
-            ],
-        )
-
-        order = {node: idx for idx, node in enumerate(gm.graph.nodes)}
-        self.assertLess(order[region0_start], order[region0_tail])
-        self.assertLess(order[region1_start], order[region1_tail])
-        self.assertLess(order[region1_start], order[boundary])
-        self.assertLess(order[boundary], order[region0_tail])
-        self.assertLess(order[region0_tail], order[region1_tail])
-
-    def test_ep_overlap_moves_owned_remat_with_chunk_body(self):
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        c10d = torch.ops._c10d_functional
-
-        c0_pre = graph.call_function(torch.ops.aten.relu.default, args=(x,))
-        c0_dispatch = graph.call_function(
-            c10d.all_to_all_single.default, args=(c0_pre, [], [], "ep")
-        )
-        c0_dispatch_wait = graph.call_function(
-            c10d.wait_tensor.default, args=(c0_dispatch,)
-        )
-        c0_compute = graph.call_function(
-            torch.ops.aten.neg.default, args=(c0_dispatch_wait,)
-        )
-        c0_combine = graph.call_function(
-            c10d.all_to_all_single.default, args=(c0_compute, [], [], "ep")
-        )
-        c0_combine_wait = graph.call_function(
-            c10d.wait_tensor.default, args=(c0_combine,)
-        )
-
-        c1_setup = graph.call_function(torch.ops.aten.clone.default, args=(x,))
-        c1_setup.meta["autograd_backward"] = True
-        c1_setup.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
-        c1_pre = graph.call_function(torch.ops.aten.relu.default, args=(c1_setup,))
-        c1_dispatch = graph.call_function(
-            c10d.all_to_all_single.default, args=(c1_pre, [], [], "ep")
-        )
-        c1_dispatch_wait = graph.call_function(
-            c10d.wait_tensor.default, args=(c1_dispatch,)
-        )
-        c1_compute = graph.call_function(
-            torch.ops.aten.neg.default, args=(c1_dispatch_wait,)
-        )
-        c1_combine = graph.call_function(
-            c10d.all_to_all_single.default, args=(c1_compute, [], [], "ep")
-        )
-        c1_combine_wait = graph.call_function(
-            c10d.wait_tensor.default, args=(c1_combine,)
-        )
-        graph.output((c0_combine_wait, c1_combine_wait))
-
-        for chunk_id, nodes in {
-            0: (
-                c0_pre,
-                c0_dispatch,
-                c0_dispatch_wait,
-                c0_compute,
-                c0_combine,
-                c0_combine_wait,
-            ),
-            1: (
-                c1_setup,
-                c1_pre,
-                c1_dispatch,
-                c1_dispatch_wait,
-                c1_compute,
-                c1_combine,
-                c1_combine_wait,
-            ),
-        }.items():
-            for node in nodes:
-                node.meta["chunk_id"] = chunk_id
-                node.meta["chunked_region_fqn"] = "layers.0.feed_forward"
-                node.meta["chunked_region_role"] = "body"
-                node.meta["autograd_backward"] = True
-            ep_nodes = nodes[1:] if chunk_id == 1 else nodes
-            for node in ep_nodes[:3]:
-                node.meta["custom"] = {
-                    _MODULE_FQN: "layers.0.feed_forward",
-                    "EP": "combine",
-                }
-            ep_nodes[1].meta["custom"][_EP_TOKEN_EXCHANGE] = "combine"
-            ep_nodes[3].meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
-            for node in ep_nodes[4:]:
-                node.meta["custom"] = {
-                    _MODULE_FQN: "layers.0.feed_forward",
-                    "EP": "dispatch",
-                }
-            ep_nodes[4].meta["custom"][_EP_TOKEN_EXCHANGE] = "dispatch"
-
-        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-        order = self._schedule_ep_overlap_and_order(gm)
-        self.assertLess(order[c1_setup], order[c1_pre])
-        self.assertLess(order[c1_dispatch], order[c0_dispatch_wait])
 
 
 class TestRemoveIdentityViewPass(TestCase):
@@ -5641,6 +4415,51 @@ class TestNormalizeViewOpsAsReshape(TestCase):
 
 class TestCanonicalizeGraphPass(TestCase):
     """Unit tests for the combined canonicalize_graph_pass entry."""
+
+    def test_parameter_gradient_identity_survives_cleanup(self):
+        """Real marked gradients retain their identities across every identity cleanup."""
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            annotate_parameter_gradient,
+            PARAMETER_GRADIENT_FQNS_META,
+        )
+        from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+            remove_parameter_gradient_markers_pass,
+        )
+
+        inputs = torch.randn(4, 4)
+        weight = torch.randn(4, 4, requires_grad=True)
+        for identity in ("detach", "reshape", "transpose", "slice"):
+            with self.subTest(identity=identity):
+
+                def joint(x, parameter):
+                    """Trace an actual parameter gradient and a removable identity."""
+                    (gradient,) = torch.autograd.grad(
+                        (x @ parameter.T).square().sum(), parameter
+                    )
+                    if identity == "detach":
+                        gradient = gradient.detach()
+                    elif identity == "reshape":
+                        gradient = gradient.reshape(gradient.shape)
+                    elif identity == "transpose":
+                        gradient = gradient.t().t()
+                    else:
+                        gradient = gradient[:, :]
+                    return annotate_parameter_gradient(
+                        annotate_parameter_gradient(gradient, "weight"), "tied_weight"
+                    )
+
+                expected = joint(inputs, weight)
+                gm = minimal_fx_tracer(joint)(inputs, weight).gm
+                remove_parameter_gradient_markers_pass(gm, (inputs, weight))
+                canonicalize_graph_pass(gm)
+                output = next(
+                    node for node in gm.graph.nodes if node.op == "output"
+                ).args[0][0]
+                self.assertEqual(
+                    set(output.meta["custom"][PARAMETER_GRADIENT_FQNS_META]),
+                    {"weight", "tied_weight"},
+                )
+                self.assertEqual(gm(inputs, weight)[0], expected)
 
     def test_runs_all_subpasses(self):
         """A single call drops detach + back-to-back transpose nodes and

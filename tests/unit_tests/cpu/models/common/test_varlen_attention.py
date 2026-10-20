@@ -13,6 +13,9 @@ from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.fx.experimental.proxy_tensor import make_fx
+from torch.nn.attention import SDPBackend
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -107,6 +110,55 @@ class TestPackedVarlenAttentionMetadata(unittest.TestCase):
 
 
 class TestPackedVarlenInnerAttention(unittest.TestCase):
+    def test_explicit_flash_backend_is_graph_visible_and_scoped(self):
+        attention = VarlenInnerAttention.Config(
+            sdpa_backend=SDPBackend.FLASH_ATTENTION
+        ).build()
+        before = (
+            torch.backends.cuda.flash_sdp_enabled(),
+            torch.backends.cuda.cudnn_sdp_enabled(),
+        )
+
+        def forward(q, k, v, offsets):
+            metadata = VarlenAttentionMetadata(offsets, offsets, 16, 16)
+            return attention(q, k, v, attention_metadata=metadata)
+
+        with FakeTensorMode():
+            inputs = [
+                torch.empty(16, 2, 64, device="cuda", dtype=torch.bfloat16)
+                for _ in range(3)
+            ]
+            offsets = torch.empty(2, device="cuda", dtype=torch.int32)
+            graph = make_fx(forward)(*inputs, offsets)
+        op = torch.ops.torch_attn._varlen_attn.default
+        native = next(node for node in graph.graph.nodes if node.target == op)
+        backend_index = next(
+            index
+            for index, arg in enumerate(op._schema.arguments)
+            if arg.name == "backend"
+        )
+        # FX omits default-valued schema arguments from the call.
+        backend = (
+            native.args[backend_index]
+            if backend_index < len(native.args)
+            else native.kwargs.get(
+                "backend", op._schema.arguments[backend_index].default_value
+            )
+        )
+        self.assertEqual(backend, SDPBackend.FLASH_ATTENTION.value)
+        self.assertEqual(
+            before,
+            (
+                torch.backends.cuda.flash_sdp_enabled(),
+                torch.backends.cuda.cudnn_sdp_enabled(),
+            ),
+        )
+
+    def test_backend_default_and_invalid_selection(self):
+        self.assertIsNone(VarlenInnerAttention.Config().sdpa_backend)
+        with self.assertRaisesRegex(ValueError, "only Flash or cuDNN"):
+            VarlenInnerAttention.Config(sdpa_backend=SDPBackend.MATH).build()
+
     def test_preserves_fp16_and_bfloat16_inputs(self):
         attention = VarlenInnerAttention.Config().build()
         metadata = create_varlen_metadata_for_document(torch.arange(4))
