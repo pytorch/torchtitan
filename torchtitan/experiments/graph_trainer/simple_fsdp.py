@@ -533,7 +533,8 @@ def data_parallel(
         raise ValueError(f"Unsupported mode {mode}")
 
     if param_shard_placements is None:
-        param_shard_placements = linear_param_shard_placements(model)
+        with disable_active_parametrization():
+            param_shard_placements = linear_param_shard_placements(model)
 
     def get_param_sharding(param: nn.Parameter) -> tuple[Placement, ...]:
         if mode == "replicate":
