@@ -798,15 +798,38 @@ class _RecordingFSDPLinear(nn.Linear):
     def __init__(self, *args, events: list[str], **kwargs):
         super().__init__(*args, **kwargs)
         self.events = events
+        self._state = SimpleNamespace(
+            _lazy_init=lambda: None,
+            _auto_reshard_after_forward=False,
+            _fsdp_param_groups=[
+                SimpleNamespace(
+                    post_forward_mesh_info=object(),
+                    reshard_after_backward=True,
+                    reduce_grads=True,
+                    all_reduce_grads=True,
+                    reshard=self.reshard,
+                )
+            ],
+        )
 
-    def set_reshard_after_forward(self, enabled):
+    def _get_fsdp_state(self):
+        return self._state
+
+    def set_reshard_after_forward(self, enabled, *, recurse):
         self.events.append(f"set_reshard_after_forward({enabled})")
+        self._state._auto_reshard_after_forward = False
+        self._state._fsdp_param_groups[0].post_forward_mesh_info = (
+            object() if enabled else None
+        )
 
-    def set_reshard_after_backward(self, enabled):
+    def set_reshard_after_backward(self, enabled, *, recurse):
         self.events.append(f"set_reshard_after_backward({enabled})")
+        self._state._fsdp_param_groups[0].reshard_after_backward = enabled
 
     def set_requires_gradient_sync(self, enabled, *, recurse):
         self.events.append(f"gradient_sync({enabled})")
+        self._state._fsdp_param_groups[0].reduce_grads = enabled
+        self._state._fsdp_param_groups[0].all_reduce_grads = enabled
 
     def unshard(self):
         self.events.append("unshard")
@@ -1237,38 +1260,22 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
         self.assertEqual(events.count("unshard"), 1)
         self.assertEqual(events.count("forward"), 4)
-        self.assertEqual(events.count("gradient_sync(True)"), 1)
+        self.assertTrue(
+            chunked_loss.lm_head._get_fsdp_state()._fsdp_param_groups[0].reduce_grads
+        )
         self.assertEqual(events.count("reshard"), 1)
 
     def test_fsdp_unshards_once_before_chunk_forwards(self):
         events: list[str] = []
 
-        class FakeFSDPLinear(nn.Linear):
-            def set_reshard_after_forward(self, enabled):
-                events.append(f"set_reshard_after_forward({enabled})")
-
-            def set_reshard_after_backward(self, enabled):
-                events.append(f"set_reshard_after_backward({enabled})")
-
-            def set_requires_gradient_sync(self, enabled, *, recurse):
-                events.append(f"set_requires_gradient_sync({enabled})")
-
-            def unshard(self):
-                events.append("unshard")
-
-            def reshard(self):
-                events.append("reshard")
-
-            def forward(self, input):
-                events.append("forward")
-                return super().forward(input)
-
         chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
-        chunked_loss.lm_head = FakeFSDPLinear(4, 8, bias=False)
+        chunked_loss.lm_head = _RecordingFSDPLinear(4, 8, bias=False, events=events)
         hidden_states = torch.randn(4, 4)
         labels = torch.randint(0, 8, (4,))
 
-        with patch("torch.distributed._composable.fsdp.FSDPModule", FakeFSDPLinear):
+        with patch(
+            "torch.distributed._composable.fsdp.FSDPModule", _RecordingFSDPLinear
+        ):
             chunked_loss(hidden_states, labels)
 
         self.assertEqual(events.count("unshard"), 1)

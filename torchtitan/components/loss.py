@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
@@ -501,6 +502,56 @@ class GradAccumulator:
         self._next_idx += 1
 
 
+@contextmanager
+def _chunked_loss_fsdp(
+    lm_head: nn.Module, *, run_backward: bool
+) -> Iterator[Callable[[], None] | None]:
+    from torch.distributed._composable.fsdp import FSDPModule
+
+    if not isinstance(lm_head, FSDPModule):
+        yield None
+        return
+
+    # FSDP exposes policy setters only. Retain the owning groups' settings so
+    # chunk-local coalescing preserves accumulation and HSDP replica policies.
+    state = lm_head._get_fsdp_state()
+    state._lazy_init()
+    auto_reshard_after_forward = state._auto_reshard_after_forward
+    policies = [
+        (
+            group,
+            group.post_forward_mesh_info,
+            group.reshard_after_backward,
+            group.reduce_grads,
+            group.all_reduce_grads,
+        )
+        for group in state._fsdp_param_groups
+    ]
+
+    def restore_gradient_sync() -> None:
+        for group, _, _, reduce_grads, all_reduce_grads in policies:
+            group.reduce_grads = reduce_grads
+            group.all_reduce_grads = all_reduce_grads
+
+    try:
+        lm_head.set_reshard_after_forward(False, recurse=False)
+        lm_head.set_reshard_after_backward(False, recurse=False)
+        lm_head.set_requires_gradient_sync(False, recurse=False)
+        # Explicit unshard avoids leaving an eager all-gather event for the
+        # next FSDP module when CUDA graph capture follows the warmup.
+        with spmd.no_typecheck():
+            lm_head.unshard()
+        yield restore_gradient_sync
+    finally:
+        restore_gradient_sync()
+        state._auto_reshard_after_forward = auto_reshard_after_forward
+        for group, post_forward_mesh_info, reshard_after_backward, _, _ in policies:
+            group.post_forward_mesh_info = post_forward_mesh_info
+            group.reshard_after_backward = reshard_after_backward
+            if reshard_after_backward or not run_backward:
+                group.reshard()
+
+
 class ChunkedLossWrapper(BaseLoss):
     """Chunked loss wrapper that splits the sequence dimension to reduce peak memory.
 
@@ -528,8 +579,9 @@ class ChunkedLossWrapper(BaseLoss):
         The lm_head's FSDP reshard-after-forward and reshard-after-backward are
         temporarily disabled during the chunked loop so that the weight stays
         unsharded across all outputs and chunks (avoiding repeated all-gathers).
-        Gradient synchronization remains disabled until the final chunk, so one
-        reduce-scatter processes the accumulated lm_head parameter gradients.
+        Gradient synchronization remains disabled until the final chunk, which
+        uses the caller's synchronization policy. Deferred accumulation retains
+        the unsharded weights and gradients for the next microbatch.
 
     TP / SP composability:
         The root decoder norm emits hidden states that are replicated on the
@@ -585,8 +637,6 @@ class ChunkedLossWrapper(BaseLoss):
         head gradients are already accumulated. The returned loss is a leaf
         whose backward accumulates only its own gradient.
         """
-        from torch.distributed._composable.fsdp import FSDPModule
-
         num_chunks = self.num_chunks
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
@@ -670,75 +720,58 @@ class ChunkedLossWrapper(BaseLoss):
                 )
             metrics: dict[str, torch.Tensor] = {}
 
-            fsdp_enabled = isinstance(lm_head, FSDPModule)
-            # Disable FSDP reshard on lm_head to keep its weight unsharded across
-            # all outputs and chunks, avoiding repeated all-gathers. Coalesce
-            # gradient synchronization into one reduce-scatter at the final chunk
-            # by disabling it for chunks 0..N-2.
-            if fsdp_enabled:
-                lm_head.set_reshard_after_forward(False)
-                lm_head.set_reshard_after_backward(False)
-                lm_head.set_requires_gradient_sync(False, recurse=False)
-                # An implicit unshard stores an all-gather event in FSDP's shared
-                # all_gather_state for the next FSDP module to consume. Since
-                # lm_head is the final FSDP forward in this loop, eager warmup
-                # leaves that state uncleared, and CUDA graph capture cannot wait
-                # on its eager event. Explicitly unshard while FSDP is idle to
-                # avoid populating the shared state.
-                with spmd.no_typecheck():
-                    lm_head.unshard()
+            with _chunked_loss_fsdp(
+                lm_head, run_backward=run_backward
+            ) as restore_gradient_sync:
+                for chunk_index in range(num_chunks):
+                    if (
+                        restore_gradient_sync is not None
+                        and chunk_index == num_chunks - 1
+                    ):
+                        restore_gradient_sync()
 
-            for chunk_index in range(num_chunks):
-                if fsdp_enabled and chunk_index == num_chunks - 1:
-                    lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
-                        True, recurse=False
+                    h_chunks = tuple(
+                        chunks[chunk_index] for chunks in hidden_state_chunks_per_output
                     )
+                    label_chunks = tuple(
+                        chunks[chunk_index] for chunks in label_chunks_per_output
+                    )
+                    loss_inputs = {
+                        key: chunks[chunk_index]
+                        if isinstance(chunks, tuple)
+                        else chunks
+                        for key, chunks in input_chunks.items()
+                    }
+                    # TODO: compile lm_head together with loss_fn (only loss_fn is
+                    # compiled today): frees the fp32 dlogits right after the split, 1.2 GiB per
+                    # Qwen3-8B chunk. Blocked: compiling HiMidLoLinear rounds grad_weight to bf16
+                    # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
+                    # fails at lm_head's hooks, which can't be traced.
+                    logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
+                    if not is_multi_output:
+                        logits = logits[0]
+                        label_chunks = label_chunks[0]
+                    chunk_loss, chunk_metrics = self.loss_fn(
+                        logits,  # pyrefly: ignore[bad-argument-type]
+                        label_chunks,  # pyrefly: ignore[bad-argument-type]
+                        global_loss_token_counts,
+                        **loss_inputs,
+                    )
+                    # Free logits before backward.
+                    del logits
+                    metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
+                    total_loss = total_loss + chunk_loss.detach()
 
-                h_chunks = tuple(
-                    chunks[chunk_index] for chunks in hidden_state_chunks_per_output
-                )
-                label_chunks = tuple(
-                    chunks[chunk_index] for chunks in label_chunks_per_output
-                )
-                loss_inputs = {
-                    key: chunks[chunk_index] if isinstance(chunks, tuple) else chunks
-                    for key, chunks in input_chunks.items()
-                }
-                # TODO: compile lm_head together with loss_fn (only loss_fn is
-                # compiled today): frees the fp32 dlogits right after the split, 1.2 GiB per
-                # Qwen3-8B chunk. Blocked: compiling HiMidLoLinear rounds grad_weight to bf16
-                # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
-                # fails at lm_head's hooks, which can't be traced.
-                logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
-                if not is_multi_output:
-                    logits = logits[0]
-                    label_chunks = label_chunks[0]
-                chunk_loss, chunk_metrics = self.loss_fn(
-                    logits,  # pyrefly: ignore[bad-argument-type]
-                    label_chunks,  # pyrefly: ignore[bad-argument-type]
-                    global_loss_token_counts,
-                    **loss_inputs,
-                )
-                # Free logits before backward.
-                del logits
-                metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
-                total_loss = total_loss + chunk_loss.detach()
-
-                if run_backward:
-                    with spmd.no_typecheck():
-                        chunk_loss.backward()
-                        if decoder_requires_grad:
-                            for h_chunk, grad_accumulator in zip(
-                                h_chunks, grad_accumulators, strict=True
-                            ):
-                                assert h_chunk.grad is not None
-                                grad_accumulator.add(h_chunk.grad)
-                                h_chunk.grad = None
-
-            if fsdp_enabled:
-                lm_head.set_reshard_after_forward(True)
-                lm_head.set_reshard_after_backward(True)
-                lm_head.reshard()
+                    if run_backward:
+                        with spmd.no_typecheck():
+                            chunk_loss.backward()
+                            if decoder_requires_grad:
+                                for h_chunk, grad_accumulator in zip(
+                                    h_chunks, grad_accumulators, strict=True
+                                ):
+                                    assert h_chunk.grad is not None
+                                    grad_accumulator.add(h_chunk.grad)
+                                    h_chunk.grad = None
             if not decoder_requires_grad:
                 # Scaling this leaf cannot rescale already accumulated head gradients.
                 return total_loss.requires_grad_(run_backward), metrics
