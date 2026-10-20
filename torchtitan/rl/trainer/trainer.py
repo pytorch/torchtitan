@@ -70,16 +70,6 @@ class Trainer(Configurable):
         model: BaseModel.Config
         """Trainer model config, built for ``parallelism``."""
 
-        def __post_init__(self) -> None:
-            TrainingEngine.Config.__post_init__(self)
-            # TODO: support CP by sharding the per-token loss kwargs along the
-            # sequence like the labels.
-            if self.parallelism.context_parallel_degree > 1:
-                raise ValueError(
-                    "RL context parallelism is not supported yet: per-token "
-                    "loss arguments are not sharded along the sequence."
-                )
-
     def __init__(
         self,
         config: Config,
