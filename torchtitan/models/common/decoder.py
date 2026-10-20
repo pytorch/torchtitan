@@ -283,9 +283,11 @@ class Decoder(BaseModel):
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
+        dict[str, Any],
     ]:
         """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""
         del kwargs
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
@@ -298,6 +300,8 @@ class Decoder(BaseModel):
             input_dict["attention_metadata"] = attention_metadata
 
         input_shardings = decoder_input_sharding()
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
@@ -309,11 +313,12 @@ class Decoder(BaseModel):
             parallelism_context, input_dict, input_shardings
         )
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         if next(self.config.traverse(AuxLoss.Config), None) is not None:
             input_dict["aux_loss_denominators"] = global_routing_token_counts
-        return inputs, labels, input_dict
+        return inputs, labels, input_dict, loss_kwargs
 
     def _cp_shard(
         self,
@@ -385,7 +390,8 @@ class Decoder(BaseModel):
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
         for layer_config in self.config.layers:
-            for _, config, _, _ in layer_config.traverse(InnerAttention.Config):
+            for _, attention, _, _ in layer_config.traverse(Attention.Config):
+                config = attention.inner_attention
                 backend = config._owner
                 assert backend is not None and issubclass(backend, InnerAttention)
                 if backend in attention_metadata:

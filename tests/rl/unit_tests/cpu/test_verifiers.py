@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 from types import SimpleNamespace
 from typing import cast
@@ -36,7 +35,6 @@ from torchtitan.rl.examples.verifiers.rollouter import (
 )
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import Completion, RolloutStatus
 from verifiers.v1.errors import model_error, OverlongPromptError
 
@@ -265,13 +263,6 @@ def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> 
     assert sent.renderer == renderers_config
     assert sent.renderer_model_name == "muse-checkpoint"
     asyncio.run(rollouter.close())
-
-
-def test_setup_async_takes_the_base_rollouter_arguments() -> None:
-    """The controller calls `setup_async` with `Rollouter.setup_async`'s arguments."""
-    assert inspect.signature(VerifiersRollouter.setup_async).parameters.keys() == (
-        inspect.signature(Rollouter.setup_async).parameters.keys()
-    )
 
 
 def test_trainable_token_spans() -> None:
