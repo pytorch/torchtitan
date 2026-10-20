@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 BOXED_CODEGEN_META = "graph_trainer_boxed_codegen"
+_GRAPH_PP_DIRECTION = "graph_pp_direction"
 LossResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, dict[str, Any]]
 AnnotatedLossFn: TypeAlias = Callable[..., LossResult]
 

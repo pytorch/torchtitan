@@ -222,8 +222,19 @@ def _prioritized_order(
 
     Prefer compute that exposes another launch over unrelated compute. This
     lets input gradients issue their exchange before independent weight grads,
-    while waits still follow every available computation.
+    while waits still follow every available computation. For eager paging,
+    retain chunk0's wgrad-only branch until its final combine is issued. Shared
+    experts, chunk1 and unchunked PP remain eligible to cover earlier exchanges.
     """
+    from torchtitan.experiments.graph_trainer.common_utils import (
+        _is_backward_node,
+        PARAMETER_GRADIENT_FQNS_META,
+    )
+    from torchtitan.experiments.graph_trainer.ep_pass_utils import _chunk_owner
+    from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+        PAGED_STASH_REGION,
+    )
+
     launch_ancestors = set()
     pending = list(launches)
     while pending:
@@ -231,6 +242,39 @@ def _prioritized_order(
         for predecessor in deps[node] - launch_ancestors:
             launch_ancestors.add(predecessor)
             pending.append(predecessor)
+    terminal_combines = {}
+    for launch in launches:
+        owner = _chunk_owner(launch)
+        if (
+            owner is not None
+            and owner.is_backward
+            and owner.chunk_id == 0
+            and launch.meta.get("custom", {}).get(_EP_TOKEN_EXCHANGE) == "combine"
+        ):
+            terminal_combines[owner] = launch
+    deferred_wgrads = {}
+    if terminal_combines:
+        # Shared data feeding an exchange is not a wgrad-only branch.
+        pending = [
+            node
+            for node in deps
+            if node.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META)
+        ]
+        visited = set()
+        while pending:
+            node = pending.pop()
+            if node in visited or node in launch_ancestors:
+                continue
+            visited.add(node)
+            custom = node.meta.get("custom", {})
+            if not (
+                _is_backward_node(node) or custom.get(PARAMETER_GRADIENT_FQNS_META)
+            ):
+                continue
+            owner = _chunk_owner(node)
+            if custom.get(PAGED_STASH_REGION) and owner in terminal_combines:
+                deferred_wgrads[node] = terminal_combines[owner]
+            pending.extend(node.all_input_nodes)
     successors: dict[fx.Node, list[fx.Node]] = {node: [] for node in deps}
     for node, predecessors in deps.items():
         for predecessor in predecessors:
@@ -255,6 +299,9 @@ def _prioritized_order(
                         if candidate in launches
                         else 3
                         if candidate in waits
+                        else 4
+                        if candidate in deferred_wgrads
+                        and deferred_wgrads[candidate] not in emitted
                         else 1
                         if candidate in launch_ancestors
                         else 2
@@ -285,10 +332,13 @@ def _plan_order(
     exchanges: list[dict[int, tuple[_TokenExchange, ...]]],
 ) -> list[fx.Node]:
     """Choose the earliest legal launches and postpone waits behind ready work."""
+    from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+        _paging_dependencies,
+    )
 
     order = ordered_nodes(gm)
     deps = _graph_dependencies(gm)
-    launches, waits = set(), set()
+    launches, waits = _paging_dependencies(gm, deps)
     for region, chunk_exchanges in zip(regions, exchanges, strict=True):
         chunk_order = (1, 0) if region.is_backward else (0, 1)
         for first, second in zip(

@@ -195,6 +195,7 @@ class GraphTrainerCompileConfig:
         "min_cut",
         "sac_and_offload",
         "sac_and_paged_stash",
+        "none_and_paged_stash",
     ] = "default"
     """
     Memory optimization policy for activation management (SAC, offload, stash).
@@ -216,6 +217,8 @@ class GraphTrainerCompileConfig:
             rows stay resident. Requires a token dispatcher with a static
             capacity factor (e.g. HybridEP with non_blocking_capacity_factor
             set). Tuned by the paged_stash settings.
+        none_and_paged_stash: save forward activations without recomputation,
+            paging capacity-padded expert activations with the same stash.
     """
 
     full_recompute_save_ops: str = ""
@@ -257,8 +260,8 @@ class GraphTrainerCompileConfig:
     Tensors are selected largest-first until the budget is exhausted."""
 
     paged_stash: PagedStashConfig = field(default_factory=PagedStashConfig)
-    """Settings for MoE paged stashing, which
-    ``memory_policy = "sac_and_paged_stash"`` enables."""
+    """MoE paged-stash settings for the sac_and_paged_stash and
+    none_and_paged_stash memory policies."""
 
     enable_fsdp_ag_rs_overlap: bool = False
     """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward

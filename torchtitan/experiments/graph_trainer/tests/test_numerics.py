@@ -435,10 +435,19 @@ class TestGraphTrainerNumerics(unittest.TestCase):
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_llama3_loss_compare())
 
-    def _assert_hybridep_training_matches(self, baseline: str, target: str) -> None:
+    def _assert_hybridep_training_matches(
+        self, baseline: str, target: str, *, no_remat: bool = False
+    ) -> None:
         """Require exact loss/norm and whole-FB CUDA replay on four ranks."""
         for recipe in (baseline, target):
             config = getattr(graph_trainer_numerics, recipe)()
+            if no_remat:
+                self.assertIsNone(config.activation_remat, recipe)
+                self.assertEqual(
+                    config.compile.memory_policy,
+                    "none" if recipe == baseline else "none_and_paged_stash",
+                    recipe,
+                )
             self.assertIsInstance(
                 config.model.layers[0].attention.inner_attention,
                 VarlenInnerAttention.Config,
@@ -471,8 +480,26 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             "deepseek_v3_hybridep_chunk_control", "deepseek_v3_hybridep_overlap"
         )
 
+    def test_hybridep_eager_paging(self):
+        """Exercise paging with resident-last-layer and terminal-join policies."""
+        for target in (
+            "deepseek_v3_hybridep_overlap_paged",
+            "deepseek_v3_hybridep_overlap_paged_all_layers",
+        ):
+            self._assert_hybridep_training_matches(
+                "deepseek_v3_hybridep_chunk_control", target
+            )
+
     def test_dense_llama3_hsdp_gradient_accumulation_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_hsdp_llama3_gradient_accumulation_loss_compare())
+
+    def test_hybridep_eager_no_remat_paging(self):
+        """Compare no-remat eager chunks with and without paged overlap."""
+        self._assert_hybridep_training_matches(
+            "deepseek_v3_hybridep_no_remat_control",
+            "deepseek_v3_hybridep_no_remat_paged",
+            no_remat=True,
+        )
 
     def test_dense_llama3_hsdp_graph_pp_vs_eager(self):
         self.assertTrue(_run_hsdp_llama3_pp_loss_compare())
@@ -776,7 +803,7 @@ class TestHybridEPContracts(FSDPTest):
                     self.assertEqual(actual_grad, expected_grad, rtol=0, atol=0)
 
     def test_eager_chunk_capacity_uses_full_call_budget(self):
-        """Observe real MoE dispatch allocations through the eager wrapper."""
+        """Check real MoE capacity and final exchange order with and without paging."""
         from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
             graph_trainer_deepseek_v3_debugmodel,
         )
@@ -886,6 +913,7 @@ class TestHybridEPContracts(FSDPTest):
                         from torchtitan.experiments.graph_trainer.common_utils import (
                             _is_backward_node,
                             annotate_module_fqns,
+                            annotate_parameter_gradient,
                         )
                         from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
                             ep_overlap_schedule_pass,
@@ -896,53 +924,127 @@ class TestHybridEPContracts(FSDPTest):
                         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
                             minimal_fx_tracer,
                         )
+                        from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+                            annotate_paged_stash_region,
+                            apply_paged_stash_pass,
+                            PagedStashManager,
+                            tag_paged_stash_activations,
+                        )
                         from torchtitan.experiments.graph_trainer.remove_noop_passes import (
                             canonicalize_graph_pass,
                             eliminate_dead_code_pass,
+                            remove_parameter_gradient_markers_pass,
                         )
 
-                        annotate_module_fqns(model)
+                        modules = nn.ModuleDict(
+                            {
+                                "layers": nn.ModuleList(
+                                    [nn.ModuleDict({"feed_forward": model})]
+                                )
+                            }
+                        )
+                        annotate_module_fqns(modules)
+                        annotate_paged_stash_region(modules)
 
                         def joint(x_TD):
                             """Trace the actual eager MoE and its parameter gradients."""
                             out_TD = wrapped(x_TD, aux_loss_denominator=denominator)
-                            return torch.autograd.grad(
+                            gradients = torch.autograd.grad(
                                 out_TD.float().square().sum(),
                                 (x_TD, *model.parameters()),
                             )
+                            return (
+                                gradients[0],
+                                *(
+                                    annotate_parameter_gradient(gradient, fqn)
+                                    for (fqn, _), gradient in zip(
+                                        model.named_parameters(),
+                                        gradients[1:],
+                                        strict=True,
+                                    )
+                                ),
+                            )
 
                         gm = minimal_fx_tracer(joint, module=model)(inputs_TD).gm
+                        remove_parameter_gradient_markers_pass(gm, (inputs_TD,))
                         eliminate_dead_code_pass(gm)
                         canonicalize_graph_pass(gm)
-                        ep_overlap_schedule_pass(
-                            gm, module_pattern="layers.0.feed_forward"
-                        )
-                        positions = {
-                            node: index for index, node in enumerate(gm.graph.nodes)
-                        }
-                        final_combine = next(
-                            node
-                            for node in gm.graph.nodes
-                            if node.target == torch.ops.hybridep.combine_bwd.default
-                            and _chunk_owner(node).chunk_id == 0
-                        )
-                        # Native backward returns 3D expert-weight grads, not 2D token grads.
-                        weight_grads = [
-                            node
-                            for node in gm.graph.nodes
-                            if node.target == torch.ops.aten._grouped_mm.default
-                            and _is_backward_node(node)
-                            and _chunk_owner(node).chunk_id == 0
-                            and node.meta["val"].ndim == 3
-                        ]
-                        self.assertEqual(len(weight_grads), 2)
-                        self.assertTrue(
-                            all(
-                                positions[node] > positions[final_combine]
-                                for node in weight_grads
-                            ),
-                            "Final input-gradient combine must issue before independent wgrad",
-                        )
+                        for paging in (False, True):
+                            with self.subTest(paging=paging):
+                                scheduled = copy.deepcopy(gm)
+                                if paging:
+                                    tag_paged_stash_activations(scheduled)
+                                    apply_paged_stash_pass(scheduled)
+                                    self.assertTrue(
+                                        any(
+                                            node.target
+                                            == torch.ops.paged_stash.wait_reload.default
+                                            for node in scheduled.graph.nodes
+                                        ),
+                                        "The graph must exercise real activation reload fences",
+                                    )
+                                ep_overlap_schedule_pass(
+                                    scheduled, module_pattern="layers.0.feed_forward"
+                                )
+                                positions = {
+                                    node: index
+                                    for index, node in enumerate(scheduled.graph.nodes)
+                                }
+                                for backward, chunk_id, target in (
+                                    (False, 0, torch.ops.hybridep.dispatch.default),
+                                    (True, 1, torch.ops.hybridep.dispatch_bwd.default),
+                                ):
+                                    first_dispatch = next(
+                                        node
+                                        for node in scheduled.graph.nodes
+                                        if node.target == target
+                                        and _chunk_owner(node).chunk_id == chunk_id
+                                    )
+                                    shared_compute = [
+                                        node
+                                        for node in scheduled.graph.nodes
+                                        if node.target == torch.ops.aten.mm.default
+                                        and _is_backward_node(node) == backward
+                                        and _chunk_owner(node).chunk_id == chunk_id
+                                        and node.meta["custom"][
+                                            "module_fqn"
+                                        ].startswith(
+                                            "layers.0.feed_forward.shared_experts"
+                                        )
+                                    ]
+                                    self.assertTrue(shared_compute)
+                                    self.assertLess(
+                                        positions[first_dispatch],
+                                        min(positions[node] for node in shared_compute),
+                                        "Shared experts must follow the first dispatch "
+                                        f"(backward={backward}, paging={paging})",
+                                    )
+                                final_combine = next(
+                                    node
+                                    for node in scheduled.graph.nodes
+                                    if node.target
+                                    == torch.ops.hybridep.combine_bwd.default
+                                    and _chunk_owner(node).chunk_id == 0
+                                )
+                                # Native backward returns 3D weight grads, not 2D token grads.
+                                weight_grads = [
+                                    node
+                                    for node in scheduled.graph.nodes
+                                    if node.target == torch.ops.aten._grouped_mm.default
+                                    and _is_backward_node(node)
+                                    and _chunk_owner(node).chunk_id == 0
+                                    and node.meta["val"].ndim == 3
+                                ]
+                                self.assertEqual(len(weight_grads), 2)
+                                self.assertTrue(
+                                    all(
+                                        positions[node] > positions[final_combine]
+                                        for node in weight_grads
+                                    ),
+                                    "Final input-gradient combine must issue before "
+                                    f"independent wgrad (paging={paging})",
+                                )
+                        PagedStashManager.reset_instance()
                 finally:
                     hook.remove()
 

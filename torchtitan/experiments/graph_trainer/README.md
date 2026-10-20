@@ -153,7 +153,7 @@ Router arguments and the full-call auxiliary-loss denominator are shared.
 Dense feed-forward modules are not chunked.
 
 The workflow is eager chunking -> tracing -> unshard normalization -> memory
-policy -> collective bucketing -> EP scheduling -> regional
+policy and paging -> collective bucketing -> EP scheduling -> regional
 attention compilation -> whole forward/backward CUDA capture and replay.
 Shared parametrized weights are read once outside chunk ownership, so both
 chunks accumulate through one parameter-gradient reduction edge.
@@ -179,11 +179,17 @@ accept compiler layouts and normalize native contiguous inputs internally;
 waits preserve storage rather than making independent layout copies. The
 scheduler issues the second chunk's launch
 before the first chunk's wait, then prefers ready launches, independent work
-and finally waits. It preserves data and mutation dependencies;
+and finally waits. It preserves data, mutation and paging queue dependencies;
 it does not infer scheduling roles from node names or tensor shapes.
 Among ready computations, launch ancestors go first so input gradients expose
 their exchange before independent weight gradients. The latter can then cover
 the final backward combine rather than being drained before it launches.
+With eager paging, parameter-gradient annotations identify wgrad-only branches
+outside the exchanges' input dependencies. The routed chunk0 branch waits to
+become eligible until its terminal backward combine is issued. Independent
+shared-expert and chunk1 work remain available earlier; reload and EP waits
+stay late. Unchunked PP retains complementary F/B work rather than reserving
+every backward wgrad for its own combine.
 
 The whole-call output row budget is
 `B = num_max_tokens_per_rank * ep_size * min(num_local_experts, top_k) * factor`.
@@ -203,13 +209,50 @@ differences must not substitute for checking completion and storage ownership.
 Native capacity validation observes the real eager MoE wrapper at factor 4
 and an odd, aligned budget; it does not hand-bind the expected capacity.
 
+Set `config.compile.memory_policy = "sac_and_paged_stash"` to page saved expert
+activations. Counts and stash commits belong to each layer/chunk, not just the
+layer. Annotated stash, reload, prefetch and wait operations share the existing
+paging stream and allocator. A true stash overflow invalidates backward and
+uses the existing device-side optimizer-skip protocol; it is not a native
+capacity drop. Initialization measures live pages once, retaining compact live
+prefixes rather than every capacity-padded activation until backward. Reload
+restores the capacity shape with the same live-prefix contract as real paging;
+padding is not meaningful. Full-count inputs and unpaged reruns keep the original
+tensor. This sizing step changes neither model computation nor recomputation.
+Steady-state exchanges and paging do not read device counts on the host. The
+CUDA page-buffer factor is headroom over that measured live-page peak,
+independent of HybridEP's
+static output capacity factor. Routing can change after calibration; choose
+headroom for that variability or the deferred overflow contract stops the run.
+
+Page copies and reloads use one high-priority stream, which serializes freelist
+updates. Set `TORCHTITAN_PAGED_STASH_MAX_CTAS` before import to bound copy/pop
+CTAs (2048 by default), without changing live-row counts or buffer sizing.
+Copy/pop CTAs stride over flat multi-token tiles and copy payloads without
+arithmetic. Page allocation, records, FIFO recycling and overflow semantics
+are unchanged; lowering the grid cap does not shorten the copied live prefix.
+Source annotations preserve each source's issue order and storage lifetimes;
+independent multiplexed F/B sources may interleave on that one stream without
+an additional whole-backward-before-forward paging chain. Per-slot records
+remain FIFO and backward generations stay stage-owned.
+
+For paging without activation recomputation, select
+`config.compile.memory_policy = "none_and_paged_stash"` and
+`config.activation_remat = None`. This saves forward activations and uses the
+same annotated page operations and runner; the existing `sac_and_paged_stash`
+mode retains its selective-recompute policy.
+
 The focused integration recipes use full forward/backward CUDA graphs for
-the two-chunk control and overlap. They select native
+the two-chunk control, overlap, and overlap with paging. They select native
 varlen attention, which uses the existing FA4 provider on Blackwell, without
 compiling attention through Inductor. They check actual
 capture and compare ten training steps of full-precision loss and gradient
 norm, including repeated replay; chunked-versus-unchunked equality is not the
-comparison contract.
+comparison contract. Paging covers both last-layer residency and
+`config.compile.paged_stash.skip_immediate_backward = False`, which requires
+a terminal stash join before backward reload. Keepalive activations belong to
+the join, not to a functional reload that can return one of them during
+calibration or residency.
 
 Varlen backend selection is explicit: use
 `VarlenInnerAttention.Config(sdpa_backend=SDPBackend.FLASH_ATTENTION)` to select
@@ -221,7 +264,7 @@ Current limitations:
 
 - `expert_parallel_degree > 1` and `pipeline_parallel_degree == 1` are required.
 - DeepEP and GraphPP overlap are outside this feature's scope.
-- Full-graph Inductor is outside this feature's scope; expert ops
+- Full-graph Inductor is outside this feature's scope; expert and paging ops
   execute natively. CUDA graphs capture the whole forward/backward callable.
 - The token count must be even.
 - Additional overlap or sharding modes require their own loss and trace checks.
