@@ -292,6 +292,9 @@ run_h100_tests() {
 run_graph_trainer_h100_tests() {
   local tests_root="${TORCHTITAN_PACKAGE_ROOT}/experiments/graph_trainer/tests"
 
+  python -m pip install flash-attn-3 \
+    --extra-index-url "${PYTORCH_INDEX_URL}"
+
   install_hybrid_ep
   python -m torchtitan.experiments.graph_trainer.tests.integration_tests \
     --test_suite graph_trainer_h100 \
