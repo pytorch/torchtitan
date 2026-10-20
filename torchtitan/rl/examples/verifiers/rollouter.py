@@ -39,6 +39,7 @@ from torchtitan.rl.generator.generation_server import (
     VerifiersGenerationMetadata,
 )
 from torchtitan.rl.generator.http_client import GeneratorClient
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
@@ -407,6 +408,13 @@ class VerifiersRolloutWorker(RolloutWorker):
         )
         for rollout, advantage in zip(scored, advantages, strict=True):
             rollout.advantage = advantage
+        for key in ("num_compactions", "num_resent_assistant_messages"):
+            values = [float(r.logs[key]) for r in rollouts if key in r.logs]
+            if values:
+                group_metrics += [
+                    m.Metric(f"rollout/{key}", m.Mean.from_list(values)),
+                    m.Metric(f"rollout/{key}", m.Max.from_list(values)),
+                ]
         return RolloutGroup(group_id=group_id, rollouts=rollouts, metrics=group_metrics)
 
     async def _run_single_rollout(
@@ -510,7 +518,7 @@ class VerifiersRolloutWorker(RolloutWorker):
                     "" if task is None else f" of task {task}",
                 )
             status = RolloutStatus.ERROR
-        logs = verifiers_rollout_logs(verifiers_episode, trace)
+        logs = verifiers_rollout_logs(verifiers_episode, trace) | _fork_counts(trace)
         if status.is_error():
             log_failed_rollout(logs, group_id=group_id, rollout_id=rollout_id)
         else:
@@ -683,6 +691,35 @@ class VerifiersRolloutWorker(RolloutWorker):
                     reply_to.env_messages.append(message_to_wire(node.message))
                 branch_offset += len(node.token_ids)
         return turns
+
+
+def _fork_counts(trace: Any) -> dict[str, int]:
+    """Why a rollout forked into more training samples (rollout/branches_per_rollout).
+
+    - num_compactions: sampled turns under a root other than the rollout's first, i.e. the agent's
+      history-summary requests (its summary prompt starts a new root); each compaction adds two
+      branches, the summary and the resumed conversation.
+    - num_resent_assistant_messages: assistant messages re-sent in a form the graph did not match to
+      the sampled turn beside them; each adds one branch. The copies a summary request re-carries
+      under its own root are not counted.
+    """
+    nodes = trace.nodes
+    root = [0] * len(nodes)  # parents come before their children in `trace.nodes`
+    for index, node in enumerate(nodes):
+        root[index] = index if node.parent is None else root[node.parent]
+    parents_of_sampled = {node.parent for node in nodes if node.sampled}
+    return {
+        "num_compactions": sum(
+            node.sampled and root[index] != root[0] for index, node in enumerate(nodes)
+        ),
+        "num_resent_assistant_messages": sum(
+            not node.sampled
+            and node.message.role == "assistant"
+            and node.parent is not None
+            and node.parent in parents_of_sampled
+            for node in nodes
+        ),
+    }
 
 
 def _trainable_token_spans(mask: list[bool]) -> list[tuple[int, int]]:
