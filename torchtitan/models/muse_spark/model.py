@@ -213,6 +213,8 @@ class MuseSparkRMSNorm(RMSNorm):
             return None
         return self.weight + self.gain_center
 
+    # Limit 16, not the default 8: all residual-stream norms share this region and use 12 graphs.
+    @local_compile("muse_spark_rmsnorm", batch_invariant=False, recompile_limit=16)
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input_dtype = input.dtype
         effective_weight_D = self._get_effective_weight()
@@ -434,6 +436,7 @@ class MuseSparkModel(MultimodalModel):
                 "muse_spark_input_scaled_rmsnorm",
                 "muse_spark_logit_postprocess",
                 "muse_spark_residual",
+                "muse_spark_rmsnorm",
             ]
         )
         # pyrefly: ignore [bad-override]
