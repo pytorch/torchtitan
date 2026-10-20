@@ -36,9 +36,14 @@ class TestLocalTokenDispatcherInference(unittest.TestCase):
         expected_TD = (
             (expert_rows_TKD * scores_TK.double()[..., None]).sum(1).bfloat16()
         )
-        compiled = torch.compile(token_dispatcher._gather_weighted_sum, backend="eager")
-        with torch.no_grad(), patch.object(
-            token_dispatcher, "_gather_weighted_sum", compiled
+        with torch.no_grad(), patch.multiple(
+            token_dispatcher,
+            _sort_routes_and_gather=torch.compile(
+                token_dispatcher._sort_routes_and_gather, backend="eager"
+            ),
+            _gather_weighted_sum=torch.compile(
+                token_dispatcher._gather_weighted_sum, backend="eager"
+            ),
         ):
             actual_TD = self._dispatch_combine(x_TD, scores_TK, ids_TK, E)
         torch.testing.assert_close(actual_TD, expected_TD, rtol=0, atol=0)
@@ -54,6 +59,33 @@ class TestLocalTokenDispatcherInference(unittest.TestCase):
         with torch.no_grad():
             actual = self._dispatch_combine(x_TD, scores_TK, ids_TK, E)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_pairwise_rank_matches_stable_argsort(self):
+        # Compiled, small inputs take the pairwise rank and large ones argsort; both
+        # give eager's stable order.
+        sort_routes = token_dispatcher._sort_routes_and_gather
+        torch.manual_seed(0)
+        T, K, D, E = 37, 4, 8, 5
+        x_TD = torch.randn(T, D)
+        scores_TK = torch.rand(T, K)
+        # Duplicate experts within a token, as router replay allows.
+        ids_TK = torch.randint(0, E, (T, K))
+        eager_outputs = sort_routes(x_TD, scores_TK, ids_TK, E)
+        pairwise_outputs = torch.compile(sort_routes, backend="eager")(
+            x_TD, scores_TK, ids_TK, E
+        )
+        torch._dynamo.reset()
+        with patch.object(token_dispatcher, "_MAX_PAIRWISE_RANK_ROUTES", -1):
+            argsort_outputs = torch.compile(sort_routes, backend="eager")(
+                x_TD, scores_TK, ids_TK, E
+            )
+        torch._dynamo.reset()
+        for eager_t, pairwise_t, argsort_t in zip(
+            eager_outputs[:3], pairwise_outputs[:3], argsort_outputs[:3]
+        ):
+            self.assertTrue(torch.equal(pairwise_t, eager_t))
+            self.assertTrue(torch.equal(argsort_t, eager_t))
+        self.assertTrue(torch.equal(pairwise_outputs[3], argsort_outputs[3]))
 
 
 class TestArgsortExpertIds(unittest.TestCase):
