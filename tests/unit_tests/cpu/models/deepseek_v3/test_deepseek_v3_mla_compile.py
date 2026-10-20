@@ -20,7 +20,8 @@ def reset_local_compile():
     apply_local_compile([])
 
 
-def test_compiled_mla_qk_matches_eager() -> None:
+@pytest.mark.parametrize("use_positions", [True, False])
+def test_compiled_mla_qk_matches_eager(use_positions: bool) -> None:
     torch.manual_seed(0)
     attention = (
         build_model_config("debugmodel", parallelism=ParallelismConfig())
@@ -35,7 +36,7 @@ def test_compiled_mla_qk_matches_eager() -> None:
     kv = torch.randn(
         num_tokens, num_heads, attention.qk_nope_head_dim + attention.v_head_dim
     )
-    positions = torch.arange(num_tokens) % 10
+    positions = torch.arange(num_tokens) % 10 if use_positions else None
     grad_q, grad_k, grad_v = (
         torch.randn_like(q),
         torch.randn(num_tokens, num_heads, attention.qk_head_dim),
