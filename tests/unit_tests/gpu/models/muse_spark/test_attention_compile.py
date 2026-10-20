@@ -22,19 +22,26 @@ def _run(fn, inputs_):
     return [*outputs, *(t.grad for t in leaves)]
 
 
+# Debug model layer 0: sliding window with RoPE. Layer 3: global, position temperature, no RoPE.
+@pytest.mark.parametrize("layer_id", [0, 3])
 @pytest.mark.parametrize(
-    "region", ["muse_spark_attention_qk_norm", "muse_spark_attention_output"]
+    "region", ["muse_spark_attention_qk", "muse_spark_attention_output"]
 )
-def test_attention_region_matches_eager(region):
+def test_attention_region_matches_eager(region, layer_id):
     torch.manual_seed(0)
-    attention = build_model_config("debugmodel").layers[0].attention.build().cuda()
+    layer = build_model_config("debugmodel").layers[layer_id]
+    attention = layer.attention.build().cuda()
     num_tokens, num_heads, num_kv_heads = 64, attention.n_heads, attention.n_kv_heads
     head_dim = attention.head_dim
     query_TNH = torch.randn(
         num_tokens, num_heads, head_dim, device="cuda", dtype=torch.bfloat16
     )
-    if region == "muse_spark_attention_qk_norm":
-        fn = attention._norm_query_and_key
+    if region == "muse_spark_attention_qk":
+        positions_T = torch.arange(num_tokens, device="cuda")
+
+        def fn(query_TNH, key_TKH):
+            return attention._prepare_query_and_key(query_TNH, key_TKH, positions_T)
+
         key_TKH = torch.randn(
             num_tokens, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16
         )
@@ -48,15 +55,22 @@ def test_attention_region_matches_eager(region):
 
     try:
         apply_local_compile([])
+        reference = _run(fn, [t.float() for t in inputs_])
         expected = _run(fn, inputs_)
         apply_local_compile([region])
         actual = _run(fn, inputs_)
     finally:
         apply_local_compile([])
 
-    # Compiled pointwise math contracts into FMAs: allow ~1 bf16 ulp.
-    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
-        torch.testing.assert_close(actual_tensor, expected_tensor, atol=2e-2, rtol=2e-2)
+    # The compiled region rounds to bf16 once at the end, eager rounds between ops,
+    # so the two differ by a few bf16 ulps. Check the compiled path is at least as
+    # close as eager to an fp32 run of the same math, for outputs and grads.
+    for actual_tensor, expected_tensor, reference_tensor in zip(
+        actual, expected, reference, strict=True
+    ):
+        actual_error = (actual_tensor.float() - reference_tensor).norm()
+        eager_error = (expected_tensor.float() - reference_tensor).norm()
+        assert actual_error <= 1.05 * eager_error, (actual_error, eager_error)
 
 
 def test_rmsnorm_region_matches_eager():
