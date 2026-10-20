@@ -16,7 +16,11 @@ from torch.distributed.checkpoint import (
     HuggingFaceStorageWriter,
 )
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.components.checkpointer.base import ModelWrapper
 
@@ -33,6 +37,9 @@ from torchtitan.models.flux import MODEL_FLAVORS as FLUX_MODEL_FLAVORS
 from torchtitan.models.flux.state_dict_adapter import FluxStateDictAdapter
 from torchtitan.models.gpt_oss import MODEL_FLAVORS as GPT_OSS_MODEL_FLAVORS
 from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
+from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
+from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
@@ -142,6 +149,47 @@ class HuggingFaceStorageReaderTest(unittest.TestCase):
                     thread_count=3,
                 )
                 self.assertEqual(reader.thread_count, 3)
+
+
+def _small_kimi_k3_config() -> KimiK3Model.Config:
+    dim = 64
+    return _kimi_k3_config(
+        max_context_length=128,
+        parallelism=ParallelismConfig(),
+        dim=dim,
+        vocab_size=32,
+        num_layers=2,
+        full_attention_layers={1},
+        attn_res_block_size=1,
+        num_heads=2,
+        q_lora_rank=32,
+        kv_lora_rank=32,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=16,
+        v_head_dim=16,
+        kda_head_dim=128,
+        conv_kernel_size=3,
+        dense_hidden_dim=128,
+        latent_dim=32,
+        expert_hidden_dim=32,
+        num_experts=2,
+        top_k=1,
+        num_shared_experts=1,
+        vision_encoder=_vision_encoder_config(
+            text_dim=dim,
+            dim=48,
+            qkv_dim=48,
+            hidden_dim=96,
+            num_layers=1,
+            num_heads=3,
+            patch_size=2,
+            merge_kernel_size=(2, 2),
+            init_pos_emb_height=2,
+            init_pos_emb_width=2,
+            max_num_frames=1,
+        ),
+        attn_backend="flex",
+    )
 
 
 class NativeFusedLinearStateDictAdapterTest(unittest.TestCase):
@@ -445,6 +493,169 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
                 self.assertIsInstance(restored[key], DTensor)
                 self.assertEqual(restored[key].placements, weight.placements)
                 torch.testing.assert_close(restored[key], weight, rtol=0, atol=0)
+
+
+class KimiK3StateDictAdapterTest(unittest.TestCase):
+    def test_first_pipeline_stage_synthesizes_unused_residual_weights(self) -> None:
+        adapter = KimiK3StateDictAdapter(_small_kimi_k3_config(), hf_assets_path=None)
+        state_dict = {
+            "layers.0.ffn_res_norm.weight": torch.arange(64, dtype=torch.bfloat16),
+            "layers.0.ffn_res_proj.weight": torch.arange(
+                64, dtype=torch.bfloat16
+            ).reshape(1, 64),
+        }
+
+        hf_state_dict = adapter.to_hf(state_dict)
+
+        prefix = "language_model.model.layers.0"
+        torch.testing.assert_close(
+            hf_state_dict[f"{prefix}.self_attention_res_norm.weight"],
+            torch.ones(64, dtype=torch.bfloat16),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            hf_state_dict[f"{prefix}.self_attention_res_proj.weight"],
+            torch.zeros(1, 64, dtype=torch.bfloat16),
+            rtol=0,
+            atol=0,
+        )
+        restored_state_dict = adapter.from_hf(hf_state_dict)
+        self.assertEqual(restored_state_dict.keys(), state_dict.keys())
+        for key, value in state_dict.items():
+            torch.testing.assert_close(restored_state_dict[key], value, rtol=0, atol=0)
+
+    def test_later_pipeline_stage_omits_layer_zero_residual_weights(self) -> None:
+        adapter = KimiK3StateDictAdapter(_small_kimi_k3_config(), hf_assets_path=None)
+        state_dict = {
+            "layers.1.attention_res_norm.weight": torch.arange(
+                64, dtype=torch.bfloat16
+            ),
+            "layers.1.attention_res_proj.weight": torch.arange(
+                64, dtype=torch.bfloat16
+            ).reshape(1, 64),
+        }
+
+        hf_state_dict = adapter.to_hf(state_dict)
+
+        prefix = "language_model.model.layers.1"
+        self.assertEqual(
+            set(hf_state_dict),
+            {
+                f"{prefix}.self_attention_res_norm.weight",
+                f"{prefix}.self_attention_res_proj.weight",
+            },
+        )
+        restored_state_dict = adapter.from_hf(hf_state_dict)
+        self.assertEqual(restored_state_dict.keys(), state_dict.keys())
+        for key, value in state_dict.items():
+            torch.testing.assert_close(restored_state_dict[key], value, rtol=0, atol=0)
+
+    def test_quantized_names_round_trip(self) -> None:
+        config = _small_kimi_k3_config()
+        with torch.device("meta"):
+            state_dict = config.build().state_dict()
+        adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
+
+        hf_state_dict = adapter.to_hf(state_dict, to_quantized_layout=True)
+
+        prefix = "language_model.model.layers.1.block_sparse_moe"
+        for name in ("w1", "w2", "w3"):
+            self.assertIn(f"{prefix}.experts.0.{name}.weight_packed", hf_state_dict)
+            self.assertNotIn(f"{prefix}.experts.0.{name}.weight", hf_state_dict)
+        self.assertIn(f"{prefix}.shared_experts.gate_proj.weight", hf_state_dict)
+        self.assertEqual(
+            adapter.to_hf(state_dict).keys(),
+            {key.removesuffix("_packed") for key in hf_state_dict},
+        )
+        self.assertEqual(
+            adapter.from_hf(hf_state_dict, is_quantized_layout=True).keys(),
+            state_dict.keys(),
+        )
+        with self.assertRaisesRegex(ValueError, "weight_packed"):
+            adapter.from_hf(hf_state_dict)
+        with self.assertRaisesRegex(ValueError, r"experts\.0\.w1\.weight'"):
+            adapter.from_hf(adapter.to_hf(state_dict), is_quantized_layout=True)
+
+    def test_released_index_maps_to_unquantized_names(self) -> None:
+        experts = "language_model.model.layers.1.block_sparse_moe.experts.0"
+        weight_map = {
+            f"{experts}.w1.weight_packed": "model-00001-of-00002.safetensors",
+            f"{experts}.w1.weight_scale": "model-00001-of-00002.safetensors",
+            "language_model.model.norm.weight": "model-00002-of-00002.safetensors",
+        }
+        with tempfile.TemporaryDirectory() as hf_assets_path:
+            with open(f"{hf_assets_path}/model.safetensors.index.json", "w") as f:
+                json.dump({"weight_map": weight_map}, f)
+            adapter = KimiK3StateDictAdapter(
+                _small_kimi_k3_config(), hf_assets_path=hf_assets_path
+            )
+
+        self.assertEqual(
+            adapter.fqn_to_index_mapping,
+            {f"{experts}.w1.weight": 1, "language_model.model.norm.weight": 2},
+        )
+
+
+class KimiK3StateDictAdapterUnevenShardingTest(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 3
+
+    @with_comms
+    def test_kda_parameters_round_trip(self) -> None:
+        adapter = KimiK3StateDictAdapter(
+            _small_kimi_k3_config(),
+            hf_assets_path=None,
+        )
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        full_a_log = torch.arange(2, dtype=torch.float32, device=self.device_type)
+        sharded_a_log = distribute_tensor(full_a_log, mesh, (Shard(0),))
+        full_bias = torch.arange(
+            2 * 128,
+            dtype=torch.float32,
+            device=self.device_type,
+        ).reshape(2, 128)
+        sharded_bias = distribute_tensor(full_bias, mesh, (Shard(0),))
+
+        hf_state_dict = adapter.to_hf(
+            {
+                "layers.0.attention.A_log": sharded_a_log,
+                "layers.0.attention.dt_bias": sharded_bias,
+                "layers.1.attention_res_norm.weight": torch.ones(
+                    1, device=self.device_type
+                ),
+                "layers.1.attention_res_proj.weight": torch.ones(
+                    1, device=self.device_type
+                ),
+            }
+        )
+        hf_a_log = hf_state_dict["language_model.model.layers.0.self_attn.A_log"]
+        self.assertIsInstance(hf_a_log, DTensor)
+        self.assertEqual(hf_a_log.placements, (Replicate(),))
+        torch.testing.assert_close(
+            hf_a_log.full_tensor(),
+            torch.cat((full_a_log, torch.zeros(126, device=self.device_type))),
+        )
+        hf_bias = hf_state_dict["language_model.model.layers.0.self_attn.dt_bias"]
+        self.assertIsInstance(hf_bias, DTensor)
+        self.assertEqual(hf_bias.placements, (Replicate(),))
+        torch.testing.assert_close(hf_bias.full_tensor(), full_bias.reshape(-1))
+
+        restored_state_dict = adapter.from_hf(hf_state_dict)
+        restored_a_log = restored_state_dict["layers.0.attention.A_log"]
+        self.assertIsInstance(restored_a_log, DTensor)
+        self.assertEqual(restored_a_log.placements, (Shard(0),))
+        torch.testing.assert_close(restored_a_log.full_tensor(), full_a_log)
+
+        restored_bias = restored_state_dict["layers.0.attention.dt_bias"]
+        self.assertIsInstance(restored_bias, DTensor)
+        self.assertEqual(restored_bias.placements, (Shard(0),))
+        torch.testing.assert_close(restored_bias.full_tensor(), full_bias)
 
 
 class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
