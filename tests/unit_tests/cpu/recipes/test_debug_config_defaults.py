@@ -38,6 +38,10 @@ from torchtitan_recipes.tests.models.gpt_oss import (
     gpt_oss_debugmodel,
     gpt_oss_debugmodel_flex,
 )
+from torchtitan_recipes.tests.models.glm5 import (
+    glm5_2_debugmodel_mtp,
+    glm5_debugmodel,
+)
 from torchtitan_recipes.tests.models.kimi_k2_7 import kimi_k2_5_debugmodel
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
@@ -97,6 +101,8 @@ _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     deepseek_v4_mtp_debugmodel,
     gpt_oss_debugmodel,
     gpt_oss_debugmodel_flex,
+    glm5_debugmodel,
+    glm5_2_debugmodel_mtp,
     kimi_k2_5_debugmodel,
     llama3_debugmodel,
     llama3_debugmodel_ce_loss,
