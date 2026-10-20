@@ -172,20 +172,30 @@ Current limitations:
 
 With the DeepEP token dispatcher, the compact training dispatch waits on the
 host for the receive counts before the received tokens exist, and eager code
-queues nothing in between. `DeepEPTokenDispatcher.Config.split_dispatch_launch_wait`
-issues that dispatch as a `deepep.launch_dispatch` node followed by a
-`deepep.wait_dispatch` node, and
+queues nothing in between. With DeepEP v2.5 or newer, enable overlap with:
 
 ```python
 config.compile.deepep_dispatch_overlap = True
 ```
 
-moves forward work that does not depend on the wait, in the common MoE layout
-the shared experts, between the two nodes, so the GPU runs it while the dispatch
-is in flight. `graph_trainer_deepseek_v3_debugmodel_deepep` in the test recipes
-shows the setup. The pass is forward-only and is independent of `ep_overlap`:
-DeepEP has one communication buffer, so the second in-flight exchange that
-`ep_overlap` chunking needs is not available.
+GraphTrainer automatically splits dispatch into `deepep.launch_dispatch` and
+`deepep.wait_dispatch` before tracing, then moves independent forward work
+(the shared experts in the common MoE layout) between the two nodes so it runs
+while dispatch is in flight. The feature defaults to off.
+`graph_trainer_deepseek_v3_debugmodel_deepep` in the test recipes shows the setup.
+For tuning, compare the following configurations with the same model and inputs:
+
+| Configuration | Dispatch | Shared-expert scheduling |
+| --- | --- | --- |
+| `deepep_dispatch_overlap = False` | Original compact op | Unchanged |
+| `deepep_dispatch_overlap = True`, `disable_passes = ["deepep_dispatch_overlap_pass"]` | Split launch/wait | Unchanged |
+| `deepep_dispatch_overlap = True` | Split launch/wait | Between launch and wait |
+
+The split-only configuration isolates dispatch overhead; comparing it with the
+full feature isolates the scheduling benefit. Append to `disable_passes` if
+other passes are already disabled. The pass is forward-only and is independent
+of `ep_overlap`: DeepEP has one communication buffer, so the second in-flight
+exchange that `ep_overlap` chunking needs is not available.
 
 ### Experimental AutoParallel Sharding
 

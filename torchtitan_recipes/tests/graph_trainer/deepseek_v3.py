@@ -111,26 +111,24 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
 def graph_trainer_deepseek_v3_debugmodel_deepep(
     *,
     parallelism: ParallelismConfig | None = None,
-    deepep_dispatch_overlap: bool = False,
 ) -> GraphTrainer.Config:
-    """Debug model on the DeepEP compact dispatcher with split launch/wait ops.
+    """Debug model on the DeepEP compact dispatcher.
 
     The compact dispatch waits on the host for the receive counts, so CUDA graphs
-    stay off. ``deepep_dispatch_overlap`` schedules the shared experts between the
-    dispatch launch and its wait.
+    stay off. Enable ``config.compile.deepep_dispatch_overlap`` to split dispatch
+    and schedule the shared experts between its launch and wait.
     """
     if parallelism is None:
         parallelism = ParallelismConfig(expert_parallel_degree=2)
-    base = deepseek_v3_debugmodel(parallelism=parallelism)
+    base = deepseek_v3_debugmodel(attn_backend="flex", parallelism=parallelism)
     base.model = build_model_config(
         "debugmodel",
+        attn_backend="flex",
         seq_len=base.training.max_context_length,
         parallelism=base.parallelism,
     )
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
-    config.compile = GraphTrainerCompileConfig(
-        deepep_dispatch_overlap=deepep_dispatch_overlap
-    )
+    config.compile = GraphTrainerCompileConfig()
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
@@ -145,7 +143,6 @@ def graph_trainer_deepseek_v3_debugmodel_deepep(
                         * config.parallelism.tensor_parallel_degree
                     )
                 ),
-                kwargs={"split_dispatch_launch_wait": True},
             )
         ],
     )

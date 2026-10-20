@@ -297,11 +297,12 @@ class GraphTrainerCompileConfig:
     """Schedule independent MoE work (the shared experts) between a DeepEP
     dispatch launch and its wait, see ``deepep_overlap_pass``.
 
-    Requires the DeepEP token dispatcher with ``split_dispatch_launch_wait``,
-    which gives the graph separate ``deepep.launch_dispatch`` and
-    ``deepep.wait_dispatch`` nodes. Forward only. Independent of
-    ``ep_overlap``, which chunks the input and needs a second in-flight
-    exchange that DeepEP's single buffer cannot hold.
+    Requires the DeepEP token dispatcher and DeepEP v2.5 or newer. GraphTrainer
+    automatically splits dispatch into ``deepep.launch_dispatch`` and
+    ``deepep.wait_dispatch`` before tracing. For a split-only ablation, keep
+    this enabled and add ``deepep_dispatch_overlap_pass`` to ``disable_passes``.
+    Forward only. Independent of ``ep_overlap``, which chunks the input and
+    needs a second in-flight exchange that DeepEP's single buffer cannot hold.
     """
 
     precompile_artifact_dir: str = ""

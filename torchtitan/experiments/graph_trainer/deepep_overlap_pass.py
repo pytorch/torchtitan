@@ -6,10 +6,11 @@
 
 """Schedule independent MoE work between a DeepEP dispatch launch and its wait.
 
-The DeepEP token dispatcher with ``split_dispatch_launch_wait`` gives the traced
-step a ``deepep.launch_dispatch`` node and a ``deepep.wait_dispatch`` node per MoE
-layer. The launch returns once the communication is queued; the wait blocks the
-host until the receive counts arrive and then materializes the received tokens.
+Enabling ``compile.deepep_dispatch_overlap`` configures the DeepEP token
+dispatcher to give the traced step a ``deepep.launch_dispatch`` node and a
+``deepep.wait_dispatch`` node per MoE layer. The launch returns once communication
+is queued; the wait blocks the host until the receive counts arrive and then
+materializes the received tokens.
 Eager code runs the two back to back, so the GPU idles during the host wait.
 
 This pass moves forward work that does not depend on the wait -- in the common

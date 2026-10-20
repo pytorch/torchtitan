@@ -845,12 +845,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         num_max_tokens_per_rank: int | None = None
         # Model hidden dim, threaded by the builder for eager buffer initialization.
         hidden_dim: int | None = None
-        # Issue the compact training dispatch as a ``launch_dispatch`` op directly
-        # followed by a ``wait_dispatch`` op (DeepEP v2.5 ``defer_epilogue``) instead
-        # of one ``dispatch`` op. Eager execution gains nothing from the split; a
-        # traced training step (the graph trainer) can schedule independent work,
-        # such as the shared experts, between the two ops.
-        split_dispatch_launch_wait: bool = False
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -866,7 +860,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.hidden_dim = config.hidden_dim
         self.cuda_graph_compatible = config.cuda_graph_compatible
-        self.split_dispatch_launch_wait = config.split_dispatch_launch_wait
+        self._split_dispatch_launch_wait = False
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -930,7 +924,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             remat_region_name=self.remat_region_name("ep_communication.dispatch"),
             recompute=self._replays_communication(),
             cuda_graph_compatible=self.cuda_graph_compatible,
-            split_launch_wait=self.split_dispatch_launch_wait,
+            split_launch_wait=self._split_dispatch_launch_wait,
         )
 
         metadata = EPDispatchMetadata(state=state)
