@@ -52,6 +52,7 @@ def _validator(*, schedule=None, first=True, last=True):
     validator.config = SimpleNamespace(steps=1)
     validator._cuda_graph_enabled = True
     validator._run_eval = None
+    validator._cuda_graph_annotation_config = None
     validator.parallelism = SimpleNamespace(
         num_pp_microbatches=4 if schedule is not None else 1
     )
