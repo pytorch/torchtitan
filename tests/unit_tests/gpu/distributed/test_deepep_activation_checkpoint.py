@@ -81,14 +81,14 @@ class _DeepEPBlock(Module):
         expert_ids_TK = (token_ids_T1 + offsets_1K) % self.num_experts
         # Scores depend on the gate, so the router gets a gradient too.
         scores_TK = torch.sigmoid(self.gate(x_TD)).gather(1, expert_ids_TK)
-        num_tokens_per_expert_E = torch.bincount(
-            expert_ids_TK.flatten(), minlength=self.num_experts
-        )
+        routing_map_TE = torch.zeros(
+            num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
+        ).scatter_(1, expert_ids_TK, True)
         out_TD = self.routed_experts(
             x_TD,
             scores_TK,
             expert_ids_TK,
-            num_tokens_per_expert_E,
+            routing_map_TE,
         )
         # The loss is a bare consumer of the routed-expert output.
         remat.recompute_needs_tensor(out_TD)
