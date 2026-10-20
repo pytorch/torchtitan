@@ -347,12 +347,17 @@ class _RotatePairs(torch.autograd.Function):
 
     @staticmethod
     def rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        if x.dtype == torch.bfloat16 and x.is_contiguous():
-            # Read each pair as one int32 (x[2i] in the low half), so loads stay contiguous.
+        """``x`` may also hold bf16 pairs already packed as int32 words (MLA's ``_RotateTail``); the
+        result is then int32 too.
+        """
+        packed = x.dtype == torch.int32
+        out_dtype = torch.bfloat16 if packed else x.dtype
+        if packed or (x.dtype == torch.bfloat16 and x.is_contiguous()):
+            # Read each pair as one int32 (little-endian: x[2i] in the low half), so loads stay contiguous.
             # A bf16 shifted into the high 16 bits is its exact fp32. The int32 view also
             # ends the fusion with whatever produced x, which is written out first. It needs an
             # even element offset: every caller slices q/k at even widths.
-            pairs = x.view(torch.int32)
+            pairs = x if packed else x.view(torch.int32)
             x_real = (pairs << 16).view(torch.float32)
             x_imag = (pairs & ~0xFFFF).view(torch.float32)
         else:
@@ -360,14 +365,14 @@ class _RotatePairs(torch.autograd.Function):
             # view would be copied first.
             x_pairs = x.float().unflatten(-1, (-1, 2))
             x_real, x_imag = x_pairs[..., 0], x_pairs[..., 1]
-        real = (x_real * cos - x_imag * sin).type_as(x)
-        imag = (x_real * sin + x_imag * cos).type_as(x)
-        if x.dtype == torch.bfloat16:
+        real = (x_real * cos - x_imag * sin).to(out_dtype)
+        imag = (x_real * sin + x_imag * cos).to(out_dtype)
+        if out_dtype == torch.bfloat16:
             # Write each rotated pair as one int32 so stores stay contiguous; a store per half
             # writes every other element.
             low = real.view(torch.int16).to(torch.int32) & 0xFFFF
             high = imag.view(torch.int16).to(torch.int32) << 16
-            return (low | high).view(torch.bfloat16)
+            return low | high if packed else (low | high).view(torch.bfloat16)
         return torch.stack((real, imag), dim=-1).flatten(-2)
 
 
