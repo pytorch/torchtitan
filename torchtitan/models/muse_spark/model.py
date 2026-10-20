@@ -119,13 +119,13 @@ class MuseSparkAttention(GQAttention):
         attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        query_TNH, key_TKH, value_TKH = self.qkv_linear(x_TD)
+        qkv = self.qkv_linear.wqkv(x_TD)
         output_gate_TO = None
         if self.output_gate is not None:
             output_gate_TO = self.output_gate(x_TD)
 
-        remat.recompute_needs_tensor(query_TNH, key_TKH)
-        query_TNH, key_TKH = self._prepare_query_and_key(query_TNH, key_TKH, positions)
+        remat.recompute_needs_tensor(qkv)
+        query_TNH, key_TKH, value_TKH = self._prepare_query_key_value(qkv, positions)
 
         output_TNH = remat.region(
             self.inner_attention,
@@ -155,17 +155,20 @@ class MuseSparkAttention(GQAttention):
         recompile_limit=16,
         options={"triton.autotune_pointwise": False},
     )
-    def _prepare_query_and_key(
+    def _prepare_query_key_value(
         self,
-        query_TNH: torch.Tensor,
-        key_TKH: torch.Tensor,
+        qkv: torch.Tensor,
         positions: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the query and key as attention reads them. Each step runs only if configured.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split qkv and return q, k, v as attention reads them. Steps after the split run only if configured.
 
-        query: q_norm -> * scale_query_by -> * position temperature -> RoPE
-        key:   k_norm -> RoPE
+        query: split -> q_norm -> * scale_query_by -> * position temperature -> RoPE
+        key:   split -> k_norm -> RoPE
+        value: split
         """
+        # Split here, not in eager: the q/k copies fuse into the norms, and the backward
+        # writes the packed qkv grad directly instead of a cat.
+        query_TNH, key_TKH, value_TKH = self.qkv_linear.split(qkv)
         if self.q_norm is not None or self.k_norm is not None:
             if self.q_norm is None or self.k_norm is None:
                 raise ValueError("MuseSparkAttention needs both q_norm and k_norm.")
@@ -188,7 +191,7 @@ class MuseSparkAttention(GQAttention):
 
         if self.rope is not None:
             query_TNH, key_TKH = self.rope(query_TNH, key_TKH, positions)
-        return query_TNH, key_TKH
+        return query_TNH, key_TKH, value_TKH
 
     @local_compile("muse_spark_attention_output", batch_invariant=False)
     def _flatten_attention_output(

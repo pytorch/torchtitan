@@ -147,6 +147,15 @@ class QKVLinear(Module):
         self.heads_per_kv = config.n_heads // config.n_kv_heads
         self.r_dim = self.heads_per_kv + 2
 
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Fused QKV: single matmul, then reshape and split along R dim.
+        qkv = self.wqkv(x)
+        # The split below copies the wqkv projection output with bare ops.
+        remat.recompute_needs_tensor(qkv)
+        return self.split(qkv)
+
     @spmd.local_map(
         out_types=(
             (
@@ -156,15 +165,17 @@ class QKVLinear(Module):
         )
         * 3
     )
-    def forward(
-        self, x: torch.Tensor
+    def split(
+        self, qkv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Fused QKV: single matmul, then reshape and split along R dim.
+        """Split the ``wqkv`` output into contiguous q, k and v.
+
+        Separate from ``forward`` so a compiled region can split ``wqkv(x)`` and fuse the
+        copies. An eager caller other than ``forward`` calls
+        ``remat.recompute_needs_tensor(qkv)`` first, as ``forward`` does.
+        """
         # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
-        qkv = self.wqkv(x)
-        # The split below copies the wqkv projection output with bare ops.
-        remat.recompute_needs_tensor(qkv)
         num_tokens = qkv.shape[0]
         with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
             qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
