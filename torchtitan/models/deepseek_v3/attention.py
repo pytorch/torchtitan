@@ -183,25 +183,24 @@ class DeepSeekMLAAttention(Attention):
             The rotated query, same shape as ``q``, and the rotated ``k_pe`` as
             ``[T, 1, qk_rope_head_dim]``.
         """
+        k_pe = k_pe.unsqueeze(1)
         if (
             torch.compiler.is_compiling()
             and isinstance(self.rope, ComplexRoPE)
             and q.dtype == torch.bfloat16
             and q.is_contiguous()
         ):
-            # Rotate inside the q row viewed as int32 pairs (_RotateTail). Eager keeps
+            # Under compile, ComplexRoPE's cache holds adjacent (cos, sin) pairs, so a contiguous
+            # bf16 q can rotate inside its row viewed as int32 pairs (_RotateTail). Eager keeps
             # split -> rope -> cat below, where ComplexRoPE rotates with complex ops.
             cache = self.rope._reshape_cache(q, positions).unflatten(-1, (-1, 2))
             cos, sin = cache[..., 0], cache[..., 1]
-            return _RotateTail.apply(q, cos, sin), _RotatePairs.apply(
-                k_pe.unsqueeze(1), cos, sin
-            )
+            return _RotateTail.apply(q, cos, sin), _RotatePairs.apply(k_pe, cos, sin)
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
-        q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
+        q_pe, k_pe = self.rope(q_pe, k_pe, positions)
         return torch.cat([q_nope, q_pe], dim=-1), k_pe
-
 
 
 class _RotateTail(torch.autograd.Function):

@@ -347,7 +347,9 @@ class _RotatePairs(torch.autograd.Function):
 
     @staticmethod
     def rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        """``x`` may also hold bf16 pairs already packed as int32 words; the result is then int32 too."""
+        """``x`` may also hold bf16 pairs already packed as int32 words (MLA's ``_RotateTail``); the
+        result is then int32 too.
+        """
         packed = x.dtype == torch.int32
         out_dtype = torch.bfloat16 if packed else x.dtype
         if packed or (x.dtype == torch.bfloat16 and x.is_contiguous()):
