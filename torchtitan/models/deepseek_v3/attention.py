@@ -187,6 +187,7 @@ class DeepSeekMLAAttention(Attention):
         Args:
             q: ``[T, H, qk_nope_head_dim + qk_rope_head_dim]`` query.
             k_pe: ``[T, qk_rope_head_dim]`` key rope dims, shared by all heads.
+            positions: ``[T]`` position ids, or ``None`` for ``0..T-1``.
 
         Returns:
             The rotated query, same shape as ``q``, and the rotated ``k_pe`` as
@@ -217,9 +218,7 @@ class DeepSeekMLAAttention(Attention):
         """
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = torch.cat([k_nope, k_pe.expand(-1, k_nope.size(1), -1)], dim=-1)
-        if torch.compiler.is_compiling():
-            # A strided value view gets a gradient from attention in another
-            # layout, which the compiled backward copies before using it. A
-            # dense value avoids that copy and fuses into the key's kernel.
-            v = v.contiguous()
-        return k, v
+        # A strided value view gets a gradient from attention in another layout,
+        # which the compiled backward copies before using it. A dense value avoids
+        # that copy and fuses into the key's kernel.
+        return k, v.contiguous()
