@@ -17,6 +17,10 @@ import torch
 import torch.nn as nn
 from torch.fx.traceback import annotate_fn
 
+from torchtitan.distributed.deepep.hybridep import (
+    _num_permuted_tokens_for_non_blocking,
+    _use_output_capacity,
+)
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_size
 from torchtitan.experiments.graph_trainer.common_utils import matches_module_fqn_pattern
@@ -57,6 +61,28 @@ class _EagerChunkedForward:
         self.inner_forward = module.forward
         self.module = module
         self.root_fqn = root_fqn
+        dispatcher = module.routed_experts.token_dispatcher
+        assert isinstance(dispatcher, HybridEPTokenDispatcher)
+        ep_mesh = dispatcher.ep_mesh
+        assert ep_mesh is not None
+        assert dispatcher.num_max_tokens_per_rank is not None
+        assert dispatcher.non_blocking_capacity_factor is not None
+        ep_size = ep_mesh.size()
+        # Split the unaligned full-call budget once, then align each chunk.
+        budget = _num_permuted_tokens_for_non_blocking(
+            dispatcher.num_max_tokens_per_rank,
+            ep_size,
+            dispatcher.num_experts // ep_size,
+            module.router.top_k,
+            dispatcher.non_blocking_capacity_factor,
+        )
+        alignment = 1 if dispatcher.pad_multiple is None else dispatcher.pad_multiple
+        if alignment <= 0:
+            raise ValueError("HybridEP pad_multiple must be positive")
+        raw = (budget // 2, budget - budget // 2)
+        self.capacities = tuple(
+            ((capacity + alignment - 1) // alignment) * alignment for capacity in raw
+        )
 
     def __call__(
         self,
@@ -127,7 +153,8 @@ class _EagerChunkedForward:
                     kwargs["padding_mask_T"] = masks[chunk_id]
                 if aux_loss_denominator is not None:
                     kwargs["aux_loss_denominator"] = aux_loss_denominator
-                outputs.append(body(inputs[chunk_id], **kwargs))
+                with _use_output_capacity(self.capacities[chunk_id]):
+                    outputs.append(body(inputs[chunk_id], **kwargs))
 
         materialize = annotate_fn(
             {

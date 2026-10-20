@@ -174,11 +174,23 @@ before the first chunk's wait, then prefers ready launches, independent work
 and finally waits. It preserves data and mutation dependencies;
 it does not infer scheduling roles from node names or tensor shapes.
 
+The whole-call output row budget is
+`B = num_max_tokens_per_rank * ep_size * min(num_local_experts, top_k) * factor`.
+Chunk capacities are `floor(B / 2)` and `B - floor(B / 2)`, each rounded to native
+alignment. Factor 4 therefore gives each chunk factor 2 on the same full-call
+basis, not factor 1 on that basis. Their combined capacity equals the unchunked
+budget apart from alignment; the public factor is never changed. Transport
+storage is shared and initialized separately from this output budget. Native
+capacity drops set a device flag without synchronizing size discovery.
+
 Chunked and unchunked training are not promised bitwise equal: chunking changes
 expert-gradient accumulation order, and partitioned capacities can retain
 different tokens. Scheduling-only validation compares the same two chunks,
 routing and capacities with overlap disabled versus enabled. Numerical
 differences must not substitute for checking completion and storage ownership.
+
+Native capacity validation observes the real eager MoE wrapper at factor 4
+and an odd, aligned budget; it does not hand-bind the expected capacity.
 
 The focused integration recipes use full forward/backward CUDA graphs for
 the two-chunk control and overlap. They select native

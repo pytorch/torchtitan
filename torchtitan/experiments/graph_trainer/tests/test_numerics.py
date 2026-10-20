@@ -754,6 +754,116 @@ class TestHybridEPContracts(FSDPTest):
                     self.assertTrue(torch.isfinite(actual_grad).all())
                     self.assertEqual(actual_grad, expected_grad, rtol=0, atol=0)
 
+    def test_eager_chunk_capacity_uses_full_call_budget(self):
+        """Observe real MoE dispatch allocations through the eager wrapper."""
+        from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
+            graph_trainer_deepseek_v3_debugmodel,
+        )
+
+        from torchtitan.config.parallelism import ParallelismConfig
+        from torchtitan.config.transform import (
+            apply_transforms,
+            TokenDispatcherTransform,
+        )
+        from torchtitan.distributed.deepep import hybridep
+        from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+            _EagerChunkedForward,
+        )
+        from torchtitan.models.common.moe import MoE
+        from torchtitan.models.common.moe.token_dispatcher import (
+            HybridEPTokenDispatcher,
+        )
+
+        torch.cuda.set_device(self.rank)
+        parallelism = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=2,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=2,
+            world_size=2,
+            enable_sequence_parallel=False,
+        )
+        parallelism.build_mesh()
+        # The second case has an odd raw budget and independently aligned halves.
+        for factor, expected_capacities in ((4.0, (3072, 3072)), (0.251, (192, 256))):
+            torch.manual_seed(42 + self.rank)
+            config = graph_trainer_deepseek_v3_debugmodel(
+                parallelism=ParallelismConfig(
+                    data_parallel_shard_degree=2,
+                    expert_parallel_degree=2,
+                )
+            )
+            config = apply_transforms(
+                config,
+                [
+                    TokenDispatcherTransform(
+                        dispatcher=HybridEPTokenDispatcher,
+                        num_max_tokens_per_rank=256,
+                        kwargs={
+                            "non_blocking_capacity_factor": factor,
+                            "pad_multiple": 64,
+                            "async_op": True,
+                        },
+                    )
+                ],
+            )
+            moe_config = next(
+                layer.feed_forward
+                for layer in config.model.layers
+                if isinstance(layer.feed_forward, MoE.Config)
+            )
+            with torch.device("cuda", self.rank):
+                # A standalone MoE has no trainer-owned mixed-precision getters.
+                model = moe_config.build().to(dtype=torch.bfloat16)
+                inputs_TD = torch.randn(
+                    256, 256, dtype=torch.bfloat16, requires_grad=True
+                )
+                denominator = torch.tensor(512.0)
+            model._parallelize(parallelism)
+            observed = []
+
+            def record_dispatch_input(_module, args):
+                """Observe allocations without replacing the dispatcher or forward."""
+                observed.append((args[0].shape[0], args[0].nbytes))
+
+            with parallelism.activate_spmd():
+                # Replicated router/shared weights must agree across DP ranks.
+                torch.manual_seed(42)
+                model.init_states()
+                hook = model.routed_experts.w13.register_forward_pre_hook(
+                    record_dispatch_input
+                )
+                try:
+                    wrapped = _EagerChunkedForward(
+                        model, root_fqn="layers.0.feed_forward"
+                    )
+                    output_TD = wrapped(inputs_TD, aux_loss_denominator=denominator)
+                    self.assertEqual(
+                        tuple(rows for rows, _ in observed), expected_capacities
+                    )
+                    chunk_bytes = sum(num_bytes for _, num_bytes in observed)
+                    observed.clear()
+                    # The same configured factor sizes one real, unchunked call.
+                    model(inputs_TD, aux_loss_denominator=denominator)
+                    self.assertEqual(len(observed), 1)
+                    self.assertEqual(chunk_bytes, observed[0][1])
+                    gradients = torch.autograd.grad(
+                        output_TD.float().square().sum(),
+                        (inputs_TD, *model.parameters()),
+                    )
+                    self.assertTrue(
+                        all(torch.isfinite(grad).all() for grad in gradients)
+                    )
+                    self.assertEqual(
+                        model.routed_experts.token_dispatcher.non_blocking_capacity_factor,
+                        factor,
+                    )
+                    self.assertIsNone(hybridep._output_capacity.get())
+                finally:
+                    hook.remove()
+
 
 class TestSimpleFSDP(FSDPTest):
     @staticmethod
