@@ -967,24 +967,23 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             non_blocking_capacity_factor: Enable non-blocking HybridEP dispatch
                 with a given capacity factor.
 
-                Setting this to a float in (0, 1] enables CPU-free non-blocking
-                dispatch and controls num_permuted_tokens — the fused-permute
-                output capacity, estimated as:
-                num_max_tokens_per_rank * ep_size *
-                min(num_local_experts, top_k) * capacity_factor, aligned for
-                MXFP8. Tokens whose permuted offset exceeds this limit are
-                silently dropped (overflow_flag is set on GPU).
+                A finite positive float enables CPU-free non-blocking dispatch.
+                The output row budget is input_tokens * ep_size *
+                min(num_local_experts, top_k) * capacity_factor, aligned to
+                pad_multiple when provided. Native token dropping is
+                reported through a sticky device-side overflow flag.
 
                 - None = blocking mode (default).  HybridEP calls
                   cudaStreamSynchronize after dispatch, copies
                   tokens_per_expert to pinned CPU memory, and computes the
                   exact num_permuted_tokens on the host.  No token dropping.
-                - 1.0 = non-blocking, worst-case sizing: every token can reach
-                  every local expert, no drops, highest memory.
+                - 1.0 = non-blocking, worst-case unaligned routing capacity.
+                  Per-expert padding may still consume additional capacity.
                 - < 1.0 = non-blocking, reduced memory; controls the
                   fused-permute output tensor size (num_permuted_tokens).
                   Safe in practice when forced load balancing (e.g. aux-loss /
                   round-robin) keeps distribution roughly uniform.
+                - > 1.0 = additional static output headroom.
 
                 This factor does not affect the all-to-all communication
                 buffer, which is initialized separately from
@@ -992,6 +991,8 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         """
 
         non_blocking_capacity_factor: float | None = None
+        async_op: bool = False
+        """Launch communication on its own stream with explicit completion waits."""
         pad_multiple: int | None = None
         hidden_dim: int | None = None
         num_max_tokens_per_rank: int | None = None
@@ -999,6 +1000,7 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
+        self.async_op = config.async_op
         self.pad_multiple = config.pad_multiple
         self.hidden_dim = config.hidden_dim
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
@@ -1055,6 +1057,7 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             ep_group,
             non_blocking_expert_capacity_factor=self.non_blocking_capacity_factor,
             pad_multiple=self.pad_multiple,
+            async_op=self.async_op,
         )
 
         metadata = EPDispatchMetadata(state=state)

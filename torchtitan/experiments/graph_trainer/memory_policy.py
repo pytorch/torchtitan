@@ -94,6 +94,7 @@ def _get_default_save_ops() -> set:
         (torch.ops, "deepep.combine.default"),
         (torch.ops, "hybridep.dispatch.default"),
         (torch.ops, "hybridep.combine.default"),
+        (torch.ops, "hybridep.wait.default"),
     ]
 
     def resolve_ops(op_specs: list) -> set:

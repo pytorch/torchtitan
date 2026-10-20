@@ -4,949 +4,322 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Schedule already chunked EP token-exchange regions.
+"""Schedule annotated eager EP exchanges without changing their computation.
 
-Contract
-========
-This pass is intentionally a scheduler only.  It consumes a graph that has
-already been chunked by eager chunking and must not change tensor values,
-live-in/live-out materialization, or provenance.  The only semantic input it
-relies on is chunk-body metadata collected by ``collect_chunked_regions``.
-
-For each selected forward/backward region:
-
-* exactly two chunk bodies, chunk 0 and chunk 1, must be present;
-* true EP scheduling markers are
-  ``_c10d_functional.all_to_all_single.default`` launches inside the selected
-  chunk body;
-* ``custom[_EP_TOKEN_EXCHANGE]`` marks true token-exchange all-to-all launches;
-  waits may inherit the annotation from traceback and are normalized to
-  ``custom[_EP_TOKEN_EXCHANGE_WAIT]``;
-* marker counts and labels must match across chunks;
-* forward emits marker pairs in chunk order 0 then 1, backward emits 1 then 0;
-* both chunks' first-marker setup precedes the first launch pair;
-* token-count sync CPU copies, when present in the first marker closure, are
-  launched before their CPU scalar/list consumers;
-* after each marker pair, ready non-collective body work is emitted as filler
-  before advancing to the next marker pair;
-* all graph nodes remain in the sorted graph exactly once and the final graph
-  must lint.
-
-If a chunked region violates the contract, the pass errors rather than
-producing a silent schedule change.
-
-Pseudo-code
-===========
-1. Collect chunked regions and build node -> chunk-owner lookup from shared EP
-   pass metadata.
-2. For each region, collect true token-exchange all-to-all markers per chunk
-   and normalize wait annotations inherited from traceback.
-3. Validate both chunks have the same marker signature, then build dependency
-   closures needed to launch each marker.
-4. Emit wait-gated phases: marker pair in chunk order, ready filler work that
-   does not need token-exchange waits, then final tail work with waits allowed.
-5. Apply the requested region phases through a stable topological sort, lint,
-   recompile, and validate that phase order materialized.
+1. Source annotations identify each launch and its explicit completion request.
+2. Tensor, mutation, and launch-pair dependencies define the legal node order.
+3. Within one MoE region, prefer ready launches, then independent work, then
+   waits. Work outside that region retains its original order.
+4. Apply the planned order with PyTorch's topological sorter and validate it.
 """
 
 from __future__ import annotations
 
 import logging
-
+import operator
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 import torch.fx as fx
 from torch._dynamo.graph_deduplication import _stable_topological_sort
-from torch.utils._ordered_set import OrderedSet
+from torch._inductor.fx_passes.bucketing import _resolve_group_name
 
-from torchtitan.experiments.graph_trainer.common_utils import (
-    _EP_TOKEN_COUNT_SYNC,
+from torchtitan.distributed.deepep.hybridep import (
     _EP_TOKEN_EXCHANGE,
     _EP_TOKEN_EXCHANGE_WAIT,
 )
 from torchtitan.experiments.graph_trainer.ep_pass_utils import (
-    ChunkBody,
     ChunkedRegion,
     ChunkOwner,
     collect_chunked_regions,
-    is_c10d_functional_node,
     ordered_nodes,
 )
-
+from torchtitan.experiments.graph_trainer.mutation_utils import (
+    base_tensor_for_mutation_target,
+    mutation_deps,
+)
 
 logger = logging.getLogger(__name__)
-
-
-_GRAPH_BOUNDARY_OPS = {"placeholder", "get_attr"}
-_EP_PHASES = {"dispatch", "combine"}
-
-
-# Step 0: Small metadata helpers and local scheduling records.
+_BOUNDARIES = {"placeholder", "get_attr"}
 
 
 @dataclass(frozen=True)
 class _TokenExchange:
-    label: str
+    """A launch and the wait consuming its distinct completion request."""
+
+    phase: str
     launch: fx.Node
+    wait: fx.Node
 
 
-@dataclass(frozen=True)
-class _ScheduledRegion:
-    region: ChunkedRegion
-    phases: tuple[tuple[fx.Node, ...], ...]
-
-
-@dataclass(frozen=True)
-class _SyncClosureParts:
-    pre_copy: tuple[fx.Node, ...]
-    copies: tuple[fx.Node, ...]
-    post_copy: tuple[fx.Node, ...]
-    launches: tuple[fx.Node, ...]
-
-
-def _custom_meta(node: fx.Node) -> dict[str, Any]:
-    """Return mutable custom metadata when present, otherwise an empty dict."""
-    custom = node.meta.get("custom")
-    return custom if isinstance(custom, dict) else {}
-
-
-def _ep_label(node: fx.Node) -> str:
-    """Return the optional EP phase label for logs/wait metadata."""
-    phase = _custom_meta(node).get(_EP_TOKEN_EXCHANGE)
-    return phase if phase in _EP_PHASES else "all_to_all"
-
-
-def _is_token_exchange_launch(node: fx.Node) -> bool:
-    """Return whether a node is a token-exchange scheduling marker.
-
-    Only all-to-all ops annotated with ``EP_token_exchange`` (dispatch or
-    combine) are scheduling markers. The counts all-to-all (which only has
-    ``EP: dispatch`` without ``EP_token_exchange``) is NOT a marker; it
-    stays in the closure with shared expert + router compute so that
-    compute is available as filler during the data dispatch window.
-    """
-    return (
-        node.op == "call_function"
-        and node.target == torch.ops._c10d_functional.all_to_all_single.default
-        and _custom_meta(node).get(_EP_TOKEN_EXCHANGE) in _EP_PHASES
-    )
-
-
-def _is_c10d_functional_node(node: fx.Node) -> bool:
-    """Return whether a node is a distributed functional op."""
-    return is_c10d_functional_node(node)
-
-
-def _is_token_count_sync_copy(node: fx.Node) -> bool:
-    return (
-        node.op == "call_function"
-        and node.target == torch.ops.aten._to_copy.default
-        and _custom_meta(node).get(_EP_TOKEN_COUNT_SYNC) == "dispatch"
-    )
-
-
-def _is_cpu_destination_copy(node: fx.Node) -> bool:
-    device = node.kwargs.get("device")
-    if device is not None:
-        return torch.device(device).type == "cpu"
-
-    val = node.meta.get("val")
-    val_device = getattr(val, "device", None)
-    return val_device is not None and val_device.type == "cpu"
-
-
-def _set_copy_non_blocking(node: fx.Node, non_blocking: bool) -> None:
-    kwargs = dict(node.kwargs)
-    kwargs["non_blocking"] = non_blocking
-    node.kwargs = kwargs
-
-
-def _same_region_owner(
-    node: fx.Node,
-    *,
-    owner_by_node: dict[fx.Node, ChunkOwner],
-    root_fqn: str,
-    is_backward: bool,
-) -> ChunkOwner | None:
-    """Return chunk ownership only when it belongs to the same selected region."""
-    owner = owner_by_node.get(node)
-    if (
-        owner is not None
-        and owner.root_fqn == root_fqn
-        and owner.is_backward == is_backward
-    ):
-        return owner
-    return None
-
-
-def _is_wait_for_token_exchange(node: fx.Node, node_set: set[fx.Node]) -> bool:
-    return (
-        node.op == "call_function"
-        and node.target == torch.ops._c10d_functional.wait_tensor.default
-        and node.all_input_nodes
-        and node.all_input_nodes[0] in node_set
-        and _is_token_exchange_launch(node.all_input_nodes[0])
-    )
-
-
-def _collect_token_exchanges(
-    body: ChunkBody,
-    *,
-    order: dict[fx.Node, int],
+def _collect_native_exchanges(
+    nodes: Iterable[fx.Node], *, context: str
 ) -> tuple[_TokenExchange, ...]:
-    """Step 2: collect true token-exchange launches for one chunk body."""
-    node_set = set(body.nodes)
-    exchanges: list[_TokenExchange] = []
-    for node in body.nodes:
-        if not _is_token_exchange_launch(node):
-            phase = _custom_meta(node).get(_EP_TOKEN_EXCHANGE)
-            if phase is None:
-                continue
-            if _is_wait_for_token_exchange(node, node_set):
-                custom = dict(_custom_meta(node))
-                custom.pop(_EP_TOKEN_EXCHANGE, None)
-                custom[_EP_TOKEN_EXCHANGE_WAIT] = phase
-                node.meta["custom"] = custom
-                continue
-            raise ValueError(
-                "ep_overlap found EP token-exchange metadata on non-marker "
-                f"node {node.name} ({node.target}). Only all_to_all launches "
-                "and their wait_tensor nodes may carry this annotation."
-            )
+    """Validate source-annotated native exchanges without assuming chunking."""
+    allowed_launches = {
+        torch.ops.hybridep.dispatch.default: "dispatch",
+        torch.ops.hybridep.combine.default: "combine",
+        torch.ops.hybridep.dispatch_bwd.default: "dispatch",
+        torch.ops.hybridep.combine_bwd.default: "combine",
+    }
+    launches = {}
+    waits = {}
+    for node in nodes:
+        # Tuple projections inherit traceback annotations, but are not ops.
+        if node.op != "call_function" or not isinstance(
+            node.target, torch._ops.OpOverload
+        ):
             continue
-
-        label = _ep_label(node)
-        waits = [
-            user
-            for user in node.users
-            if user in node_set
-            and user.op == "call_function"
-            and user.target == torch.ops._c10d_functional.wait_tensor.default
-        ]
-        if len(waits) != 1:
+        custom = node.meta.get("custom", {})
+        phase = custom.get(_EP_TOKEN_EXCHANGE)
+        wait_phase = custom.get(_EP_TOKEN_EXCHANGE_WAIT)
+        if phase is not None:
+            if allowed_launches.get(node.target) != phase:
+                raise ValueError(
+                    f"Invalid EP launch annotation on {node.name}: {node.target}"
+                )
+            launches[node] = phase
+        if wait_phase is not None:
+            if node.target != torch.ops.hybridep.wait.default:
+                raise ValueError(
+                    f"Invalid EP wait annotation on {node.name}: {node.target}"
+                )
+            request = node.args[1]
+            if not (
+                isinstance(request, fx.Node)
+                and request.target is operator.getitem
+                and isinstance(request.args[0], fx.Node)
+            ):
+                raise ValueError(
+                    f"EP wait {node.name} must consume a launch's completion request"
+                )
+            launch = request.args[0]
+            inputs = {
+                input_node
+                for input_node in launch.all_input_nodes
+                if isinstance(input_node.meta.get("val"), torch.Tensor)
+            }
+            if set(node.args[2]) != inputs:
+                raise ValueError(
+                    f"EP wait {node.name} must retain every tensor input of "
+                    f"{launch.name}; compiler reuse cannot see opaque references"
+                )
+            if request.args[1] != len(launch.target._schema.returns) - 1:
+                raise ValueError(
+                    f"EP wait {node.name} does not consume the completion output"
+                )
+            if launch in waits:
+                raise ValueError(
+                    f"EP launch {launch.name} has multiple completion waits"
+                )
+            waits[launch] = (node, wait_phase)
+    if set(launches) != set(waits):
+        missing = set(launches) ^ set(waits)
+        raise ValueError(
+            f"{context} has unmatched EP launches/waits: "
+            f"{[node.name for node in missing]}. Enable non-blocking HybridEP async_op."
+        )
+    exchanges = []
+    for launch, phase in launches.items():
+        wait, wait_phase = waits[launch]
+        if phase != wait_phase:
             raise ValueError(
-                f"ep_overlap expected one token-exchange wait for {node.name}, "
-                f"found {len(waits)}."
+                f"EP launch/wait phase mismatch: {launch.name} -> {wait.name}"
             )
-        wait = waits[0]
-        if order[wait] <= order[node]:
-            raise ValueError(
-                "ep_overlap expected token-exchange wait to appear after its "
-                f"launch, found launch={node.name} wait={wait.name} for "
-                f"{body.owner}."
-            )
-        custom = dict(_custom_meta(wait))
-        custom.pop(_EP_TOKEN_EXCHANGE, None)
-        custom[_EP_TOKEN_EXCHANGE_WAIT] = label
-        wait.meta["custom"] = custom
-        exchanges.append(_TokenExchange(label=label, launch=node))
+        exchanges.append(_TokenExchange(phase, launch, wait))
     return tuple(exchanges)
 
 
-def _exchange_signature(exchanges: tuple[_TokenExchange, ...]) -> tuple[str, ...]:
-    """Return the semantic marker sequence used to match chunk pairs."""
-    return ("all_to_all",) * len(exchanges)
-
-
-def _exchange_labels(exchanges: tuple[_TokenExchange, ...]) -> tuple[str, ...]:
-    """Return optional marker labels for diagnostics."""
-    return tuple(exchange.label for exchange in exchanges)
-
-
-def _validate_exchange_labels(
-    root: str,
-    direction: str,
-    exchanges_by_chunk: dict[int, tuple[_TokenExchange, ...]],
-) -> None:
-    labels0 = _exchange_labels(exchanges_by_chunk[0])
-    labels1 = _exchange_labels(exchanges_by_chunk[1])
-    if labels0 != labels1:
-        raise ValueError(
-            f"ep_overlap expected matching token-exchange labels for "
-            f"{root!r} ({direction}), found chunk0={labels0} chunk1={labels1}."
+def _collect_exchanges(region: ChunkedRegion) -> dict[int, tuple[_TokenExchange, ...]]:
+    """Require one dispatch/combine pair in each annotated eager chunk."""
+    exchanges = {}
+    for chunk_id, body in region.bodies_by_chunk.items():
+        chunk_exchanges = _collect_native_exchanges(
+            body.nodes, context=f"EP region {region.root_fqn}, chunk {chunk_id}"
         )
-
-
-# Step 3: Build marker dependency closures and identify ready filler work.
-
-
-def _hidden_body_deps(
-    node: fx.Node,
-    *,
-    owner_by_node: dict[fx.Node, ChunkOwner],
-    root_fqn: str,
-    is_backward: bool,
-) -> tuple[fx.Node, ...]:
-    """Find same-region body deps behind unowned graph plumbing."""
-    deps: list[fx.Node] = []
-    seen: set[fx.Node] = set()
-    stack = list(node.all_input_nodes)
-    while stack:
-        dep = stack.pop()
-        if dep in seen:
-            continue
-        seen.add(dep)
-        owner = _same_region_owner(
-            dep,
-            owner_by_node=owner_by_node,
-            root_fqn=root_fqn,
-            is_backward=is_backward,
-        )
-        if owner is not None:
-            deps.append(dep)
-        elif owner_by_node.get(dep) is None and dep.op not in _GRAPH_BOUNDARY_OPS:
-            stack.extend(dep.all_input_nodes)
-    return tuple(deps)
-
-
-def _body_deps(
-    node: fx.Node,
-    *,
-    body: ChunkBody,
-    owner_by_node: dict[fx.Node, ChunkOwner],
-) -> tuple[fx.Node, ...]:
-    """Return same-region body deps, including deps behind unowned plumbing."""
-    deps: list[fx.Node] = []
-    for dep in node.all_input_nodes:
-        owner = _same_region_owner(
-            dep,
-            owner_by_node=owner_by_node,
-            root_fqn=body.owner.root_fqn,
-            is_backward=body.owner.is_backward,
-        )
-        if owner is not None:
-            deps.append(dep)
-        elif owner_by_node.get(dep) is None and dep.op not in _GRAPH_BOUNDARY_OPS:
-            deps.extend(
-                _hidden_body_deps(
-                    dep,
-                    owner_by_node=owner_by_node,
-                    root_fqn=body.owner.root_fqn,
-                    is_backward=body.owner.is_backward,
-                )
-            )
-    return tuple(dict.fromkeys(deps))
-
-
-def _body_ancestors(
-    nodes: tuple[fx.Node, ...],
-    *,
-    body: ChunkBody,
-    owner_by_node: dict[fx.Node, ChunkOwner],
-    node_set: set[fx.Node],
-) -> set[fx.Node]:
-    """Return same-body ancestors needed before the requested body nodes."""
-    ancestors: set[fx.Node] = set()
-    stack = [
-        dep
-        for node in nodes
-        for dep in _body_deps(node, body=body, owner_by_node=owner_by_node)
-        if dep in node_set
-    ]
-    while stack:
-        dep = stack.pop()
-        if dep in ancestors:
-            continue
-        ancestors.add(dep)
-        stack.extend(
-            next_dep
-            for next_dep in _body_deps(dep, body=body, owner_by_node=owner_by_node)
-            if next_dep in node_set
-        )
-    return ancestors
-
-
-def _split_token_count_sync_closure(
-    closure: tuple[fx.Node, ...],
-    *,
-    body: ChunkBody,
-    launch_nodes: set[fx.Node],
-    owner_by_node: dict[fx.Node, ChunkOwner],
-) -> _SyncClosureParts | None:
-    """Split the first token-exchange closure around sync D2H copy launches."""
-    copies = tuple(node for node in closure if _is_token_count_sync_copy(node))
-    if not copies:
-        return None
-    direction = "backward" if body.owner.is_backward else "forward"
-    if len(copies) != 2:
-        raise ValueError(
-            "ep_overlap expected exactly two token-count sync CPU copies for "
-            f"{body.owner.root_fqn!r} chunk {body.owner.chunk_id} ({direction}), "
-            f"found {len(copies)}."
-        )
-    non_cpu_copies = [
-        copy.name for copy in copies if not _is_cpu_destination_copy(copy)
-    ]
-    if non_cpu_copies:
-        raise ValueError(
-            "ep_overlap token-count sync optimization only supports CPU "
-            f"_to_copy destinations; ambiguous/non-CPU copies for "
-            f"{body.owner.root_fqn!r} chunk {body.owner.chunk_id} ({direction}): "
-            f"{', '.join(non_cpu_copies)}."
-        )
-
-    closure_set = set(closure)
-    copy_set = set(copies)
-    pre_copy_set = _body_ancestors(
-        copies,
-        body=body,
-        owner_by_node=owner_by_node,
-        node_set=closure_set,
-    )
-    launches = tuple(node for node in closure if node in launch_nodes)
-    blocked = pre_copy_set | copy_set | set(launches)
-    return _SyncClosureParts(
-        pre_copy=tuple(node for node in closure if node in pre_copy_set),
-        copies=copies,
-        post_copy=tuple(node for node in closure if node not in blocked),
-        launches=launches,
-    )
-
-
-def _validate_token_count_sync_copies(
-    body: ChunkBody,
-    *,
-    first_closure: tuple[fx.Node, ...],
-) -> None:
-    first_closure_set = set(first_closure)
-    stray_copies = [
-        node.name
-        for node in body.nodes
-        if _is_token_count_sync_copy(node) and node not in first_closure_set
-    ]
-    if stray_copies:
-        direction = "backward" if body.owner.is_backward else "forward"
-        raise ValueError(
-            "ep_overlap only schedules token-count sync CPU copies in the first "
-            f"token-exchange closure for {body.owner.root_fqn!r} chunk "
-            f"{body.owner.chunk_id} ({direction}); found outside the first "
-            f"closure: {', '.join(stray_copies)}."
-        )
-
-
-def _marker_closure(
-    launch: fx.Node,
-    *,
-    body: ChunkBody,
-    order: dict[fx.Node, int],
-    owner_by_node: dict[fx.Node, ChunkOwner],
-    exchange_index: int,
-    exchange_indices: dict[fx.Node, int],
-) -> tuple[fx.Node, ...]:
-    """Return the body nodes required to launch one token exchange."""
-    closure: list[fx.Node] = []
-    visiting: set[fx.Node] = set()
-    visited: set[fx.Node] = set()
-
-    def visit(node: fx.Node, *, allow_peer_chunk: bool = False) -> None:
-        if node in visited:
-            return
-        if node in visiting:
+        if len(chunk_exchanges) != 2 or {item.phase for item in chunk_exchanges} != {
+            "dispatch",
+            "combine",
+        }:
             raise ValueError(
-                "ep_overlap found a cycle while building marker closure for "
-                f"{launch.name} in {body.owner}."
+                f"EP region {region.root_fqn}, chunk {chunk_id}, requires "
+                "one dispatch and one combine with explicit completion waits"
             )
-
-        owner = _same_region_owner(
-            node,
-            owner_by_node=owner_by_node,
-            root_fqn=body.owner.root_fqn,
-            is_backward=body.owner.is_backward,
-        )
-        if owner is None:
-            for dep in sorted(
-                _hidden_body_deps(
-                    node,
-                    owner_by_node=owner_by_node,
-                    root_fqn=body.owner.root_fqn,
-                    is_backward=body.owner.is_backward,
-                ),
-                key=order.__getitem__,
-            ):
-                visit(dep, allow_peer_chunk=True)
-            return
-
-        if owner.chunk_id != body.owner.chunk_id and not allow_peer_chunk:
-            raise ValueError(
-                "ep_overlap cannot schedule a token exchange whose dependency "
-                f"{node.name} belongs to peer chunk {owner.chunk_id} of "
-                f"{body.owner.root_fqn!r}."
-            )
-        if owner.chunk_id == body.owner.chunk_id:
-            dep_exchange_idx = exchange_indices.get(node)
-            if dep_exchange_idx is not None and dep_exchange_idx > exchange_index:
-                raise ValueError(
-                    "ep_overlap token-exchange order is not topologically valid: "
-                    f"launch {launch.name} for {body.owner} needs later "
-                    f"same-chunk launch {node.name}."
-                )
-
-        visiting.add(node)
-        for dep in sorted(
-            _body_deps(node, body=body, owner_by_node=owner_by_node),
-            key=order.__getitem__,
-        ):
-            dep_owner = _same_region_owner(
-                dep,
-                owner_by_node=owner_by_node,
-                root_fqn=body.owner.root_fqn,
-                is_backward=body.owner.is_backward,
-            )
-            visit(
-                dep,
-                allow_peer_chunk=allow_peer_chunk
-                or (
-                    dep_owner is not None and dep_owner.chunk_id != body.owner.chunk_id
-                ),
-            )
-        visiting.remove(node)
-        visited.add(node)
-        closure.append(node)
-
-    visit(launch)
-    return tuple(sorted(closure, key=order.__getitem__))
-
-
-def _ready_nodes(
-    *,
-    candidates_by_chunk: dict[int, set[fx.Node]],
-    emitted: set[fx.Node],
-    region: ChunkedRegion,
-    chunk_order: tuple[int, ...],
-    order: dict[fx.Node, int],
-    owner_by_node: dict[fx.Node, ChunkOwner],
-    include_waits: bool,
-) -> tuple[fx.Node, ...]:
-    """Return currently schedulable body nodes from candidate filler sets."""
-    ready: list[fx.Node] = []
-    selected: set[fx.Node] = set()
-    for chunk_id in chunk_order:
-        body = region.bodies_by_chunk[chunk_id]
-        candidates = sorted(
-            candidates_by_chunk.get(chunk_id, set()) - emitted,
-            key=order.__getitem__,
-        )
-        for node in candidates:
-            if node in selected:
-                continue
-            if not include_waits and _is_c10d_functional_node(node):
-                continue
-            deps = _body_deps(node, body=body, owner_by_node=owner_by_node)
-            if all(dep in emitted for dep in deps):
-                ready.append(node)
-                selected.add(node)
-    return tuple(ready)
-
-
-def _append_ready_blocks(
-    blocks: list[tuple[fx.Node, ...]],
-    emitted: set[fx.Node],
-    *,
-    candidates_by_chunk: dict[int, set[fx.Node]],
-    region: ChunkedRegion,
-    chunk_order: tuple[int, ...],
-    order: dict[fx.Node, int],
-    owner_by_node: dict[fx.Node, ChunkOwner],
-    include_waits: bool,
-) -> bool:
-    """Append ready filler/tail blocks until the candidate frontier stalls."""
-    made_progress = False
-    while True:
-        ready = tuple(
-            node
-            for node in _ready_nodes(
-                candidates_by_chunk=candidates_by_chunk,
-                emitted=emitted,
-                region=region,
-                chunk_order=chunk_order,
-                order=order,
-                owner_by_node=owner_by_node,
-                include_waits=include_waits,
-            )
-            if node not in emitted
-        )
-        if not ready:
-            return made_progress
-        blocks.append(ready)
-        emitted.update(ready)
-        made_progress = True
-
-
-def _build_region_phases(
-    *,
-    region: ChunkedRegion,
-    exchanges_by_chunk: dict[int, tuple[_TokenExchange, ...]],
-    order: dict[fx.Node, int],
-    owner_by_node: dict[fx.Node, ChunkOwner],
-    rewrite_token_count_sync_copies: bool,
-) -> tuple[tuple[fx.Node, ...], ...]:
-    """Step 4: construct wait-gated phases for one scheduled region."""
-    chunk_order = (1, 0) if region.is_backward else (0, 1)
-    exchange_indices = {
-        chunk_id: {
-            exchange.launch: idx
-            for idx, exchange in enumerate(exchanges_by_chunk[chunk_id])
-        }
-        for chunk_id in chunk_order
+        exchanges[chunk_id] = chunk_exchanges
+    signatures = {
+        chunk: tuple((exchange.phase, exchange.launch.target) for exchange in values)
+        for chunk, values in exchanges.items()
     }
-    closures = {
-        chunk_id: tuple(
-            _marker_closure(
-                exchange.launch,
-                body=region.bodies_by_chunk[chunk_id],
-                order=order,
-                owner_by_node=owner_by_node,
-                exchange_index=idx,
-                exchange_indices=exchange_indices[chunk_id],
-            )
-            for idx, exchange in enumerate(exchanges_by_chunk[chunk_id])
-        )
-        for chunk_id in chunk_order
-    }
-    closure_nodes = {
-        chunk_id: {node for closure in chunk_closures for node in closure}
-        for chunk_id, chunk_closures in closures.items()
-    }
-    filler = {
-        chunk_id: set(region.bodies_by_chunk[chunk_id].nodes) - closure_nodes[chunk_id]
-        for chunk_id in chunk_order
-    }
-    launch_nodes = {
-        exchange.launch
-        for chunk_exchanges in exchanges_by_chunk.values()
-        for exchange in chunk_exchanges
-    }
-
-    def future_candidates(exchange_idx: int) -> dict[int, set[fx.Node]]:
-        return {
-            chunk_id: {
-                node
-                for closure in closures[chunk_id][exchange_idx + 1 :]
-                for node in closure
-                if node not in launch_nodes
-            }
-            | filler[chunk_id]
-            for chunk_id in chunk_order
-        }
-
-    blocks: list[tuple[fx.Node, ...]] = []
-    emitted: set[fx.Node] = set()
-
-    def append_pending(nodes: tuple[fx.Node, ...]) -> None:
-        pending = tuple(node for node in nodes if node not in emitted)
-        if pending:
-            blocks.append(pending)
-            emitted.update(pending)
-
-    def rewrite_sync_copies(copies: tuple[fx.Node, ...]) -> None:
-        if not rewrite_token_count_sync_copies:
-            return
-        for idx, copy in enumerate(copies):
-            _set_copy_non_blocking(copy, idx + 1 != len(copies))
-
-    sync_parts_by_chunk: dict[int, _SyncClosureParts | None] = {}
-    if exchanges_by_chunk[0]:
-        for chunk_id in chunk_order:
-            body = region.bodies_by_chunk[chunk_id]
-            first_closure = closures[chunk_id][0]
-            _validate_token_count_sync_copies(body, first_closure=first_closure)
-            sync_parts_by_chunk[chunk_id] = _split_token_count_sync_closure(
-                first_closure,
-                body=body,
-                launch_nodes=launch_nodes,
-                owner_by_node=owner_by_node,
-            )
-        if any(parts is not None for parts in sync_parts_by_chunk.values()) and not all(
-            parts is not None for parts in sync_parts_by_chunk.values()
-        ):
-            direction = "backward" if region.is_backward else "forward"
-            raise ValueError(
-                "ep_overlap expected token-count sync CPU copies for both chunks "
-                f"of {region.root_fqn!r} ({direction}) when optimizing sync "
-                "copy scheduling."
-            )
-
-    for exchange_idx in range(len(exchanges_by_chunk[0])):
-        if exchange_idx == 0:
-            paired_sync_parts = tuple(
-                sync_parts_by_chunk[chunk_id] for chunk_id in chunk_order
-            )
-            if all(parts is not None for parts in paired_sync_parts):
-                # Startup: issue both chunks' token-count D2H copies before any
-                # CPU split-size reads, so only the final copy has to block.
-                for parts in paired_sync_parts:
-                    assert parts is not None
-                    append_pending(parts.pre_copy)
-                paired_copies = tuple(
-                    copy
-                    for parts in paired_sync_parts
-                    for copy in (parts.copies if parts is not None else ())
-                )
-                rewrite_sync_copies(paired_copies)
-                append_pending(paired_copies)
-                for parts in paired_sync_parts:
-                    assert parts is not None
-                    append_pending(parts.post_copy)
-                for parts in paired_sync_parts:
-                    assert parts is not None
-                    append_pending(parts.launches)
-            else:
-                # Startup: emit both chunks up to the first token exchange before
-                # launching either chunk's exchange. This keeps count/sync setup
-                # together in forward and keeps backward combine launches paired.
-                for chunk_id in chunk_order:
-                    closure = closures[chunk_id][exchange_idx]
-                    deps = tuple(
-                        node
-                        for node in closure
-                        if node not in emitted and node not in launch_nodes
-                    )
-                    append_pending(deps)
-                for chunk_id in chunk_order:
-                    closure = closures[chunk_id][exchange_idx]
-                    launches = tuple(
-                        node
-                        for node in closure
-                        if node not in emitted and node in launch_nodes
-                    )
-                    append_pending(launches)
-        else:
-            # Regular wait-gated scheduling: emit each chunk's full closure
-            # sequentially. Later closures may intentionally include waits
-            # whose users are the next token-exchange launch.
-            for chunk_id in chunk_order:
-                sync_parts = (
-                    sync_parts_by_chunk.get(chunk_id) if exchange_idx == 0 else None
-                )
-                if sync_parts is not None:
-                    rewrite_sync_copies(sync_parts.copies)
-                    append_pending(sync_parts.pre_copy)
-                    append_pending(sync_parts.copies)
-                    append_pending(sync_parts.post_copy)
-                    append_pending(sync_parts.launches)
-                else:
-                    closure = closures[chunk_id][exchange_idx]
-                    append_pending(
-                        tuple(node for node in closure if node not in emitted)
-                    )
-        _append_ready_blocks(
-            blocks,
-            emitted,
-            candidates_by_chunk=future_candidates(exchange_idx),
-            region=region,
-            chunk_order=chunk_order,
-            order=order,
-            owner_by_node=owner_by_node,
-            include_waits=False,
-        )
-
-    remaining = {
-        chunk_id: set(region.bodies_by_chunk[chunk_id].nodes) - emitted
-        for chunk_id in chunk_order
-    }
-    made_progress = True
-    while made_progress:
-        made_progress = False
-        for chunk_id in chunk_order:
-            made_progress |= _append_ready_blocks(
-                blocks,
-                emitted,
-                candidates_by_chunk={chunk_id: remaining[chunk_id]},
-                region=region,
-                chunk_order=(chunk_id,),
-                order=order,
-                owner_by_node=owner_by_node,
-                include_waits=True,
-            )
-
-    missing = [
-        node
-        for chunk_id in chunk_order
-        for node in region.bodies_by_chunk[chunk_id].nodes
-        if node not in emitted
-    ]
-    if missing:
-        direction = "backward" if region.is_backward else "forward"
+    if signatures[0] != signatures[1]:
         raise ValueError(
-            f"ep_overlap could not schedule all body nodes for {region.root_fqn!r} "
-            f"({direction}); remaining: {', '.join(n.name for n in missing[:8])}."
+            f"EP chunk signatures differ for {region.root_fqn}: {signatures}"
         )
-    logger.debug(
-        "ep_overlap phases: root=%s direction=%s chunk_order=%s markers=%d "
-        "phase_sizes=%s",
-        region.root_fqn,
-        "backward" if region.is_backward else "forward",
-        chunk_order,
-        len(exchanges_by_chunk[0]),
-        [len(block) for block in blocks],
-    )
-    return tuple(blocks)
+    return exchanges
 
 
-def _plan_region(
-    region: ChunkedRegion,
-    *,
-    order: dict[fx.Node, int],
-    owner_by_node: dict[fx.Node, ChunkOwner],
-    rewrite_token_count_sync_copies: bool,
-) -> _ScheduledRegion | None:
-    """Steps 2-4: validate one chunked region and build its schedule phases."""
-    root = region.root_fqn
-    direction = "backward" if region.is_backward else "forward"
-    if set(region.bodies_by_chunk) != {0, 1}:
-        raise ValueError(
-            f"ep_overlap expected both chunks for {root!r} ({direction}), "
-            f"found {sorted(region.bodies_by_chunk)}."
-        )
-
-    exchanges_by_chunk = {
-        chunk_id: _collect_token_exchanges(
-            region.bodies_by_chunk[chunk_id],
-            order=order,
-        )
-        for chunk_id in (0, 1)
-    }
-    if not exchanges_by_chunk[0] and not exchanges_by_chunk[1]:
-        logger.debug(
-            "ep_overlap skipped region without token exchanges: root=%s direction=%s",
-            root,
-            direction,
-        )
-        return None
-    if not exchanges_by_chunk[0] or not exchanges_by_chunk[1]:
-        raise ValueError(
-            f"ep_overlap found EP token exchanges for only one chunk of "
-            f"{root!r} ({direction})."
-        )
-    if _exchange_signature(exchanges_by_chunk[0]) != _exchange_signature(
-        exchanges_by_chunk[1]
-    ):
-        raise ValueError(
-            f"ep_overlap expected matching EP all-to-all counts for "
-            f"{root!r} ({direction}), found "
-            f"chunk0={_exchange_signature(exchanges_by_chunk[0])} "
-            f"chunk1={_exchange_signature(exchanges_by_chunk[1])}."
-        )
-    _validate_exchange_labels(root, direction, exchanges_by_chunk)
-    logger.debug(
-        "ep_overlap planned region: root=%s direction=%s body_sizes=(%d,%d) "
-        "marker_count=%d marker_labels=(%s,%s)",
-        root,
-        direction,
-        len(region.bodies_by_chunk[0].nodes),
-        len(region.bodies_by_chunk[1].nodes),
-        len(exchanges_by_chunk[0]),
-        _exchange_labels(exchanges_by_chunk[0]),
-        _exchange_labels(exchanges_by_chunk[1]),
-    )
-
-    phases = _build_region_phases(
-        region=region,
-        exchanges_by_chunk=exchanges_by_chunk,
-        order=order,
-        owner_by_node=owner_by_node,
-        rewrite_token_count_sync_copies=rewrite_token_count_sync_copies,
-    )
-    return _ScheduledRegion(region=region, phases=phases) if phases else None
-
-
-def _phase_order_deps(
-    scheduled_regions: list[_ScheduledRegion],
-) -> dict[fx.Node, OrderedSet[fx.Node]]:
-    """Return extra ordering deps that preserve each region's phase schedule."""
-    deps: dict[fx.Node, OrderedSet[fx.Node]] = {}
-
-    def add_dep(node: fx.Node, dep: fx.Node) -> None:
-        if node is dep:
-            return
-        deps.setdefault(node, OrderedSet()).add(dep)
-
-    for region in scheduled_regions:
-        previous_phase_tail: fx.Node | None = None
-        for phase in region.phases:
-            previous_node: fx.Node | None = None
-            for node in phase:
-                if previous_node is not None:
-                    add_dep(node, previous_node)
-                elif previous_phase_tail is not None:
-                    add_dep(node, previous_phase_tail)
-                previous_node = node
-            if previous_node is not None:
-                previous_phase_tail = previous_node
+def _graph_dependencies(gm: fx.GraphModule) -> dict[fx.Node, set[fx.Node]]:
+    """Preserve positional arguments, data edges and mutable-storage ordering."""
+    deps = {node: set(node.all_input_nodes) for node in gm.graph.nodes}
+    # Positional input order is the callable ABI, not a tensor dependency.
+    placeholders = gm.graph.find_nodes(op="placeholder")
+    for first, second in zip(placeholders, placeholders[1:]):
+        deps[second].add(first)
+    mutators_by_base = mutation_deps(gm.graph)
+    mutable_bases = set(mutators_by_base)
+    readers: dict[fx.Node, set[fx.Node]] = {}
+    last_write: dict[fx.Node, fx.Node] = {}
+    writes: dict[fx.Node, set[fx.Node]] = {}
+    for base, mutators in mutators_by_base.items():
+        for mutator in mutators:
+            writes.setdefault(mutator, set()).add(base)
+    for node in gm.graph.nodes:
+        bases = {
+            base_tensor_for_mutation_target(input_node)
+            for input_node in node.all_input_nodes
+        } & mutable_bases
+        for base in bases:
+            if base in last_write:
+                deps[node].add(last_write[base])
+            readers.setdefault(base, set()).add(node)
+        for base in writes.get(node, ()):
+            deps[node].update(readers.get(base, set()) - {node})
+            readers[base] = set()
+            last_write[base] = node
     return deps
 
 
-def _apply_schedule(
-    gm: fx.GraphModule,
-    scheduled_regions: list[_ScheduledRegion],
-) -> None:
-    """Step 5: apply scheduled order, lint, recompile, and validate phases."""
-    _stable_topological_sort(gm.graph, _phase_order_deps(scheduled_regions))
-    gm.graph.lint()
-    gm.recompile()
-    new_order = ordered_nodes(gm)
-    for region in scheduled_regions:
-        previous_max: int | None = None
-        for phase in region.phases:
-            if not phase:
-                continue
-            phase_min = min(new_order[node] for node in phase)
-            phase_max = max(new_order[node] for node in phase)
-            if previous_max is not None and previous_max >= phase_min:
-                direction = "backward" if region.region.is_backward else "forward"
-                raise ValueError(
-                    "ep_overlap failed to materialize requested block order for "
-                    f"{region.region.root_fqn!r} ({direction})."
-                )
-            previous_max = phase_max
+def _region_scope(
+    region: ChunkedRegion,
+    deps: dict[fx.Node, set[fx.Node]],
+    owners: dict[fx.Node, ChunkOwner],
+) -> set[fx.Node]:
+    """Include a region's unowned preparation without pulling in another body."""
+    scope = {node for body in region.bodies_by_chunk.values() for node in body.nodes}
+    pending = [dep for node in scope for dep in deps[node]]
+    while pending:
+        node = pending.pop()
+        if node in scope or node in owners or node.op in _BOUNDARIES:
+            continue
+        scope.add(node)
+        pending.extend(deps[node])
+    return scope
 
 
-def _schedule_ep_overlap_regions(
-    gm: fx.GraphModule,
+def _prioritized_order(
+    deps: dict[fx.Node, set[fx.Node]],
     *,
-    module_pattern: str,
-    require_all_to_all: bool,
-    reorder: bool = True,
-) -> int:
-    """Run validation or scheduling for all chunked regions matching a pattern."""
+    order: dict[fx.Node, int],
+    launches: set[fx.Node],
+    waits: set[fx.Node],
+    regions: list[tuple[set[fx.Node], set[fx.Node]]],
+) -> list[fx.Node]:
+    """Topologically schedule ordered scopes with early launches and late waits.
+
+    Each region contains its eligible scope and the owned body whose completion
+    advances to the next region.
+    """
+    successors: dict[fx.Node, list[fx.Node]] = {node: [] for node in deps}
+    for node, predecessors in deps.items():
+        for predecessor in predecessors:
+            successors[predecessor].append(node)
+    remaining = {node: len(predecessors) for node, predecessors in deps.items()}
+    ready = {node for node, count in remaining.items() if not count}
+    emitted = set()
+    result = []
+    active_region = 0
+    while ready:
+        while active_region < len(regions) and regions[active_region][1] <= emitted:
+            active_region += 1
+        scoped_ready = (
+            ready & regions[active_region][0] if active_region < len(regions) else set()
+        )
+        if scoped_ready:
+            node = min(
+                scoped_ready,
+                key=lambda candidate: (
+                    0 if candidate in launches else 2 if candidate in waits else 1,
+                    order[candidate],
+                ),
+            )
+        else:
+            node = min(ready, key=order.__getitem__)
+        ready.remove(node)
+        emitted.add(node)
+        result.append(node)
+        for successor in successors[node]:
+            remaining[successor] -= 1
+            if remaining[successor] == 0:
+                ready.add(successor)
+    if len(result) != len(deps):
+        blocked = [node.name for node in deps if node not in emitted]
+        raise ValueError(
+            f"Communication scheduling dependencies contain a cycle: {blocked[:8]}"
+        )
+    return result
+
+
+def _plan_order(
+    gm: fx.GraphModule,
+    regions: list[ChunkedRegion],
+    exchanges: list[dict[int, tuple[_TokenExchange, ...]]],
+) -> list[fx.Node]:
+    """Choose the earliest legal launches and postpone waits behind ready work."""
+
     order = ordered_nodes(gm)
-    chunked_regions = collect_chunked_regions(gm, module_pattern=module_pattern)
-    owner_by_node = {
+    deps = _graph_dependencies(gm)
+    launches, waits = set(), set()
+    for region, chunk_exchanges in zip(regions, exchanges, strict=True):
+        chunk_order = (1, 0) if region.is_backward else (0, 1)
+        for first, second in zip(
+            chunk_exchanges[chunk_order[0]],
+            chunk_exchanges[chunk_order[1]],
+            strict=True,
+        ):
+            deps[second.launch].add(first.launch)
+            deps[first.wait].add(second.launch)
+            launches.update((first.launch, second.launch))
+            waits.update((first.wait, second.wait))
+    owners = {
         node: body.owner
-        for region in chunked_regions
+        for region in regions
         for body in region.bodies_by_chunk.values()
         for node in body.nodes
     }
-    scheduled_regions = [
-        planned
-        for region in chunked_regions
-        if (
-            planned := _plan_region(
-                region,
-                order=order,
-                owner_by_node=owner_by_node,
-                rewrite_token_count_sync_copies=reorder,
-            )
-        )
-        is not None
+    scopes = [_region_scope(region, deps, owners) for region in regions]
+    body_nodes = [
+        {node for body in region.bodies_by_chunk.values() for node in body.nodes}
+        for region in regions
     ]
-    logger.debug(
-        "ep_overlap discovered %d chunked region(s), scheduled %d: pattern=%s",
-        len(chunked_regions),
-        len(scheduled_regions),
-        module_pattern,
+    return _prioritized_order(
+        deps,
+        order=order,
+        launches=launches,
+        waits=waits,
+        regions=list(zip(scopes, body_nodes, strict=True)),
     )
 
-    if scheduled_regions and reorder:
-        _apply_schedule(gm, scheduled_regions)
-    elif require_all_to_all:
-        raise ValueError(
-            f"ep_overlap did not find any chunked EP all-to-all regions for "
-            f"pattern {module_pattern}."
-        )
-    return len(scheduled_regions)
+
+def _validated_regions(
+    gm: fx.GraphModule,
+    *,
+    module_pattern: str,
+) -> tuple[list[ChunkedRegion], list[dict[int, tuple[_TokenExchange, ...]]]]:
+    """Collect regions with explicit exchanges and reject incomplete chunk pairs."""
+    regions = []
+    exchanges = []
+    for region in collect_chunked_regions(gm, module_pattern=module_pattern):
+        if set(region.bodies_by_chunk) != {0, 1}:
+            raise ValueError(
+                f"EP region {region.root_fqn} must contain both token chunks"
+            )
+        pairs = _collect_exchanges(region)
+        regions.append(region)
+        exchanges.append(pairs)
+    if not regions:
+        raise ValueError(f"No annotated HybridEP exchanges found for {module_pattern}")
+    return regions, exchanges
 
 
 def ep_overlap_validate_pass(
@@ -954,21 +327,36 @@ def ep_overlap_validate_pass(
     example_inputs: tuple[Any, ...] | None = None,
     *,
     module_pattern: str,
-    require_all_to_all: bool = False,
 ) -> fx.GraphModule:
-    """Validate the already chunked graph without changing node order."""
+    """Validate real eager launch/request/wait contracts without reordering."""
     del example_inputs
-    validated = _schedule_ep_overlap_regions(
+    regions, _ = _validated_regions(
         gm,
         module_pattern=module_pattern,
-        require_all_to_all=require_all_to_all,
-        reorder=False,
     )
-    logger.info(
-        "Validated %d ep_overlap chunked region(s): module=%s",
-        validated,
-        module_pattern,
-    )
+    from torchtitan.experiments.graph_trainer.fsdp_patterns import fsdp_param_fqns
+
+    roots = {region.root_fqn for region in regions}
+    collectives = {
+        torch.ops._c10d_functional.all_gather_into_tensor.default,
+        torch.ops._c10d_functional.all_reduce.default,
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    }
+    seen = {}
+    for node in gm.graph.nodes:
+        if node.target not in collectives:
+            continue
+        for fqn in fsdp_param_fqns(node):
+            if not any(fqn.startswith(root + ".") for root in roots):
+                continue
+            key = (fqn, node.target, _resolve_group_name(node.args[-1]))
+            if key in seen:
+                raise ValueError(
+                    f"Duplicate eager-chunk FSDP chain for {fqn}: "
+                    f"{seen[key].name}, {node.name}. Materialize shared "
+                    "parameters outside chunk ownership before tracing."
+                )
+            seen[key] = node
     return gm
 
 
@@ -977,18 +365,19 @@ def ep_overlap_schedule_pass(
     example_inputs: tuple[Any, ...] | None = None,
     *,
     module_pattern: str,
-    require_all_to_all: bool = True,
 ) -> fx.GraphModule:
-    """Reorder already chunked regions around EP all-to-alls."""
+    """Overlap annotated eager EP regions using their explicit dependencies."""
     del example_inputs
-    scheduled = _schedule_ep_overlap_regions(
+    regions, exchanges = _validated_regions(
         gm,
         module_pattern=module_pattern,
-        require_all_to_all=require_all_to_all,
     )
-    logger.info(
-        "Applied ep_overlap scheduling to %d chunked region(s): module=%s",
-        scheduled,
-        module_pattern,
-    )
+    planned = _plan_order(gm, regions, exchanges)
+    sequencing = {node: {previous} for previous, node in zip(planned, planned[1:])}
+    _stable_topological_sort(gm.graph, sequencing)
+    gm.graph.lint()
+    gm.recompile()
+    if list(gm.graph.nodes) != planned:
+        raise ValueError("EP topological sorting did not materialize the planned order")
+    logger.info("Scheduled %d annotated eager EP regions", len(regions))
     return gm

@@ -114,7 +114,7 @@ def tlparse_log_graph_pass(
     Returns:
         The graph module unchanged.
     """
-    additional_meta = ["autograd_backward", "seq_nr"]
+    additional_meta = ["autograd_backward", "seq_nr", "custom"]
 
     trace_structured(
         "artifact",

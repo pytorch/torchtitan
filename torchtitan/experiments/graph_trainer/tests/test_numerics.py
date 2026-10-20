@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 import spmd_types as spmd
@@ -24,6 +25,7 @@ from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
+from torch.nn.attention import SDPBackend
 from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan_recipes.tests.graph_trainer import numerics as graph_trainer_numerics
 
@@ -32,6 +34,7 @@ from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.experiments.graph_trainer import simple_fsdp
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.linear import GroupedLinear, Linear
 
 
@@ -48,6 +51,8 @@ def run_loss_compare(
     test_ngpus: int = 8,
     metrics: tuple[str, ...] = ("loss",),
     steps: int = STEPS,
+    use_seed_checkpoint: bool = True,
+    require_cuda_graphs: bool = False,
 ) -> bool:
     """Run loss_compare.py comparing a baseline module against a graph_trainer module.
 
@@ -60,6 +65,9 @@ def run_loss_compare(
         test_ngpus: Number of GPUs for the test run.
         metrics: Full-precision TensorBoard metrics that must match exactly.
         steps: Number of optimizer steps in both runs.
+        use_seed_checkpoint: Create a single-rank seed checkpoint. Disable for
+            backends whose configuration requires real multi-rank EP.
+        require_cuda_graphs: Require actual whole-FB capture in both run logs.
 
     Returns:
         True if the assertion passed, False otherwise.
@@ -82,11 +90,28 @@ def run_loss_compare(
             f"--test-ngpus={test_ngpus}",
             f"--metrics={','.join(metrics)}",
             f"--job-dump-folder={job_dump_folder}",
+            f"--output-folder={job_dump_folder}/comparison",
         ]
+        if not use_seed_checkpoint:
+            cmd.append("--no-seed-checkpoint")
         print(f"Running: {' '.join(cmd)}")
         result = subprocess.run(cmd, text=True)
         if result.returncode != 0:
             print("loss_compare.py failed")
+            for scenario in ("baseline", "test"):
+                log = Path(job_dump_folder, "comparison", f"{scenario}_training.log")
+                if log.exists():
+                    print(f"{scenario} training log tail:")
+                    print("\n".join(log.read_text().splitlines()[-40:]))
+            return False
+        if require_cuda_graphs:
+            for scenario in ("baseline", "test"):
+                log = Path(
+                    job_dump_folder, "comparison", f"{scenario}_training.log"
+                ).read_text()
+                if "Recorded CUDA graph" not in log:
+                    print(f"{scenario} did not capture the whole forward/backward")
+                    return False
         return result.returncode == 0
 
 
@@ -410,6 +435,42 @@ class TestGraphTrainerNumerics(unittest.TestCase):
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_llama3_loss_compare())
 
+    def _assert_hybridep_training_matches(self, baseline: str, target: str) -> None:
+        """Require exact loss/norm and whole-FB CUDA replay on four ranks."""
+        for recipe in (baseline, target):
+            config = getattr(graph_trainer_numerics, recipe)()
+            self.assertIsInstance(
+                config.model.layers[0].attention.inner_attention,
+                VarlenInnerAttention.Config,
+                recipe,
+            )
+            self.assertEqual(
+                config.model.layers[0].attention.inner_attention.sdpa_backend,
+                SDPBackend.FLASH_ATTENTION,
+                recipe,
+            )
+        self.assertTrue(
+            run_loss_compare(
+                NUMERICS_CONFIG_MODULE,
+                baseline,
+                NUMERICS_CONFIG_MODULE,
+                target,
+                baseline_ngpus=4,
+                test_ngpus=4,
+                metrics=("loss", "grad_norm"),
+                steps=10,
+                use_seed_checkpoint=False,
+                require_cuda_graphs=True,
+            ),
+            target,
+        )
+
+    def test_hybridep_eager_overlap(self):
+        """Compare eager chunks with and without communication scheduling."""
+        self._assert_hybridep_training_matches(
+            "deepseek_v3_hybridep_chunk_control", "deepseek_v3_hybridep_overlap"
+        )
+
     def test_dense_llama3_hsdp_gradient_accumulation_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_hsdp_llama3_gradient_accumulation_loss_compare())
 
@@ -572,6 +633,126 @@ class _AddFp32GradResidual(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad):
         return grad.float() + 2**-9
+
+
+class TestHybridEPContracts(FSDPTest):
+    """Exercise native routing, production expert linears, and completion waits."""
+
+    @property
+    def world_size(self):
+        return 2
+
+    def test_async_dispatch_experts_combine_and_backward(self):
+        from torchtitan.distributed.deepep import hybridep
+
+        torch.cuda.set_device(self.rank)
+        device = torch.device("cuda", self.rank)
+        torch.manual_seed(42 + self.rank)
+        with torch.device(device):
+            up = GroupedLinear.Config(
+                group_size=4, in_features=256, out_features=256, num_linears=2
+            ).build()
+            down = GroupedLinear.Config(
+                group_size=4, in_features=256, out_features=256
+            ).build()
+        torch.nn.init.normal_(up.weight, std=0.02)
+        torch.nn.init.normal_(down.weight, std=0.02)
+        # Strided inputs exercise the native adapter's layout contract as well
+        # as the storage lifetime of copies made on the communication stream.
+        inputs_TD = torch.randn(256, 256, device=device, dtype=torch.bfloat16).T
+        expert_ids_TK = torch.rand(256, 8, device=device).topk(3, dim=1).indices
+        scores_TK = torch.rand(3, 256, device=device).T
+        scores_TK /= scores_TK.sum(1, keepdim=True)
+        hybridep.get_buffer(dist.group.WORLD, 256, 256, 4)
+
+        def run(async_op, factor, pad_multiple, expected_capacity, ids_TK):
+            """Use the public native wrapper and production grouped linears."""
+            hybridep.reset_hybridep_over_budget()
+            x_TD = inputs_TD.detach().clone().requires_grad_()
+            routing_TK = scores_TK.detach().clone().requires_grad_()
+            outputs = []
+            retained = []
+            for x, scores, ids in zip(
+                x_TD.chunk(2), routing_TK.chunk(2), ids_TK.chunk(2), strict=True
+            ):
+                hidden_RD, counts_E, state = hybridep.dispatch_tokens(
+                    x,
+                    ids,
+                    scores,
+                    4,
+                    8,
+                    dist.group.WORLD,
+                    non_blocking_expert_capacity_factor=factor,
+                    pad_multiple=pad_multiple,
+                    async_op=async_op,
+                )
+                self.assertEqual(counts_E.device, device)
+                self.assertEqual(hidden_RD.shape, (expected_capacity, 256))
+                self.assertLessEqual(int(counts_E.sum()), expected_capacity)
+                retained.append((hidden_RD, hidden_RD.detach().clone()))
+                offsets_E = counts_E.cumsum(0, dtype=torch.int32)
+                gate_RF, value_RF = up(hidden_RD, offsets_E).unbind(1)
+                output_RD = down(
+                    torch.nn.functional.silu(gate_RF) * value_RF, offsets_E
+                )
+                outputs.append(hybridep.combine_tokens(output_RD, state, pad_multiple))
+            output_TD = torch.cat(outputs)
+            grads = torch.autograd.grad(
+                output_TD.float().square().sum(),
+                (x_TD, routing_TK, up.weight, down.weight),
+            )
+            for actual, saved in retained:
+                self.assertEqual(actual, saved)
+            self.assertNotEqual(retained[0][0].data_ptr(), retained[1][0].data_ptr())
+            # Measure actual output allocations against one full-call dispatch.
+            full_RD, _, _ = hybridep.dispatch_tokens(
+                inputs_TD,
+                ids_TK,
+                scores_TK,
+                4,
+                8,
+                dist.group.WORLD,
+                non_blocking_expert_capacity_factor=factor,
+                pad_multiple=pad_multiple,
+                async_op=async_op,
+            )
+            self.assertEqual(
+                sum(tensor.nbytes for tensor, _ in retained), full_RD.nbytes
+            )
+            self.assertEqual(
+                bool(hybridep.check_hybridep_over_budget()),
+                factor < 1 and self.rank == 0,
+            )
+            return output_TD.detach(), tuple(grad.detach() for grad in grads)
+
+        for factor, pad_multiple, expected_capacity in (
+            (1.0, None, 768),
+            (4.0, 64, 3072),
+            (0.25, 64, 192),
+        ):
+            with self.subTest(factor=factor, pad_multiple=pad_multiple):
+                # Skewed routing exercises unequal live counts and empty experts;
+                # reduced capacity deliberately exercises the native drop path.
+                ids_TK = (
+                    expert_ids_TK
+                    if factor >= 1
+                    else torch.arange(3, device=device).expand(256, 3)
+                )
+                reference, reference_grads = run(
+                    False, factor, pad_multiple, expected_capacity, ids_TK
+                )
+                actual, actual_grads = run(
+                    True, factor, pad_multiple, expected_capacity, ids_TK
+                )
+                self.assertTrue(torch.isfinite(actual).all())
+                if factor >= 1:
+                    self.assertGreater(actual.float().norm().item(), 0)
+                self.assertEqual(actual, reference, rtol=0, atol=0)
+                for actual_grad, expected_grad in zip(
+                    actual_grads, reference_grads, strict=True
+                ):
+                    self.assertTrue(torch.isfinite(actual_grad).all())
+                    self.assertEqual(actual_grad, expected_grad, rtol=0, atol=0)
 
 
 class TestSimpleFSDP(FSDPTest):

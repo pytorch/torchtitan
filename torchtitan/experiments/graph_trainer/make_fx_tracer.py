@@ -171,7 +171,8 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
     like score_mod/mask_mod). Pass 1 collects forward nodes by seq_nr; pass 2
     copies custom/nn_module_stack/stack_trace from the matching forward node to
     each backward node. Backward nodes are identified by the autograd engine's
-    ``autograd_backward`` tag on ``node.meta``.
+    ``autograd_backward`` tag on ``node.meta``. Explicit backward annotations
+    take precedence over inherited forward annotations.
     """
 
     def _is_backward(node: torch.fx.Node) -> bool:
@@ -209,7 +210,10 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
 
             custom = fwd_node.meta.get("custom")
             if custom:
-                node.meta.setdefault("custom", {}).update(copy.deepcopy(custom))
+                node.meta["custom"] = {
+                    **copy.deepcopy(custom),
+                    **node.meta.get("custom", {}),
+                }
             nn_module_stack = fwd_node.meta.get("nn_module_stack")
             if nn_module_stack is not None:
                 node.meta["nn_module_stack"] = nn_module_stack.copy()

@@ -57,9 +57,7 @@ from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
 )
 from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
     ep_overlap_schedule_pass,
-)
-from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
-    isolate_ep_process_group_pass,
+    ep_overlap_validate_pass,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     deduplicate_fsdp_unshard_chains_pass,
@@ -191,6 +189,13 @@ def compile_time_passes(
         if isinstance(layer_cfg.feed_forward, MoE.Config)
     )
     ep_overlap_enabled = config.compile.ep_overlap.enabled
+    if ep_overlap_enabled:
+        if config.parallelism.expert_parallel_degree <= 1:
+            raise ValueError("EP overlap requires expert_parallel_degree > 1")
+        if config.parallelism.pipeline_parallel_degree != 1:
+            raise ValueError("Eager EP overlap does not support pipeline parallelism")
+        if config.compile.inductor_compilation != "regional":
+            raise ValueError("Eager EP overlap does not support full-graph Inductor")
     if parallelism_context is not None and hasattr(
         parallelism_context, "get_optional_mesh"
     ):
@@ -218,6 +223,8 @@ def compile_time_passes(
     )
 
     passes = construct_mandatory_graph_passes()
+    if ep_overlap_enabled:
+        passes.append(populate_eager_chunk_metadata_pass)
     if include_mandatory_normalization:
         passes.extend(
             [
@@ -229,6 +236,12 @@ def compile_time_passes(
     ep_overlap_module_fqn: str | None = None
     if ep_overlap_enabled:
         ep_overlap_module_fqn = validate_ep_overlap_config(config.compile.ep_overlap)
+        passes.append(
+            functools.partial(
+                ep_overlap_validate_pass,
+                module_pattern=ep_overlap_module_fqn,
+            )
+        )
 
     passes.extend(
         [
@@ -255,10 +268,6 @@ def compile_time_passes(
             ),
         ]
     )
-    if ep_overlap_enabled:
-        passes.append(populate_eager_chunk_metadata_pass)
-        passes.append(isolate_ep_process_group_pass)
-        passes.append(eliminate_dead_code_pass)
 
     if dp_replicate_degree > 1:
         if parallelism_context is None and (
@@ -323,9 +332,6 @@ def compile_time_passes(
             functools.partial(
                 ep_overlap_schedule_pass,
                 module_pattern=ep_overlap_module_fqn,
-                require_all_to_all=(
-                    getattr(config.parallelism, "expert_parallel_degree", 1) > 1
-                ),
             )
         )
 
@@ -345,8 +351,7 @@ def compile_time_passes(
             pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
         )
         # Move FSDP comm launches into neighboring transformer dense regions.
-        # This is useful both as an EP-overlap companion and as a standalone
-        # FSDP scheduling ablation, so it is controlled by its explicit flag.
+        # This standalone FSDP scheduling ablation is controlled explicitly.
         passes.append(
             functools.partial(
                 schedule_fsdp_comms_to_dense_regions_pass,
