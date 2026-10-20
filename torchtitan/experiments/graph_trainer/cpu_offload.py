@@ -127,13 +127,17 @@ def _is_view(node: Node) -> bool:
 
 
 def _get_storage_chain(
-    node: Node, *, is_view: Callable[[Node], bool] = _is_view
+    node: Node,
+    *,
+    is_view: Callable[[Node], bool] = _is_view,
+    is_backward: Callable[[Node], bool] = _is_backward_node,
 ) -> tuple[set[Node], bool]:
     """Walk the view chain to find all nodes sharing this tensor's storage.
 
     Views alias the base tensor's storage, so any node reachable through view
     edges (and its non-view consumers) depends on the storage being alive.
-    ``is_view`` decides which nodes extend the chain.
+    ``is_view`` decides which nodes extend the chain; ``is_backward`` decides
+    which consumers read the saved storage rather than retain a copy keepalive.
 
     Returns:
         (chain_nodes, has_bwd) where chain_nodes is every forward
@@ -149,7 +153,7 @@ def _get_storage_chain(
         for user in n.users:
             if user.op != "call_function":
                 continue
-            if _is_backward_node(user):
+            if is_backward(user):
                 has_bwd = True
                 continue
             chain_nodes.add(user)

@@ -435,10 +435,19 @@ class TestGraphTrainerNumerics(unittest.TestCase):
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_llama3_loss_compare())
 
-    def _assert_hybridep_training_matches(self, baseline: str, target: str) -> None:
+    def _assert_hybridep_training_matches(
+        self, baseline: str, target: str, *, no_remat: bool = False
+    ) -> None:
         """Require exact loss/norm and whole-FB CUDA replay on four ranks."""
         for recipe in (baseline, target):
             config = getattr(graph_trainer_numerics, recipe)()
+            if no_remat:
+                self.assertIsNone(config.activation_remat, recipe)
+                self.assertEqual(
+                    config.compile.memory_policy,
+                    "none" if recipe == baseline else "none_and_paged_stash",
+                    recipe,
+                )
             self.assertIsInstance(
                 config.model.layers[0].attention.inner_attention,
                 VarlenInnerAttention.Config,
@@ -471,8 +480,26 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             "deepseek_v3_hybridep_chunk_control", "deepseek_v3_hybridep_overlap"
         )
 
+    def test_hybridep_eager_paging(self):
+        """Exercise paging with resident-last-layer and terminal-join policies."""
+        for target in (
+            "deepseek_v3_hybridep_overlap_paged",
+            "deepseek_v3_hybridep_overlap_paged_all_layers",
+        ):
+            self._assert_hybridep_training_matches(
+                "deepseek_v3_hybridep_chunk_control", target
+            )
+
     def test_dense_llama3_hsdp_gradient_accumulation_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_hsdp_llama3_gradient_accumulation_loss_compare())
+
+    def test_hybridep_eager_no_remat_paging(self):
+        """Compare no-remat eager chunks with and without paged overlap."""
+        self._assert_hybridep_training_matches(
+            "deepseek_v3_hybridep_no_remat_control",
+            "deepseek_v3_hybridep_no_remat_paged",
+            no_remat=True,
+        )
 
     def test_dense_llama3_hsdp_graph_pp_vs_eager(self):
         self.assertTrue(_run_hsdp_llama3_pp_loss_compare())

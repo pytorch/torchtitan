@@ -6,6 +6,7 @@
 
 import logging
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -180,7 +181,10 @@ class GraphTrainingEngine(TrainingEngine):
             defer_fsdp_gradient_reduction=False,
         )
         self._run_forward_backward = eager_forward_backward_fn
-        if self.config.compile.memory_policy == "sac_and_paged_stash":
+        if self.config.compile.memory_policy in (
+            "sac_and_paged_stash",
+            "none_and_paged_stash",
+        ):
             self._paged_stash_runner = build_paged_stash_runner(
                 self.config.compile.paged_stash,
                 optimizers=self.optim.optimizers,
@@ -202,6 +206,13 @@ class GraphTrainingEngine(TrainingEngine):
                     for parameter in model_part.parameters()
                 ),
                 num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+            )
+
+        if self._paged_stash_runner is not None:
+            # Host verdict polling must surround the captured GPU step, not
+            # execute inside it or disappear on subsequent replays.
+            self._run_forward_backward = partial(
+                self._run_paged_forward_backward, self._run_forward_backward
             )
 
         maybe_apply_numa_binding(self.device.index, self.device.type)
@@ -359,26 +370,33 @@ class GraphTrainingEngine(TrainingEngine):
         *,
         defer_fsdp_gradient_reduction: bool,
     ) -> ForwardBackwardResult:
-        """``_forward_backward_body`` under the paged stash runner.
-
-        Wraps every microbatch group of the optimizer step rather than one
-        graph: the step's schedule is the unit that shares the stash buffers,
-        so it is also the unit an overflow verdict covers. Same placement as
-        Megatron's PagedStashRunner around forward_backward_func.
-        """
+        """GPU reset and whole forward/backward for paged CUDA capture."""
         runner = self._paged_stash_runner
         assert runner is not None
-        if self.parallelism_context.pp_enabled:
-            graph_runtime = self.pp_schedule
-            assert isinstance(graph_runtime, GraphRuntime)
-            runner.apply_pp_schedule(graph_runtime.pipeline_liveness_schedule)
-        return runner(
+        return runner.run_attempt(
             partial(
                 self._forward_backward_body,
                 microbatch_groups,
                 global_loss_token_counts,
                 defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
             )
+        )
+
+    def _run_paged_forward_backward(
+        self,
+        run_attempt_fn: Callable[..., ForwardBackwardResult],
+        microbatch_groups: list[tuple[Any, ...]],
+        global_loss_token_counts: torch.Tensor,
+    ) -> ForwardBackwardResult:
+        """Apply host overflow policy around the full optional CUDA replay."""
+        runner = self._paged_stash_runner
+        assert runner is not None
+        if self.parallelism_context.pp_enabled:
+            graph_runtime = self.pp_schedule
+            assert isinstance(graph_runtime, GraphRuntime)
+            runner.apply_pp_schedule(graph_runtime.pipeline_liveness_schedule)
+        return runner.run(
+            partial(run_attempt_fn, microbatch_groups, global_loss_token_counts)
         )
 
     def close(self) -> None:
