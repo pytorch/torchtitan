@@ -283,6 +283,11 @@ class GraphTrainerCompileConfig:
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
     """Configuration for EP-overlap chunking and scheduling."""
 
+    enable_graph_pp_comm_compute_overlap: bool = False
+    """Overlap HybridEP and paged-stash operations across multiplexed PP F/B
+    graphs. Requires a combined-action schedule and non-blocking HybridEP.
+    This does not chunk tokens or divide per-microbatch capacity budgets."""
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:

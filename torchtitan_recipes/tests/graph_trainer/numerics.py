@@ -121,6 +121,105 @@ def deepseek_v3_hybridep_no_remat_paged():
     return _deepseek_v3_hybridep_chunks(overlap=True, paging=True, no_remat=True)
 
 
+def _deepseek_v3_hybridep_pp(
+    *,
+    schedule: Literal["Interleaved1F1BCombined", "DualPipeV"],
+    overlap: bool,
+    paging: bool,
+    no_remat: bool = False,
+):
+    """Build matched native-varlen PP2/EP2 recipes without EP token chunking."""
+    config = graph_trainer_deepseek_v3_debugmodel(
+        attn_backend="varlen",
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2,
+            expert_parallel_degree=2,
+            pipeline_parallel_degree=2,
+            pipeline_parallel_schedule=schedule,
+            pipeline_parallel_layers_per_stage=2,
+            num_pp_microbatches=4,
+        ),
+    )
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.num_tokens_per_train_step = 4096
+    config.dataloader.max_num_documents = c4_document_capacity(
+        config.training.num_tokens_per_microbatch_per_dp_rank
+    )
+    config.training.disable_cuda_graphs = False
+    config.compile.inductor_compilation = "regional"
+    config.compile.enable_graph_pp_comm_compute_overlap = overlap
+    if no_remat:
+        config.activation_remat = None
+    config.compile.memory_policy = "none" if no_remat else "default"
+    if paging:
+        config.compile.memory_policy = (
+            "none_and_paged_stash" if no_remat else "sac_and_paged_stash"
+        )
+        config.compile.paged_stash.buffer_size_factor_cuda = 2.1
+    config.debug.seed = 42
+    config.debug.deterministic = True
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                num_max_tokens_per_rank=512,
+                kwargs={"non_blocking_capacity_factor": 4.0, "async_op": True},
+            )
+        ],
+    )
+
+
+def deepseek_v3_hybridep_combined_pp_control():
+    """Run the combined PP schedule with sequential multiplexed graphs."""
+    return _deepseek_v3_hybridep_pp(
+        schedule="Interleaved1F1BCombined", overlap=False, paging=False
+    )
+
+
+def deepseek_v3_hybridep_combined_pp_overlap():
+    """Overlap native EP across combined PP F/B graphs without token chunks."""
+    return _deepseek_v3_hybridep_pp(
+        schedule="Interleaved1F1BCombined", overlap=True, paging=False
+    )
+
+
+def deepseek_v3_hybridep_combined_pp_overlap_paged():
+    """Overlap native EP and paged stashing across combined PP F/B graphs."""
+    return _deepseek_v3_hybridep_pp(
+        schedule="Interleaved1F1BCombined", overlap=True, paging=True
+    )
+
+
+def deepseek_v3_hybridep_dual_pipe_v_control():
+    """Run native DualPipeV full/split backward without EP/page scheduling."""
+    return _deepseek_v3_hybridep_pp(schedule="DualPipeV", overlap=False, paging=False)
+
+
+def deepseek_v3_hybridep_dual_pipe_v_overlap():
+    """Overlap HybridEP across DualPipeV's combined forward/backward graphs."""
+    return _deepseek_v3_hybridep_pp(schedule="DualPipeV", overlap=True, paging=False)
+
+
+def deepseek_v3_hybridep_dual_pipe_v_overlap_paged():
+    """Overlap native HybridEP and paged stashing under DualPipeV."""
+    return _deepseek_v3_hybridep_pp(schedule="DualPipeV", overlap=True, paging=True)
+
+
+def deepseek_v3_hybridep_combined_pp_no_remat_control():
+    """Run the combined schedule without activation recomputation or overlap."""
+    return _deepseek_v3_hybridep_pp(
+        schedule="Interleaved1F1BCombined", overlap=False, paging=False, no_remat=True
+    )
+
+
+def deepseek_v3_hybridep_combined_pp_no_remat_paged():
+    """Overlap native EP and pages under the combined schedule without remat."""
+    return _deepseek_v3_hybridep_pp(
+        schedule="Interleaved1F1BCombined", overlap=True, paging=True, no_remat=True
+    )
+
+
 def _without_inplace_wgrad_accum(config):
     """Turn off in-place WGRAD accumulation in an eager baseline.
 

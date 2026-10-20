@@ -19,6 +19,7 @@ from torch.distributed.pipelining.schedules import (
 
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.graph_multiplex import (
+    graph_pp_comm_compute_overlap_pass,
     multiplex_fw_bw_graph,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.runner import (
@@ -35,8 +36,10 @@ from torchtitan.experiments.graph_trainer.graph_pp.stage import (
     SplitStageGraphs,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
+    example_inputs_from_placeholders,
     overlap_fw_bw_sub_actions,
 )
+from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 
 
 class _StageGraphModules(Protocol):
@@ -246,6 +249,13 @@ def _build_graph_pp_overlap_graphs(
             fw_graphs.modules.fw,
             bw_graphs.modules.full_bw,
         )
+        if compile_config.enable_graph_pp_comm_compute_overlap:
+            multiplexed_graph = apply_graph_passes(
+                multiplexed_graph,
+                example_inputs_from_placeholders(multiplexed_graph),
+                [graph_pp_comm_compute_overlap_pass],
+                compile_config=compile_config,
+            )
         compiled_graph = compile_graph_module(
             multiplexed_graph,
             compile_config=compile_config,

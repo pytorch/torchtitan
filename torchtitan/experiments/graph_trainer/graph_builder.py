@@ -299,6 +299,11 @@ class GraphTrainerStageGraphProvider:
 
         required_overlap_pairs = stage_builder._required_multiplex_pairs(schedule)
         if not required_overlap_pairs:
+            if self.config.compile.enable_graph_pp_comm_compute_overlap:
+                logger.warning(
+                    "GraphPP communication overlap requested, but the schedule "
+                    "contains no combined forward/backward actions."
+                )
             self._overlap_graphs = {}
             overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
         elif self._overlap_graphs is None:
