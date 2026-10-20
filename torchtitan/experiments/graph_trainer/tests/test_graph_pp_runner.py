@@ -1051,6 +1051,46 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             parallelism=ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B"),
         )
 
+    def test_graph_pp_overlap_configuration(self) -> None:
+        """Exercise the real execution-plan configuration contract."""
+        for invalid in (None, "no_pp", "no_ep", "ep_chunking", "full_compile"):
+            with self.subTest(invalid=invalid):
+                compile_config = GraphTrainerCompileConfig(
+                    enable_graph_pp_comm_compute_overlap=True,
+                    inductor_compilation="regional",
+                )
+                parallelism = ParallelismConfig(
+                    pipeline_parallel_schedule="Interleaved1F1BCombined",
+                    pipeline_parallel_degree=2,
+                    expert_parallel_degree=2,
+                )
+                if invalid == "no_ep":
+                    parallelism.expert_parallel_degree = 1
+                elif invalid == "ep_chunking":
+                    compile_config.ep_overlap.enabled = True
+                elif invalid == "full_compile":
+                    compile_config.inductor_compilation = "full"
+                kwargs = dict(
+                    num_microbatches=4,
+                    parallelism=parallelism,
+                    pp_enabled=invalid != "no_pp",
+                    fsdp_enabled=True,
+                )
+                if invalid is None:
+                    plan = resolve_graph_execution_plan(compile_config, **kwargs)
+                    self.assertEqual(
+                        (plan.unshard, plan.reduce_grad), ("schedule", "schedule")
+                    )
+                else:
+                    message = {
+                        "no_pp": "requires pipeline parallelism",
+                        "no_ep": "expert_parallel_degree > 1",
+                        "ep_chunking": "does not use EP token chunking",
+                        "full_compile": "requires regional compilation",
+                    }[invalid]
+                    with self.assertRaisesRegex(ValueError, message):
+                        resolve_graph_execution_plan(compile_config, **kwargs)
+
     def test_split_fsdp_boundaries_reject_dense_region_overlap(self) -> None:
         compile_config = GraphTrainerCompileConfig(
             enable_fsdp_dense_region_overlap=True

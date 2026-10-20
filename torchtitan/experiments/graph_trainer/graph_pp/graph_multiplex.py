@@ -8,13 +8,88 @@ import copy
 from itertools import dropwhile
 
 import torch.fx as fx
+from torch._dynamo.graph_deduplication import _stable_topological_sort
 from torch.fx.graph_module import _assign_attr, _get_attr
 
+from torchtitan.experiments.graph_trainer.common_utils import _GRAPH_PP_DIRECTION
 from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     _find_fake_mode,
     _MetaShapeEnvTransfer,
 )
+
+
+def graph_pp_comm_compute_overlap_pass(
+    gm: fx.GraphModule, example_inputs: tuple | None = None
+) -> fx.GraphModule:
+    """Overlap explicitly owned F/B communications in a multiplexed graph.
+
+    Native exchanges retain their exact inputs through completion. Tensor and
+    mutation edges, plus the paging queue order, define the legal schedule.
+    Both source graphs form one scope: launches first, ready compute next,
+    completion waits last. Each communication launch yields to ready work in
+    the opposite source graph, so neither source drains all its waits first.
+    No tokens or computation are split or duplicated.
+    """
+    del example_inputs
+    from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
+        _collect_native_exchanges,
+        _graph_dependencies,
+        _prioritized_order,
+    )
+    from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+        _paging_dependencies,
+    )
+
+    exchanges = _collect_native_exchanges(gm.graph.nodes, context="GraphPP F/B pair")
+    deps = _graph_dependencies(gm)
+    launches, waits = _paging_dependencies(gm, deps)
+    source_nodes = {
+        direction: {
+            node
+            for node in gm.graph.nodes
+            if node.meta.get("custom", {}).get(_GRAPH_PP_DIRECTION) == direction
+        }
+        for direction in ("forward", "backward")
+    }
+    yield_to = {}
+    for exchange in exchanges:
+        direction = exchange.launch.meta.get("custom", {}).get(_GRAPH_PP_DIRECTION)
+        if direction not in ("forward", "backward") or direction != (
+            exchange.wait.meta.get("custom", {}).get(_GRAPH_PP_DIRECTION)
+        ):
+            raise ValueError(
+                f"GraphPP exchange {exchange.launch.name} lost its source F/B ownership"
+            )
+        launches.add(exchange.launch)
+        waits.add(exchange.wait)
+    for launch in launches:
+        direction = launch.meta.get("custom", {}).get(_GRAPH_PP_DIRECTION)
+        if direction not in source_nodes:
+            raise ValueError(
+                f"GraphPP launch {launch.name} lost its source F/B ownership"
+            )
+        yield_to[launch] = source_nodes[
+            "backward" if direction == "forward" else "forward"
+        ]
+    if not launches and not waits:
+        return gm
+    nodes = set(gm.graph.nodes)
+    planned = _prioritized_order(
+        deps,
+        order={node: index for index, node in enumerate(gm.graph.nodes)},
+        launches=launches,
+        waits=waits,
+        regions=[(nodes, nodes)],
+        yield_to=yield_to,
+    )
+    sequencing = {node: {previous} for previous, node in zip(planned, planned[1:])}
+    _stable_topological_sort(gm.graph, sequencing)
+    gm.graph.lint()
+    gm.recompile()
+    if list(gm.graph.nodes) != planned:
+        raise ValueError("GraphPP communication schedule did not materialize its order")
+    return gm
 
 
 def _copy_prefixed_get_attrs(
@@ -23,6 +98,7 @@ def _copy_prefixed_get_attrs(
     *,
     prefix: str,
 ) -> dict[str, str]:
+    """Copy referenced attributes under unique names and return the remapping."""
     remap: dict[str, str] = {}
     for node in src.graph.find_nodes(op="get_attr"):
         attr_name = str(node.target)
@@ -63,13 +139,10 @@ def multiplex_fw_bw_graph(
       replace the output tuple with backward outputs followed by forward outputs
 
     The forward graph remains the destination module because its ShapeEnv owns
-    the dynamic collective-size constraints needed by full Inductor for MoE
-    all-to-all outputs.  The backward graph is inserted in topological order
-    before the existing forward compute, with disjoint placeholders and
-    prefixed attributes, so this helper does not need dependency analysis or a
-    scheduling policy.  EP-overlap annotations are intentionally not applied
-    inside this graph; pass ordering keeps EP-overlap on the standalone no-FSDP
-    forward/backward graphs.
+    the traced collective-size constraints. The backward graph is inserted
+    before forward compute, with disjoint placeholders and prefixed attributes.
+    Explicit source ownership allows the optional communication/compute pass
+    to reorder the pair; multiplexing itself preserves each source's order.
 
     Args:
         fw_gm (fx.GraphModule): Forward graph whose ShapeEnv and module
@@ -90,6 +163,11 @@ def multiplex_fw_bw_graph(
     # Preserve the forward ShapeEnv exactly as traced.  Reconstructing it from
     # copied metadata can lose collective-size hints that full Inductor needs.
     multiplexed_gm = copy.deepcopy(fw_gm)
+    for node in multiplexed_gm.graph.nodes:
+        node.meta["custom"] = {
+            **node.meta.get("custom", {}),
+            _GRAPH_PP_DIRECTION: "forward",
+        }
     dst_fake_mode = _find_fake_mode(multiplexed_gm)
     meta_transfer = _MetaShapeEnvTransfer(dst_fake_mode)
     for node in bw_gm.graph.nodes:
@@ -141,6 +219,10 @@ def multiplex_fw_bw_graph(
                     node, lambda arg: old_to_new[arg]
                 )
         new_node.meta = meta_transfer.copy_meta(node.meta)
+        new_node.meta["custom"] = {
+            **new_node.meta.get("custom", {}),
+            _GRAPH_PP_DIRECTION: "backward",
+        }
         if new_node.op == "get_attr":
             attr_name = str(new_node.target)
             if attr_name not in bw_get_attr_remap:

@@ -105,8 +105,7 @@ live `param.grad`. Internal values remain flat because they never leave GraphPP
 graph execution: saved-for-backward tensors, unsharded FSDP params, raw grad
 leaves, reduce-grad inputs, and multiplexed intermediate outputs.
 
-Current limitations: GraphPP does not load precompile artifacts yet, and
-EP-overlap annotations will be composed with GraphPP in a later PR.
+Current limitation: GraphPP does not load precompile artifacts yet.
 
 ### Compiler Optimizations
 
@@ -268,6 +267,58 @@ Current limitations:
   execute natively. CUDA graphs capture the whole forward/backward callable.
 - The token count must be even.
 - Additional overlap or sharding modes require their own loss and trace checks.
+
+### Pipeline Communication Overlap
+
+Pipeline overlap uses `Interleaved1F1BCombined` or `DualPipeV` and graph
+multiplexing, not EP token chunking. `Interleaved1F1BCombined` adds one warmup
+forward, then pairs an independent
+forward and backward as an explicit `OVERLAP_F_B` action. Both actions' receives
+and parameter unshards precede the pair; normal send, gradient accumulation and
+reduction ownership remain in the existing pipeline schedule.
+
+`DualPipeV` uses the upstream V-shaped mapping with exactly two stages per
+rank. Its combined actions use full backward; separate input-gradient and
+weight-gradient actions fill the bubbles. Their saved activations remain live
+until weight backward completes. The focused HybridEP recipes use native
+varlen attention for both schedules, including actual dI/dW graph splitting.
+
+```python
+config.parallelism.pipeline_parallel_schedule = "Interleaved1F1BCombined"
+config.compile.enable_graph_pp_comm_compute_overlap = True
+config.compile.ep_overlap.enabled = False
+config.compile.inductor_compilation = "regional"
+config.training.disable_cuda_graphs = False
+```
+
+Use non-blocking `HybridEPTokenDispatcher` capacity. Enabling the GraphPP pass
+selects explicit asynchronous native launches/waits without splitting tokens
+or dividing each microbatch's capacity. Configure `sac_and_paged_stash` to
+include page operations. Source graphs retain explicit forward/backward
+ownership when multiplexed. The pass validates native request/input lifetimes,
+preserves tensor/mutation and paging queue dependencies, launches ready
+communication early and postpones waits behind independent compute.
+Each EP or paging launch gives ready work in the opposite source graph priority,
+including its ready completion waits, instead of draining one source first.
+Full CUDA capture covers the entire pipeline forward/backward step, including every
+microbatch's distinct native routing state.
+
+For long multistream captures, PyTorch's native allocator can reclaim storage
+after graph dependencies prove its asynchronous uses have joined:
+
+```bash
+PYTORCH_ALLOC_CONF=graph_capture_record_stream_reuse:True
+```
+
+This upstream option is experimental. Without it, cross-stream frees can wait
+until capture ends, growing the graph pool with the microbatch count. Keep the
+same allocator setting in matched comparisons; it does not replace request
+ownership, stream joins, or the explicit overlap annotations.
+
+The pass can be disabled with `compile.disable_passes =
+["graph_pp_comm_compute_overlap_pass"]` for a same-schedule comparison. Without
+combined actions, the requested overlap emits a warning. Full-graph Inductor
+and DeepEP are outside this feature's scope.
 
 ### Experimental AutoParallel Sharding
 

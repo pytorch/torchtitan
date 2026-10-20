@@ -56,6 +56,8 @@ from torchtitan.experiments.graph_trainer.graph_pp.runner import (
 from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
 from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
 from torchtitan.models.base.model import BaseModel
+from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 
 
 if TYPE_CHECKING:
@@ -196,6 +198,19 @@ def _validate_graph_pp_config(
     compile_config: GraphTrainerCompileConfig,
     parallelism: ParallelismConfig,
 ) -> None:
+    if compile_config.enable_graph_pp_comm_compute_overlap:
+        if compile_config.ep_overlap.enabled:
+            raise ValueError(
+                "GraphPP communication overlap does not use EP token chunking"
+            )
+        if compile_config.inductor_compilation != "regional":
+            raise ValueError(
+                "GraphPP communication overlap requires regional compilation"
+            )
+        if parallelism.expert_parallel_degree <= 1:
+            raise ValueError(
+                "GraphPP HybridEP overlap requires expert_parallel_degree > 1"
+            )
     if compile_config.precompile_artifact_dir:
         raise ValueError(
             "GraphPP does not support compile.precompile_artifact_dir yet. "
@@ -261,6 +276,8 @@ def resolve_graph_execution_plan(
         pp_enabled: Whether pipeline parallelism is enabled.
         fsdp_enabled: Whether FSDP is enabled.
     """
+    if compile_config.enable_graph_pp_comm_compute_overlap and not pp_enabled:
+        raise ValueError("GraphPP communication overlap requires pipeline parallelism")
     if pp_enabled:
         _validate_graph_pp_config(
             compile_config=compile_config,
@@ -850,6 +867,18 @@ def graph_pipeline_llm(
             activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
+        if compile_config.enable_graph_pp_comm_compute_overlap:
+            for module in model_part.modules():
+                if not isinstance(module, MoE):
+                    continue
+                dispatcher = module.routed_experts.token_dispatcher
+                if not isinstance(dispatcher, HybridEPTokenDispatcher):
+                    raise ValueError("GraphPP communication overlap requires HybridEP")
+                if dispatcher.non_blocking_capacity_factor is None:
+                    raise ValueError(
+                        "GraphPP overlap requires non-blocking HybridEP capacity"
+                    )
+                dispatcher.async_op = True
         logger.info(
             "PP rank %s is building GraphPP stage_idx %s with modules %s",
             pp_mesh.get_local_rank(),
