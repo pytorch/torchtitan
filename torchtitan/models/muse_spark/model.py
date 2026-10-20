@@ -444,6 +444,7 @@ class MuseSparkModel(MultimodalModel):
                 "muse_spark_logit_postprocess",
                 "muse_spark_residual",
                 "muse_spark_rmsnorm",
+                "moe_router_topk",
             ]
         )
         # pyrefly: ignore [bad-override]
