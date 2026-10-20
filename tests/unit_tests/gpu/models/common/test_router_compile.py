@@ -10,7 +10,7 @@ import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.local_compile import apply_local_compile
-from torchtitan.models import deepseek_v3, kimi_k2_7, muse_spark
+from torchtitan.models import deepseek_v3, kimi_k2_7, kimi_k3, muse_spark
 from torchtitan.models.common.activation import Softmax
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import BatchWiseLoadBalanceLoss, TokenChoiceTopKRouter
@@ -32,6 +32,7 @@ def _flavor_router(model_config) -> TokenChoiceTopKRouter:
 
 # Sigmoid scores and route_norm; the tests pass an expert bias, as the MoE does.
 # DeepSeek-V3 671B also runs its group-limited top-k (8 expert groups, 4 kept) inside the region.
+# Kimi K3 picks 16 of 896 experts.
 FLAVOR_ROUTERS = {
     "DeepSeek-V3 671B": lambda: _flavor_router(
         deepseek_v3.build_model_config("671B", parallelism=ParallelismConfig())
@@ -41,6 +42,9 @@ FLAVOR_ROUTERS = {
     ),
     "Muse Spark 816B-A42B": lambda: _flavor_router(
         muse_spark.build_model_config("816B-A42B")
+    ),
+    "Kimi K3": lambda: _flavor_router(
+        kimi_k3.build_model_config("Kimi-K3", parallelism=ParallelismConfig())
     ),
 }
 
@@ -113,7 +117,7 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
             torch.testing.assert_close(actual, expected)
 
     def test_scores_do_not_depend_on_batch_size(self):
-        """A token's router outputs at 1 and 34 tokens equal its outputs in a 16k batch, bitwise."""
+        """Bitwise: a token's router outputs at 1 and 34 tokens, and at 16k with grad on, equal its no-grad 16k outputs."""
         torch.manual_seed(0)
         config = TokenChoiceTopKRouter.Config(
             num_experts=256,
@@ -126,6 +130,11 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
             router = config.build().eval()
         apply_local_compile(["moe_router_topk"])
         gate_TE = torch.randn(16384, 256, device="cuda")
+        # The trainer's graph first, as in training: grad on and a static 16k shape, so the
+        # compiled forward also saves tensors for backward.
+        trainer_outputs = router._score_and_select_experts(
+            gate_TE.detach().requires_grad_(), None, padding_mask_T=None
+        )
         with torch.no_grad():
             # The generator's compile order: 16384 (static), 14336 (T turns dynamic), then
             # decode; Dynamo gives T=1 its own graph.
@@ -138,6 +147,8 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
         for n in (34, 1):
             for actual, expected in zip(outputs[n], outputs[16384], strict=True):
                 self.assertTrue(torch.equal(actual, expected[:n]))
+        for actual, expected in zip(trainer_outputs, outputs[16384], strict=True):
+            self.assertTrue(torch.equal(actual.detach(), expected))
 
     def test_flavor_routers_match_eager(self):
         """Full-size flavor routers: compiled fwd + bwd matches eager."""
