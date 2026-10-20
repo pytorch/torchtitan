@@ -232,6 +232,30 @@ def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
     )
     microbatch = batcher._pack_training_samples(_make_samples([3]))
 
-    temperature = microbatch.loss_kwargs()["temperature"]
+    temperature = microbatch.as_input_dict()["loss_kwargs"]["temperature"]
     assert temperature.dtype == torch.float32
     assert temperature.tolist() == [0.5] * 8
+
+
+def test_microbatch_moves_loss_kwargs_with_the_model_inputs() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=8,
+        max_context_length=8,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+        temperature=1.0,
+    )
+    microbatch = batcher._pack_training_samples(_make_samples([3]))
+
+    input_dict = microbatch.to_input_dict("meta")
+
+    assert input_dict["input"].device.type == "meta"
+    assert set(input_dict["loss_kwargs"]) == {
+        "generator_logprobs",
+        "temperature",
+        "loss_mask",
+        "advantages",
+    }
+    for value in input_dict["loss_kwargs"].values():
+        assert value.device.type == "meta"

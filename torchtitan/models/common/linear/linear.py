@@ -159,7 +159,7 @@ class Linear(nn.Linear, Module):
         return F.linear(input, *self._flatten_weight_and_bias(weight, bias))
 
 
-@spmd.register_local_autograd_function
+@spmd.register_autograd_function
 class _LinearFunction(torch.autograd.Function):
     """``F.linear`` whose backward adds WGRAD into ``weight.grad`` in place.
 
@@ -172,6 +172,23 @@ class _LinearFunction(torch.autograd.Function):
     ``addmm(out=weight.grad)``, which adds the GEMM's fp32 accumulator into the
     running gradient instead of first rounding the WGRAD to the weight dtype.
     """
+
+    @staticmethod
+    def spmd_typecheck(
+        *,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor | spmd.rules.NdimWithSpmdType:
+        stack = "_" if weight.dim() == 3 else ""
+        output = spmd.rules.einsum(
+            f"...k,{stack}nk->...n", input, weight, linear_in=(0, 1)
+        )
+        if bias is None:
+            return output
+        return spmd.rules.einsum(
+            f"...n,{stack}n->...n", output, bias, linear_in=((0, 1),)
+        )
 
     @staticmethod
     def forward(  # pyrefly: ignore[bad-override]

@@ -100,7 +100,7 @@ def _validate_loss(validator, model_parts, prepared, *, step):
         model_parts[0],
         "preprocess_inputs",
         create=True,
-        side_effect=lambda row, **kwargs: row["prepared"],
+        side_effect=lambda row, **kwargs: (*row["prepared"], {}),
     ):
         validator.validate(model_parts, step)
     return torch.tensor(losses[0] * len(prepared), device="cuda")
@@ -322,15 +322,14 @@ def test_varlen_eval_replays_different_document_counts():
                     "padding_mask": torch.zeros(8, dtype=torch.bool, device="cuda"),
                 }
                 with validator.parallelism_context.activate_spmd():
-                    prepared = [
-                        model.preprocess_inputs(
-                            batch,
-                            parallelism_context=validator.parallelism_context,
-                            parallelism=validator.parallelism,
-                            max_num_documents=validator.dl_config.max_num_documents,
-                            max_context_length=validator.seq_len,
-                        )
-                    ]
+                    inputs, labels, model_kwargs, _ = model.preprocess_inputs(
+                        batch,
+                        parallelism_context=validator.parallelism_context,
+                        parallelism=validator.parallelism,
+                        max_num_documents=validator.dl_config.max_num_documents,
+                        max_context_length=validator.seq_len,
+                    )
+                prepared = [(inputs, labels, model_kwargs)]
                 metadata = prepared[0][2]["attention_metadata"][VarlenInnerAttention]
                 assert metadata.cu_seq_q.shape == (6,)
                 assert metadata.max_q == metadata.max_k == 8
