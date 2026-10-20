@@ -1266,7 +1266,8 @@ class TestMLAContextParallelAttention(unittest.TestCase):
         self.assertEqual((8, 4, 13), calls[1][0].shape)
         self.assertEqual((spmd.S(0), spmd.S(1)), calls[1][2:4])
         self.assertEqual((spmd.S(1), spmd.S(0)), calls[2][2:4])
-        self.assertTrue(all(call[5] for call in calls))
+        # k_shared's all-gather is synchronous; mla_kv would detach an async one.
+        self.assertEqual([False, True, True], [call[5] for call in calls])
         inner_forward.assert_called_once()
         args = inner_forward.call_args.args
         self.assertIs(args[0], kernel.inner_attention)
