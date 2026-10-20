@@ -30,7 +30,6 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.renderer import from_renderers, RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.common.attention import (
-    Attention,
     FlexInnerAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -574,12 +573,9 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
             [0, 1, 2, 0, 1, 0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 1],
             dtype=torch.int32,
         )
-        attn_config = Attention.Config(
-            n_heads=1,
-            inner_attention=FlexInnerAttention.Config(block_size=4),
-        )
+        attn_config = FlexInnerAttention.Config(block_size=4)
 
-        mask = attn_config.inner_attention.build_attention_metadata(positions)
+        mask = attn_config.build_attention_metadata(positions)
 
         self.assertEqual(mask.shape, (1, 1, positions.shape[0], positions.shape[0]))
 

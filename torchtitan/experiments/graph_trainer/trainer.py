@@ -223,20 +223,31 @@ class GraphTrainingEngine(TrainingEngine):
         global_routing_token_counts: torch.Tensor,
     ) -> list[tuple[Any, ...]]:
         """Prepare GraphRuntime schedule inputs for AOT single-stage execution."""
+        # The traced loss only receives the shared loss arguments, on both the
+        # single-stage and the PP path.
+        if any(
+            microbatch.as_input_dict().get("loss_kwargs")
+            for microbatch_group in microbatch_groups
+            for microbatch in microbatch_group
+        ):
+            raise ValueError(
+                "Per-microbatch loss arguments are not supported with "
+                "GraphRuntime yet."
+            )
         if self.parallelism_context.pp_enabled:
-            return super()._preprocess_microbatch_groups(
+            pp_microbatch_groups = super()._preprocess_microbatch_groups(
                 microbatch_groups,
                 global_routing_token_counts=global_routing_token_counts,
             )
+            # Drop the per-microbatch loss arguments, rejected above, so both
+            # paths return (arg_mbs, kwarg_mbs, target_mbs).
+            return [
+                (arg_mbs, kwarg_mbs, target_mbs)
+                for arg_mbs, kwarg_mbs, target_mbs, _ in pp_microbatch_groups
+            ]
 
         preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
         for microbatch_group in microbatch_groups:
-            if any(microbatch.loss_kwargs() for microbatch in microbatch_group):
-                raise ValueError(
-                    "Per-microbatch loss arguments are not supported with "
-                    "GraphRuntime yet."
-                )
-
             # Calling convention:
             # The runtime receives one positional tuple, keyword dictionary,
             # and target per schedule microbatch.
@@ -249,7 +260,7 @@ class GraphTrainingEngine(TrainingEngine):
                     sl.log_trace_span("preprocess_inputs"),
                     self.parallelism_context.activate_spmd(),
                 ):
-                    inputs_mb, labels_mb, extra_kwargs_mb = self.model_parts[
+                    inputs_mb, labels_mb, extra_kwargs_mb, _ = self.model_parts[
                         0
                     ].preprocess_inputs(
                         input_dict,
@@ -281,14 +292,16 @@ class GraphTrainingEngine(TrainingEngine):
         """Run microbatch groups through GraphRuntime."""
         assert not defer_fsdp_gradient_reduction
         accumulated_loss: torch.Tensor | None = None
-        loss_metrics: list[dict[str, torch.Tensor]] = []
+        loss_metrics: list[list[dict[str, torch.Tensor]]] = []
         for inputs, model_kwargs, labels in microbatch_groups:
-            self.loss_metrics = {}
-            loss = self._pp_forward_backward_microbatch_group(
+            loss, group_loss_metrics = self._pp_forward_backward_microbatch_group(
                 inputs=inputs,
                 model_kwargs=model_kwargs,
                 labels=labels,
-                loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
+                loss_kwargs=[
+                    {"global_loss_token_counts": global_loss_token_counts}
+                    for _ in model_kwargs
+                ],
                 finalize_gradients=True,
             )
             detached_loss = loss.detach()
@@ -296,15 +309,48 @@ class GraphTrainingEngine(TrainingEngine):
                 accumulated_loss = detached_loss.clone()
             else:
                 accumulated_loss.add_(detached_loss)
-            loss_metrics.append(
-                {
-                    key: value.detach().clone()
-                    for key, value in self.loss_metrics.items()
-                }
-            )
+            loss_metrics.append(group_loss_metrics)
 
         assert accumulated_loss is not None
         return ForwardBackwardResult(accumulated_loss, loss_metrics)
+
+    def _pp_forward_backward_microbatch_group(
+        self,
+        *,
+        inputs: list[tuple[torch.Tensor, ...]] | None,
+        labels: list[torch.Tensor] | None,
+        model_kwargs: list[dict[str, Any]],
+        loss_kwargs: list[dict[str, Any]],
+        finalize_gradients: bool = True,
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        """Run one microbatch group through the graph runtime.
+
+        The traced loss takes one set of loss arguments shared by every
+        microbatch and reports no loss metrics. Preprocessing rejects
+        per-microbatch loss arguments, so every microbatch carries the same
+        ones.
+        """
+        with self.parallelism_context.activate_spmd(
+            typechecking=self.config.debug.spmd_typechecking,
+        ):
+            losses = [] if self.pp_has_last_stage else None
+            self.pp_schedule.step(
+                arg_mbs=inputs,
+                kwarg_mbs=model_kwargs,
+                target_mbs=labels,
+                losses=losses,
+                loss_kwargs=loss_kwargs[0],
+                return_outputs=False,
+                finalize_gradients=finalize_gradients,
+            )
+
+        loss_metrics: list[dict[str, torch.Tensor]] = [{} for _ in loss_kwargs]
+        if self.pp_has_last_stage:
+            assert losses is not None
+            detached_losses = [loss.detach() for loss in losses]
+            losses.clear()
+            return torch.sum(torch.stack(detached_losses)).to(self.device), loss_metrics
+        return self._pp_loss_sentinel_on_non_last_stage, loss_metrics
 
     def _page_stashed_forward_backward_body(
         self,
