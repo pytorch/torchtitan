@@ -399,7 +399,7 @@ class MuseSparkModel(MultimodalModel):
         """
 
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "fp32_to_bf16_split"]
+            default_factory=lambda: ["loss", "fp32_to_bf16_split", "rope"]
         )
         # pyrefly: ignore [bad-override]
         tok_embeddings: MuseSparkEmbeddingWithNorm.Config
