@@ -526,7 +526,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     else:
         config.checkpointer = replace(
             config.checkpointer,
-            folder=("muse_spark_816b_a42b_dist_moe_bf16_spmd_" f"{logical_world_size}"),
+            folder=(f"muse_spark_816b_a42b_dist_moe_bf16_spmd_{logical_world_size}"),
         )
     if context_parallel_degree > 1:
         config = apply_transforms(
@@ -786,7 +786,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     )
     config.comm.init_timeout_seconds = 1800
     config.comm.train_timeout_seconds = 1800
-    config.model.local_compile_regions = ["loss"]
+    config.model.local_compile.regions = ["loss"]
     config.debug.seed = 42
     config.activation_remat = ActivationRematConfig(
         save_regions=list(_MUSE_SPARK_DIST_MOE_SAVE_REGIONS),

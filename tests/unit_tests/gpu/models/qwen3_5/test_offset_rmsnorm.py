@@ -13,7 +13,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.common.decoder_sharding import head_norm_sharding_config
@@ -23,10 +23,10 @@ from torchtitan.models.qwen3_5.model import OffsetRMSNorm
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestOffsetRMSNormCompile(unittest.TestCase):
     def setUp(self):
-        apply_local_compile(["offset_rmsnorm"])
+        LocalCompileConfig(regions=["offset_rmsnorm"]).apply()
 
     def tearDown(self):
-        apply_local_compile([])
+        LocalCompileConfig().apply()
         torch._dynamo.reset()
 
     def test_forward_and_backward_emit_triton(self):
@@ -101,7 +101,7 @@ class TestOffsetRMSNormTensorParallel(DTensorTestBase):
 
     @with_comms
     def test_compiled_qk_norm(self):
-        apply_local_compile(["offset_rmsnorm"])
+        LocalCompileConfig(regions=["offset_rmsnorm"]).apply()
         device = self.device_type
         config = OffsetRMSNorm.Config(
             dim=128,
@@ -137,7 +137,7 @@ class TestOffsetRMSNormTensorParallel(DTensorTestBase):
             output.sum().backward()
 
         self.assertEqual(output.shape, x_local.shape)
-        apply_local_compile([])
+        LocalCompileConfig().apply()
         torch._dynamo.reset()
 
 

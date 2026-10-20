@@ -26,6 +26,7 @@ from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.base.module import Module, ModuleDict
@@ -280,12 +281,12 @@ class HFTransformerModel(BaseModel):
             # Set param_init and sharding_config before Module.Config.build()
             # accesses them. PretrainedConfig.__getattribute__ doesn't
             # recognize slots inherited from Module.Config.
-            self.param_init = (
-                None  # noqa: this sets Config.param_init, not Module._param_init
-            )
+            self.param_init = None  # noqa: this sets Config.param_init, not Module._param_init
             self.sharding_config = None
             # HF modules run eager; the loss and the swapped-in TorchTitan MoE (SwiGLU) can compile.
-            self.local_compile_regions = ["loss", "fused_binary_activation"]
+            self.local_compile = LocalCompileConfig(
+                regions=["loss", "fused_binary_activation"]
+            )
 
             assert model_config is not None, "model_config is required"
 
@@ -392,12 +393,12 @@ class HFTransformerModel(BaseModel):
             needed. The custom impl name only exists to bypass HF's per-model
             ``_supports_flex_attn`` gate.
             """
-            AttentionInterface._global_mapping[
+            AttentionInterface._global_mapping[_ATTN_IMPLEMENTATION] = (
+                _flex_attention_torchtitan
+            )
+            self._titan_injected_model_args["attn_implementation"] = (
                 _ATTN_IMPLEMENTATION
-            ] = _flex_attention_torchtitan
-            self._titan_injected_model_args[
-                "attn_implementation"
-            ] = _ATTN_IMPLEMENTATION
+            )
             self.attn_implementation = _ATTN_IMPLEMENTATION
             # HF selects the attention function from ``config._attn_implementation``.
             # PretrainedConfig has no ``attn_implementation`` property in this
@@ -1267,11 +1268,11 @@ class HFTransformerModel(BaseModel):
                 else None
             )
             if "attention_metadata" in input_dict:
-                input_dict[
-                    "attention_metadata"
-                ] = AllGatherKVFlexInnerAttention.prepare_cp_metadata(
-                    input_dict["attention_metadata"],
-                    permutation=permutation,
+                input_dict["attention_metadata"] = (
+                    AllGatherKVFlexInnerAttention.prepare_cp_metadata(
+                        input_dict["attention_metadata"],
+                        permutation=permutation,
+                    )
                 )
             input_dict = context_parallel.shard_tensors(
                 input_dict,

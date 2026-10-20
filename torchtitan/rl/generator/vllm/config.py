@@ -32,7 +32,7 @@ _DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 class VLLMCudaGraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
 
-    Local compile regions come from the model config's ``local_compile_regions``.
+    Local compile regions come from the model config's ``local_compile.regions``.
     Only CUDA graph capture, which is vLLM-specific, is controlled here.
 
     ``mode`` selects which vLLM CUDA graph mode to capture; see that field and

@@ -51,7 +51,7 @@ MODULE=torchtitan_recipes.tests.models.flux CONFIG=flux_debugmodel_inference \
 The loss function can be compiled independently with:
 
 ```python
-config.model.local_compile_regions = ["loss"]
+config.model.local_compile.regions = ["loss"]
 ```
 
 The model itself is not compiled by the standard Trainer.

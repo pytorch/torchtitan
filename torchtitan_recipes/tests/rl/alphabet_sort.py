@@ -160,7 +160,7 @@ def rl_grpo_gpt_oss_debug_varlen_no_compile(
 ) -> Controller.Config:
     config = rl_grpo_gpt_oss_debug_varlen(seq_len=seq_len)
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return config
 
 
@@ -198,7 +198,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
@@ -447,7 +447,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
@@ -616,7 +616,7 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return config
 
 
@@ -641,7 +641,7 @@ def _kimi_k3_rl_model_configs(
         converters=converters,
     )
     for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return trainer_model, generator_model
 
 
@@ -885,7 +885,7 @@ def rl_grpo_moe_debug_tp4_ep4() -> Controller.Config:
         generator_parallelism=config.generator.parallelism,
     )
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     # TODO: use FULL CUDA graphs once GPT-OSS CI enables a
     # CUDA-graph-compatible distributed MoE token dispatcher.
     config.generator.engine.cuda_graph.mode = "NONE"
