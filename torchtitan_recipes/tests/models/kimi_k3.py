@@ -186,7 +186,9 @@ def _dist_muon_optimizer(
         # one block: [kv_latent; k_rope]
         "wkv_a": blocks_of(attention.kv_lora_rank, attention.qk_rope_head_dim),
         # per head: [k_nope_h; v_h]
-        "wkv_b": blocks_of(attention.qk_nope_head_dim, attention.v_head_dim),
+        "inner_attention.wkv_b": blocks_of(
+            attention.qk_nope_head_dim, attention.v_head_dim
+        ),
         "gate": blocks_of(attention.v_head_dim),
         "wo": owned,
     }

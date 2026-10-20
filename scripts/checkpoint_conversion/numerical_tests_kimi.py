@@ -205,7 +205,7 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
 
     model.vision_encoder.to(vision_dtype)  # mixed precision: ViT in vision_dtype
     for layer in model.layers.values():
-        layer.attention.inner_attention = _SDPA(is_causal=True)
+        layer.attention.inner_attention.inner_attention = _SDPA(is_causal=True)
     for layer in model.vision_encoder.layers.values():
         layer.attn.flex_attention = _SDPA(is_causal=False)
     model.eval()
