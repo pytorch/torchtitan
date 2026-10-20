@@ -292,7 +292,7 @@ class MuseGlimmerModel(MultimodalModel):
         dim: int = 6656
         vocab_size: int = 202048
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "fused_binary_activation"]
+            default_factory=lambda: ["loss", "fused_binary_activation", "rope"]
         )
         # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
         # bundled embedding+norm unit whose .embedding/.norm children carry the sharding.

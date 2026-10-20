@@ -13,6 +13,7 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.attention import (
     Attention,
     FlexAttentionMetadata,
@@ -21,7 +22,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import _RotatePairs, ComplexRoPE, RoPE
 
 __all__ = ["DeepSeekMLAAttention"]
 
@@ -127,19 +128,14 @@ class DeepSeekMLAAttention(Attention):
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
                 )
 
-        q_nope, q_pe = torch.split(
-            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
-
         # Key-value projection
         kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         # rope, the query concat, and kv_norm read the query and wkv_a projection
         # outputs with bare ops.
-        remat.recompute_needs_tensor(q_nope, q_pe, kv, k_pe)
-        q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
-        q = torch.cat([q_nope, q_pe], dim=-1)
+        remat.recompute_needs_tensor(q, kv, k_pe)
+        q, k_pe = self._apply_rope_to_q_and_k_pe(q, k_pe, positions)
 
         kv_c_normed = self.kv_norm(kv)
 
@@ -157,3 +153,80 @@ class DeepSeekMLAAttention(Attention):
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
         return self.wo(output)
+
+    # Cat options: _RotateTail concatenates q's untouched int32 words with the rotated ones;
+    # Inductor's default pointwise cat makes that masked loads, slower than a plain cat.
+    # No pointwise autotuning, as in ComplexRoPE.forward: RoPE is inlined here, so this region's options apply.
+    @local_compile(
+        "mla_qk",
+        batch_invariant=True,
+        options={
+            "max_pointwise_cat_inputs": 0,
+            "max_complex_pointwise_cat_inputs": 0,
+            "triton.autotune_pointwise": False,
+        },
+    )
+    def _apply_rope_to_q_and_k_pe(
+        self,
+        q: torch.Tensor,
+        k_pe: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Rotate the rope dims of ``q`` and ``k_pe``.
+
+        Args:
+            q: ``[T, H, qk_nope_head_dim + qk_rope_head_dim]`` query.
+            k_pe: ``[T, qk_rope_head_dim]`` key rope dims, shared by all heads.
+            positions: ``[T]`` position ids, or ``None`` for ``0..T-1``.
+
+        Returns:
+            The rotated query, same shape as ``q``, and the rotated ``k_pe`` as
+            ``[T, 1, qk_rope_head_dim]``.
+        """
+        k_pe = k_pe.unsqueeze(1)
+        if (
+            torch.compiler.is_compiling()
+            and type(self.rope) is ComplexRoPE
+            and q.dtype == torch.bfloat16
+            and q.is_contiguous()
+        ):
+            # Under compile, ComplexRoPE's cache holds adjacent (cos, sin) pairs, so a contiguous
+            # bf16 q can rotate inside its row viewed as int32 pairs (_RotateTail). Eager and
+            # ComplexRoPE subclasses, which may replace forward, keep split -> rope -> cat below.
+            cache = self.rope._reshape_cache(q, positions).unflatten(-1, (-1, 2))
+            cos, sin = cache[..., 0], cache[..., 1]
+            return _RotateTail.apply(q, cos, sin), _RotatePairs.apply(k_pe, cos, sin)
+        q_nope, q_pe = torch.split(
+            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        q_pe, k_pe = self.rope(q_pe, k_pe, positions)
+        return torch.cat([q_nope, q_pe], dim=-1), k_pe
+
+
+class _RotateTail(torch.autograd.Function):
+    """Rotate the last ``2 * cos.shape[-1]`` dims of contiguous bf16 rows; copy the rest.
+
+    The rotation runs on the whole row viewed as int32 pairs: slicing the tail out first gives
+    a strided view, which ``_RotatePairs`` can only read as halves. A Function because the int32
+    views have no autograd. Needs an even storage offset; q comes straight from its projection.
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    ) -> torch.Tensor:
+        ctx.save_for_backward(cos, sin)
+        return _RotateTail.rotate(x, cos, sin)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):  # pyrefly: ignore[bad-override]
+        cos, sin = ctx.saved_tensors
+        return _RotateTail.rotate(grad, cos, -sin), None, None
+
+    @staticmethod
+    def rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        words = x.view(torch.int32)
+        num_pairs = cos.shape[-1]
+        kept, tail = words.split([words.shape[-1] - num_pairs, num_pairs], dim=-1)
+        rotated = _RotatePairs.rotate(tail, cos, sin)
+        return torch.cat([kept, rotated], dim=-1).view(torch.bfloat16)

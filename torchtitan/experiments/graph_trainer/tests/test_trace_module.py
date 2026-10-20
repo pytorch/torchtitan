@@ -37,6 +37,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     annotate_flex_attention_for_regional_inductor_pass,
 )
+from torchtitan.observability.profiler import Profiler
 
 
 def get_loss(logits, labels):
@@ -186,6 +187,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             compile=SimpleNamespace(memory_policy="none"),
             dist_moe_runtime=None,
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
+            profiler=Profiler.Config(),
             sdc_replayer=None,
             training=SimpleNamespace(
                 disable_cuda_graphs=False,

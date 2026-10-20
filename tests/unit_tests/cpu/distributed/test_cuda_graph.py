@@ -199,6 +199,7 @@ def test_cuda_graph_wrapper_collects_annotations() -> None:
             pool=graph_pool,
             stream=stream,
             enable_annotations=True,
+            annotation_config=None,
             capture_error_mode="thread_local",
         )
 
