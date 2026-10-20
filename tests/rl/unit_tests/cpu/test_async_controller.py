@@ -562,18 +562,6 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
     assert dropped_metric.value.value == 1
 
 
-def test_batcher_requires_whole_rows_per_microbatch() -> None:
-    with pytest.raises(ValueError, match="must be divisible"):
-        Batcher.Config().build(
-            num_tokens_per_microbatch_per_dp_rank=5,
-            max_context_length=3,
-            num_prompts_per_train_step=1,
-            dp_degree=1,
-            pad_id=0,
-            temperature=1.0,
-        )
-
-
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
     time_metrics = [
         m.Metric("timing/step/total", m.Mean.from_list([20.0])),

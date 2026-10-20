@@ -323,3 +323,44 @@ def test_microbatch_has_no_topk_kwargs_by_default() -> None:
     )
     loss_kwargs = batcher._pack_training_samples(_make_samples([3])).loss_kwargs()
     assert "generator_topk_token_ids" not in loss_kwargs
+
+
+def test_token_budget_need_not_be_a_multiple_of_the_context() -> None:
+    """A 2.5-context budget packs whole samples; padding positions wrap at the context."""
+    from torchtitan.models.common.attention.attention import (
+        create_varlen_metadata_for_document,
+    )
+
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=25,
+        max_context_length=10,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+        temperature=1.0,
+    )
+    samples = _make_samples([10, 10, 4])
+
+    assignments = batcher._assign_training_samples_to_microbatches(samples)
+    microbatch = batcher._pack_training_samples(samples)
+    metadata = create_varlen_metadata_for_document(
+        microbatch.positions, padding_mask=microbatch.padding_mask
+    )
+
+    assert [len(rank_samples) for row in assignments for rank_samples in row] == [3]
+    assert microbatch.input.shape == (25,)
+    assert microbatch.positions.tolist()[20:] == [0, 1, 2, 3, 0]
+    assert microbatch.padding_mask.tolist()[24] is True
+    assert metadata.cu_seq_q.tolist() == [0, 10, 20, 24, 25]
+
+
+def test_token_budget_must_fit_a_full_context_sample() -> None:
+    with pytest.raises(ValueError, match="must be at least max_context_length"):
+        Batcher.Config().build(
+            num_tokens_per_microbatch_per_dp_rank=9,
+            max_context_length=10,
+            num_prompts_per_train_step=1,
+            dp_degree=1,
+            pad_id=0,
+            temperature=1.0,
+        )
