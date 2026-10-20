@@ -243,8 +243,8 @@ class Generator(Configurable):
             # The prefetch buffers below and each prefetch's TorchStore read pin memory through
             # the CUDA runtime, on the calling thread's device. Both run on this thread, which
             # would otherwise use device 0, rank 0's GPU.
-            torch.cuda.set_device(
-                self._engine_loop_thread.call(torch.cuda.current_device)
+            torch.accelerator.set_device_index(
+                self._engine_loop_thread.call(torch.accelerator.current_device_index)
             )
             logger.info("Generator engine initialized")
 

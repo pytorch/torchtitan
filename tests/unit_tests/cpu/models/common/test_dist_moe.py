@@ -970,7 +970,9 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     assert config.training.mixed_precision_reduce == "bfloat16"
     assert all(expert.inplace_wgrad_accum for _, expert, _, _ in experts)
     assert all(
-        isinstance(layer.attention.inner_attention, VarlenInnerAttention.Config)
+        isinstance(
+            layer.attention.inner_attention.inner_attention, VarlenInnerAttention.Config
+        )
         for layer in model_config.layers
     )
     assert config.dataloader.max_num_documents == max_documents

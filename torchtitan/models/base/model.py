@@ -61,15 +61,21 @@ class BaseModel(Module, ABC):
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
+        dict[str, Any],
     ]:
-        """Prepare the forward inputs from a dataloader batch.
+        """Prepare the forward and loss inputs from a dataloader batch.
 
         Models driven by the standard trainer/validator forward path implement
         this to build any attention masks, apply context-parallel sharding and
         SPMD annotation as needed, and split ``input``/``labels`` out of the
         batch. ``input_dict`` is the batch with ``labels`` folded in; return
-        ``(inputs, labels, extra_kwargs)``. Models with aligned multi-output
-        objectives may return tuples of input and label tensors.
+        ``(inputs, labels, model_kwargs, loss_kwargs)``. Models with aligned
+        multi-output objectives may return tuples of input and label tensors.
+
+        ``input_dict["loss_kwargs"]``, if present, holds per-microbatch loss
+        arguments, e.g. RL advantages. Its tensors share the ``labels`` token
+        dimension and are CP-sharded and SPMD-annotated like ``labels``;
+        non-tensor values pass through. They are returned as ``loss_kwargs``.
 
         Additional keyword arguments may provide model-specific preprocessing
         dependencies that are owned outside the trainable model. The trainer
