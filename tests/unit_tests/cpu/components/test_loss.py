@@ -801,15 +801,21 @@ class _RecordingFSDPLinear(nn.Linear):
         self._state = SimpleNamespace(
             _lazy_init=lambda: None,
             _auto_reshard_after_forward=False,
+            _modules_to_run_forward=set(),
             _fsdp_param_groups=[
                 SimpleNamespace(
                     post_forward_mesh_info=object(),
                     reshard_after_backward=True,
                     reduce_grads=True,
                     all_reduce_grads=True,
+                    _post_backward_pending=False,
+                    _partial_reduce_output=None,
                     reshard=self.reshard,
                 )
             ],
+        )
+        self._state._state_ctx = SimpleNamespace(
+            is_last_backward=True, all_states=[self._state]
         )
 
     def _get_fsdp_state(self):
@@ -821,15 +827,6 @@ class _RecordingFSDPLinear(nn.Linear):
         self._state._fsdp_param_groups[0].post_forward_mesh_info = (
             object() if enabled else None
         )
-
-    def set_reshard_after_backward(self, enabled, *, recurse):
-        self.events.append(f"set_reshard_after_backward({enabled})")
-        self._state._fsdp_param_groups[0].reshard_after_backward = enabled
-
-    def set_requires_gradient_sync(self, enabled, *, recurse):
-        self.events.append(f"gradient_sync({enabled})")
-        self._state._fsdp_param_groups[0].reduce_grads = enabled
-        self._state._fsdp_param_groups[0].all_reduce_grads = enabled
 
     def unshard(self):
         self.events.append("unshard")
