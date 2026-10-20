@@ -19,12 +19,12 @@ from torchtitan.models.common.attn_gym import (
     _ChunkKDA,
     _FusedGate,
     _MaskRows,
-    _MissingKernel,
     bound_gate,
     causal_conv1d,
     chunk_kda,
     ChunkKdaCudnn,
     ContextParallelRouting,
+    is_missing_kernel,
     l2norm,
     require_attn_gym,
 )
@@ -52,7 +52,7 @@ from .linear_attention import (
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
 # SPMD region.
 for _kernel_function in (_FusedGate, _ChunkKDA, ChunkKdaCudnn, _MaskRows):
-    if _kernel_function is not _MissingKernel:
+    if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
 
 
@@ -71,7 +71,8 @@ class KDAKernel(Module):
                 )
 
     def __init__(self, config: Config):
-        require_attn_gym()
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(chunk_kda, bound_gate, l2norm)
         super().__init__()
         self.lower_bound = config.lower_bound
 
@@ -173,6 +174,8 @@ class InnerKDA(InnerAttention):
             )
 
     def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(causal_conv1d)
         super().__init__()
         self.head_dim = config.head_dim
         self.kernel = config.kernel.build()

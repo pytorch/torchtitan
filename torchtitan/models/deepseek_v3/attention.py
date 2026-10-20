@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""DeepSeek V3 multi-head latent attention."""
+
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
@@ -15,9 +17,8 @@ from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.attention import (
     Attention,
     FlexAttentionMetadata,
-    InnerAttention,
+    MLAAttention,
     VarlenAttentionMetadata,
-    VarlenInnerAttention,
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -27,11 +28,7 @@ __all__ = ["DeepSeekMLAAttention"]
 
 
 class DeepSeekMLAAttention(Attention):
-    """
-    Multi-head latent attention (MLA) module.
-
-    This is DeepSeek V3-specific and NOT shared with other models.
-    """
+    """DeepSeek V3 multi-head latent attention."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Attention.Config):
@@ -40,7 +37,6 @@ class DeepSeekMLAAttention(Attention):
         wq_a: Linear.Config | None = None
         wq_b: Linear.Config | None = None
         wkv_a: Linear.Config
-        wkv_b: Linear.Config
         wo: Linear.Config
         q_lora_rank: int = 0
         kv_lora_rank: int = 512
@@ -50,9 +46,7 @@ class DeepSeekMLAAttention(Attention):
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
         rope: RoPE.Config
-        inner_attention: InnerAttention.Config = field(
-            default_factory=VarlenInnerAttention.Config
-        )
+        inner_attention: MLAAttention.Config  # pyrefly: ignore[bad-override]
         mscale: float = 1.0
 
         @property
@@ -63,6 +57,14 @@ class DeepSeekMLAAttention(Attention):
                 mscale = 0.1 * self.mscale * math.log(self.rope.rope_factor) + 1.0
                 scale = scale * mscale * mscale
             return scale
+
+        def __post_init__(self) -> None:
+            Attention.Config.__post_init__(self)
+            if not isinstance(self.inner_attention, MLAAttention.Config):
+                raise ValueError(
+                    "DeepSeekMLAAttention requires an MLAAttention.Config, "
+                    f"but got {type(self.inner_attention).__qualname__}."
+                )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -90,11 +92,10 @@ class DeepSeekMLAAttention(Attention):
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3034078575
         self.wkv_a = config.wkv_a.build()
         self.kv_norm = config.kv_norm.build()
-        self.wkv_b = config.wkv_b.build()
+        self.inner_attention = config.inner_attention.build()
         self.wo = config.wo.build()
         self.softmax_scale = config.softmax_scale
 
-        self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
 
     def forward(
@@ -136,29 +137,19 @@ class DeepSeekMLAAttention(Attention):
         remat.recompute_needs_tensor(q, kv, k_pe)
         q, k_pe = self._apply_rope_to_q_and_k_pe(q, k_pe, positions)
 
-        kv = self.wkv_b(self.kv_norm(kv))
+        kv_c_normed = self.kv_norm(kv)
 
-        with (
-            spmd.local()
-        ):  # QKV even shard unflatten, but the expand is truly local SPMD
-            kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
-            # The key concat reads the wkv_b projection output with bare ops.
-            remat.recompute_needs_tensor(kv)
-            k, v = self._split_kv_and_build_k(kv, k_pe)
-            if spmd.is_type_checking() and not torch.compiler.is_compiling():
-                for t in [k, v]:
-                    spmd.assert_type(
-                        t,
-                        spmd.V,
-                        spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                    )
+        with spmd.local():
+            k_shared_TR = k_pe.squeeze(1)
 
-        output = remat.region(
-            self.inner_attention,
-            self.remat_region_name("inner_attention"),
-            recompute=self.remat_should_recompute("inner_attention"),
-        )(q, k, v, attention_metadata=attention_metadata, scale=self.softmax_scale)
-        # The copy below reads the inner_attention output with bare ops.
+        output = self.inner_attention(
+            q,
+            kv_c_normed,
+            k_shared_TR,
+            attention_metadata=attention_metadata,
+            scale=self.softmax_scale,
+        )
+        # The copy below reads the MLA attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
         return self.wo(output)
@@ -198,27 +189,3 @@ class DeepSeekMLAAttention(Attention):
         )
         q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
         return torch.cat([q_nope, q_pe], dim=-1), k_pe
-
-    @local_compile("mla_qk", batch_invariant=True)
-    def _split_kv_and_build_k(
-        self,
-        kv: torch.Tensor,
-        k_pe: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Build the key from ``kv``'s nope dims and the shared ``k_pe``.
-
-        Args:
-            kv: ``[T, H, qk_nope_head_dim + v_head_dim]`` packed key nope dims
-                and value.
-            k_pe: ``[T, 1, qk_rope_head_dim]`` rotated key rope dims.
-
-        Returns:
-            Key ``[T, H, qk_nope_head_dim + qk_rope_head_dim]`` and value
-            ``[T, H, v_head_dim]``.
-        """
-        k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = torch.cat([k_nope, k_pe.expand(-1, k_nope.size(1), -1)], dim=-1)
-        # A strided value view gets a gradient from attention in another layout,
-        # which the compiled backward copies before using it. A dense value avoids
-        # that copy and fuses into the key's kernel.
-        return k, v.contiguous()

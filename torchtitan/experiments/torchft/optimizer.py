@@ -17,7 +17,6 @@ from torchtitan.components.optim.utils import (
     get_flat_optim_state_dict,
     init_optim_state,
 )
-from torchtitan.distributed import utils as dist_utils
 
 if TYPE_CHECKING:
     from torchtitan.experiments.torchft.manager import TorchFTManager
@@ -126,12 +125,11 @@ class TorchFTOptim(Optim):
     def _update(self, loss: torch.Tensor) -> torch.Tensor:
         if self._quorum_manager is None:
             return super()._update(loss)
-        # Duplicates Optim._update except for the finite check.
-        grad_norm = dist_utils.clip_grad_norm_(
+        # Matches Optim._update except for the finite check.
+        grad_norm = self.gradient_clipper.clip_grad_norm_(
             self.parameters,
             self.config.max_norm,
-            foreach=True,
-            pp_mesh=self.parallelism_context.get_optional_mesh("pp"),
+            parallelism_context=self.parallelism_context,
         )
         loss_is_finite = torch.isfinite(loss).all().to(torch.int32)
         if not self.parallelism_context.pp_enabled or self.pp_has_last_stage:
