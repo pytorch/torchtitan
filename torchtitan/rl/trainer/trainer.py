@@ -133,13 +133,10 @@ class Trainer(Configurable):
 
         engine.load_checkpoint()
         self._staging_state_dict = self._setup_staging_model_state_dict()
-        self._staging_device_module = torch.get_device_module(engine.device)
         if engine.device.type == "cpu":
             self._staging_model_state_dict_stream = None
         else:
-            self._staging_model_state_dict_stream = self._staging_device_module.Stream(
-                device=engine.device
-            )
+            self._staging_model_state_dict_stream = torch.Stream(device=engine.device)
             self._mark_model_state_dict_ready_for_staging()
         if config.checkpointer is None:
             logger.warning(
@@ -180,7 +177,7 @@ class Trainer(Configurable):
         # for optimizer updates, but not for next-step forward/backward kernels
         # that may be queued before the concurrent push starts.
         self._staging_model_state_dict_stream.wait_stream(
-            self._staging_device_module.current_stream(self.engine.device)
+            torch.accelerator.current_stream(self.engine.device)
         )
 
     async def close(self) -> None:
@@ -440,11 +437,7 @@ class Trainer(Configurable):
     ) -> torch.Event | None:
         """Enqueue model-state copies into pinned CPU buffers."""
         stream = self._staging_model_state_dict_stream
-        stream_context = (
-            self._staging_device_module.stream(stream)
-            if stream is not None
-            else nullcontext()
-        )
+        stream_context = stream if stream is not None else nullcontext()
         staging_complete: torch.Event | None = None
         with stream_context:
             for name, destination in self._staging_state_dict.items():
@@ -453,7 +446,7 @@ class Trainer(Configurable):
                     get_local_tensor(source), non_blocking=stream is not None
                 )
             if stream is not None:
-                staging_complete = self._staging_device_module.Event()
+                staging_complete = torch.Event()
                 staging_complete.record(stream)
 
         return staging_complete
