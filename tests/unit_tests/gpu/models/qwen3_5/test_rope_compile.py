@@ -292,6 +292,32 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
                 ):
                     torch.testing.assert_close(compiled, eager)
 
+    def test_compiled_matches_eager_complex_non_contiguous(self):
+        # A split key with an inserted head dim, and a query with transposed head strides:
+        # the compiled path rotates these without the contiguous int32 shortcut.
+        torch.manual_seed(42)
+        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        positions = torch.randperm(128, device="cuda")[:64]
+        query_storage = torch.randn(8, 64, 64, device="cuda", dtype=torch.bfloat16)
+        key_full = torch.randn(64, 96, device="cuda", dtype=torch.bfloat16)
+
+        def run():
+            query_leaf = query_storage.detach().clone().requires_grad_()
+            key_leaf = key_full.detach().clone().requires_grad_()
+            query = query_leaf.transpose(0, 1)
+            key = key_leaf[..., -64:].unsqueeze(1)
+            outputs = rope(query, key, positions)
+            grads = torch.autograd.grad(
+                outputs, (query_leaf, key_leaf), [torch.ones_like(o) for o in outputs]
+            )
+            return (*outputs, *grads)
+
+        apply_local_compile([])
+        eager = run()
+        apply_local_compile(["rope"])
+        for compiled, expected in zip(run(), eager, strict=True):
+            torch.testing.assert_close(compiled, expected)
+
     def test_compiled_is_batch_invariant(self):
         torch.manual_seed(42)
         apply_local_compile(["rope"])
