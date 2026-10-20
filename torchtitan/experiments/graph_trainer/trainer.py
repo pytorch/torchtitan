@@ -202,6 +202,7 @@ class GraphTrainingEngine(TrainingEngine):
                     for parameter in model_part.parameters()
                 ),
                 num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
             )
 
         maybe_apply_numa_binding(self.device.index, self.device.type)

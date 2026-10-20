@@ -138,6 +138,7 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
             optim._update,
             num_warmup_iterations=2,
             name="optimizer",
+            annotation_config=None,
         )
         assert optim._run_update is wrapped_update
     else:
