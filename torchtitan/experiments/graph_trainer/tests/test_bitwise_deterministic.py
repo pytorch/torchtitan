@@ -123,10 +123,19 @@ class BitwiseDeterministicBase(unittest.TestCase):
             "max_autotune": False,
             "coordinate_descent_tuning": False,
         }
+        # fullgraph=True: a graph break or a hit recompile_limit raises instead
+        # of silently running unfused eager flex, which would change the eager
+        # reference.
         FlexInnerAttention._compiled_flex_attn = torch.compile(
             flex_attention,
+            fullgraph=True,
             options=FlexInnerAttention.inductor_configs,
+            recompile_limit=16,
         )
+        # Dynamo caches compiled flex on flex_attention's code object, which
+        # outlives the torch.compile wrapper. Start each test from an empty
+        # cache so graphs from earlier tests don't count toward recompile_limit.
+        torch._dynamo.reset()
 
         _set_deterministic()
         self.model_config = self.build_model_config(
@@ -191,9 +200,14 @@ class BitwiseDeterministicBase(unittest.TestCase):
         numerics_changing_optim: bool = False,
     ) -> tuple[torch.Tensor, str, str]:
         """Run forward-backward-optimizer steps using the given trainer class."""
+        # Only GraphTrainer's graph passes read the module annotations. Keep the
+        # eager reference unannotated like the core and RL trainers: Dynamo
+        # guards on the active annotation, so an annotated eager model compiles
+        # flex once per layer.
         # Annotate after deepcopy: annotate_fn wrappers capture bound methods
         # that don't rebind correctly through copy.deepcopy.
-        self.annotate_model(model)
+        if issubclass(trainer_cls, GraphTrainer):
+            self.annotate_model(model)
         trainer = build_minimal_trainer(
             model,
             self.model_config,

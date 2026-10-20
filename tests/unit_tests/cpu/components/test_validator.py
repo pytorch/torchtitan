@@ -37,7 +37,7 @@ class _ClosableLoader:
 class _EchoModel(nn.Module):
     def preprocess_inputs(self, input_dict, **kwargs):
         del kwargs
-        return input_dict["input"], input_dict["labels"], {}
+        return input_dict["input"], input_dict["labels"], {}, {}
 
     def forward(self, inputs, **kwargs):
         del kwargs

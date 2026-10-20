@@ -375,7 +375,7 @@ def _dist_muon_optimizer(
     attention_shardings = {
         **query_shardings,
         "wkv_a": kv_latent_and_rope,
-        "wkv_b": per_key_value_head,
+        "inner_attention.wkv_b": per_key_value_head,
         "wo": owned,
     }
     feed_forward_shardings = {
