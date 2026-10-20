@@ -27,7 +27,9 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
+    gate_attention_output,
     GQAttention,
+    local_head_split,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -146,15 +148,13 @@ class Attention(GQAttention):
         )
         # The copy below reads the inner_attention output with bare ops.
         remat.recompute_needs_tensor(output)
-        output = output.contiguous().view(num_tokens, -1)
+        if self.o_gate is None:
+            return self.wo(output.contiguous().view(num_tokens, -1))
 
-        if self.o_gate is not None:
-            gate = self.o_gate(x_TD)
-            # The gating reads the o_gate projection output with bare ops.
-            remat.recompute_needs_tensor(gate)
-            output = output * torch.sigmoid(gate)
-
-        return self.wo(output)
+        gate = local_head_split(self.o_gate(x_TD), self.head_dim, cp_shard_dim=0)
+        # The gating reads the o_gate projection output with bare ops.
+        remat.recompute_needs_tensor(gate)
+        return self.wo(gate_attention_output(output, gate))
 
 
 class MuseGlimmerTransformerBlock(TransformerBlock):
@@ -292,7 +292,12 @@ class MuseGlimmerModel(MultimodalModel):
         dim: int = 6656
         vocab_size: int = 202048
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "fused_binary_activation", "rope"]
+            default_factory=lambda: [
+                "loss",
+                "fused_binary_activation",
+                "rope",
+                "attention_output_gate",
+            ]
         )
         # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
         # bundled embedding+norm unit whose .embedding/.norm children carry the sharding.

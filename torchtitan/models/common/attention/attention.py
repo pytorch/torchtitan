@@ -39,6 +39,7 @@ from torch.nn.attention.varlen import (
 )
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
@@ -61,6 +62,7 @@ __all__ = [
     "VarlenAttentionMetadata",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
+    "gate_attention_output",
     "get_causal_mask_mod",
     "get_document_mask_mod",
     "get_efficient_causal_mask_mod_for_packed_document",
@@ -710,6 +712,19 @@ def local_head_split(
         if spmd.is_type_checking():
             spmd.assert_type(out, output_type)
     return out
+
+
+@local_compile("attention_output_gate", batch_invariant=True)
+def gate_attention_output(
+    output_THV: torch.Tensor, gate_THV: torch.Tensor
+) -> torch.Tensor:
+    """Scale the attention output by ``sigmoid(gate)`` and flatten the heads, ``[T, H, V] -> [T, H * V]``.
+
+    The flatten is inside so that, compiled, the copy of a heads-first output fuses into the same kernel.
+    """
+    return (output_THV.contiguous() * torch.sigmoid(gate_THV)).view(
+        output_THV.shape[0], -1
+    )
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:

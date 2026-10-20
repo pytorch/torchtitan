@@ -13,6 +13,7 @@ from .attention import (  # noqa: F401
     create_varlen_metadata_for_document,
     FlexAttentionMetadata,
     FlexInnerAttention,
+    gate_attention_output,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
