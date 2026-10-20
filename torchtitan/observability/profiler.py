@@ -17,7 +17,10 @@ from typing import Any, Literal
 import torch
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.cuda_graph import get_cuda_graph_annotations
+from torchtitan.distributed.cuda_graph import (
+    get_cuda_graph_annotations,
+    get_cuspy_cuda_graph_annotation_config,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.utils import device_module, device_type
 
@@ -37,6 +40,7 @@ PROFILE_DIR = "profiling/traces"  # Profiler.Config.save_traces_folder default
 PROFILE_ITER_DIR = "iteration_{step}"  # PROFILE_DIR/{PROFILE_ITER_DIR}
 PROFILE_FILE = "rank{rank}_trace.json.gz"  # PROFILE_DIR/PROFILE_ITER_DIR/{PROFILE_FILE}
 PFTRACE_PROFILE_FILE = "rank{rank}_trace.pftrace.gz"
+PY_STACKS_FILE = "rank{rank}_cuda_graph_py_stacks.json.gz"
 
 MEMORY_DIR = (
     "profiling/memory_snapshot"  # Profiler.Config.save_memory_snapshot_folder default
@@ -66,6 +70,12 @@ class CuspyProfilerConfig:
 
     enable_event_node_ids: bool = False
     """Associate CUDA events with CUDA graph event-record nodes."""
+
+    record_py_stacks: bool = False
+    """Record each CUDA graph kernel's Python launch stack at capture and save them
+    beside the trace as ``rank{rank}_cuda_graph_py_stacks.json.gz``, keyed by
+    ``(graph id << 32) | graph node id`` of the trace's kernel events (see
+    ``torch.cuda.graph_annotations.get_kernel_py_stacks``)."""
 
     performance_metrics: list[str] = field(default_factory=list)
     """CUPTI PM-sampling metric names to collect, e.g. ``sm__cycles_active.avg``.
@@ -334,6 +344,16 @@ class Profiler(Configurable):
                     "profiler_warmup + profiler_active."
                 )
 
+        def maybe_cuda_graph_annotation_config(self) -> dict[str, Any] | None:
+            """``torch.cuda.graph`` annotation options for a Cuspy-profiled run, or
+            ``None`` when this config does not profile with Cuspy."""
+            if not self.enable_profiling or self.cuspy is None:
+                return None
+            return get_cuspy_cuda_graph_annotation_config(
+                enable_event_node_ids=self.cuspy.enable_event_node_ids,
+                record_py_stacks=self.cuspy.record_py_stacks,
+            )
+
     def __init__(
         self,
         config: Config,
@@ -462,6 +482,19 @@ class Profiler(Configurable):
             if cuspy is not None:
                 # Cuspy picks its Perfetto encoder from the ".pftrace" in the path.
                 prof.export_chrome_trace(output_file)
+                if cuspy.record_py_stacks:
+                    if torch.cuda.graph_annotations.get_kernel_py_stacks():
+                        torch.cuda.graph_annotations.dump_kernel_py_stacks(
+                            os.path.join(
+                                curr_trace_dir, PY_STACKS_FILE.format(rank=rank)
+                            )
+                        )
+                    else:
+                        logger.warning(
+                            "profiler.cuspy.record_py_stacks is set, but no CUDA graph "
+                            "launch stacks were recorded; stacks are only recorded for "
+                            "CUDA graphs, so check that CUDA graphs are enabled."
+                        )
             else:
                 # CUDA graph annotations are baked in during the export rather than
                 # joined onto the written file afterwards: re-reading and rewriting a
@@ -508,6 +541,13 @@ class Profiler(Configurable):
                 raise ValueError(
                     "profiler.cuspy is set, but Cuspy cannot run here:\n  - "
                     + "\n  - ".join(reasons)
+                )
+            if not torch.cuda.graph_annotations.is_available():
+                logger.warning(
+                    "CUDA graph annotations are unavailable (see "
+                    "torch.cuda.graph_annotations.is_available for requirements); "
+                    "kernels replayed from CUDA graphs will not carry mark_kernels "
+                    "metadata in the Cuspy trace."
                 )
             activities.append(_get_cuspy_activity_config(cuspy))
         elif torch.cuda.is_available():
