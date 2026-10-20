@@ -13,6 +13,7 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.attention import (
     Attention,
     FlexAttentionMetadata,
@@ -127,19 +128,14 @@ class DeepSeekMLAAttention(Attention):
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
                 )
 
-        q_nope, q_pe = torch.split(
-            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
-
         # Key-value projection
         kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         # rope, the query concat, and kv_norm read the query and wkv_a projection
         # outputs with bare ops.
-        remat.recompute_needs_tensor(q_nope, q_pe, kv, k_pe)
-        q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
-        q = torch.cat([q_nope, q_pe], dim=-1)
+        remat.recompute_needs_tensor(q, kv, k_pe)
+        q, k_pe = self._apply_rope_to_q_and_k_pe(q, k_pe, positions)
 
         kv_c_normed = self.kv_norm(kv)
 
@@ -157,3 +153,39 @@ class DeepSeekMLAAttention(Attention):
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
         return self.wo(output)
+
+    # With RoPE in real arithmetic under compile, Inductor's default pointwise-cat
+    # lowering turns the q_nope/q_pe concat into masked loads, which are slower than
+    # a plain cat kernel.
+    # No pointwise autotuning, as in ComplexRoPE.forward: RoPE is inlined here, so this region's options apply.
+    @local_compile(
+        "mla_qk",
+        batch_invariant=True,
+        options={
+            "max_pointwise_cat_inputs": 0,
+            "max_complex_pointwise_cat_inputs": 0,
+            "triton.autotune_pointwise": False,
+        },
+    )
+    def _apply_rope_to_q_and_k_pe(
+        self,
+        q: torch.Tensor,
+        k_pe: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Rotate the rope dims of ``q`` and ``k_pe``.
+
+        Args:
+            q: ``[T, H, qk_nope_head_dim + qk_rope_head_dim]`` query.
+            k_pe: ``[T, qk_rope_head_dim]`` key rope dims, shared by all heads.
+            positions: ``[T]`` position ids, or ``None`` for ``0..T-1``.
+
+        Returns:
+            The rotated query, same shape as ``q``, and the rotated ``k_pe`` as
+            ``[T, 1, qk_rope_head_dim]``.
+        """
+        q_nope, q_pe = torch.split(
+            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
+        return torch.cat([q_nope, q_pe], dim=-1), k_pe
