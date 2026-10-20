@@ -1,0 +1,59 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import pytest
+import torch
+
+from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.models.muse_spark import build_model_config
+
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+
+
+def _run(fn, inputs_):
+    leaves = [t.detach().clone().requires_grad_() for t in inputs_]
+    outputs = fn(*leaves)
+    outputs = outputs if isinstance(outputs, tuple) else (outputs,)
+    torch.autograd.backward(outputs, [torch.ones_like(t) for t in outputs])
+    return [*outputs, *(t.grad for t in leaves)]
+
+
+@pytest.mark.parametrize(
+    "region", ["muse_spark_attention_qk_norm", "muse_spark_attention_output"]
+)
+def test_attention_region_matches_eager(region):
+    torch.manual_seed(0)
+    attention = build_model_config("debugmodel").layers[0].attention.build().cuda()
+    num_tokens, num_heads, num_kv_heads = 64, attention.n_heads, attention.n_kv_heads
+    head_dim = attention.head_dim
+    query_TNH = torch.randn(
+        num_tokens, num_heads, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    if region == "muse_spark_attention_qk_norm":
+        fn = attention._norm_query_and_key
+        key_TKH = torch.randn(
+            num_tokens, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16
+        )
+        inputs_ = (query_TNH, key_TKH)
+    else:
+        fn = attention._flatten_attention_output
+        gate_TO = torch.randn(
+            num_tokens, num_heads * head_dim, device="cuda", dtype=torch.bfloat16
+        )
+        inputs_ = (query_TNH, gate_TO)
+
+    try:
+        apply_local_compile([])
+        expected = _run(fn, inputs_)
+        apply_local_compile([region])
+        actual = _run(fn, inputs_)
+    finally:
+        apply_local_compile([])
+
+    # Compiled pointwise math contracts into FMAs: allow ~1 bf16 ulp.
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_tensor, expected_tensor, atol=2e-2, rtol=2e-2)

@@ -126,10 +126,8 @@ class MuseSparkAttention(GQAttention):
 
         if self.q_norm is not None or self.k_norm is not None:
             assert self.q_norm is not None and self.k_norm is not None
-            remat.recompute_needs_tensor(query_TNH)
-            query_TNH = self.q_norm(query_TNH) * self.scale_query_by
-            remat.recompute_needs_tensor(key_TKH)
-            key_TKH = self.k_norm(key_TKH)
+            remat.recompute_needs_tensor(query_TNH, key_TKH)
+            query_TNH, key_TKH = self._norm_query_and_key(query_TNH, key_TKH)
 
         floor_scale = self.position_temperature_floor_scale
         query_scale = self.position_temperature_query_scale
@@ -167,15 +165,38 @@ class MuseSparkAttention(GQAttention):
             enable_gqa=self.enable_gqa,
         )
         remat.recompute_needs_tensor(output_TNH)
+        if output_gate_TO is not None:
+            remat.recompute_needs_tensor(output_gate_TO)
+        output_TO = self._flatten_attention_output(output_TNH, output_gate_TO)
+        # Not in the compiled region: wo runs the TP reduce and its own remat regions.
+        output_TD = self.wo(output_TO)
+        return output_TD
+
+    @local_compile("muse_spark_attention_qk_norm", batch_invariant=False)
+    def _norm_query_and_key(
+        self,
+        query_TNH: torch.Tensor,
+        key_TKH: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the per-head normalized query, times ``scale_query_by``, and key."""
+        if self.q_norm is None or self.k_norm is None:
+            raise ValueError("MuseSparkAttention needs both q_norm and k_norm.")
+        return self.q_norm(query_TNH) * self.scale_query_by, self.k_norm(key_TKH)
+
+    @local_compile("muse_spark_attention_output", batch_invariant=False)
+    def _flatten_attention_output(
+        self,
+        output_TNH: torch.Tensor,
+        output_gate_TO: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Flatten the heads, applying the configured per-head norm and sigmoid gate."""
         output_TNH = output_TNH.contiguous()
         if self.output_norm is not None:
             output_TNH = self.output_norm(output_TNH)
         output_TO = output_TNH.reshape(output_TNH.shape[0], -1)
         if output_gate_TO is not None:
-            remat.recompute_needs_tensor(output_gate_TO)
             output_TO = output_TO * torch.sigmoid(output_gate_TO)
-        output_TD = self.wo(output_TO)
-        return output_TD
+        return output_TO
 
 
 class MuseSparkRMSNorm(RMSNorm):
@@ -408,6 +429,8 @@ class MuseSparkModel(MultimodalModel):
                 "loss",
                 "fp32_to_bf16_split",
                 "rope",
+                "muse_spark_attention_output",
+                "muse_spark_attention_qk_norm",
                 "muse_spark_input_scaled_rmsnorm",
                 "muse_spark_logit_postprocess",
                 "muse_spark_residual",
