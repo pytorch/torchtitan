@@ -324,9 +324,10 @@ class KimiK3Model(MultimodalModel):
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build metadata, CP-shard inputs, and annotate K3 layouts."""
         del kwargs
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         positions = input_dict.get("positions")
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
@@ -359,6 +360,8 @@ class KimiK3Model(MultimodalModel):
         }
         if "vision_bank_indices_T" in input_dict:
             input_shardings["vision_bank_indices_T"] = token_id_placement()
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
@@ -375,10 +378,11 @@ class KimiK3Model(MultimodalModel):
                 if isinstance(metadata, LinearAttentionMetadata):
                     metadata.annotate_spmd_types()
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         input_dict["aux_loss_denominators"] = global_routing_token_counts
-        return inputs, labels, input_dict
+        return inputs, labels, input_dict, loss_kwargs
 
     def _prepare_multimodal_embeds(
         self,
