@@ -33,26 +33,19 @@ def test_compiled_mla_qk_matches_eager(use_positions: bool) -> None:
     num_heads = attention.n_heads
     q = torch.randn(num_tokens, num_heads, attention.qk_head_dim)
     k_pe = torch.randn(num_tokens, attention.qk_rope_head_dim)
-    kv = torch.randn(
-        num_tokens, num_heads, attention.qk_nope_head_dim + attention.v_head_dim
-    )
     positions = torch.arange(num_tokens) % 10 if use_positions else None
-    grad_q, grad_k, grad_v = (
-        torch.randn_like(q),
-        torch.randn(num_tokens, num_heads, attention.qk_head_dim),
-        torch.randn(num_tokens, num_heads, attention.v_head_dim),
-    )
+    grad_q = torch.randn_like(q)
+    grad_k_pe = torch.randn(num_tokens, 1, attention.qk_rope_head_dim)
 
     results = []
     for regions in ([], ["mla_qk"]):
         apply_local_compile(regions)
-        inputs = [t.clone().requires_grad_(True) for t in (q, k_pe, kv)]
+        inputs = [t.clone().requires_grad_(True) for t in (q, k_pe)]
         rotated_q, rotated_k_pe = attention._apply_rope_to_q_and_k_pe(
             inputs[0], inputs[1], positions
         )
-        k, v = attention._split_kv_and_build_k(inputs[2], rotated_k_pe)
-        torch.autograd.backward((rotated_q, k, v), (grad_q, grad_k, grad_v))
-        results.append((rotated_q, k, v, *(t.grad for t in inputs)))
+        torch.autograd.backward((rotated_q, rotated_k_pe), (grad_q, grad_k_pe))
+        results.append((rotated_q, rotated_k_pe, *(t.grad for t in inputs)))
 
     for eager, compiled in zip(*results, strict=True):
         torch.testing.assert_close(compiled, eager)
