@@ -227,7 +227,7 @@ class GraphTrainingEngine(TrainingEngine):
         # The traced loss only receives the shared loss arguments, on both the
         # single-stage and the PP path.
         if any(
-            microbatch.loss_kwargs()
+            microbatch.as_input_dict().get("loss_kwargs")
             for microbatch_group in microbatch_groups
             for microbatch in microbatch_group
         ):
@@ -236,10 +236,16 @@ class GraphTrainingEngine(TrainingEngine):
                 "GraphRuntime yet."
             )
         if self.parallelism_context.pp_enabled:
-            return super()._preprocess_microbatch_groups(
+            pp_microbatch_groups = super()._preprocess_microbatch_groups(
                 microbatch_groups,
                 global_routing_token_counts=global_routing_token_counts,
             )
+            # Drop the per-microbatch loss arguments, rejected above, so both
+            # paths return (arg_mbs, kwarg_mbs, target_mbs).
+            return [
+                (arg_mbs, kwarg_mbs, target_mbs)
+                for arg_mbs, kwarg_mbs, target_mbs, _ in pp_microbatch_groups
+            ]
 
         preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
         for microbatch_group in microbatch_groups:
@@ -255,7 +261,7 @@ class GraphTrainingEngine(TrainingEngine):
                     sl.log_trace_span("preprocess_inputs"),
                     self.parallelism_context.activate_spmd(),
                 ):
-                    inputs_mb, labels_mb, extra_kwargs_mb = self.model_parts[
+                    inputs_mb, labels_mb, extra_kwargs_mb, _ = self.model_parts[
                         0
                     ].preprocess_inputs(
                         input_dict,

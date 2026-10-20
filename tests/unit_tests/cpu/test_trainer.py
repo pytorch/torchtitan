@@ -19,7 +19,7 @@ from torchtitan.components.data.types import (
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
 )
-from torchtitan.components.optim import Optim
+from torchtitan.components.optim import GradientClipper, Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.aux_loss import AuxLoss
@@ -93,30 +93,22 @@ class _DictTrainingMicrobatch(TrainingMicrobatch):
         loss_kwargs: dict[str, Any] | None = None,
     ) -> None:
         self._input_dict = input_dict
-        self._loss_kwargs = loss_kwargs or {}
+        self._loss_kwargs = loss_kwargs
         self.labels = input_dict["labels"]
         self.loss_token_counts = torch.tensor(self.labels.numel())
         self.routing_token_counts = self.loss_token_counts.unsqueeze(0)
         self.to_input_dict_calls: list[tuple[torch.device | str, bool]] = []
-        self.to_loss_kwargs_calls: list[tuple[torch.device | str, bool]] = []
 
     def as_input_dict(self) -> dict[str, Any]:
-        return dict(self._input_dict)
+        if self._loss_kwargs is None:
+            return dict(self._input_dict)
+        return {**self._input_dict, "loss_kwargs": dict(self._loss_kwargs)}
 
     def to_input_dict(
         self, device: torch.device | str, *, non_blocking: bool = False
     ) -> dict[str, Any]:
         self.to_input_dict_calls.append((device, non_blocking))
         return super().to_input_dict(device, non_blocking=non_blocking)
-
-    def loss_kwargs(self) -> dict[str, Any]:
-        return dict(self._loss_kwargs)
-
-    def to_loss_kwargs(
-        self, device: torch.device | str, *, non_blocking: bool = False
-    ) -> dict[str, Any]:
-        self.to_loss_kwargs_calls.append((device, non_blocking))
-        return super().to_loss_kwargs(device, non_blocking=non_blocking)
 
 
 def _dict_microbatch(
@@ -283,6 +275,7 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
                 input_dict["input"] + 1,
                 input_dict["labels"] + 2,
                 {"positions": input_dict["positions"] + 3},
+                input_dict["loss_kwargs"],
             )
 
     trainer = cast(
@@ -352,7 +345,6 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
     for microbatch in microbatches:
         assert isinstance(microbatch, _DictTrainingMicrobatch)
         assert microbatch.to_input_dict_calls == [(trainer.device, True)]
-        assert microbatch.to_loss_kwargs_calls == [(trainer.device, True)]
 
 
 def test_pp_forward_backward_copies_global_counts_and_nests_metrics() -> None:
@@ -411,12 +403,14 @@ def test_forward_backward_runs_whole_accumulation(
             return iter(())
 
         def preprocess_inputs(self, input_dict, *, global_routing_token_counts, **kw):
+            loss_kwargs = input_dict["loss_kwargs"]
             captured["preprocess_kwargs"] = kw
             events.append(f"preprocess {input_dict['input']}")
             return (
                 "INPUTS",
                 torch.ones(7),
                 {"positions": 1, "aux_loss_denominators": global_routing_token_counts},
+                loss_kwargs,
             )
 
     losses = iter((torch.tensor(1.0), torch.tensor(2.0)))
@@ -501,7 +495,6 @@ def test_forward_backward_runs_whole_accumulation(
     for microbatch in microbatches:
         assert isinstance(microbatch, _DictTrainingMicrobatch)
         assert microbatch.to_input_dict_calls == [(engine.device, True)]
-        assert microbatch.to_loss_kwargs_calls == [(engine.device, True)]
     for inputs, labels, model_kwargs in captured["fwd_bwd_args"]:
         assert inputs == "INPUTS"
         assert model_kwargs["positions"] == 1
@@ -839,19 +832,16 @@ def test_optim_update_clips_before_parameter_update() -> None:
     events = []
     optimizers = MagicMock()
     optimizers.step.side_effect = lambda: events.append("step")
-    optim = cast(
-        Optim,
-        SimpleNamespace(
-            config=SimpleNamespace(max_norm=1.0),
-            parallelism_context=SimpleNamespace(
-                pp_enabled=False,
-                ep_enabled=False,
-                get_optional_mesh=lambda name: None,
-            ),
-            parameters=[],
-            optimizers=optimizers,
-        ),
+    optim = object.__new__(Optim)
+    optim.config = SimpleNamespace(max_norm=1.0)
+    optim.parallelism_context = SimpleNamespace(
+        pp_enabled=False,
+        ep_enabled=False,
+        get_optional_mesh=lambda name: None,
     )
+    optim.parameters = []
+    optim.optimizers = optimizers
+    optim.gradient_clipper = GradientClipper(GradientClipper.Config())
 
     def clip_grad_norm(*args, **kwargs):
         events.append("clip")
@@ -861,7 +851,7 @@ def test_optim_update_clips_before_parameter_update() -> None:
         "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_",
         side_effect=clip_grad_norm,
     ):
-        grad_norm = Optim._update(optim, torch.tensor(1.0))
+        grad_norm = optim._update(torch.tensor(1.0))
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
     assert events == ["clip", "step"]
@@ -1085,11 +1075,17 @@ def test_engine_prepares_pp_metadata_before_cuda_graph(disable_cuda_graphs, per_
             return
         wrap = wrap_group if per_group else wrap_update
         inputs, labels = torch.ones(1, 4), torch.zeros(1, 4)
-        group = ([(inputs,)], [{}], [labels])
-        wrap.call_args.kwargs["prepare_for_capture"]([group], torch.tensor(4))
+        advantages, global_loss_token_counts = torch.ones(1, 4), torch.tensor(4)
+        # PP layout: (arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs).
+        group = ([(inputs,)], [{}], [labels], [{"advantages": advantages}])
+        wrap.call_args.kwargs["prepare_for_capture"]([group], global_loss_token_counts)
         assert prepare.call_args.args == (engine.pp_schedule,)
         assert prepare.call_args.kwargs["args"] == (inputs,)
         assert prepare.call_args.kwargs["target"] is labels
+        loss_kwargs = prepare.call_args.kwargs["loss_kwargs"]
+        assert loss_kwargs.keys() == {"advantages", "global_loss_token_counts"}
+        assert loss_kwargs["advantages"] is advantages
+        assert loss_kwargs["global_loss_token_counts"] is global_loss_token_counts
 
 
 def test_engine_replay_checks_whole_accumulation() -> None:
@@ -1403,7 +1399,7 @@ class _RecordingFSDPPart:
         return iter(())
 
     def preprocess_inputs(self, input_dict, **kwargs):
-        return input_dict["input"], input_dict["labels"], {}
+        return input_dict["input"], input_dict["labels"], {}, {}
 
 
 def _run_forward_backward_recording_all_reduce(
