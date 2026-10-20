@@ -496,13 +496,14 @@ class MuseSparkModel(MultimodalModel):
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         from torchtitan.models.muse_spark.sharding import (
             multimodal_bank_indices_placement,
         )
 
         del kwargs
         batch: dict[str, Any] = dict(input_dict)
+        loss_kwargs = batch.pop("loss_kwargs", {})
         special_tokens = batch.get("special_tokens")
         for input_name, placeholder_key, bank_indices_name in (
             ("pixel_values", "image_id", "image_bank_indices_T"),
@@ -551,6 +552,8 @@ class MuseSparkModel(MultimodalModel):
             "audio_bank_indices_T",
         ):
             input_sharding[bank_indices_name] = bank_indices_placement
+        input_sharding.update(dict.fromkeys(loss_kwargs, input_sharding["labels"]))
+        batch.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             batch = self._cp_shard(
                 batch,
@@ -578,11 +581,12 @@ class MuseSparkModel(MultimodalModel):
             input_sharding,
         )
 
+        loss_kwargs = {name: batch.pop(name) for name in loss_kwargs}
         inputs = batch.pop("input")
         labels = batch.pop("labels")
         if next(self.config.traverse(AuxLoss.Config), None) is not None:
             batch["aux_loss_denominators"] = global_routing_token_counts
-        return inputs, labels, batch
+        return inputs, labels, batch, loss_kwargs
 
     def _get_visual_bank(
         self,

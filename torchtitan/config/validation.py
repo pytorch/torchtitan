@@ -154,7 +154,7 @@ def validate_context_parallel(
     from torchtitan.distributed.context_parallel import supports_cp_inner_attention
     from torchtitan.models.common.attention.cp_attention import (
         CPInnerAttention,
-        UlyssesInnerAttention,
+        Ulysses,
     )
     from torchtitan.models.common.decoder import Decoder
 
@@ -183,7 +183,7 @@ def validate_context_parallel(
         assert cp_inner_attention is not None and issubclass(
             cp_inner_attention, CPInnerAttention
         )
-        if issubclass(cp_inner_attention, UlyssesInnerAttention):
+        if issubclass(cp_inner_attention, Ulysses):
             head_shard_degree = parallelism.tensor_parallel_degree * cp
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
@@ -204,7 +204,7 @@ def validate_context_parallel(
             continue
         if isinstance(model, Decoder.Config) and model.first_full_attention is None:
             continue
-        if issubclass(cp_inner_attention, UlyssesInnerAttention):
+        if issubclass(cp_inner_attention, Ulysses):
             raise ValueError(
                 f"{fqn}.inner_attention uses {cp_inner_attention.__qualname__}, so "
                 "context_parallel_load_balancer must be None."

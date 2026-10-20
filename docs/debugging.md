@@ -1,31 +1,3 @@
-## Enable Memory Profiling
-
-Configure profiling in the selected recipe:
-
-```python
-from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
-
-
-def my_debug_recipe() -> Trainer.Config:
-    config = llama3_debugmodel()
-    config.profiler.enable_memory_snapshot = True
-    config.profiler.save_memory_snapshot_folder = "memory_snapshot"
-    config.profiler.memory_snapshot_freq = 3
-    return config
-```
-
-Launch it with `MODULE=my_project.recipes CONFIG=my_debug_recipe
-./run_train.sh`. In case of an OOM, the snapshot is written under
-`step_{step:012d}_exit`; regular snapshots use `step_{step:012d}`.
-
-* `profiler.enable_memory_snapshot`: enables memory profiling.
-* `profiler.save_memory_snapshot_folder`: configures the output folder.
-* `profiler.memory_snapshot_freq`: controls how often regular snapshots are
-  taken and defaults to `profiler.profile_freq` when unset.
-
-You can find the saved pickle files in your output folder.
-To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
-
 ## Debugging Config Values
 
 To inspect a resolved configuration without starting training, use

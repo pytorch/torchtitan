@@ -120,6 +120,94 @@ def _make_stub_model(params=None, buffers=None):
 
 
 class TestPrecompileMain(unittest.TestCase):
+    def test_attention_metadata_reaches_tracing_with_and_without_mla(self):
+        from torchtitan.experiments.graph_trainer import (
+            make_fx_tracer,
+            precompile,
+            precompile_main,
+        )
+        from torchtitan.models.common.attention import (
+            FlexInnerAttention,
+            MLAAttention,
+            VarlenInnerAttention,
+        )
+        from torchtitan.models.common.decoder import Decoder
+        from torchtitan.models.common.linear import Linear
+
+        for kernel in (FlexInnerAttention, VarlenInnerAttention):
+            for use_mla in (False, True):
+                with self.subTest(kernel=kernel.__name__, use_mla=use_mla):
+                    backend = kernel.Config()
+                    if use_mla:
+                        backend = MLAAttention.Config(
+                            wkv_b=Linear.Config(in_features=4, out_features=8),
+                            packed_kv_head_dim=4,
+                            inner_attention=backend,
+                        )
+                    model_config = MagicMock(spec=Decoder.Config)
+                    model_config.layers = [
+                        SimpleNamespace(
+                            attention=SimpleNamespace(inner_attention=backend)
+                        )
+                    ]
+                    model_config.vocab_size = 16
+                    model_config.traverse.return_value = iter(())
+                    model_config.first_moe = None
+                    model = MagicMock()
+                    metadata = {backend._owner: object()}
+                    model._get_attention_metadata.return_value = metadata
+                    config = SimpleNamespace(
+                        loss=MagicMock(),
+                        training=SimpleNamespace(
+                            num_tokens_per_microbatch_per_dp_rank=16,
+                            max_context_length=8,
+                        ),
+                    )
+                    parallelism_context = MagicMock(
+                        dp_shard=1,
+                        dp_replicate=1,
+                        cp=1,
+                        cp_enabled=False,
+                        tp_enabled=False,
+                    )
+                    trace = MagicMock(
+                        side_effect=RuntimeError("stop before compilation")
+                    )
+                    with (
+                        patch.object(
+                            make_fx_tracer, "minimal_fx_tracer", return_value=trace
+                        ),
+                        patch.object(
+                            precompile, "get_spmd_precompile_meshes", return_value=[]
+                        ),
+                        patch.object(
+                            precompile_main, "maybe_register_blockmask_pytree_node"
+                        ),
+                        self.assertRaisesRegex(RuntimeError, "stop before compilation"),
+                    ):
+                        precompile_main._precompile_aot_fx_trace(
+                            config,
+                            model,
+                            model_config,
+                            SimpleNamespace(),
+                            parallelism_context,
+                            torch.device("cpu"),
+                            tokenizer=None,
+                        )
+
+                    model._get_attention_metadata.assert_called_once()
+                    trace.assert_called_once()
+                    extra_kwargs = trace.call_args.args[3]
+                    self.assertIs(extra_kwargs["attention_metadata"], metadata)
+                    self.assertIs(
+                        model._get_attention_metadata.call_args.kwargs["positions"],
+                        extra_kwargs["positions"],
+                    )
+                    torch.testing.assert_close(
+                        extra_kwargs["positions"],
+                        torch.arange(16, dtype=torch.int32) % 8,
+                    )
+
     def test_validates_memory_policy_after_model_setup(self):
         from torchtitan.experiments.graph_trainer import precompile_main
 

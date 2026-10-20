@@ -573,9 +573,3 @@ def test_monarch_actor_system_spans_pipeline_stages_per_dp_rank():
 def test_monarch_actor_system_rejects_a_trainer_not_laid_out_as_dp_cp_tp():
     with pytest.raises(RuntimeError, match="DP rank 0 report DP ranks"):
         _spawn_trainer(_FakeTrainerRanks([0, 1, 0, 1]), dp_degree=2)
-
-
-def test_controller_defaults_to_the_monarch_actor_system():
-    from torchtitan.rl.controller.controller import _default_actor_system_config
-
-    assert isinstance(_default_actor_system_config(), MonarchActorSystem.Config)

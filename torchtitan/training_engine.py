@@ -534,16 +534,21 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             Eval can change the schedule mode after training warmup. Rebuilding
             metadata can synchronize with the CPU, which capture does not allow.
             """
-            arg_mbs, kwarg_mbs, target_mbs = microbatch_groups[0]
+            arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs = microbatch_groups[0]
             with self.parallelism_context.activate_spmd(
                 typechecking=self.config.debug.spmd_typechecking,
             ):
+                # Initialization calls the loss on the first microbatch, so it
+                # needs that microbatch's loss arguments, as in the real step.
                 prepare_pipeline_schedule_for_cuda_graph(
                     self.pp_schedule,
                     args=arg_mbs[0] if arg_mbs is not None else (),
                     kwargs=kwarg_mbs[0],
                     target=target_mbs[0] if target_mbs is not None else None,
-                    loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
+                    loss_kwargs={
+                        **loss_kwarg_mbs[0],
+                        "global_loss_token_counts": global_loss_token_counts,
+                    },
                 )
 
         if self.config.training.cuda_graph_per_microbatch_group:
@@ -680,26 +685,20 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 sl.log_trace_span("preprocess_inputs"),
                 self.parallelism_context.activate_spmd(),
             ):
-                inputs, labels, model_kwargs = self.model_parts[0].preprocess_inputs(
-                    microbatch.to_input_dict(self.device, non_blocking=True),
-                    parallelism_context=self.parallelism_context,
-                    parallelism=self.config.parallelism,
-                    max_num_documents=self.max_num_documents,
-                    max_context_length=self.config.training.max_context_length,
-                    global_routing_token_counts=global_routing_token_counts,
-                    **self.preprocess_inputs_kwargs,
+                prepared_microbatches.append(
+                    self.model_parts[0].preprocess_inputs(
+                        microbatch.to_input_dict(self.device, non_blocking=True),
+                        parallelism_context=self.parallelism_context,
+                        parallelism=self.config.parallelism,
+                        max_num_documents=self.max_num_documents,
+                        max_context_length=self.config.training.max_context_length,
+                        global_routing_token_counts=global_routing_token_counts,
+                        **self.preprocess_inputs_kwargs,
+                    )
                 )
             self.ntokens_seen += (
                 self.config.training.num_tokens_per_microbatch_per_dp_rank
                 // self.parallelism_context.cp
-            )
-            prepared_microbatches.append(
-                (
-                    inputs,
-                    labels,
-                    model_kwargs,
-                    microbatch.to_loss_kwargs(self.device, non_blocking=True),
-                )
             )
 
         if not self.parallelism_context.pp_enabled:

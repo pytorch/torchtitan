@@ -575,12 +575,15 @@ class ChunkedLossWrapper(BaseLoss):
         with ``_skip_lm_head=True``. Tensor inputs must be paired with tensor
         labels; tuple inputs must contain one labels tensor per prediction.
 
-        When ``pred`` does not require grad (e.g. validation), runs chunked
-        forward only -- no per-chunk backward or gradient accumulation.
+        Per-chunk backward runs when the decoder outputs or head require
+        gradients, including training the lm_head on frozen decoder outputs.
+        With frozen decoder outputs, ``no_grad`` runs chunked forward only.
 
         Returns a differentiable loss and metrics. When ``.backward()`` is called
         on the loss, it triggers backward through the decoder via a custom
-        autograd Function.
+        autograd Function. With frozen decoder outputs and a trainable head,
+        head gradients are already accumulated. The returned loss is a leaf
+        whose backward accumulates only its own gradient.
         """
         from torch.distributed._composable.fsdp import FSDPModule
 
@@ -603,12 +606,18 @@ class ChunkedLossWrapper(BaseLoss):
                 "ChunkedLossWrapper requires either one prediction/labels "
                 "tensor pair or non-empty aligned tuples."
             )
-        requires_grad = pred[0].requires_grad
-        if any(prediction.requires_grad != requires_grad for prediction in pred[1:]):
+        decoder_requires_grad = pred[0].requires_grad
+        if any(
+            prediction.requires_grad != decoder_requires_grad for prediction in pred[1:]
+        ):
             raise ValueError(
                 "All chunked-loss predictions must agree on whether gradients "
                 "are required."
             )
+        run_backward = decoder_requires_grad or (
+            torch.is_grad_enabled()
+            and any(p.requires_grad for p in lm_head.parameters())
+        )
 
         # Chunking operates on the local tensor. Equal chunk sizes match
         # GradAccumulator's sequential slice
@@ -629,7 +638,7 @@ class ChunkedLossWrapper(BaseLoss):
             # accumulates ``.grad`` for ``GradAccumulator``.
             hidden_state_chunks_per_output = tuple(
                 tuple(
-                    chunk.detach().requires_grad_(requires_grad)
+                    chunk.detach().requires_grad_(decoder_requires_grad)
                     for chunk in _chunk_local(hidden_state)
                 )
                 for hidden_state in pred
@@ -648,7 +657,7 @@ class ChunkedLossWrapper(BaseLoss):
                     )
                     for hidden_state in pred
                 )
-                if requires_grad
+                if decoder_requires_grad
                 else ()
             )
 
@@ -715,22 +724,24 @@ class ChunkedLossWrapper(BaseLoss):
                 metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
                 total_loss = total_loss + chunk_loss.detach()
 
-                if requires_grad:
+                if run_backward:
                     with spmd.no_typecheck():
                         chunk_loss.backward()
-                        for h_chunk, grad_accumulator in zip(
-                            h_chunks, grad_accumulators, strict=True
-                        ):
-                            assert h_chunk.grad is not None
-                            grad_accumulator.add(h_chunk.grad)
-                            h_chunk.grad = None
+                        if decoder_requires_grad:
+                            for h_chunk, grad_accumulator in zip(
+                                h_chunks, grad_accumulators, strict=True
+                            ):
+                                assert h_chunk.grad is not None
+                                grad_accumulator.add(h_chunk.grad)
+                                h_chunk.grad = None
 
             if fsdp_enabled:
                 lm_head.set_reshard_after_forward(True)
                 lm_head.set_reshard_after_backward(True)
                 lm_head.reshard()
-            if not requires_grad:
-                return total_loss, metrics
+            if not decoder_requires_grad:
+                # Scaling this leaf cannot rescale already accumulated head gradients.
+                return total_loss.requires_grad_(run_backward), metrics
 
             accumulated_grads = tuple(
                 grad_accumulator.buffer for grad_accumulator in grad_accumulators
