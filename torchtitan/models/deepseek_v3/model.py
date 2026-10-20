@@ -123,6 +123,7 @@ class DeepSeekV3Model(MTPDecoder):
                 "fused_binary_activation",
                 "fp32_to_bf16_split",
                 "moe_aux_loss",
+                "rope",
             ]
         )
 

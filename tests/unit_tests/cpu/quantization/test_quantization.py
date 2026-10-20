@@ -482,7 +482,7 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
         assert config.model.local_compile_regions == [
             "loss",
             "fused_binary_activation",
-            "cos_sin_rope",
+            "rope",
             "fp32_to_bf16_split",
         ]
 
