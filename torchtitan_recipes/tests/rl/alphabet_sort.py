@@ -28,9 +28,12 @@ from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
+    ContextParallelTransform,
     ModelConfigConverter,
     TokenDispatcherTransform,
 )
+from torchtitan.models.common.attention import VarlenInnerAttention
+from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
@@ -791,6 +794,31 @@ def rl_grpo_fsdp2_gen_tp2_no_compile() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 2
     config.trainer.parallelism.tensor_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 2
+    return _configure_ci(
+        config,
+        steps=5,
+        num_tokens_per_microbatch=2048,
+        max_generated_tokens=256,
+        use_hf_assets_from_env=True,
+    )
+
+
+def rl_grpo_cp2_fsdp2_gen_tp2() -> Controller.Config:
+    config = rl_grpo_qwen3_0_6b_varlen_no_compile(seq_len=1024)
+    config.num_generators = 2
+    config.trainer.parallelism.data_parallel_shard_degree = 2
+    config.trainer.parallelism.tensor_parallel_degree = 1
+    config.trainer.parallelism.context_parallel_degree = 2
+    config.generator.parallelism.tensor_parallel_degree = 2
+    # Only the trainer shards the sequence; generators keep plain varlen attention.
+    config.trainer = apply_transforms(
+        config.trainer,
+        [
+            ContextParallelTransform(
+                inner_attention_map={VarlenInnerAttention: UlyssesVarlenInnerAttention}
+            )
+        ],
+    )
     return _configure_ci(
         config,
         steps=5,

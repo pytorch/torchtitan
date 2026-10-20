@@ -18,7 +18,6 @@ from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
 from torchtitan.config import Configurable, DebugConfig, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
@@ -56,14 +55,6 @@ def test_mirrored_state_uses_a_fixed_opaque_template() -> None:
 
 def test_rl_trainer_uses_training_engine_config_defaults() -> None:
     assert not Trainer.Config(model=MagicMock()).training.disable_cuda_graphs
-
-
-def test_context_parallelism_is_rejected() -> None:
-    with pytest.raises(ValueError, match="context parallelism"):
-        Trainer.Config(
-            model=MagicMock(),
-            parallelism=ParallelismConfig(context_parallel_degree=2),
-        )
 
 
 def test_initialize_torchstore_client_uses_publisher_role() -> None:

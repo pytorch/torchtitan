@@ -16,6 +16,7 @@ import logging
 import math
 from collections import deque
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 import numpy as np
 import torch
@@ -51,12 +52,21 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
     loss_mask: torch.Tensor  # [T]
     advantages: torch.Tensor  # [T]
 
-    def loss_kwargs(self) -> dict[str, torch.Tensor]:
+    def as_input_dict(self) -> dict[str, Any]:
+        """Return the model inputs plus the per-token RL loss arguments.
+
+        ``preprocess_inputs`` shards ``loss_kwargs`` like the labels and
+        returns them separately for the loss.
+        """
+        # Explicit base call: zero-argument super() fails in slots=True dataclasses.
         return {
-            "generator_logprobs": self.generator_logprobs,
-            "temperature": self.temperature,
-            "loss_mask": self.loss_mask,
-            "advantages": self.advantages,
+            **TokenizedTrainingMicrobatch.as_input_dict(self),
+            "loss_kwargs": {
+                "generator_logprobs": self.generator_logprobs,
+                "temperature": self.temperature,
+                "loss_mask": self.loss_mask,
+                "advantages": self.advantages,
+            },
         }
 
 
