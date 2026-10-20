@@ -186,13 +186,13 @@ class DeepSeekMLAAttention(Attention):
         k_pe = k_pe.unsqueeze(1)
         if (
             torch.compiler.is_compiling()
-            and isinstance(self.rope, ComplexRoPE)
+            and type(self.rope) is ComplexRoPE
             and q.dtype == torch.bfloat16
             and q.is_contiguous()
         ):
             # Under compile, ComplexRoPE's cache holds adjacent (cos, sin) pairs, so a contiguous
-            # bf16 q can rotate inside its row viewed as int32 pairs (_RotateTail). Eager keeps
-            # split -> rope -> cat below, where ComplexRoPE rotates with complex ops.
+            # bf16 q can rotate inside its row viewed as int32 pairs (_RotateTail). Eager and
+            # ComplexRoPE subclasses, which may replace forward, keep split -> rope -> cat below.
             cache = self.rope._reshape_cache(q, positions).unflatten(-1, (-1, 2))
             cos, sin = cache[..., 0], cache[..., 1]
             return _RotateTail.apply(q, cos, sin), _RotatePairs.apply(k_pe, cos, sin)

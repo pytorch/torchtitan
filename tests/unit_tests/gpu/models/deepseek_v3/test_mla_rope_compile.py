@@ -22,7 +22,8 @@ def reset_local_compile():
     apply_local_compile([])
 
 
-def test_compiled_bf16_rope_matches_eager() -> None:
+@pytest.mark.parametrize("use_positions", [True, False])
+def test_compiled_bf16_rope_matches_eager(use_positions: bool) -> None:
     torch.manual_seed(0)
     # DeepSeek-V3's 128 query heads; an odd token count leaves a partial block.
     num_heads, num_tokens = 128, 1027
@@ -47,7 +48,9 @@ def test_compiled_bf16_rope_matches_eager() -> None:
         device="cuda",
         dtype=torch.bfloat16,
     )
-    positions = torch.randint(0, 2048, (num_tokens,), device="cuda")
+    positions = (
+        torch.randint(0, 2048, (num_tokens,), device="cuda") if use_positions else None
+    )
     grad_q = torch.randn_like(q)
     grad_k_pe = torch.randn(
         num_tokens, 1, attention.qk_rope_head_dim, device="cuda", dtype=torch.bfloat16
