@@ -248,6 +248,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             input_dict["input"],
             input_dict["labels"],
             {"positions": input_dict["positions"]},
+            {},
         )
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
@@ -284,7 +285,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             [microbatches], global_routing_token_counts=torch.tensor([2])
         )
         engine._pp_forward_backward_microbatch_group = MagicMock(
-            return_value=torch.tensor(3.0)
+            return_value=(torch.tensor(3.0), [{}, {}])
         )
         result = engine._forward_backward_body(
             prepared_groups,
@@ -294,15 +295,50 @@ class TestGraphGradientAccumulation(unittest.TestCase):
 
         assert engine.ntokens_seen == 2
         torch.testing.assert_close(result.loss, torch.tensor(3.0))
-        assert result.loss_metrics == [{}]
+        assert result.loss_metrics == [[{}, {}]]
         call = engine._pp_forward_backward_microbatch_group.call_args
         assert len(call.kwargs["inputs"]) == 2
         assert len(call.kwargs["model_kwargs"]) == 2
         assert len(call.kwargs["labels"]) == 2
-        torch.testing.assert_close(
-            call.kwargs["loss_kwargs"]["global_loss_token_counts"], torch.tensor(2)
-        )
+        assert len(call.kwargs["loss_kwargs"]) == 2
+        for mb_loss_kwargs in call.kwargs["loss_kwargs"]:
+            torch.testing.assert_close(
+                mb_loss_kwargs["global_loss_token_counts"], torch.tensor(2)
+            )
         assert call.kwargs["finalize_gradients"]
+
+    def test_graph_runtime_receives_shared_loss_kwargs(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+
+        engine = object.__new__(GraphTrainingEngine)
+        engine.config = SimpleNamespace(debug=SimpleNamespace(spmd_typechecking=False))
+        engine.parallelism_context = SimpleNamespace(
+            activate_spmd=lambda **kwargs: contextlib.nullcontext()
+        )
+        engine.pp_has_last_stage = True
+        engine.device = torch.device("cpu")
+
+        def step(**kwargs):
+            kwargs["losses"].extend([torch.tensor(1.0), torch.tensor(2.0)])
+
+        engine.pp_schedule = SimpleNamespace(step=MagicMock(side_effect=step))
+        loss_kwargs = {"global_loss_token_counts": torch.tensor(2)}
+
+        loss, loss_metrics = engine._pp_forward_backward_microbatch_group(
+            inputs=[(torch.ones(1),), (torch.ones(1),)],
+            labels=[torch.ones(1), torch.ones(1)],
+            model_kwargs=[{}, {}],
+            loss_kwargs=[loss_kwargs, loss_kwargs],
+        )
+
+        call = engine.pp_schedule.step.call_args
+        assert call.kwargs["loss_kwargs"] is loss_kwargs
+        assert "loss_kwarg_mbs" not in call.kwargs
+        torch.testing.assert_close(loss, torch.tensor(3.0))
+        assert loss_metrics == [{}, {}]
 
     def test_aot_fx_preserves_tuple_model_inputs(self):
         from types import SimpleNamespace
@@ -319,6 +355,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             (main_tokens, mtp_tokens),
             (main_labels, mtp_labels),
             {"mtp_input_valid_masks": (torch.tensor([True, False]),)},
+            {},
         )
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
@@ -1842,6 +1879,7 @@ class TestTraceModels(unittest.TestCase):
             FlexInnerAttention,
             get_causal_mask_mod,
             get_document_mask_mod,
+            MLAAttention,
         )
         from torchtitan.models.common.linear import Linear
         from torchtitan.models.common.nn_modules import RMSNorm
@@ -1878,7 +1916,6 @@ class TestTraceModels(unittest.TestCase):
                     ),
                     q_norm=RMSNorm.Config(normalized_shape=1),
                     kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
-                    inner_attention=FlexInnerAttention.Config(),
                     wq=Linear.Config(
                         in_features=dim,
                         out_features=n_heads * qk_head_dim,
@@ -1887,9 +1924,13 @@ class TestTraceModels(unittest.TestCase):
                         in_features=dim,
                         out_features=kv_lora_rank + rope_dim,
                     ),
-                    wkv_b=Linear.Config(
-                        in_features=kv_lora_rank,
-                        out_features=n_heads * (qk_nope_head_dim + v_head_dim),
+                    inner_attention=MLAAttention.Config(
+                        wkv_b=Linear.Config(
+                            in_features=kv_lora_rank,
+                            out_features=n_heads * (qk_nope_head_dim + v_head_dim),
+                        ),
+                        packed_kv_head_dim=qk_nope_head_dim + v_head_dim,
+                        inner_attention=FlexInnerAttention.Config(),
                     ),
                     wo=Linear.Config(
                         in_features=n_heads * v_head_dim,

@@ -402,11 +402,12 @@ class MuseGlimmerModel(MultimodalModel):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build first-stage vision-bank indices and masks, then shard the batch."""
         del kwargs
         from .sharding import vision_bank_indices_placement
 
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         pixel_values = input_dict.get("pixel_values")
         grid_thw = input_dict.get("grid_thw")
         pixel_values_videos = input_dict.get("pixel_values_videos")
@@ -459,6 +460,8 @@ class MuseGlimmerModel(MultimodalModel):
         input_shardings["vision_bank_indices_T"] = vision_bank_indices_placement(
             enable_sp=parallelism.enable_sequence_parallel
         )
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
@@ -481,9 +484,10 @@ class MuseGlimmerModel(MultimodalModel):
             parallelism_context, input_dict, input_shardings
         )
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
-        return inputs, labels, input_dict
+        return inputs, labels, input_dict, loss_kwargs
 
     def _get_vision_features(
         self,

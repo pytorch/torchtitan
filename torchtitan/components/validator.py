@@ -335,15 +335,14 @@ class Validator(BaseValidator):
                 prepared = []
                 for input_dict in microbatch_group:
                     with parallelism_context.activate_spmd():
-                        prepared.append(
-                            model_parts[0].preprocess_inputs(
-                                input_dict,
-                                parallelism_context=parallelism_context,
-                                parallelism=self.parallelism,
-                                max_num_documents=self.dl_config.max_num_documents,
-                                max_context_length=self.seq_len,
-                            )
+                        inputs, labels, kwargs, _ = model_parts[0].preprocess_inputs(
+                            input_dict,
+                            parallelism_context=parallelism_context,
+                            parallelism=self.parallelism,
+                            max_num_documents=self.dl_config.max_num_documents,
+                            max_context_length=self.seq_len,
                         )
+                    prepared.append((inputs, labels, kwargs))
                 if evaluate is None:
                     evaluate = self._init_validate_fn(model_parts)
                 loss_sum = evaluate(prepared)

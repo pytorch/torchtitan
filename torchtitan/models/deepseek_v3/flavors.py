@@ -11,6 +11,7 @@ import dataclasses
 from collections.abc import Callable
 from functools import partial
 
+import spmd_types as spmd
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
@@ -33,7 +34,7 @@ from torchtitan.models.common import (
     TransformerBlock,
     UnaryActivationFn,
 )
-from torchtitan.models.common.attention import InnerAttention
+from torchtitan.models.common.attention import InnerAttention, MLAAttention
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -43,8 +44,9 @@ from torchtitan.models.common.config_utils import (
     make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.decoder_sharding import (
-    inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
+    mla_attention_local_spmd_sharding_config,
+    mla_kv_projection_sharding_config,
     norm_sharding_config,
     pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
@@ -167,7 +169,7 @@ def make_mla_attention_config(
     ] = get_attention_config,
     enable_sp: bool,
 ) -> DeepSeekMLAAttention.Config:
-    """Build a fully-specified, sharded DeepSeek V3 MLA ``DeepSeekMLAAttention.Config``.
+    """Build a fully-specified, sharded ``DeepSeekMLAAttention.Config``.
 
     All Linear and RMSNorm sub-configs have their dimensional fields set. When
     ``q_lora_rank == 0``, sets ``wq`` (not ``wq_a``/``wq_b``); when
@@ -177,11 +179,19 @@ def make_mla_attention_config(
     weights on TP; up-projections are column-parallel and ``wo`` is
     row-parallel back to the residual layout selected by ``enable_sp``.
     """
-    inner_attention = dataclasses.replace(
-        attention_config_factory(attn_backend),
-        sharding_config=inner_attention_local_spmd_sharding_config(),
-    )
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+    wkv_b = Linear.Config(
+        in_features=kv_lora_rank,
+        out_features=n_heads * (qk_nope_head_dim + v_head_dim),
+        param_init=linear_init,
+        sharding_config=mla_kv_projection_sharding_config(cp=spmd.S(0)),
+    )
+    inner_attention = MLAAttention.Config(
+        wkv_b=wkv_b,
+        packed_kv_head_dim=qk_nope_head_dim + v_head_dim,
+        inner_attention=attention_config_factory(attn_backend),
+        sharding_config=mla_attention_local_spmd_sharding_config(),
+    )
 
     if q_lora_rank == 0:
         wq = Linear.Config(
@@ -241,12 +251,6 @@ def make_mla_attention_config(
             param_init=norm_init,
             sharding_config=replicated_state_sharding_config("weight"),
         ),
-        wkv_b=Linear.Config(
-            in_features=kv_lora_rank,
-            out_features=n_heads * (qk_nope_head_dim + v_head_dim),
-            param_init=linear_init,
-            sharding_config=replicated_input_colwise_sharding_config(),
-        ),
         wo=RowParallelLinear.Config(
             in_features=n_heads * v_head_dim,
             out_features=dim,
@@ -295,6 +299,7 @@ def build_mla_moe_layers(
         ..., TokenChoiceTopKRouter.Config
     ] = make_router_config,
     first_layer_sharding_config: ShardingConfig | None = None,
+    norm_eps: float = 1e-6,
     enable_sp: bool,
     enable_ep: bool,
 ) -> list[TransformerBlock.Config]:
@@ -308,7 +313,9 @@ def build_mla_moe_layers(
     architecture variants select their routing policy without changing this
     shared layer builder; it must return a sharded router config.
     ``first_layer_sharding_config`` sets layer 0's own boundary, for decoders
-    whose embedding output is not in the residual layout.
+    whose embedding output is not in the residual layout. ``norm_eps`` is the
+    epsilon of each block's ``attention_norm`` and ``ffn_norm`` (HF
+    ``rms_norm_eps``); the MLA q/kv norms keep 1e-6.
     """
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     layers = []
@@ -378,13 +385,13 @@ def build_mla_moe_layers(
                 attention=attn_cfg,
                 attention_norm=RMSNorm.Config(
                     normalized_shape=dim,
-                    eps=1e-6,
+                    eps=norm_eps,
                     param_init=norm_init,
                     sharding_config=norm_sharding,
                 ),
                 ffn_norm=RMSNorm.Config(
                     normalized_shape=dim,
-                    eps=1e-6,
+                    eps=norm_eps,
                     param_init=norm_init,
                     sharding_config=norm_sharding,
                 ),

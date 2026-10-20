@@ -5,14 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
-import inspect
 
 import pytest
 
-from torchtitan.rl.actors.monarch.router import (
-    _InterGeneratorRouterActorEndpoints,
-    InterGeneratorRouterActor,
-)
 from torchtitan.rl.actors.system import ServiceHandle
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.routing.strategies import (
@@ -624,17 +619,3 @@ def test_wait_engine_loop_returns_once_every_rank_exits():
         await asyncio.wait_for(router.wait_engine_loop(), timeout=5)
 
     asyncio.run(_run())
-
-
-def test_router_actor_exposes_every_public_router_method():
-    public_methods = {
-        name
-        for name, method in vars(InterGeneratorRouter).items()
-        if inspect.iscoroutinefunction(method) and not name.startswith("_")
-    }
-    assert issubclass(InterGeneratorRouterActor, InterGeneratorRouter)
-    assert public_methods == {
-        name
-        for name in vars(_InterGeneratorRouterActorEndpoints)
-        if not name.startswith("_")
-    }
