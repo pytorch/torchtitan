@@ -22,10 +22,13 @@ from torchtitan.rl.trainer.training_sample_builder import (
 )
 
 
-def _make_samples(lengths: list[int]) -> list[TrainingSample]:
+def _make_samples(
+    lengths: list[int], first_version: int | None = None
+) -> list[TrainingSample]:
+    """Samples of `lengths`; min_policy_version is 0, or first_version + index when given."""
     return [
         TrainingSample(
-            min_policy_version=0,
+            min_policy_version=0 if first_version is None else first_version + index,
             max_policy_version=0,
             rollout_id=RolloutTurnID(group_id=0, rollout_id=index, turn_id=0),
             token_ids=np.arange(length + 1),
@@ -396,11 +399,23 @@ def _two_rank_batcher() -> Batcher:
 _GROUP_LENGTHS = [[9, 5, 3, 7], [8, 6, 2, 2, 9]]
 
 
-def _queue_groups(batcher: Batcher) -> list[weakref.ref]:
+def _group_samples(distinct_versions: bool) -> list[list[TrainingSample]]:
+    """`_GROUP_LENGTHS` as samples; with distinct_versions, min_policy_version counts up across groups."""
+    groups, first_version = [], 0
+    for lengths in _GROUP_LENGTHS:
+        groups.append(
+            _make_samples(lengths, first_version if distinct_versions else None)
+        )
+        first_version += len(lengths)
+    return groups
+
+
+def _queue_groups(
+    batcher: Batcher, distinct_versions: bool = False
+) -> list[weakref.ref]:
     """Queue `_GROUP_LENGTHS` as groups held only by the batcher; return weakrefs to each sample's tokens."""
     token_refs = []
-    for group_id, lengths in enumerate(_GROUP_LENGTHS):
-        samples = _make_samples(lengths)
+    for group_id, samples in enumerate(_group_samples(distinct_versions)):
         token_refs += [weakref.ref(sample.token_ids) for sample in samples]
         batcher._groups_for_next_batch.append(
             TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])
@@ -410,7 +425,7 @@ def _queue_groups(batcher: Batcher) -> list[weakref.ref]:
 
 def test_packed_batch_equals_packing_each_assigned_microbatch() -> None:
     batcher = _two_rank_batcher()
-    samples = [s for lengths in _GROUP_LENGTHS for s in _make_samples(lengths)]
+    samples = [s for group in _group_samples(distinct_versions=True) for s in group]
     assignments = batcher._assign_training_samples_to_microbatches(
         copy.deepcopy(samples)
     )
@@ -418,7 +433,7 @@ def test_packed_batch_equals_packing_each_assigned_microbatch() -> None:
         [batcher._pack_training_samples(rank_samples) for rank_samples in row]
         for row in assignments
     ]
-    _queue_groups(batcher)
+    _queue_groups(batcher, distinct_versions=True)
 
     batch = batcher._pack_one_training_batch()
 
@@ -434,7 +449,8 @@ def test_packed_batch_equals_packing_each_assigned_microbatch() -> None:
                         )
                 else:
                     assert torch.equal(microbatch.as_input_dict()[key], value)
-    assert batch.min_policy_versions == [0] * len(samples)
+    # Distinct versions per sample, so a change in order would show here.
+    assert batch.min_policy_versions == [s.min_policy_version for s in samples]
     metrics = {metric.key: metric.value for metric in batch.metrics}
     assert metrics["train_batch/num_training_samples"].value == len(samples)
     assert metrics["train_batch/num_microbatches"].value == len(expected)
