@@ -19,7 +19,7 @@ from torchtitan.distributed.fsdp import (
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.feed_forward import DenseFeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.moe import MoE
 
 
@@ -121,3 +121,64 @@ def test_enable_fsdp_symm_mem_scope(
     assert sparse.symm_mem_enabled == sparse_enabled
     assert other.force_sum_enabled == dense_enabled
     assert other.symm_mem_enabled == dense_enabled
+
+
+def test_grouped_linear_shard_placements_use_default_shard_dim() -> None:
+    module = nn.Module()
+    # Stock layouts: in_features is last, so the output-feature axis is
+    # second from the end. w13 stacks gate/up, w2 does not.
+    w13 = GroupedLinear.Config(
+        group_size=4, in_features=8, out_features=6, num_linears=2
+    ).build()
+    w2 = GroupedLinear.Config(
+        group_size=4, in_features=6, out_features=8, num_linears=1
+    ).build()
+    module.add_module("w13", w13)
+    module.add_module("w2", w2)
+
+    placements = linear_param_shard_placements(module, include_unstacked_grouped=True)
+
+    assert list(w13.weight.shape) == [4, 2, 6, 8]
+    assert list(w2.weight.shape) == [4, 8, 6]
+    assert placements == {
+        w13.weight: Shard(2),
+        w2.weight: Shard(1),
+    }
+
+
+def test_grouped_linear_subclass_declares_its_own_shard_dim() -> None:
+    """A kernel-native layout ends with out_features, so it shards the last dim.
+
+    With the stock ``ndim - 2`` this would pick the size-2 gate/up axis, which
+    does not divide across an FSDP shard group larger than 2.
+    """
+
+    class _KernelLayoutGroupedLinear(GroupedLinear):
+        """Stores w13 as [E, D, N, F]: out_features is last."""
+
+        def __init__(self, config: GroupedLinear.Config) -> None:
+            super().__init__(config)
+            self.weight = nn.Parameter(
+                torch.empty(
+                    config.group_size,
+                    config.in_features,
+                    config.num_linears,
+                    config.out_features,
+                )
+            )
+
+        def fsdp_shard_dim(self, param_name: str) -> int:
+            return -1
+
+    module = nn.Module()
+    config = GroupedLinear.Config(
+        group_size=4, in_features=8, out_features=6, num_linears=2
+    )
+    kernel = _KernelLayoutGroupedLinear(config)
+    module.add_module("w13", kernel)
+
+    placements = linear_param_shard_placements(module)
+
+    assert list(kernel.weight.shape) == [4, 8, 2, 6]
+    # Stock would have picked dim 2, the size-2 gate/up axis.
+    assert placements == {kernel.weight: Shard(-1)}
