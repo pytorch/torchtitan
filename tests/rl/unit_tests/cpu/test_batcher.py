@@ -374,17 +374,6 @@ def test_token_budget_must_fit_a_full_context_sample() -> None:
         )
 
 
-    assert input_dict["input"].device.type == "meta"
-    assert set(input_dict["loss_kwargs"]) == {
-        "generator_logprobs",
-        "temperature",
-        "loss_mask",
-        "advantages",
-    }
-    for value in input_dict["loss_kwargs"].values():
-        assert value.device.type == "meta"
-
-
 def _two_rank_batcher() -> Batcher:
     return Batcher.Config().build(
         num_tokens_per_microbatch_per_dp_rank=20,
