@@ -426,13 +426,24 @@ def _queue_groups(
 def test_packed_batch_equals_packing_each_assigned_microbatch() -> None:
     batcher = _two_rank_batcher()
     samples = [s for group in _group_samples(distinct_versions=True) for s in group]
-    assignments = batcher._assign_training_samples_to_microbatches(
-        copy.deepcopy(samples)
-    )
+    sample_copies = copy.deepcopy(samples)
+    assignments = batcher._assign_training_samples_to_microbatches(sample_copies)
     expected = [
         [batcher._pack_training_samples(rank_samples) for rank_samples in row]
         for row in assignments
     ]
+    expected_packing_metrics = batcher._packing_metrics(
+        assignments, sample_copies, len(_GROUP_LENGTHS), 0
+    )
+    expected_microbatches = [mb for row in expected for mb in row]
+    expected_loss_counts = sum(mb.loss_token_counts for mb in expected_microbatches)
+    expected_routing_counts = sum(
+        mb.routing_token_counts for mb in expected_microbatches
+    )
+    num_response_tokens = sum(int(mb.loss_mask.sum()) for mb in expected_microbatches)
+    expected_nan_frac = (
+        num_response_tokens - int(expected_loss_counts.reshape(-1)[0])
+    ) / max(num_response_tokens, 1)
     _queue_groups(batcher, distinct_versions=True)
 
     batch = batcher._pack_one_training_batch()
@@ -449,11 +460,15 @@ def test_packed_batch_equals_packing_each_assigned_microbatch() -> None:
                         )
                 else:
                     assert torch.equal(microbatch.as_input_dict()[key], value)
+    assert torch.equal(batch.global_loss_token_counts, expected_loss_counts)
+    assert torch.equal(batch.global_routing_token_counts, expected_routing_counts)
     # Distinct versions per sample, so a change in order would show here.
     assert batch.min_policy_versions == [s.min_policy_version for s in samples]
-    metrics = {metric.key: metric.value for metric in batch.metrics}
-    assert metrics["train_batch/num_training_samples"].value == len(samples)
-    assert metrics["train_batch/num_microbatches"].value == len(expected)
+    # Every metric, in order: the groups' own (none here), the NaN fraction, then packing.
+    assert [(metric.key, metric.value.value) for metric in batch.metrics] == [
+        ("loss/generator_logprob_nan_frac", expected_nan_frac),
+        *[(metric.key, metric.value.value) for metric in expected_packing_metrics],
+    ]
 
 
 def test_packing_releases_each_microbatchs_samples_once_packed() -> None:
