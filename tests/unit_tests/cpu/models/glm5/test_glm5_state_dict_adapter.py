@@ -34,6 +34,9 @@ class TestGlm5StateDictAdapter(unittest.TestCase):
     def test_debug_model_hf_roundtrip(self) -> None:
         self._assert_hf_roundtrip("glm5_2_debugmodel")
 
+    def test_glm5_3_debug_model_hf_roundtrip(self) -> None:
+        self._assert_hf_roundtrip("glm5_3_debugmodel")
+
     def test_mtp_debug_model_hf_roundtrip(self) -> None:
         flavor = "glm5_2_debugmodel_mtp"
         config = build_model_config(

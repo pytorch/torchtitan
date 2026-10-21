@@ -114,3 +114,44 @@ def glm5_2_debugmodel_mtp(
         flavor="glm5_2_debugmodel_mtp",
         mtp_scale=mtp_scale,
     )
+
+
+def glm5_3_debugmodel(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Return the GLM-5.3 debug recipe."""
+    return glm5_debugmodel(
+        seq_len,
+        parallelism=parallelism,
+        flavor="glm5_3_debugmodel",
+    )
+
+
+def glm5_3_scaled_debugmodel(
+    seq_len: int = 4096,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Return the scaled GLM-5.3 validation recipe."""
+    return glm5_debugmodel(
+        seq_len,
+        parallelism=parallelism,
+        flavor="glm5_3_scaled_debugmodel",
+    )
+
+
+def glm5_3_debugmodel_mtp(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+    mtp_scale: float = 0.3,
+) -> Trainer.Config:
+    """Return the GLM-5.3 debug recipe with one NextN/MTP block."""
+    return glm5_debugmodel(
+        seq_len,
+        parallelism=parallelism,
+        flavor="glm5_3_debugmodel_mtp",
+        mtp_scale=mtp_scale,
+    )
