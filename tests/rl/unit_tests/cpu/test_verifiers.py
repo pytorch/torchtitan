@@ -1114,31 +1114,40 @@ def test_rollout_status_maps_timeouts_to_error_timeout(
 
 
 @pytest.mark.parametrize(
-    "trace_errors, episode_errors, expected",
+    "trace_errors, episode_errors, num_turns, expected",
     [
         # The generator unreachable (Verifiers surfaces a failed connection as 503).
-        ([_recorded_error("ProviderError", 503)], [], RolloutStatus.ERROR_SYSTEM),
-        ([_recorded_error("SandboxError")], [], RolloutStatus.ERROR_SYSTEM),
+        ([_recorded_error("ProviderError", 503)], [], 1, RolloutStatus.ERROR_SYSTEM),
+        ([_recorded_error("SandboxError")], [], 1, RolloutStatus.ERROR_SYSTEM),
         # An untyped error is a bug in the code around the policy.
-        ([_recorded_error("RuntimeError")], [], RolloutStatus.ERROR_SYSTEM),
+        ([_recorded_error("RuntimeError")], [], 1, RolloutStatus.ERROR_SYSTEM),
         # The env's own `run()` raised: recorded on the episode, not the trace.
-        ([], [_recorded_error("EnvError")], RolloutStatus.ERROR_SYSTEM),
+        ([], [_recorded_error("EnvError")], 1, RolloutStatus.ERROR_SYSTEM),
         # A prompt past the context, or the agent's own exit: the policy's doing.
-        ([_recorded_error("ProviderError", 400)], [], RolloutStatus.ERROR),
-        ([_recorded_error("HarnessError")], [], RolloutStatus.ERROR),
+        ([_recorded_error("ProviderError", 400)], [], 1, RolloutStatus.ERROR),
+        ([_recorded_error("HarnessError")], [], 1, RolloutStatus.ERROR),
+        # A generator 4xx stays ERROR even before the first turn.
+        ([_recorded_error("ProviderError", 400)], [], 0, RolloutStatus.ERROR),
+        # The harness failed before the policy's first turn: the policy never ran.
+        ([_recorded_error("HarnessError")], [], 0, RolloutStatus.ERROR_SYSTEM),
         # The first error stopped the rollout; a later teardown error doesn't change it.
         (
             [_recorded_error("ProviderError", 400), _recorded_error("SandboxError")],
             [],
+            1,
             RolloutStatus.ERROR,
         ),
     ],
 )
 def test_rollout_status_maps_recorded_infra_errors_to_error_system(
-    trace_errors, episode_errors, expected: RolloutStatus
+    trace_errors, episode_errors, num_turns: int, expected: RolloutStatus
 ) -> None:
     trace = SimpleNamespace(
-        ok=False, is_timeout=False, is_truncated=False, errors=trace_errors
+        ok=False,
+        is_timeout=False,
+        is_truncated=False,
+        errors=trace_errors,
+        num_turns=num_turns,
     )
     episode = SimpleNamespace(ok=False, is_timeout=False, errors=episode_errors)
 
@@ -1147,6 +1156,31 @@ def test_rollout_status_maps_recorded_infra_errors_to_error_system(
     )
 
     assert status is expected
+
+
+def test_a_harness_that_fails_before_the_first_turn_is_error_system() -> None:
+    from verifiers.v1.episode import WireEpisode
+    from verifiers.v1.trace import WireTrace
+
+    task = {"type": "swe", "data": {}}
+    # As Verifiers records it: the error at the harness boundary, no model call, no node.
+    trace = WireTrace.model_validate(
+        {
+            "task": task,
+            "agent": {"config": {}},
+            "stop_condition": "harness_error",
+            "errors": [
+                {"type": "HarnessError", "message": "opening harness session timed out"}
+            ],
+        }
+    )
+    episode = WireEpisode.model_validate({"task": task, "ok": False, "traces": [trace]})
+
+    status = VerifiersRolloutWorker.rollout_status(
+        verifiers_episode=episode, trace=trace
+    )
+
+    assert status is RolloutStatus.ERROR_SYSTEM
 
 
 def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
