@@ -416,7 +416,8 @@ class VerifiersRolloutWorker(RolloutWorker):
                     m.Metric(f"rollout/{key}", m.Mean.from_list(values)),
                     m.Metric(f"rollout/{key}", m.Max.from_list(values)),
                 ]
-        # Every group logs every bucket, so each averages to its share of the step's rollouts.
+        # Every group logs every bucket, so each averages to its share of the step's rollouts (of groups
+        # that reach the batcher: groups dropped or cancelled as too old log no rollout/* metrics).
         buckets = [_stop_bucket(r.logs.get("stop_condition")) for r in rollouts]
         group_metrics += [
             m.Metric(
@@ -726,7 +727,10 @@ def _stop_bucket(stop_condition: str | None) -> str:
 
 
 def _without_date(message: Any) -> tuple[str, str]:
-    """A root message's role and text with OpenCode's date line blanked; non-text content as is."""
+    """A root message's role and text with OpenCode's date line blanked; non-text content as is.
+
+    OpenCode sends its system prompt as a string; list content keeps its date (repr), so it would
+    count as a different root."""
     content = message.content
     text = _DATE_LINE.sub("", content) if isinstance(content, str) else repr(content)
     return message.role, text
