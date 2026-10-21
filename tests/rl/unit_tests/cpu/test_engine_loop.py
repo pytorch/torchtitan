@@ -1639,7 +1639,7 @@ def test_drain_task_resolves_peer_results_on_the_engine_thread(
 
 def test_peer_dp_replica_sends_its_finished_requests_once_per_burst() -> None:
     sent: list[_FinishedRequests] = []
-    peer = _dispatcher(rank=2, dp_size=2)  # DP rank 1's TP rank 0
+    peer = _dispatcher(rank=2, dp_size=2)  # a peer TP rank 0 (global rank 2)
     peer._result_port = SimpleNamespace(send=sent.append)
 
     # Steps of one burst: nothing goes to rank 0 until the burst's flush.

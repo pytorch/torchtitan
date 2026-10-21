@@ -260,10 +260,11 @@ class RequestDispatcher:
         task, in one message. The engine loop flushes after each step burst (no-op elsewhere).
 
         One message per burst, not per engine step: the drain task shares the engine loop, which
-        yields once per engine step, and takes about one message per yield. With 7 peers (DP=8)
-        sending per step, their finished requests waited ~16 s at rank 0 (job 1969506), and the DP
-        router, which counts a request as load until rank 0 resolves it, sent new sessions to rank
-        0. Per burst, a peer's request waits at most one burst (~0.5 s).
+        yields once per engine step, and each Monarch ``recv`` needs about two loop passes, so it
+        takes ~0.6 messages per engine step. With 7 peers (DP=8) sending per step, their finished
+        requests waited ~16 s at rank 0 (job 1969506), and the DP router, which counts a request as
+        load until rank 0 resolves it, sent new sessions to rank 0. Per burst, peers send at most 7
+        messages per ~16 steps whatever the load, and a request waits about one burst (~0.5 s).
         """
         if not self._peer_finished_requests:
             return
