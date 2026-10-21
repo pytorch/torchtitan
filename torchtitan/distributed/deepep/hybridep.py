@@ -21,6 +21,7 @@ import math
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -38,6 +39,23 @@ _EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _buffer: Any = None
 _communication_stream: torch.cuda.Stream | None = None
 _over_budget: torch.Tensor | None = None
+_output_capacity: ContextVar[int | None] = ContextVar(
+    "hybridep_output_capacity", default=None
+)
+
+
+@contextmanager
+def _use_output_capacity(capacity: int | None) -> Iterator[None]:
+    """Bind an absolute output-row budget within a multi-call region.
+
+    Dispatch passes the bound integer to its native op. Traced graphs never
+    consult this context, and exiting it restores the enclosing call's budget.
+    """
+    token = _output_capacity.set(capacity)
+    try:
+        yield
+    finally:
+        _output_capacity.reset(token)
 
 
 class DispatchHandle(CustomClassBase):
@@ -590,8 +608,8 @@ def dispatch_tokens(
     Returns:
         Expert-major inputs, device counts, and state for combine.
     """
-    capacity = None
-    if non_blocking_expert_capacity_factor is not None:
+    capacity = _output_capacity.get()
+    if capacity is None and non_blocking_expert_capacity_factor is not None:
         capacity = _num_permuted_tokens_for_non_blocking(
             hidden_states.shape[0],
             group.size(),
