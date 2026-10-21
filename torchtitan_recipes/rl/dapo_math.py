@@ -27,9 +27,11 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 
-from torchtitan.config.transform import apply_transforms
+from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.models.common.attention import VarlenInnerAttention
+from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.muse_spark import (
@@ -233,20 +235,24 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
     a 65,536-token context and up to 63,488 response tokens. Validation is disabled.
     Checks trainer/generator logprob agreement with padding in both roles.
 
-    Trainer: 256 GPUs (FSDP(shard)=64, TP=4, EP=4), fp32 master weights and a bf16
-    forward, no CUDA graphs. Generator: 16 GPUs (DP=4, TP=4, EP=16), bf16 weights,
-    full CUDA graphs.
+    Trainer: 128 GPUs (FSDP(shard)=8, TP=4, CP=4, EP=16), fp32 master weights and a
+    bf16 forward, no CUDA graphs. CP shards each rollout's tokens over 4 ranks with
+    Ulysses varlen attention; with EP=16 the expert FSDP group is 8 instead of 64,
+    which avoids the expert all-gathers that dominated FSDP(shard)=64 x EP=4.
+    Generator: 16 GPUs (DP=4, TP=4, EP=16), bf16 weights, full CUDA graphs.
 
     Supply the checkpoint directory and dataset repo IDs or local directories;
-    the launcher owns cluster placement.
+    the launcher owns cluster placement. Dist-MoE exchanges tokens through peer GPU
+    memory, so each EP=16 group (4 GB300 hosts) must share one NVLink domain.
     """
     max_response_tokens = 63488
     max_total_tokens = 65536
     trainer_parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=64,
+        data_parallel_shard_degree=8,
         tensor_parallel_degree=4,
-        expert_parallel_degree=4,
+        context_parallel_degree=4,
+        expert_parallel_degree=16,
         enable_sequence_parallel=True,
     )
     generator_parallelism = InferenceParallelismConfig(
@@ -324,9 +330,9 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
                 mixed_precision_param="bfloat16",
             ),
             parallelism=trainer_parallelism,
-            # EP=4 confines each expert group to one host; factor 4 covers
-            # its worst-case routing imbalance.
-            dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=4.0),
+            # Factor EP=16 keeps the worst case (every token routed to one rank)
+            # in device scratch; host-backed VMM scratch stays off.
+            dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=16.0),
             # Test run: load the HF weights, never write a checkpoint.
             checkpointer=cast(
                 CheckpointManager.Config,
@@ -366,9 +372,15 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             ),
         ),
     )
-    # Dist-MoE routed experts in both roles.
+    # Dist-MoE routed experts in both roles; only the trainer shards sequences.
     config.trainer = apply_transforms(
-        config.trainer, [DistMoeTransform(inplace_wgrad_accum=True)]
+        config.trainer,
+        [
+            ContextParallelTransform(
+                inner_attention_map={VarlenInnerAttention: UlyssesVarlenInnerAttention}
+            ),
+            DistMoeTransform(inplace_wgrad_accum=True),
+        ],
     )
     config.generator = apply_transforms(
         config.generator, [DistMoeTransform(inplace_wgrad_accum=True)]
