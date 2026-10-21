@@ -12,6 +12,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+import os
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
 
@@ -248,6 +249,36 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_0_6b_flex_slurm() -> Controller.Config:
+    """Example of running a recipe on SLURM with ``SlurmLauncher``: one trainer node
+    and two generator nodes, with the cluster's default account and partition. The
+    Launchers section of ``torchtitan/rl/actors/monarch/README.md`` uses it as its
+    example, so keep it."""
+    # Imported lazily so this module loads without Monarch.
+    from torchtitan.rl.actors.monarch.launcher.slurm import SlurmLauncher
+    from torchtitan.rl.actors.monarch.system import MonarchActorSystem
+
+    config = rl_grpo_qwen3_0_6b_flex()
+    config.num_generators = 2
+    # Node-local JIT caches: the default caches live under the home directory, which
+    # SLURM clusters usually put on a shared network filesystem; nodes compiling
+    # into one shared cache can hang or crash.
+    cache_root = f"/tmp/torchtitan-{os.getuid()}"
+    # The trainer and each generator use 2 GPUs (TP=2), so each gets its own node.
+    # This intentionally uses only 2 GPUs per node, even on nodes with more GPUs:
+    # the recipe only demonstrates the multi-node launcher, not efficient GPU use.
+    launcher = SlurmLauncher.Config(
+        gpus_per_node=2,
+        env={
+            "TRITON_CACHE_DIR": f"{cache_root}/triton",
+            "VLLM_CACHE_ROOT": f"{cache_root}/vllm",
+            "FLASHINFER_WORKSPACE_BASE": f"{cache_root}/flashinfer",
+        },
+    )
+    config.actor_system = MonarchActorSystem.Config(launcher=launcher)
+    return config
 
 
 def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:

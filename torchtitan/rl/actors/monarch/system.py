@@ -14,11 +14,17 @@ from dataclasses import dataclass
 from typing import Any
 
 import torchstore as ts
-from monarch.actor import ProcMesh
+from monarch.actor import HostMesh, ProcMesh
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
 from torchtitan.rl.actors.monarch.generator import GeneratorActor
+from torchtitan.rl.actors.monarch.launcher.base import (
+    generator_role_names,
+    Layout,
+    MonarchLauncher,
+    SUBMIT_COMMAND,
+)
 from torchtitan.rl.actors.monarch.provisioning import (
     compute_generator_world_size,
     compute_trainer_world_size,
@@ -46,7 +52,7 @@ class MonarchActorSystem(ActorSystem):
     """Runs the RL services as Monarch actors on proc meshes.
 
     The trainer and each generator get their own GPU proc mesh: on this host,
-    partitioned with ``CUDA_VISIBLE_DEVICES``, or on the ``host_meshes`` a
+    partitioned with ``CUDA_VISIBLE_DEVICES``, on ``Config.launcher``'s hosts, or on the ``host_meshes`` a
     launcher passes in. ``generator_env`` adds environment variables to the
     generator procs. The router, the batcher and the rollout worker pool get CPU
     procs on this host.
@@ -59,7 +65,9 @@ class MonarchActorSystem(ActorSystem):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActorSystem.Config):
-        pass
+        launcher: MonarchLauncher.Config | None = None
+        """Scheduler that provides the hosts, e.g. ``SlurmLauncher.Config``; None runs
+        on this host."""
 
     def __init__(
         self,
@@ -71,6 +79,10 @@ class MonarchActorSystem(ActorSystem):
         self.config = config
         self._host_meshes = host_meshes
         self._generator_env = generator_env
+        self._launcher: MonarchLauncher | None = (
+            config.launcher.build() if config.launcher is not None else None
+        )
+        self._launcher_meshes: dict[str, HostMesh] | None = None
         self._trainer_mesh: ProcMesh | None = None
         self._generator_meshes: list[ProcMesh] = []
         self._router_mesh: ProcMesh | None = None
@@ -86,10 +98,21 @@ class MonarchActorSystem(ActorSystem):
         generator_parallelism: InferenceParallelismConfig,
         num_generators: int,
     ) -> None:
+        # TODO: remove _host_meshes (and the host_meshes argument) once internal
+        # ad-hoc launchers have migrated to MonarchLauncher.
+        host_meshes = self._host_meshes
+        if host_meshes is None and self._launcher is not None:
+            if not self._launcher.in_job():
+                raise ValueError(
+                    f"This recipe sets a launcher; submit it with `{SUBMIT_COMMAND}`."
+                )
+            layout = Layout.from_env()
+            self._launcher_meshes = await self._launcher.acquire_hosts(layout)
+            host_meshes = layout.host_meshes(self._launcher_meshes)
         self._trainer_mesh, self._generator_meshes = spawn_proc_mesh(
             compute_trainer_world_size(trainer_parallelism),
             compute_generator_world_size(generator_parallelism),
-            host_meshes=self._host_meshes,
+            host_meshes=host_meshes,
             num_generators=num_generators,
             generator_env=self._generator_env,
         )
@@ -148,10 +171,8 @@ class MonarchActorSystem(ActorSystem):
         **generator_kwargs: Any,
     ) -> Any:
         assert self._router_mesh is not None, "provision before spawning"
-        for idx, generator_mesh in enumerate(self._generator_meshes):
-            actor_name = (
-                "generator" if len(self._generator_meshes) == 1 else f"generator_{idx}"
-            )
+        actor_names = generator_role_names(len(self._generator_meshes))
+        for actor_name, generator_mesh in zip(actor_names, self._generator_meshes):
             generator = generator_mesh.spawn(
                 actor_name, GeneratorActor, generator_config, **generator_kwargs
             )
@@ -230,6 +251,12 @@ class MonarchActorSystem(ActorSystem):
                 await mesh.stop()
             except Exception:
                 logger.exception("mesh.stop[%d] failed", i)
+        launcher_meshes, self._launcher_meshes = self._launcher_meshes, None
+        if launcher_meshes is not None:
+            try:
+                await self._launcher.release_hosts(launcher_meshes)
+            except Exception:
+                logger.exception("launcher.release_hosts failed")
 
     def shutdown(self) -> None:
         shutdown()
