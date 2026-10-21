@@ -109,6 +109,7 @@ and [`torchtitan_recipes`](torchtitan_recipes/README.md) for the verified recipe
 | [Qwen3.5](torchtitan/models/qwen3_5) / [3.6](torchtitan/models/qwen3_6) / [3.8](torchtitan/models/qwen3_8) | 0.8B – 397B-A17B; 2.4T-A95B (3.8) | Text, vision | | ✅ text |
 | [DeepSeek V3](torchtitan/models/deepseek_v3) | 16B, 236B, 671B | Text | `deepseek_v3_671b` (+ Dist-MoE, NVFP4) | |
 | [DeepSeek V4](torchtitan/models/deepseek_v4) | Flash, Pro | Text | | Soon |
+| [GLM-5.2](torchtitan/models/glm5) | 744B-A40B | Text | | |
 | [gpt-oss](torchtitan/models/gpt_oss) | 20B, 120B | Text | | ✅ |
 | [Kimi K2.7](torchtitan/models/kimi_k2_7) | Moonlight-16B-A3B, Kimi-VL-A3B, K2.5 | Text, vision | | |
 | [Kimi K3](torchtitan/models/kimi_k3) | K3 | Text, vision | | Soon |
