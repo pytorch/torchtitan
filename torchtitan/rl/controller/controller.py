@@ -1447,6 +1447,9 @@ class Controller(Configurable):
                     generation_task.cancel()
                     await asyncio.wait([generation_task])
                     raise
+                if not work.cancelled:
+                    # Not the buffer's cancel: propagate, as before groups ran in their own task.
+                    raise
                 # The buffer cancelled the group: it became too old to train while generating.
                 logger.info(
                     f"rollout group {work.group_id} cancelled: past max_offpolicy_steps"

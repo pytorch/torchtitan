@@ -1414,6 +1414,47 @@ def test_adaptive_buffer_cancel_racing_the_last_rollout_releases_the_slot_once()
     asyncio.run(run())
 
 
+def test_rollout_worker_propagates_a_cancel_the_buffer_did_not_make() -> None:
+    async def run() -> None:
+        buffer = _adaptive_buffer(
+            num_prompts=1, max_offpolicy_steps=1, generation_capacity=4
+        )
+
+        released = []
+
+        async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+            raise asyncio.CancelledError  # e.g. an awaited call cancelled from elsewhere
+
+        async def release_groups(group_ids: list[int]) -> None:
+            released.append(group_ids)
+
+        controller = object.__new__(Controller)
+        controller.config = SimpleNamespace(
+            async_loop=SimpleNamespace(num_samples_per_prompt=2)
+        )
+        controller._sampling = None
+        controller.generator_router = SimpleNamespace(
+            release_groups=SimpleNamespace(call_one=release_groups)
+        )
+        controller.rollout_recorder = SimpleNamespace(record=lambda **kwargs: None)
+        controller._rollouter = SimpleNamespace(
+            run_group_rollouts=run_group_rollouts,
+            record_group_outcome=lambda group: None,
+        )
+        worker = asyncio.create_task(
+            controller._rollout_loop(
+                group_buffer=buffer, generate_fn=None, release_session_fn=None
+            )
+        )
+        await _admit(buffer, 0)
+        # The worker exits with the CancelledError instead of treating it as a buffer cancel.
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(worker, timeout=5)
+        assert released == [[0]]  # the group's sessions are still released
+
+    asyncio.run(run())
+
+
 def test_rollout_worker_survives_a_group_the_buffer_cancels() -> None:
     async def run() -> None:
         buffer = _adaptive_buffer(
