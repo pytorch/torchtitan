@@ -119,7 +119,8 @@ python -m scripts.checkpoint_conversion.numerical_tests_glm5 --device cuda
 
 The parity check builds equivalent reduced TorchTitan and Hugging Face models,
 strictly loads the converted state dict, compares MoE routing choices, and
-checks full-sequence logits with a KL-divergence threshold.
+checks full-sequence logits with KL-divergence, cosine-similarity, and top-1
+agreement thresholds.
 
 The integration suite registers separate base and MTP training cases. Both use
 an 8-GPU FSDP2+TP2+CP2+EP2 configuration with a real process group:
