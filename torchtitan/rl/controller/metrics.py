@@ -13,6 +13,7 @@ import contextlib
 import functools
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -343,8 +344,10 @@ def compute_host_memory_metrics() -> list[m.Metric]:
     Anonymous memory leaves out shared libraries, which summed RSS counts once per process. It is
     read from `smaps_rollup` (a page-table walk, ~1 ms per 4 GiB): `status`'s `RssAnon` misses each
     CPU's unflushed count (up to ~18 MiB per CPU on 144-CPU hosts), so it reads about 2x low.
-    Scans every process in the controller's cgroup: trainer ranks need not be the
-    controller's descendants. A process's role is `TORCHTITAN_RL_ROLE` in its spawn env:
+    Scans every process in the controller's Slurm job cgroup on this host, i.e. every job step
+    (outside Slurm, the controller's own cgroup): trainer ranks run in another step than the
+    controller, so its own cgroup misses them. A process's role is `TORCHTITAN_RL_ROLE` in its
+    spawn env:
 
         controller                         this process
         trainer, generator                 Monarch procs and their children
@@ -364,7 +367,7 @@ def compute_host_memory_metrics() -> list[m.Metric]:
         return []
     rss_anon_kib = dict.fromkeys(_PROCESS_ROLES, 0)
     num_processes = dict.fromkeys(_PROCESS_ROLES, 0)
-    for pid in (cgroup_dir / "cgroup.procs").read_text().split():
+    for pid in _cgroup_pids(cgroup_dir):
         # A process may exit after the cgroup listing, or be unreadable (hidepid).
         try:
             rollup = Path(f"/proc/{pid}/smaps_rollup").read_text()
@@ -408,19 +411,58 @@ def compute_host_memory_metrics() -> list[m.Metric]:
     return metrics
 
 
+# Slurm's per-job cgroup (cgroup/v2 plugin): job_<id>/step_<step>/user/task_<n>.
+_SLURM_JOB_CGROUP = re.compile(r"job_\d+")
+
+
 @functools.cache
 def _cgroup_dir() -> Path | None:
-    """The controller's cgroup v2 directory; cached, so a host without one warns once.
+    """The cgroup v2 directory whose processes the host memory metrics scan; cached, so a host
+    without one warns once.
 
-    Example: "0::/user.slice/session-3.scope" -> /sys/fs/cgroup/user.slice/session-3.scope
+    Example:
+        "0::/system.slice/slurmstepd.scope/job_7/step_batch/user/task_0"
+            -> /sys/fs/cgroup/system.slice/slurmstepd.scope/job_7
+        "0::/user.slice/session-3.scope" -> /sys/fs/cgroup/user.slice/session-3.scope
     """
     for line in Path("/proc/self/cgroup").read_text().splitlines():
         if line.startswith("0::"):
-            cgroup_dir = Path("/sys/fs/cgroup") / line[3:].lstrip("/")
+            cgroup_dir = _job_cgroup_dir(Path("/sys/fs/cgroup"), line[3:])
             if (cgroup_dir / "cgroup.procs").exists():
                 return cgroup_dir
     logger.warning("No cgroup v2 found; host memory metrics are off")
     return None
+
+
+def _job_cgroup_dir(cgroup_root: Path, cgroup_path: str) -> Path:
+    """`cgroup_path`'s nearest ancestor that is a Slurm job cgroup, else `cgroup_path` itself.
+
+    Example: (/sys/fs/cgroup, "/system.slice/slurmstepd.scope/job_7/step_0/user/task_0")
+        -> /sys/fs/cgroup/system.slice/slurmstepd.scope/job_7
+    """
+    parts = Path(cgroup_path.lstrip("/")).parts
+    for depth in range(len(parts), 0, -1):
+        if _SLURM_JOB_CGROUP.fullmatch(parts[depth - 1]):
+            return cgroup_root.joinpath(*parts[:depth])
+    return cgroup_root.joinpath(*parts)
+
+
+def _cgroup_pids(cgroup_dir: Path) -> list[str]:
+    """Pids in `cgroup_dir`; for a Slurm job cgroup, in every cgroup below it (cgroup v2 keeps
+    processes in leaf cgroups, here each step's task cgroups).
+
+    Example: job_7/step_batch/user/task_0 holds [100], job_7/step_0/user/task_0 holds [200]
+        -> _cgroup_pids(.../job_7) == ["100", "200"]
+    """
+    if not _SLURM_JOB_CGROUP.fullmatch(cgroup_dir.name):
+        return (cgroup_dir / "cgroup.procs").read_text().split()
+    pids = []
+    for dirpath, _, filenames in os.walk(cgroup_dir):
+        if "cgroup.procs" in filenames:
+            # A step's cgroup can go away mid-walk.
+            with contextlib.suppress(OSError):
+                pids += (Path(dirpath) / "cgroup.procs").read_text().split()
+    return pids
 
 
 def _process_role(pid: str) -> str:

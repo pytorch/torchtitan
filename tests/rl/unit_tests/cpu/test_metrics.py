@@ -16,10 +16,13 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import torchtitan.rl.controller.metrics as metrics_module
 
 from torchtitan.observability.metrics import BaseLogger, TensorBoardLogger, WandBLogger
 from torchtitan.rl._env import RL_ROLE_ENV
 from torchtitan.rl.controller.metrics import (
+    _cgroup_pids,
+    _job_cgroup_dir,
     compute_host_memory_metrics,
     compute_rollout_metrics,
 )
@@ -888,6 +891,58 @@ def test_compute_host_memory_metrics_groups_processes_by_role() -> None:
     assert after["host_memory/num_processes/controller"] == 1
     assert after[trainer_count_key] == before[trainer_count_key] + 1
     assert after["host_memory/rss_anon_gib/trainer"] > 0
+
+
+def _write_cgroup(root, path: str, pids: list[int]):
+    cgroup = root / path
+    cgroup.mkdir(parents=True, exist_ok=True)
+    (cgroup / "cgroup.procs").write_text("".join(f"{pid}\n" for pid in pids))
+    return cgroup
+
+
+def test_host_memory_scans_every_step_of_the_slurm_job_only(tmp_path) -> None:
+    job = "system.slice/slurmstepd.scope/job_7"
+    _write_cgroup(tmp_path, f"{job}/step_batch/user/task_0", [100])
+    _write_cgroup(tmp_path, f"{job}/step_0/user/task_0", [200, 201])
+    _write_cgroup(
+        tmp_path, "system.slice/slurmstepd.scope/job_8/step_0/user/task_0", [300]
+    )
+
+    job_dir = _job_cgroup_dir(tmp_path, f"/{job}/step_batch/user/task_0")
+
+    assert job_dir == tmp_path / job
+    # The controller's step and the trainer's step; not another job's processes.
+    assert sorted(_cgroup_pids(job_dir)) == ["100", "200", "201"]
+
+
+def test_host_memory_outside_slurm_scans_the_own_cgroup(tmp_path) -> None:
+    own = _write_cgroup(tmp_path, "user.slice/session-3.scope", [100])
+    _write_cgroup(tmp_path, "user.slice/session-3.scope/other", [101])
+
+    assert _job_cgroup_dir(tmp_path, "/user.slice/session-3.scope") == own
+    assert _cgroup_pids(own) == ["100"]
+
+
+def test_compute_host_memory_metrics_counts_trainers_in_another_job_step(
+    tmp_path, monkeypatch
+) -> None:
+    sleeper = subprocess.Popen(
+        ["sleep", "60"], env={**os.environ, RL_ROLE_ENV: "trainer"}
+    )
+    try:
+        job = "system.slice/slurmstepd.scope/job_7"
+        _write_cgroup(tmp_path, f"{job}/step_batch/user/task_0", [os.getpid()])
+        _write_cgroup(tmp_path, f"{job}/step_0/user/task_0", [sleeper.pid])
+        monkeypatch.setattr(metrics_module, "_cgroup_dir", lambda: tmp_path / job)
+        metrics = {
+            metric.key: metric.value.value for metric in compute_host_memory_metrics()
+        }
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    assert metrics["host_memory/num_processes/controller"] == 1
+    assert metrics["host_memory/num_processes/trainer"] == 1
+    assert metrics["host_memory/rss_anon_gib/trainer"] > 0
 
 
 def test_compute_host_memory_metrics_reports_node_mem_available() -> None:
