@@ -64,6 +64,7 @@ class RequestDispatcher:
         DP0's tp_rank=0 (i.e. rank 0)               DP1's tp_rank=0 (i.e. rank 2)
           engine.step()                             engine.step()
           resolve own replies locally   <--port--   send finished requests to rank 0
+                                                    (one message per step burst)
                                                     (tp_rank!=0: hold no outputs)
         rank 0 background drain task: recv from port -> resolve those replies
     """
@@ -101,6 +102,10 @@ class RequestDispatcher:
         self._result_port: Any | None = None
         self._rank0_result_receiver: Any | None = None
         self._rank0_drain_task: asyncio.Task | None = None
+        # PEER tp_rank=0: finished requests not sent yet, and the policy version they finished
+        # under (see ``flush_finished_requests``).
+        self._peer_finished_requests: list[FinishedRequest] = []
+        self._peer_finished_policy_version: int | None = None
 
         # --- DP routing ---
         # RANK-0 DP routing: pick a DP rank per request, reserving its load until
@@ -230,10 +235,10 @@ class RequestDispatcher:
     def process_finished_requests(
         self, finished_requests: list[FinishedRequest], policy_version: int
     ) -> None:
-        """TP rank 0s send finished requests to global rank 0 after each engine step:
+        """TP rank 0s hand finished requests to global rank 0 after each engine step:
           - Global Rank 0 resolves its own DP replica's requests locally;
-          - every other TP rank 0 sends them over the port to global rank 0's drain
-            task.
+          - every other TP rank 0 holds them until ``flush_finished_requests``, which sends
+            them over the port to global rank 0's drain task.
           - Other ranks hold no finished outputs and do nothing.
 
         ``policy_version`` is the version installed when they finished.
@@ -244,11 +249,31 @@ class RequestDispatcher:
         if self._rank == 0:
             self._rank0_resolve_generations(finished_requests, policy_version)
         elif finished_requests:
-            self._result_port.send(
-                _FinishedRequests(
-                    requests=finished_requests, policy_version=policy_version
-                )
+            # One message carries one policy version.
+            if policy_version != self._peer_finished_policy_version:
+                self.flush_finished_requests()
+            self._peer_finished_requests.extend(finished_requests)
+            self._peer_finished_policy_version = policy_version
+
+    def flush_finished_requests(self) -> None:
+        """PEER TP RANK 0: send the finished requests held since the last flush to rank 0's drain
+        task, in one message. The engine loop flushes after each step burst (no-op elsewhere).
+
+        One message per burst, not per engine step: the drain task shares the engine loop, which
+        yields once per engine step, and takes about one message per yield. With 7 peers (DP=8)
+        sending per step, their finished requests waited ~16 s at rank 0 (job 1969506), and the DP
+        router, which counts a request as load until rank 0 resolves it, sent new sessions to rank
+        0. Per burst, a peer's request waits at most one burst (~0.5 s).
+        """
+        if not self._peer_finished_requests:
+            return
+        self._result_port.send(
+            _FinishedRequests(
+                requests=self._peer_finished_requests,
+                policy_version=self._peer_finished_policy_version,
             )
+        )
+        self._peer_finished_requests = []
 
     def process_rejected_requests(
         self, rejected_requests: list[tuple[str, Exception]]

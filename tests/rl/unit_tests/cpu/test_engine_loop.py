@@ -1637,6 +1637,87 @@ def test_drain_task_resolves_peer_results_on_the_engine_thread(
     asyncio.run(run())
 
 
+def test_peer_dp_replica_sends_its_finished_requests_once_per_burst() -> None:
+    sent: list[_FinishedRequests] = []
+    peer = _dispatcher(rank=2, dp_size=2)  # DP rank 1's TP rank 0
+    peer._result_port = SimpleNamespace(send=sent.append)
+
+    # Steps of one burst: nothing goes to rank 0 until the burst's flush.
+    peer.process_finished_requests([_finished("r0")], policy_version=3)
+    peer.process_finished_requests([], policy_version=3)
+    peer.process_finished_requests([_finished("r1"), _finished("r2")], policy_version=3)
+    assert sent == []
+    peer.flush_finished_requests()
+    assert [
+        ([f.request_id for f in message.requests], message.policy_version)
+        for message in sent
+    ] == [(["r0", "r1", "r2"], 3)]
+
+    # Nothing held: the flush sends nothing.
+    peer.flush_finished_requests()
+    assert len(sent) == 1
+
+    # A new policy version starts a new message, so each message keeps one version.
+    peer.process_finished_requests([_finished("r3")], policy_version=3)
+    peer.process_finished_requests([_finished("r4")], policy_version=4)
+    peer.flush_finished_requests()
+    assert [
+        ([f.request_id for f in message.requests], message.policy_version)
+        for message in sent[1:]
+    ] == [(["r3"], 3), (["r4"], 4)]
+
+
+def test_peer_engine_loop_sends_a_bursts_finished_requests_after_the_burst(
+    engine_thread, monkeypatch
+) -> None:
+    requests = [_request("r0"), _request("r1")]
+    for request in requests:
+        request.min_policy_version = 0  # rank 0 pins it on admission
+    decisions = iter(
+        [
+            LoopDecision(action=LoopAction.STEP, requests_per_dp_rank=[[], requests]),
+            LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[]),
+        ]
+    )
+
+    def broadcast_object_list(container, **kwargs):
+        container[0] = next(decisions)
+
+    monkeypatch.setattr(
+        engine_loop_module.dist, "broadcast_object_list", broadcast_object_list
+    )
+
+    class OneRequestPerStepEngine(_FakeEngine):
+        def step(self) -> list[FinishedRequest]:
+            self.step_hook()
+            finished, self.running = self.running[:1], self.running[1:]
+            return [_finished(request_id) for request_id in finished]
+
+    async def run() -> None:
+        engine = OneRequestPerStepEngine()
+        steps: list[None] = []
+        engine.step_hook = lambda: steps.append(None)
+        # (requests, steps run when sent)
+        sent: list[tuple[list[str], int]] = []
+        # DP rank 1's TP rank 0 of a DP=2, TP=1 generator, with its port in place of setup's.
+        peer = _dispatcher(rank=1, dp_size=2)
+        peer.dp_rank = 1
+        peer.setup = lambda: None
+        peer._result_port = SimpleNamespace(
+            send=lambda message: sent.append(
+                ([f.request_id for f in message.requests], len(steps))
+            )
+        )
+        engine_loop = engine_thread(engine, rank=1, request_dispatcher=peer)
+        engine_loop.start()
+
+        await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
+        # Two steps finished one request each; one message after both.
+        assert sent == [(["r0", "r1"], 2)]
+
+    asyncio.run(run())
+
+
 def test_peer_dp_replica_aborts_a_request_whose_caller_left(
     engine_thread, monkeypatch
 ) -> None:

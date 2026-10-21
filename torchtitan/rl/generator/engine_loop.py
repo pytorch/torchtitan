@@ -400,6 +400,8 @@ class EngineLoop:
                             finished_requests, self.policy_version
                         )
                         await asyncio.sleep(0)  # let pending generate() calls enqueue
+                # Peer DP replicas send the burst's finished requests to rank 0 in one message.
+                self._request_dispatcher.flush_finished_requests()
 
         except Exception as exc:
             logger.exception("engine loop crashed; failing all outstanding replies")
