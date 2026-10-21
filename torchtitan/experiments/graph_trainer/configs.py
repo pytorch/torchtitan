@@ -18,32 +18,19 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.models.base.model import BaseModel
 from torchtitan.trainer import Trainer
 
-EpOverlapChunkDim = Literal["batch", "seq"]
-
-TRANSFORMER_BLOCK_FQN = "layers.*"
 MOE_BLOCK_FQN = "layers.*.feed_forward"
-SUPPORTED_EP_OVERLAP_MODULE_FQNS = frozenset({TRANSFORMER_BLOCK_FQN, MOE_BLOCK_FQN})
 
 
 @dataclass(kw_only=True, slots=True)
 class EpOverlapConfig:
     enabled: bool = False
-    """Enable EP-overlap support for the selected chunking and scheduling mode."""
+    """Split each selected MoE's tokens into two chunks for EP overlap."""
 
-    chunk_dim: EpOverlapChunkDim = "batch"
-    """Logical input dimension to split for EP-overlap chunking.
+    module_fqn: str = MOE_BLOCK_FQN
+    """MoE module FQN pattern chunked along the token axis before tracing.
 
-    Sequence chunking is only supported for MoE block roots because attention
-    requires full K/V context.
-    """
-
-    module_fqn: str = TRANSFORMER_BLOCK_FQN
-    """Single module FQN pattern chunked for EP overlap.
-
-    v1 supports all transformer blocks (``layers.*``) or all MoE blocks
-    (``layers.*.feed_forward``). Selected module forwards are wrapped with eager chunking
-    before tracing, and the overlap scheduler consumes the resulting chunk
-    metadata.
+    Chunk annotations identify the resulting forward and backward regions to
+    the overlap scheduler. Dense feed-forward modules are not chunked.
     """
 
 
@@ -308,27 +295,15 @@ class GraphTrainerCompileConfig:
 
 def validate_ep_overlap_config(
     ep_overlap_config: EpOverlapConfig,
-) -> tuple[EpOverlapChunkDim, str]:
-    chunk_dim = ep_overlap_config.chunk_dim
-    if chunk_dim not in ("batch", "seq"):
-        raise ValueError(
-            "compile.ep_overlap.chunk_dim must be 'batch' or 'seq' when "
-            "compile.ep_overlap.enabled is set"
-        )
-
+) -> str:
+    """Validate the supported MoE selection and return its module pattern."""
     module_fqn = ep_overlap_config.module_fqn
-    if module_fqn not in SUPPORTED_EP_OVERLAP_MODULE_FQNS:
+    if module_fqn != MOE_BLOCK_FQN:
         raise ValueError(
-            "compile.ep_overlap.module_fqn must be either 'layers.*' "
-            "or 'layers.*.feed_forward' for ep_overlap"
+            "compile.ep_overlap.module_fqn must be 'layers.*.feed_forward'; "
+            "EP overlap chunks MoE tokens, not transformer blocks"
         )
-    if chunk_dim == "seq" and module_fqn != MOE_BLOCK_FQN:
-        raise ValueError(
-            "compile.ep_overlap.chunk_dim='seq' is only supported with "
-            "compile.ep_overlap.module_fqn='layers.*.feed_forward'"
-        )
-
-    return chunk_dim, module_fqn
+    return module_fqn
 
 
 def to_graph_trainer_config(

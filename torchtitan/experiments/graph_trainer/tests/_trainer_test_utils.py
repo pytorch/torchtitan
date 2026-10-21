@@ -83,8 +83,7 @@ def build_minimal_trainer(
     compile_enable_passes: bool = True,
     compile_passes: list[str] | None = None,
     compile_ep_overlap_enabled: bool = False,
-    compile_ep_overlap_chunk_dim: str = "batch",
-    compile_ep_overlap_module_fqn: str = "layers.*",
+    compile_ep_overlap_module_fqn: str = "layers.*.feed_forward",
     compile_inductor_compilation: str = "regional",
     compile_disable_passes: list[str] | None = None,
     compile_numerics_changing_optim: bool = False,
@@ -128,7 +127,6 @@ def build_minimal_trainer(
                 numerics_changing_optim=compile_numerics_changing_optim,
                 ep_overlap=EpOverlapConfig(
                     enabled=compile_ep_overlap_enabled,
-                    chunk_dim=compile_ep_overlap_chunk_dim,
                     module_fqn=compile_ep_overlap_module_fqn,
                 ),
             ),

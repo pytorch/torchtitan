@@ -57,10 +57,6 @@ from torchtitan.experiments.graph_trainer.cuda_graph import (
 from torchtitan.experiments.graph_trainer.decompositions import (
     apply_decompositions_pass,
 )
-from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
-    maybe_apply_ep_overlap_eager_chunking,
-    populate_eager_chunk_metadata_pass,
-)
 from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
     _apply_schedule,
     _schedule_ep_overlap_regions,
@@ -135,8 +131,6 @@ from torchtitan.experiments.graph_trainer.tests.test_performance_passes import (
 )
 from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.linear import Linear
-
-from torchtitan.models.common.moe import MoE
 
 
 @torch.library.custom_op(
@@ -3780,13 +3774,11 @@ class TestChunkPasses(TestCase):
         gm,
         *,
         module_pattern: str = "layers.*.feed_forward",
-        pair_first_token_exchange: bool = True,
     ):
         _schedule_ep_overlap_regions(
             gm,
             module_pattern=module_pattern,
             require_all_to_all=True,
-            pair_first_token_exchange=pair_first_token_exchange,
         )
         return {node: idx for idx, node in enumerate(gm.graph.nodes)}
 
@@ -3875,6 +3867,24 @@ class TestChunkPasses(TestCase):
         graph.output((refs[0]["wait"], refs[1]["wait"]))
         return torch.fx.GraphModule(torch.nn.Module(), graph), refs
 
+    def test_padding_masks_follow_local_tp_token_chunks(self):
+        from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+            _split_padding_mask,
+        )
+
+        padding_mask_T = torch.arange(16).remainder(3) == 0
+        for num_token_shards in (1, 2):
+            chunks = _split_padding_mask(
+                padding_mask_T, num_token_shards=num_token_shards
+            )
+            for chunk_id, mask in enumerate(chunks):
+                for original, actual in zip(
+                    padding_mask_T.chunk(num_token_shards),
+                    mask.chunk(num_token_shards),
+                    strict=True,
+                ):
+                    self.assertEqual(actual, original.chunk(2)[chunk_id])
+
     def _compile_config_for_ep_overlap_test(self):
         from types import SimpleNamespace
 
@@ -3894,8 +3904,7 @@ class TestChunkPasses(TestCase):
             compile=GraphTrainerCompileConfig(
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
-                    chunk_dim="batch",
-                    module_fqn="layers.*",
+                    module_fqn="layers.*.feed_forward",
                 ),
                 cpu_offload_prefetch_n_layers=1,
                 cpu_offload_defer_n_layers=1,
@@ -3961,12 +3970,6 @@ class TestChunkPasses(TestCase):
         )
 
     def test_fsdp_dense_region_scheduler_pass_gating(self):
-        def transformer_batch_default(config):
-            pass
-
-        def transformer_batch_explicit(config):
-            config.compile.enable_fsdp_dense_region_overlap = True
-
         def moe_ep_default(config):
             config.compile.ep_overlap.module_fqn = "layers.*.feed_forward"
 
@@ -3979,14 +3982,6 @@ class TestChunkPasses(TestCase):
             config.compile.enable_fsdp_dense_region_overlap = True
 
         cases = (
-            ("transformer_batch_default", transformer_batch_default, True, False, None),
-            (
-                "transformer_batch_explicit",
-                transformer_batch_explicit,
-                True,
-                False,
-                "ignored when compile.ep_overlap.enabled is set",
-            ),
             ("moe_ep_default", moe_ep_default, True, False, None),
             (
                 "moe_ep_explicit",
@@ -4324,165 +4319,6 @@ class TestChunkPasses(TestCase):
             ],
         )
 
-    def test_ep_overlap_keeps_transformer_batch_first_marker_wait_gated(self):
-        c10d = torch.ops._c10d_functional
-
-        def build_forward_gm():
-            graph = torch.fx.Graph()
-            x = graph.placeholder("x")
-            refs = {}
-            for chunk_id in (0, 1):
-                dense_prefix = graph.call_function(
-                    torch.ops.aten.relu.default, args=(x,)
-                )
-                router = graph.call_function(
-                    torch.ops.aten.neg.default, args=(dense_prefix,)
-                )
-                count = graph.call_function(
-                    c10d.all_to_all_single.default, args=(router, [], [], "ep")
-                )
-                sync = graph.call_function(
-                    torch.ops.aten._local_scalar_dense.default, args=(count,)
-                )
-                dispatch = graph.call_function(
-                    c10d.all_to_all_single.default, args=(sync, [], [], "ep")
-                )
-                dispatch_wait = graph.call_function(
-                    c10d.wait_tensor.default, args=(dispatch,)
-                )
-                grouped_mm = graph.call_function(
-                    torch.ops.aten.relu.default, args=(dispatch_wait,)
-                )
-                combine = graph.call_function(
-                    c10d.all_to_all_single.default, args=(grouped_mm, [], [], "ep")
-                )
-                combine_wait = graph.call_function(
-                    c10d.wait_tensor.default, args=(combine,)
-                )
-                refs[chunk_id] = {
-                    "dense_prefix": dense_prefix,
-                    "router": router,
-                    "count": count,
-                    "sync": sync,
-                    "dispatch": dispatch,
-                    "dispatch_wait": dispatch_wait,
-                    "grouped_mm": grouped_mm,
-                    "combine": combine,
-                    "combine_wait": combine_wait,
-                }
-                for node in (dense_prefix, router, count, sync, dispatch):
-                    self._mark_chunk_body(
-                        node,
-                        fqn="layers.0",
-                        chunk_id=chunk_id,
-                        ep="dispatch",
-                        token_exchange=node is dispatch,
-                    )
-                for node in (dispatch_wait, grouped_mm, combine, combine_wait):
-                    self._mark_chunk_body(
-                        node,
-                        fqn="layers.0",
-                        chunk_id=chunk_id,
-                        ep="combine",
-                        token_exchange=node is combine,
-                    )
-            graph.output((refs[0]["combine_wait"], refs[1]["combine_wait"]))
-            return torch.fx.GraphModule(torch.nn.Module(), graph), refs
-
-        def build_backward_gm():
-            graph = torch.fx.Graph()
-            x = graph.placeholder("x")
-            refs = {}
-            for chunk_id in (0, 1):
-                remat_prefix = graph.call_function(
-                    torch.ops.aten.relu.default, args=(x,)
-                )
-                combine = graph.call_function(
-                    c10d.all_to_all_single.default, args=(remat_prefix, [], [], "ep")
-                )
-                combine_wait = graph.call_function(
-                    c10d.wait_tensor.default, args=(combine,)
-                )
-                input_grad = graph.call_function(
-                    torch.ops.aten.relu.default, args=(combine_wait,)
-                )
-                dispatch = graph.call_function(
-                    c10d.all_to_all_single.default, args=(input_grad, [], [], "ep")
-                )
-                dispatch_wait = graph.call_function(
-                    c10d.wait_tensor.default, args=(dispatch,)
-                )
-                refs[chunk_id] = {
-                    "remat_prefix": remat_prefix,
-                    "combine": combine,
-                    "combine_wait": combine_wait,
-                    "input_grad": input_grad,
-                    "dispatch": dispatch,
-                    "dispatch_wait": dispatch_wait,
-                }
-                for node in (remat_prefix, combine, combine_wait):
-                    self._mark_chunk_body(
-                        node,
-                        fqn="layers.0",
-                        chunk_id=chunk_id,
-                        backward=True,
-                        ep="combine",
-                        token_exchange=node is combine,
-                    )
-                for node in (input_grad, dispatch, dispatch_wait):
-                    self._mark_chunk_body(
-                        node,
-                        fqn="layers.0",
-                        chunk_id=chunk_id,
-                        backward=True,
-                        ep="dispatch",
-                        token_exchange=node is dispatch,
-                    )
-            graph.output((refs[1]["dispatch_wait"], refs[0]["dispatch_wait"]))
-            return torch.fx.GraphModule(torch.nn.Module(), graph), refs
-
-        fwd_gm, fwd = build_forward_gm()
-        fwd_order = self._schedule_ep_overlap_and_order(
-            fwd_gm,
-            module_pattern="layers.*",
-            pair_first_token_exchange=False,
-        )
-        self._assert_nodes_in_order(
-            fwd_order,
-            [
-                fwd[0]["dense_prefix"],
-                fwd[0]["dispatch"],
-                fwd[1]["dense_prefix"],
-                fwd[1]["dispatch"],
-                fwd[0]["dispatch_wait"],
-                fwd[0]["combine"],
-                fwd[1]["dispatch_wait"],
-                fwd[1]["combine"],
-            ],
-        )
-
-        bwd_gm, bwd = build_backward_gm()
-        bwd_order = self._schedule_ep_overlap_and_order(
-            bwd_gm,
-            module_pattern="layers.*",
-            pair_first_token_exchange=False,
-        )
-        self._assert_nodes_in_order(
-            bwd_order,
-            [
-                bwd[1]["remat_prefix"],
-                bwd[1]["combine"],
-                bwd[0]["remat_prefix"],
-                bwd[0]["combine"],
-                bwd[1]["combine_wait"],
-                bwd[1]["dispatch"],
-                bwd[0]["combine_wait"],
-                bwd[0]["dispatch"],
-                bwd[1]["dispatch_wait"],
-                bwd[0]["dispatch_wait"],
-            ],
-        )
-
     def test_ep_overlap_pairs_token_count_sync_cpu_copies_before_consumers(self):
         gm, refs = self._build_ep_sync_copy_schedule_gm()
 
@@ -4503,30 +4339,6 @@ class TestChunkPasses(TestCase):
             min(order[refs[chunk_id]["dispatch"]] for chunk_id in (0, 1)),
         )
 
-    def test_ep_overlap_hoists_token_count_sync_cpu_copies_per_chunk(self):
-        gm, refs = self._build_ep_sync_copy_schedule_gm(fqn="layers.0")
-
-        order = self._schedule_ep_overlap_and_order(
-            gm,
-            module_pattern="layers.*",
-            pair_first_token_exchange=False,
-        )
-
-        for chunk_id in (0, 1):
-            self.assertEqual(
-                [copy.kwargs["non_blocking"] for copy in refs[chunk_id]["copies"]],
-                [True, False],
-            )
-            self.assertLess(
-                max(order[copy] for copy in refs[chunk_id]["copies"]),
-                min(order[consumer] for consumer in refs[chunk_id]["consumers"]),
-            )
-            self.assertLess(
-                max(order[consumer] for consumer in refs[chunk_id]["consumers"]),
-                order[refs[chunk_id]["dispatch"]],
-            )
-        self.assertLess(order[refs[0]["dispatch"]], order[refs[1]["copies"][0]])
-
     def test_ep_overlap_rejects_malformed_token_count_sync_copy_count(self):
         gm, _refs = self._build_ep_sync_copy_schedule_gm(copies_per_chunk=1)
 
@@ -4535,7 +4347,6 @@ class TestChunkPasses(TestCase):
                 gm,
                 module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
-                pair_first_token_exchange=True,
             )
 
     def test_ep_overlap_rejects_ambiguous_token_count_sync_copy_destination(self):
@@ -4546,7 +4357,6 @@ class TestChunkPasses(TestCase):
                 gm,
                 module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
-                pair_first_token_exchange=True,
             )
 
     def test_ep_overlap_rejects_unannotated_all_to_all_markers(self):
@@ -4568,7 +4378,6 @@ class TestChunkPasses(TestCase):
                 gm,
                 module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
-                pair_first_token_exchange=True,
             )
 
     def test_ep_overlap_rejects_token_exchange_metadata_on_compute(self):
@@ -4586,7 +4395,6 @@ class TestChunkPasses(TestCase):
                 gm,
                 module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
-                pair_first_token_exchange=True,
             )
 
     def test_ep_overlap_rejects_mismatched_token_exchange_labels(self):
@@ -4606,7 +4414,6 @@ class TestChunkPasses(TestCase):
                 gm,
                 module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
-                pair_first_token_exchange=True,
             )
 
     def test_ep_overlap_rejects_wait_before_token_exchange_launch(self):
@@ -4630,7 +4437,6 @@ class TestChunkPasses(TestCase):
                 gm,
                 module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
-                pair_first_token_exchange=True,
             )
 
     def test_ep_overlap_uses_future_closure_prefix_before_wait(self):
@@ -4829,7 +4635,6 @@ class TestChunkPasses(TestCase):
                 gm,
                 module_pattern="layers.*.feed_forward",
                 require_all_to_all=True,
-                pair_first_token_exchange=True,
             )
 
     def test_ep_overlap_schedules_arbitrary_matching_token_exchange_sequence(self):
@@ -5073,65 +4878,6 @@ class TestChunkPasses(TestCase):
         order = self._schedule_ep_overlap_and_order(gm)
         self.assertLess(order[c1_setup], order[c1_pre])
         self.assertLess(order[c1_dispatch], order[c0_dispatch_wait])
-
-    def test_eager_chunking_traces_overlap_metadata(self):
-        class Block(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear = torch.nn.Linear(3, 3)
-
-            def forward(self, x):
-                return torch.relu(self.linear(x))
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([Block()])
-
-            def forward(self, x):
-                return self.layers[0](x)
-
-        model = Model()
-        annotate_module_fqns(model)
-        maybe_apply_ep_overlap_eager_chunking(
-            model,
-            GraphTrainerCompileConfig(
-                ep_overlap=EpOverlapConfig(
-                    enabled=True,
-                    module_fqn="layers.*",
-                ),
-            ),
-        )
-
-        def step(inputs):
-            y = model(inputs)
-            loss = y.sum()
-            params = [p for p in model.parameters() if p.requires_grad]
-            return [loss] + list(torch.autograd.grad(loss, params))
-
-        traced = minimal_fx_tracer(step, module=model)(torch.randn(4, 3))
-        gm = populate_eager_chunk_metadata_pass(traced.gm)
-
-        body_chunks = {
-            node.meta.get("chunk_id")
-            for node in gm.graph.nodes
-            if node.meta.get("chunked_region_role") == "body"
-        }
-        backward_body_chunks = {
-            node.meta.get("chunk_id")
-            for node in gm.graph.nodes
-            if node.meta.get("chunked_region_role") == "body"
-            and node.meta.get("autograd_backward", False)
-        }
-        boundary_roles = {
-            node.meta.get("chunked_region_role")
-            for node in gm.graph.nodes
-            if node.meta.get("chunked_region_fqn") == "layers.0"
-        }
-        self.assertEqual(body_chunks, {0, 1})
-        self.assertEqual(backward_body_chunks, {0, 1})
-        self.assertIn("split_boundary", boundary_roles)
-        self.assertIn("materialization", boundary_roles)
 
 
 class TestRemoveIdentityViewPass(TestCase):
@@ -6574,373 +6320,6 @@ class TestIsFullCudaGraphCompatible(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), g)
         self.assertFalse(is_cuda_graph_node_compatible(s))
         self.assertFalse(is_cuda_graph_fully_compatible(gm))
-
-
-class TestEagerChunking(TestCase):
-    def _config(
-        self,
-        *,
-        chunk_dim: str = "batch",
-        module_fqn: str = "layers.*",
-    ) -> GraphTrainerCompileConfig:
-        return GraphTrainerCompileConfig(
-            ep_overlap=EpOverlapConfig(
-                enabled=True,
-                chunk_dim=chunk_dim,
-                module_fqn=module_fqn,
-            ),
-        )
-
-    def test_eager_chunking_is_idempotent(self):
-        class Block(torch.nn.Module):
-            def forward(self, x):
-                return x.sin()
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([Block()])
-
-            def forward(self, x):
-                return self.layers[0](x)
-
-        model = Model()
-        config = self._config()
-        maybe_apply_ep_overlap_eager_chunking(model, config)
-        wrapped_forward = model.layers[0].forward
-        maybe_apply_ep_overlap_eager_chunking(model, config)
-
-        self.assertIs(model.layers[0].forward, wrapped_forward)
-
-    def test_eager_chunking_compile_disabled_is_noop(self):
-        class Block(torch.nn.Module):
-            def forward(self, x):
-                return x.sin()
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([Block()])
-
-            def forward(self, x):
-                return self.layers[0](x)
-
-        model = Model()
-        forward = model.layers[0].forward
-        config = self._config()
-        config.ep_overlap.enabled = False
-
-        maybe_apply_ep_overlap_eager_chunking(model, config)
-
-        self.assertIs(model.layers[0].forward.__func__, forward.__func__)
-
-    def test_eager_chunking_rejects_unsupported_output_type(self):
-        class Block(torch.nn.Module):
-            def forward(self, x):
-                return {"x": x}
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([Block()])
-
-            def forward(self, x):
-                return self.layers[0](x)
-
-        model = Model()
-        maybe_apply_ep_overlap_eager_chunking(model, self._config())
-
-        with self.assertRaisesRegex(TypeError, "layers.0.*dict"):
-            model(torch.randn(4, 3))
-
-    def test_transformer_batch_chunking_splits_token_metadata_by_batch(self):
-        seen_positions = []
-        seen_padding_masks = []
-
-        class Block(torch.nn.Module):
-            def forward(
-                self,
-                x,
-                attention_metadata=None,
-                positions=None,
-                *,
-                padding_mask=None,
-            ):
-                seen_positions.append(positions)
-                seen_padding_masks.append(padding_mask)
-                return x
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([Block()])
-
-            def forward(self, x, positions, padding_mask):
-                return self.layers[0](x, None, positions, padding_mask=padding_mask)
-
-        model = Model()
-        maybe_apply_ep_overlap_eager_chunking(model, self._config())
-        x = torch.randn(4, 4, 2)
-        positions = torch.arange(16).view(4, 4)
-        padding_mask = torch.tensor(
-            [
-                [False, False, False, True],
-                [False, False, True, True],
-                [False, False, False, False],
-                [False, True, True, True],
-            ]
-        )
-
-        self.assertEqual(model(x, positions, padding_mask), x)
-        self.assertEqual([tuple(pos.shape) for pos in seen_positions], [(2, 4), (2, 4)])
-        self.assertEqual(seen_positions[0], positions[:2])
-        self.assertEqual(seen_positions[1], positions[2:])
-        self.assertEqual(seen_padding_masks[0], padding_mask[:2])
-        self.assertEqual(seen_padding_masks[1], padding_mask[2:])
-
-    def test_transformer_batch_chunking_rejects_same_extent_tensor_mask(self):
-        class Block(torch.nn.Module):
-            def forward(self, x, attention_metadata):
-                return x + attention_metadata
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([Block()])
-
-            def forward(self, x, attention_metadata):
-                return self.layers[0](x, attention_metadata)
-
-        model = Model()
-        maybe_apply_ep_overlap_eager_chunking(model, self._config())
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "attention_metadata must be None, BlockMask.*upstream .*TransformerBlock",
-        ):
-            model(torch.randn(4, 3), torch.randn(4, 3))
-
-    def test_moe_chunking_splits_activation_only(self):
-        seen_shapes = []
-
-        class Moe(MoE):
-            def __init__(self):
-                torch.nn.Module.__init__(self)
-
-            def forward(self, x):
-                seen_shapes.append(tuple(x.shape))
-                return x
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([torch.nn.Module()])
-                self.layers[0].feed_forward = Moe()
-
-            def forward(self, x):
-                return self.layers[0].feed_forward(x)
-
-        model = Model()
-        maybe_apply_ep_overlap_eager_chunking(
-            model,
-            self._config(chunk_dim="seq", module_fqn="layers.*.feed_forward"),
-        )
-        x = torch.randn(8, 3)
-
-        self.assertEqual(model(x), x)
-        self.assertEqual(seen_shapes, [(4, 3), (4, 3)])
-
-    def test_moe_chunking_splits_padding_mask_with_activation(self):
-        seen_inputs = []
-
-        class Moe(MoE):
-            def __init__(self):
-                torch.nn.Module.__init__(self)
-
-            def forward(self, x, *, padding_mask_T=None):
-                seen_inputs.append((x, padding_mask_T))
-                return x.masked_fill(padding_mask_T.unsqueeze(-1), 0)
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([torch.nn.Module()])
-                self.layers[0].feed_forward = Moe()
-
-            def forward(self, x, padding_mask_T):
-                return self.layers[0].feed_forward(x, padding_mask_T=padding_mask_T)
-
-        model = Model()
-        maybe_apply_ep_overlap_eager_chunking(
-            model,
-            self._config(chunk_dim="seq", module_fqn="layers.*.feed_forward"),
-        )
-        x = torch.randn(8, 3)
-        padding_mask_T = torch.tensor(
-            [False, True, False, True, True, False, True, False]
-        )
-
-        self.assertEqual(
-            model(x, padding_mask_T),
-            x.masked_fill(padding_mask_T.unsqueeze(-1), 0),
-        )
-        self.assertEqual(
-            [tuple(chunk_x.shape) for chunk_x, _ in seen_inputs],
-            [(4, 3), (4, 3)],
-        )
-        self.assertEqual(seen_inputs[0][1], padding_mask_T[:4])
-        self.assertEqual(seen_inputs[1][1], padding_mask_T[4:])
-
-    def test_moe_chunking_shares_aux_loss_denominator(self):
-        seen_denominators = []
-
-        class Moe(MoE):
-            def __init__(self):
-                torch.nn.Module.__init__(self)
-
-            def forward(self, x, *, aux_loss_denominator):
-                seen_denominators.append(aux_loss_denominator)
-                return x
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([torch.nn.Module()])
-                self.layers[0].feed_forward = Moe()
-
-            def forward(self, x, aux_loss_denominator):
-                return self.layers[0].feed_forward(
-                    x, aux_loss_denominator=aux_loss_denominator
-                )
-
-        model = Model()
-        maybe_apply_ep_overlap_eager_chunking(
-            model,
-            self._config(chunk_dim="seq", module_fqn="layers.*.feed_forward"),
-        )
-        x = torch.randn(8, 3)
-        aux_loss_denominator = torch.tensor(8)
-
-        self.assertEqual(model(x, aux_loss_denominator), x)
-        self.assertEqual(seen_denominators, [aux_loss_denominator] * 2)
-
-    def test_moe_chunking_rejects_extra_tensor_input(self):
-        class Moe(MoE):
-            def __init__(self):
-                torch.nn.Module.__init__(self)
-
-            def forward(self, x, aux):
-                return x + aux
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([torch.nn.Module()])
-                self.layers[0].feed_forward = Moe()
-
-            def forward(self, x, aux):
-                return self.layers[0].feed_forward(x, aux)
-
-        model = Model()
-        maybe_apply_ep_overlap_eager_chunking(
-            model,
-            self._config(module_fqn="layers.*.feed_forward"),
-        )
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "expected exactly one positional activation tensor.*upstream MoE.forward",
-        ):
-            model(torch.randn(4, 3), torch.randn(4, 3))
-
-    def test_eager_chunking_traces_overlap_metadata(self):
-        class Block(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear = torch.nn.Linear(3, 3)
-
-            def forward(self, x):
-                return torch.relu(self.linear(x))
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([Block()])
-
-            def forward(self, x):
-                return self.layers[0](x)
-
-        model = Model()
-        annotate_module_fqns(model)
-        maybe_apply_ep_overlap_eager_chunking(model, self._config())
-
-        traced = minimal_fx_tracer(lambda inputs: model(inputs), module=model)(
-            torch.randn(4, 3)
-        )
-        gm = populate_eager_chunk_metadata_pass(traced.gm)
-
-        body_nodes = [
-            node
-            for node in gm.graph.nodes
-            if node.meta.get("chunked_region_role") == "body"
-        ]
-        roles = {
-            node.meta.get("chunked_region_role")
-            for node in gm.graph.nodes
-            if node.meta.get("chunked_region_fqn") == "layers.0"
-        }
-        self.assertEqual({node.meta.get("chunk_id") for node in body_nodes}, {0, 1})
-        self.assertEqual(
-            {node.meta.get("chunked_region_fqn") for node in body_nodes},
-            {"layers.0"},
-        )
-        self.assertIn("split_boundary", roles)
-        self.assertIn("materialization", roles)
-
-    def test_eager_chunking_splits_block_mask_batch_metadata(self):
-        from torch.nn.attention.flex_attention import create_block_mask
-
-        seen_masks = []
-
-        def mask_mod(b, h, q_idx, kv_idx):
-            return (b == 2) & (q_idx >= kv_idx)
-
-        class Block(torch.nn.Module):
-            def forward(self, x, attention_metadata, positions):
-                seen_masks.append(attention_metadata)
-                return x
-
-        class Model(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = torch.nn.ModuleList([Block()])
-
-            def forward(self, x, attention_metadata, positions):
-                return self.layers[0](x, attention_metadata, positions)
-
-        model = Model()
-        maybe_apply_ep_overlap_eager_chunking(model, self._config())
-        block_mask = create_block_mask(
-            mask_mod,
-            B=4,
-            H=None,
-            Q_LEN=128,
-            KV_LEN=128,
-            device="cpu",
-        )
-        x = torch.randn(4, 128, 8)
-        positions = torch.arange(128).repeat(4, 1)
-
-        self.assertEqual(model(x, block_mask, positions).shape, x.shape)
-        self.assertEqual(len(seen_masks), 2)
-        self.assertEqual([mask.kv_num_blocks.size(0) for mask in seen_masks], [2, 2])
-
-        b = torch.tensor(0)
-        h = torch.tensor(0)
-        q_idx = torch.tensor(1)
-        kv_idx = torch.tensor(0)
-        self.assertFalse(seen_masks[0].mask_mod(b, h, q_idx, kv_idx).item())
-        self.assertTrue(seen_masks[1].mask_mod(b, h, q_idx, kv_idx).item())
 
 
 if __name__ == "__main__":
