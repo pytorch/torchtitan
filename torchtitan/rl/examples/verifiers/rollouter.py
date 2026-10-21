@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import re
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
@@ -415,6 +416,15 @@ class VerifiersRolloutWorker(RolloutWorker):
                     m.Metric(f"rollout/{key}", m.Mean.from_list(values)),
                     m.Metric(f"rollout/{key}", m.Max.from_list(values)),
                 ]
+        # Every group logs every bucket, so each averages to its share of the step's rollouts.
+        buckets = [_stop_bucket(r.logs.get("stop_condition")) for r in rollouts]
+        group_metrics += [
+            m.Metric(
+                f"rollout/stop/{bucket}",
+                m.Mean.from_list([float(b == bucket) for b in buckets]),
+            )
+            for bucket in (*_STOP_CONDITION_BUCKETS, "other")
+        ]
         return RolloutGroup(group_id=group_id, rollouts=rollouts, metrics=group_metrics)
 
     async def _run_single_rollout(
@@ -693,24 +703,77 @@ class VerifiersRolloutWorker(RolloutWorker):
         return turns
 
 
+# Stop conditions the SWE-rebench V2 OpenCode runs ended with (v6/v7 rollout ledgers); any other
+# value, or a rollout without a trace, counts as "other".
+_STOP_CONDITION_BUCKETS = (
+    "agent_completed",
+    "agent_timeout",
+    "max_turns",
+    "max_input_tokens",
+    "sandbox_error",
+    "harness_error",
+    "agentstalled_error",
+)
+
+# OpenCode's system prompt carries the sandbox's date ("Today's date: Tue Oct 20 2026"). A rollout in
+# flight at 00:00 UTC re-sends its history under the new date, which starts a new graph root.
+_DATE_LINE = re.compile(r"Today's date: [^\n]*")
+
+
+def _stop_bucket(stop_condition: str | None) -> str:
+    """The `rollout/stop/<bucket>` a rollout counts under."""
+    return stop_condition if stop_condition in _STOP_CONDITION_BUCKETS else "other"
+
+
+def _without_date(message: Any) -> tuple[str, str]:
+    """A root message's role and text with OpenCode's date line blanked; non-text content as is."""
+    content = message.content
+    text = _DATE_LINE.sub("", content) if isinstance(content, str) else repr(content)
+    return message.role, text
+
+
 def _fork_counts(trace: Any) -> dict[str, int]:
     """Why a rollout forked into more training samples (rollout/branches_per_rollout).
 
-    - num_compactions: sampled turns under a root other than the rollout's first, i.e. the agent's
-      history-summary requests (its summary prompt starts a new root); each compaction adds two
-      branches, the summary and the resumed conversation.
+    - num_compactions: the agent's history-summary requests. Verifiers files every summary request of a
+      rollout under one root of its own (same system message and tools), each as a new chain from that
+      root, so a request is a sampled node under a non-first root with no sampled ancestor. A root that is
+      the main conversation re-sent under a new date (a midnight fork) is not a compaction. Each
+      compaction adds two branches, the summary and the resumed conversation.
     - num_resent_assistant_messages: assistant messages re-sent in a form the graph did not match to
       the sampled turn beside them; each adds one branch. The copies a summary request re-carries
       under its own root are not counted.
+
+    Example: two summary requests, then a midnight fork whose later turns continue the conversation
+    -> num_compactions = 2.
     """
     nodes = trace.nodes
     root = [0] * len(nodes)  # parents come before their children in `trace.nodes`
+    has_sampled_ancestor = [False] * len(nodes)
     for index, node in enumerate(nodes):
-        root[index] = index if node.parent is None else root[node.parent]
+        if node.parent is None:
+            root[index] = index
+        else:
+            root[index] = root[node.parent]
+            has_sampled_ancestor[index] = (
+                has_sampled_ancestor[node.parent] or nodes[node.parent].sampled
+            )
+    main_message = _without_date(nodes[0].message) if nodes else None
+    redated_main_roots = {
+        index
+        for index, node in enumerate(nodes)
+        if node.parent is None
+        and index != 0
+        and _without_date(node.message) == main_message
+    }
     parents_of_sampled = {node.parent for node in nodes if node.sampled}
     return {
         "num_compactions": sum(
-            node.sampled and root[index] != root[0] for index, node in enumerate(nodes)
+            node.sampled
+            and root[index] != 0
+            and root[index] not in redated_main_roots
+            and not has_sampled_ancestor[index]
+            for index, node in enumerate(nodes)
         ),
         "num_resent_assistant_messages": sum(
             not node.sampled

@@ -1466,4 +1466,158 @@ def test_rollout_logs_why_its_trace_forked() -> None:
         ]
     )
 
-    assert _fork_counts(trace) == {"num_compactions": 1, "num_resent_assistant_messages": 1}
+    assert _fork_counts(trace) == {
+        "num_compactions": 1,
+        "num_resent_assistant_messages": 1,
+    }
+
+
+def _trace_of(*nodes):
+    return SimpleNamespace(
+        nodes=[
+            SimpleNamespace(parent=parent, message=message, sampled=sampled)
+            for parent, message, sampled in nodes
+        ]
+    )
+
+
+def _system(day: str):
+    from verifiers.v1.types import SystemMessage as VerifiersSystemMessage
+
+    return VerifiersSystemMessage(
+        content=f"You are opencode.\n<env>\n  Today's date: {day} Oct 2026\n</env>"
+    )
+
+
+def test_each_summary_request_counts_as_one_compaction() -> None:
+    """Two summary requests share one root (same system message), each a new chain from it."""
+    from verifiers.v1.types import (
+        AssistantMessage as VerifiersAssistantMessage,
+        SystemMessage as VerifiersSystemMessage,
+        UserMessage as VerifiersUserMessage,
+    )
+
+    answer = VerifiersAssistantMessage(content="answer")
+    summarize = VerifiersSystemMessage(content="Summarize the conversation.")
+    trace = _trace_of(
+        (None, _system("Tue 20"), False),
+        (0, VerifiersUserMessage(content="fix it"), False),
+        (1, answer, True),
+        (None, summarize, False),  # 3: the summary root
+        (3, VerifiersUserMessage(content="history 1"), False),
+        (4, VerifiersAssistantMessage(content="## Summary 1"), True),
+        (0, VerifiersUserMessage(content="summary 1, go on"), False),
+        (6, answer, True),
+        (3, VerifiersUserMessage(content="history 2"), False),
+        (8, VerifiersAssistantMessage(content="## Summary 2"), True),
+        (0, VerifiersUserMessage(content="summary 2, go on"), False),
+        (10, answer, True),
+        (11, VerifiersUserMessage(content="tool output"), False),
+        (12, answer, True),
+    )
+
+    assert _fork_counts(trace)["num_compactions"] == 2
+
+
+def test_a_midnight_fork_is_not_a_compaction() -> None:
+    """The main conversation re-sent under a new date starts a new root; its turns don't count."""
+    from verifiers.v1.types import (
+        AssistantMessage as VerifiersAssistantMessage,
+        UserMessage as VerifiersUserMessage,
+    )
+
+    answer = VerifiersAssistantMessage(content="answer")
+    trace = _trace_of(
+        (None, _system("Tue 20"), False),
+        (0, VerifiersUserMessage(content="fix it"), False),
+        (1, answer, True),
+        (None, _system("Wed 21"), False),  # 3: the same history re-sent after 00:00 UTC
+        (3, VerifiersUserMessage(content="fix it"), False),
+        (4, answer, False),
+        (5, VerifiersUserMessage(content="tool output"), False),
+        (6, answer, True),
+        (7, VerifiersUserMessage(content="tool output"), False),
+        (8, answer, True),
+    )
+
+    assert _fork_counts(trace)["num_compactions"] == 0
+
+
+def test_a_summary_after_a_midnight_fork_counts_once() -> None:
+    from verifiers.v1.types import (
+        AssistantMessage as VerifiersAssistantMessage,
+        SystemMessage as VerifiersSystemMessage,
+        UserMessage as VerifiersUserMessage,
+    )
+
+    answer = VerifiersAssistantMessage(content="answer")
+    trace = _trace_of(
+        (None, _system("Tue 20"), False),
+        (0, VerifiersUserMessage(content="fix it"), False),
+        (1, answer, True),
+        (None, _system("Wed 21"), False),  # 3: midnight fork
+        (3, VerifiersUserMessage(content="fix it"), False),
+        (4, answer, False),
+        (5, VerifiersUserMessage(content="tool output"), False),
+        (6, answer, True),
+        (None, VerifiersSystemMessage(content="Summarize the conversation."), False),
+        (8, VerifiersUserMessage(content="history"), False),
+        (9, VerifiersAssistantMessage(content="## Summary"), True),
+        # The resume carries the new date: a new chain under the re-dated root.
+        (3, VerifiersUserMessage(content="summary, go on"), False),
+        (11, answer, True),
+    )
+
+    assert _fork_counts(trace)["num_compactions"] == 1
+
+
+def test_group_logs_the_share_of_each_stop_condition(monkeypatch) -> None:
+    stops = ["agent_completed", "agent_timeout", "agent_timeout", "image_pull_error"]
+
+    async def run_single_rollout(self, *, group_id, rollout_id, **kwargs):
+        if rollout_id == len(stops):
+            raise RuntimeError("env server request failed")  # no trace: "other"
+        return Rollout(
+            group_id=group_id,
+            rollout_id=rollout_id,
+            status=RolloutStatus.COMPLETED,
+            logs={"stop_condition": stops[rollout_id]},
+        )
+
+    async def score_group(self, rollouts, sample):
+        return [RubricOutput(reward=0.0, reward_breakdown={}) for _ in rollouts]
+
+    monkeypatch.setattr(
+        VerifiersRolloutWorker, "_run_single_rollout", run_single_rollout
+    )
+    monkeypatch.setattr(VerifiersRolloutWorker, "score_group", score_group)
+    worker = object.__new__(VerifiersRolloutWorker)
+    worker.advantage_estimator = AdvantageEstimator.Config().build()
+
+    group = asyncio.run(
+        worker.run_group(
+            generate_fn=GeneratorClient(router=None),
+            release_session_fn=None,
+            sample=None,
+            group_id=1,
+            group_size=len(stops) + 1,
+            sampling=SamplingConfig(),
+        )
+    )
+
+    shares = {
+        key: value
+        for key, value in m.MetricsProcessor._aggregate_metrics(group.metrics).items()
+        if key.startswith("rollout/stop/")
+    }
+    # Every bucket is logged, zeros included, so each averages to its share across groups.
+    assert shares == {
+        "rollout/stop/agent_completed/mean": 0.2,
+        "rollout/stop/agent_timeout/mean": 0.4,
+        "rollout/stop/max_turns/mean": 0.0,
+        "rollout/stop/max_input_tokens/mean": 0.0,
+        "rollout/stop/sandbox_error/mean": 0.0,
+        "rollout/stop/harness_error/mean": 0.0,
+        "rollout/stop/agentstalled_error/mean": 0.0,
+        "rollout/stop/other/mean": 0.4,
+    }
