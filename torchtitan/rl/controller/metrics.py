@@ -338,8 +338,8 @@ _PROCESS_ROLES = (
 
 
 def compute_host_memory_metrics() -> list[m.Metric]:
-    """Anonymous memory per process role on this host, plus the cgroup total and the node's
-    `MemAvailable`.
+    """Anonymous memory per process role on this host, plus the job's cgroup total on this host and
+    the node's `MemAvailable`.
 
     Anonymous memory leaves out shared libraries, which summed RSS counts once per process. It is
     read from `smaps_rollup` (a page-table walk, ~1 ms per 4 GiB): `status`'s `RssAnon` misses each
@@ -354,7 +354,8 @@ def compute_host_memory_metrics() -> list[m.Metric]:
         batcher, router, rollout_worker    the controller host's CPU procs (`spawn_cpu_procs`)
         env_server                         each Verifiers env server
         env_server_worker                  processes an env server spawns, and their children
-        other                              the rest, e.g. Monarch host agents
+        other                              the rest, e.g. Monarch host agents and the job's other
+                                           steps (step_extern, sidecars such as leakwatch)
 
     Example:
         compute_host_memory_metrics()
