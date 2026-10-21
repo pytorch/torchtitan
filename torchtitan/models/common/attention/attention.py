@@ -13,6 +13,7 @@
 #   K = query/key head dimension, V = value head dimension.
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
 
@@ -22,6 +23,8 @@ import torch_remat as remat
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
+    sdpa_kernel,
+    SDPBackend,
 )
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
@@ -319,6 +322,13 @@ class VarlenAttentionMetadata(NamedTuple):
 class VarlenInnerAttention(InnerAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
+        sdpa_backend: SDPBackend | None = None
+        """Restrict native varlen selection to Flash or cuDNN when specified.
+
+        None preserves PyTorch's default priority. Flash uses the architecture's
+        registered implementation (FA4 on Blackwell), not a cuDNN fallback.
+        """
+
         window_size: tuple[int, int] = (-1, 0)
         """ window_size=(left, right) controls the attention window relative to each
             query position. 'left' is how many tokens before the query to attend to,
@@ -353,13 +363,23 @@ class VarlenInnerAttention(InnerAttention):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        if config.sdpa_backend not in (
+            None,
+            SDPBackend.FLASH_ATTENTION,
+            SDPBackend.CUDNN_ATTENTION,
+        ):
+            raise ValueError(
+                "Varlen attention supports only Flash or cuDNN SDPA backends"
+            )
+        self.sdpa_backend = config.sdpa_backend
         self.window_size = config.window_size
 
         from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
         flash_attention_impl = get_cuda_flash_attention_impl()
         if (
-            flash_attention_impl is not None
+            self.sdpa_backend != SDPBackend.CUDNN_ATTENTION
+            and flash_attention_impl is not None
             and current_flash_attention_impl() != flash_attention_impl
         ):
             activate_flash_attention_impl(flash_attention_impl)
@@ -395,9 +415,14 @@ class VarlenInnerAttention(InnerAttention):
         # For FA3, only force num_splits=1 in batch-invariant mode
         # to prevent non-deterministic split-k reductions.
         # ROCm's _flash_attention_forward rejects num_splits entirely.
+        # Explicit cuDNN selection must not receive FA2-only options.
         fa_impl = current_flash_attention_impl()
         if (
-            fa_impl in (None, "FA2") or is_in_batch_invariant_mode()
+            (
+                fa_impl in (None, "FA2")
+                and self.sdpa_backend != SDPBackend.CUDNN_ATTENTION
+            )
+            or is_in_batch_invariant_mode()
         ) and torch.version.hip is None:
             varlen_kwargs["num_splits"] = 1
 
@@ -413,18 +438,23 @@ class VarlenInnerAttention(InnerAttention):
             # Preserve the legacy BF16 conversion for full-precision callers.
             attn_dtype = torch.bfloat16
 
-        result = varlen_attn_fn(
-            q_THK.to(attn_dtype),
-            k_THK.to(attn_dtype),
-            v_THV.to(attn_dtype),
-            cu_seq_q,
-            cu_seq_k,
-            max_q,
-            max_k,
-            scale=scale,
-            window_size=self.window_size,
-            **varlen_kwargs,
-        )
+        with (
+            sdpa_kernel(self.sdpa_backend)
+            if self.sdpa_backend is not None
+            else nullcontext()
+        ):
+            result = varlen_attn_fn(
+                q_THK.to(attn_dtype),
+                k_THK.to(attn_dtype),
+                v_THV.to(attn_dtype),
+                cu_seq_q,
+                cu_seq_k,
+                max_q,
+                max_k,
+                scale=scale,
+                window_size=self.window_size,
+                **varlen_kwargs,
+            )
 
         # varlen_attn returns the packed output (T, H, V), plus the LSE when an
         # out_transform epilogue was requested.

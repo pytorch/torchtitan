@@ -166,7 +166,7 @@ class GraphTrainerCompileConfig:
 
     passes: list[str] = field(default_factory=list)
     """
-    Additional compiler pass names to apply or prepare inputs for.
+    Additional compiler pass names to apply.
     """
 
     enable_passes: bool = True

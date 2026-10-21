@@ -6,6 +6,7 @@
 
 """DeepSeek V3 GraphTrainer configurations used by tests."""
 
+from torch.nn.attention import SDPBackend
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -22,6 +23,7 @@ from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import (
@@ -43,13 +45,17 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
 
 
 def graph_trainer_deepseek_v3_debugmodel(
-    *, parallelism: ParallelismConfig | None = None
+    *, attn_backend: str = "flex", parallelism: ParallelismConfig | None = None
 ) -> GraphTrainer.Config:
+    """Build a debug recipe; varlen attention explicitly selects the Flash backend."""
     config = to_graph_trainer_config(
-        deepseek_v3_debugmodel(attn_backend="flex", parallelism=parallelism),
+        deepseek_v3_debugmodel(attn_backend=attn_backend, parallelism=parallelism),
         GraphTrainerDeepSeekV3Model.Config,
     )
     config.compile = GraphTrainerCompileConfig()
+    if attn_backend == "varlen":
+        for _, attention, _, _ in config.model.traverse(VarlenInnerAttention.Config):
+            attention.sdpa_backend = SDPBackend.FLASH_ATTENTION
     return config
 
 

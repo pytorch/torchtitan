@@ -171,10 +171,6 @@ _MODULE_FQN = "module_fqn"
 # Tuple of unique parameter FQNs naming one gradient value. Consumers must
 # treat it as a set: tied parameters can associate multiple FQNs with one node.
 PARAMETER_GRADIENT_FQNS_META = "parameter_gradient_fqns"
-_EP_TOKEN_COUNT_EXCHANGE = "EP_token_count_exchange"
-_EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
-_EP_TOKEN_EXCHANGE = "EP_token_exchange"
-_EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
 
 
@@ -367,8 +363,6 @@ def annotate_module_fqns(model: nn.Module) -> None:
 
 def annotate_graph_trainer_model(model: Decoder) -> None:
     """Attach the annotations consumed by GraphTrainer passes."""
-    if model.config.first_moe is not None:
-        annotate_moe_ep_regions()
     annotate_module_fqns(model)
 
 
@@ -380,49 +374,6 @@ def matches_module_fqn_pattern(pattern: str, fqn: str) -> bool:
         fnmatch.fnmatchcase(fqn_part, pattern_part)
         for pattern_part, fqn_part in zip(pattern_parts, fqn_parts)
     )
-
-
-_MOE_EP_REGIONS_ANNOTATED = False
-
-
-def annotate_moe_ep_regions() -> None:
-    """Annotate MoE EP compute, dispatch, and combine regions for FX passes."""
-    global _MOE_EP_REGIONS_ANNOTATED
-    if _MOE_EP_REGIONS_ANNOTATED:
-        return
-
-    from torchtitan.models.common.moe import MoE
-    from torchtitan.models.common.moe.token_dispatcher import (
-        AllToAllTokenDispatcher,
-        LocalTokenDispatcher,
-    )
-
-    LocalTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
-        LocalTokenDispatcher.dispatch
-    )
-    LocalTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
-        LocalTokenDispatcher.combine
-    )
-    AllToAllTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
-        AllToAllTokenDispatcher.dispatch
-    )
-    AllToAllTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
-        AllToAllTokenDispatcher.combine
-    )
-    AllToAllTokenDispatcher._token_count_exchange = annotate_fn(
-        {_EP_TOKEN_COUNT_EXCHANGE: "dispatch"}
-    )(AllToAllTokenDispatcher._token_count_exchange)
-    AllToAllTokenDispatcher._sync_token_count_exchange = annotate_fn(
-        {_EP_TOKEN_COUNT_SYNC: "dispatch"}
-    )(AllToAllTokenDispatcher._sync_token_count_exchange)
-    AllToAllTokenDispatcher._dispatch_token_exchange = annotate_fn(
-        {_EP_TOKEN_EXCHANGE: "dispatch"}
-    )(AllToAllTokenDispatcher._dispatch_token_exchange)
-    AllToAllTokenDispatcher._combine_token_exchange = annotate_fn(
-        {_EP_TOKEN_EXCHANGE: "combine"}
-    )(AllToAllTokenDispatcher._combine_token_exchange)
-    MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
-    _MOE_EP_REGIONS_ANNOTATED = True
 
 
 def parallelize_inputs(parallelism_context, args, kwargs):

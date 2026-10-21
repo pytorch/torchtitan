@@ -302,7 +302,8 @@ run_graph_trainer_h100_tests() {
     "${ARTIFACTS}/graph_trainer_h100" \
     --ngpu 8
   python -m pytest "${tests_root}/test_numerics.py::TestGraphTrainerNumerics" \
-    -v -k moe
+    -v -k "moe or hybridep_eager"
+  python -m pytest "${tests_root}/test_numerics.py::TestHybridEPContracts" -v
   python -m torchtitan.experiments.graph_trainer.tests.run_precompile_tests \
     "${ARTIFACTS}/graph_trainer_h100_precompile" \
     --ngpu 8 \
