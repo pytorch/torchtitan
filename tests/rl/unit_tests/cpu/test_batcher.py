@@ -6,7 +6,9 @@
 
 """CPU tests for fixed-bin LPT packing and its FFD fallback."""
 
+import copy
 import random
+import weakref
 
 import numpy as np
 import pytest
@@ -14,7 +16,10 @@ import torch
 from torchtitan.rl.rollout.types import RolloutTurnID
 
 from torchtitan.rl.trainer.batcher import Batcher
-from torchtitan.rl.trainer.training_sample_builder import TrainingSample
+from torchtitan.rl.trainer.training_sample_builder import (
+    TrainingSample,
+    TrainingSampleGroup,
+)
 
 
 def _make_samples(lengths: list[int]) -> list[TrainingSample]:
@@ -364,3 +369,97 @@ def test_token_budget_must_fit_a_full_context_sample() -> None:
             pad_id=0,
             temperature=1.0,
         )
+
+
+    assert input_dict["input"].device.type == "meta"
+    assert set(input_dict["loss_kwargs"]) == {
+        "generator_logprobs",
+        "temperature",
+        "loss_mask",
+        "advantages",
+    }
+    for value in input_dict["loss_kwargs"].values():
+        assert value.device.type == "meta"
+
+
+def _two_rank_batcher() -> Batcher:
+    return Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=20,
+        max_context_length=10,
+        num_prompts_per_train_step=2,
+        dp_degree=2,
+        pad_id=0,
+        temperature=1.0,
+    )
+
+
+_GROUP_LENGTHS = [[9, 5, 3, 7], [8, 6, 2, 2, 9]]
+
+
+def _queue_groups(batcher: Batcher) -> list[weakref.ref]:
+    """Queue `_GROUP_LENGTHS` as groups held only by the batcher; return weakrefs to each sample's tokens."""
+    token_refs = []
+    for group_id, lengths in enumerate(_GROUP_LENGTHS):
+        samples = _make_samples(lengths)
+        token_refs += [weakref.ref(sample.token_ids) for sample in samples]
+        batcher._groups_for_next_batch.append(
+            TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])
+        )
+    return token_refs
+
+
+def test_packed_batch_equals_packing_each_assigned_microbatch() -> None:
+    batcher = _two_rank_batcher()
+    samples = [s for lengths in _GROUP_LENGTHS for s in _make_samples(lengths)]
+    assignments = batcher._assign_training_samples_to_microbatches(
+        copy.deepcopy(samples)
+    )
+    expected = [
+        [batcher._pack_training_samples(rank_samples) for rank_samples in row]
+        for row in assignments
+    ]
+    _queue_groups(batcher)
+
+    batch = batcher._pack_one_training_batch()
+
+    packed = [row for group in batch.microbatch_groups for row in group]
+    assert len(packed) == len(expected) > 1
+    for row, expected_row in zip(packed, expected):
+        for microbatch, expected_microbatch in zip(row, expected_row):
+            for key, value in expected_microbatch.as_input_dict().items():
+                if isinstance(value, dict):
+                    for loss_key, loss_value in value.items():
+                        assert torch.equal(
+                            microbatch.as_input_dict()[key][loss_key], loss_value
+                        )
+                else:
+                    assert torch.equal(microbatch.as_input_dict()[key], value)
+    assert batch.min_policy_versions == [0] * len(samples)
+    metrics = {metric.key: metric.value for metric in batch.metrics}
+    assert metrics["train_batch/num_training_samples"].value == len(samples)
+    assert metrics["train_batch/num_microbatches"].value == len(expected)
+
+
+def test_packing_releases_each_microbatchs_samples_once_packed() -> None:
+    """The batcher never holds a packed microbatch and its samples at once."""
+    batcher = _two_rank_batcher()
+    token_refs = _queue_groups(batcher)
+    pack_training_samples = batcher._pack_training_samples
+    num_alive_before_each_pack: list[int] = []
+    num_samples_per_pack: list[int] = []
+
+    def counting_pack(training_samples: list[TrainingSample]):
+        num_alive_before_each_pack.append(sum(ref() is not None for ref in token_refs))
+        num_samples_per_pack.append(len(training_samples))
+        return pack_training_samples(training_samples)
+
+    batcher._pack_training_samples = counting_pack
+    batch = batcher._pack_one_training_batch()
+
+    num_samples = len(token_refs)
+    num_packed_before = np.cumsum([0, *num_samples_per_pack[:-1]]).tolist()
+    assert len(num_samples_per_pack) > 2
+    # Before each microbatch is packed, every earlier microbatch's samples are gone.
+    assert num_alive_before_each_pack == [num_samples - n for n in num_packed_before]
+    assert all(ref() is None for ref in token_refs)
+    assert batch.min_policy_versions == [0] * num_samples

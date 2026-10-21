@@ -469,7 +469,11 @@ class Batcher(Configurable):
         )
 
     def _pack_one_training_batch(self) -> TrainerStepBatch:
-        """Pack the oldest accumulated groups (up to `num_prompts_per_train_step` trainable groups) into one batch."""
+        """Pack the oldest accumulated groups (up to `num_prompts_per_train_step` trainable groups) into one batch.
+
+        Each microbatch's samples are released as soon as they are packed, so the batcher holds a sample
+        or its packed copy, not both: peak memory is about one packed batch, not two.
+        """
         (
             training_samples,
             metrics,
@@ -480,10 +484,26 @@ class Batcher(Configurable):
         assignments = self._assign_training_samples_to_microbatches(
             training_samples, num_pp_microbatches=self._num_pp_microbatches
         )
-        microbatches = [
-            [self._pack_training_samples(samples) for samples in rank_assignments]
-            for rank_assignments in assignments
+        # Read what the batch needs from the samples before packing releases them.
+        packing_metrics = self._packing_metrics(
+            assignments,
+            training_samples,
+            num_rollout_groups,
+            num_metric_only_groups,
+        )
+        # Trainer computes policy_age from these at consume time (faithful to what it trains on).
+        # min_policy_version is the oldest version this training_sample was sampled under.
+        min_policy_versions = [
+            training_sample.min_policy_version for training_sample in training_samples
         ]
+        del training_samples
+        microbatches: list[list[TrainingMicrobatch]] = []
+        for rank_assignments in assignments:
+            microbatches.append([])
+            while rank_assignments:
+                microbatches[-1].append(
+                    self._pack_training_samples(rank_assignments.pop(0))
+                )
         global_loss_token_counts: torch.Tensor | None = None
         global_routing_token_counts: torch.Tensor | None = None
         for rank_microbatches in microbatches:
@@ -525,20 +545,10 @@ class Batcher(Configurable):
                         / max(num_response_tokens, 1)
                     ),
                 ),
-                *self._packing_metrics(
-                    assignments,
-                    training_samples,
-                    num_rollout_groups,
-                    num_metric_only_groups,
-                ),
+                *packing_metrics,
             ],
             group_ids=group_ids,
-            # Trainer computes policy_age from these at consume time (faithful to what it trains on).
-            # min_policy_version is the oldest version this training_sample was sampled under.
-            min_policy_versions=[
-                training_sample.min_policy_version
-                for training_sample in training_samples
-            ],
+            min_policy_versions=min_policy_versions,
         )
 
     def _take_groups(
