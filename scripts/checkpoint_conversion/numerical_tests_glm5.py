@@ -5,7 +5,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Forward parity for TorchTitan GLM-5.2 and Hugging Face GLM-MoE-DSA.
+"""Forward parity for TorchTitan GLM-5 and Hugging Face GLM-MoE-DSA.
 
 The released model is too large for a single-device correctness test. This
 script instead reduces the Hugging Face configuration to TorchTitan's
@@ -211,7 +211,7 @@ def _compare_logits(
 @torch.no_grad()
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compare TorchTitan and Hugging Face GLM-5.2 logits."
+        description="Compare TorchTitan and Hugging Face GLM-5 logits."
     )
     parser.add_argument("--model_flavor", default=_DEFAULT_FLAVOR)
     parser.add_argument("--seq_len", type=int, default=16)

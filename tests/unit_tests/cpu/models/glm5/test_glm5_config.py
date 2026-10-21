@@ -100,6 +100,36 @@ class TestGlm5Config(unittest.TestCase):
         )
         self.assertEqual(config.mtp_layers[0].eh_proj.out_features, config.dim)
 
+    def test_glm5_3_reuses_released_architecture(self) -> None:
+        self.assertIs(
+            MODEL_FLAVORS["glm5_3_744b_a40b"],
+            MODEL_FLAVORS["744B-A40B"],
+        )
+        glm5_3 = build_model_config(
+            "glm5_3_744b_a40b",
+            parallelism=ParallelismConfig(),
+            seq_len=128,
+        )
+
+        self.assertEqual(len(glm5_3.layers), 78)
+        self.assertEqual(len(glm5_3.mtp_layers), 1)
+
+    def test_glm5_3_recipes_select_versioned_flavors(self) -> None:
+        from torchtitan_recipes.tests.models.glm5 import (
+            glm5_3_debugmodel,
+            glm5_3_debugmodel_mtp,
+            glm5_3_scaled_debugmodel,
+        )
+
+        debug = glm5_3_debugmodel()
+        mtp = glm5_3_debugmodel_mtp()
+        scaled = glm5_3_scaled_debugmodel(seq_len=128)
+
+        self.assertEqual(len(debug.model.mtp_layers), 0)
+        self.assertEqual(len(mtp.model.mtp_layers), 1)
+        self.assertEqual(mtp.dataloader.num_mtp_layers, 1)
+        self.assertEqual(len(scaled.model.layers), 16)
+
     def test_mtp_recipe_propagates_depth_to_dataloader(self) -> None:
         from torchtitan_recipes.tests.models.glm5 import glm5_2_debugmodel_mtp
 

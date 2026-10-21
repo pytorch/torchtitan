@@ -1,6 +1,11 @@
-# GLM-5.2
+# GLM-5.2 and GLM-5.3
 
-This directory implements the GLM-5.2 decoder architecture for TorchTitan.
+This directory implements the shared GLM-MoE-DSA decoder architecture used by
+GLM-5.2 and GLM-5.3. The GLM-5.3 model card states that it uses the same base
+model as GLM-5.2, and the released training configuration retains the
+same decoder, DSA index-sharing schedule, MoE dimensions, and one-layer MTP
+configuration as GLM-5.2. Versioned flavors keep recipes and checkpoint
+validation explicit without duplicating model code.
 The implementation follows TorchTitan's config-first model contract and uses
 shared PyTorch-native components for distributed training.
 
@@ -24,6 +29,10 @@ Available flavors are defined in `flavors.py`:
 - `glm5_2_debugmodel_mtp`: small model with one trainable NextN/MTP objective
 - `glm5_2_scaled_debugmodel`: larger validation model
 - `744B-A40B`: released GLM-5.2 architecture
+- `glm5_3_debugmodel`: GLM-5.3 development model
+- `glm5_3_debugmodel_mtp`: GLM-5.3 development model with one MTP layer
+- `glm5_3_scaled_debugmodel`: larger GLM-5.3 validation model
+- `glm5_3_744b_a40b`: released GLM-5.3 training architecture
 
 Runnable development recipes live in
 `torchtitan_recipes/tests/models/glm5.py`. The released flavor describes the
@@ -75,6 +84,15 @@ python scripts/download_hf_assets.py \
   --assets tokenizer config index
 ```
 
+For GLM-5.3 training and checkpoint conversion, use the BF16 release rather
+than the quantized inference checkpoint:
+
+```bash
+python scripts/download_hf_assets.py \
+  --repo_id zai-org/GLM-5.3-BF16 \
+  --assets tokenizer config index
+```
+
 To load the released weights for continued training or checkpoint conversion,
 also request `safetensors`. The checkpoint is very large, so the debug recipes
 use the repository test tokenizer and randomly initialized weights by default.
@@ -84,6 +102,13 @@ reduced deterministic parity test:
 
 ```bash
 python -m scripts.checkpoint_conversion.numerical_tests_glm5
+```
+
+Select the versioned GLM-5.3 development flavor with:
+
+```bash
+python -m scripts.checkpoint_conversion.numerical_tests_glm5 \
+  --model_flavor glm5_3_debugmodel
 ```
 
 ## Multi-token prediction
@@ -137,4 +162,6 @@ is not yet supported; base GLM-5.2 pipeline parallelism is supported.
 ## References
 
 - [GLM-5.2 model and checkpoint](https://huggingface.co/zai-org/GLM-5.2)
+- [GLM-5.3 model and checkpoint](https://huggingface.co/zai-org/GLM-5.3)
+- [GLM-5.3 BF16 checkpoint](https://huggingface.co/zai-org/GLM-5.3-BF16)
 - [Hugging Face GLM-MoE-DSA reference implementation](https://github.com/huggingface/transformers/tree/main/src/transformers/models/glm_moe_dsa)
