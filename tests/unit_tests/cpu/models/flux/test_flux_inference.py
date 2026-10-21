@@ -8,12 +8,14 @@ import contextlib
 import importlib
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from torchtitan.config import ConfigLoader
 
 
 flux_infer = importlib.import_module("torchtitan.models.flux.inference.infer")
+flux_sampling = importlib.import_module("torchtitan.models.flux.inference.sampling")
 
 
 def test_documented_inference_config_loads():
@@ -94,3 +96,30 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
 
     flux_infer.inference(config)
     assert not context_active
+
+
+# 256px -> 32x32 latents -> 256 packed tokens; 512px -> 1024 packed tokens.
+@pytest.mark.parametrize("img_size, packed_seq_len", [(256, 256), (512, 1024)])
+def test_denoise_shifts_schedule_by_packed_sequence_length(img_size, packed_seq_len):
+    """The schedule shift uses the packed 2x2-patch sequence length, as in the
+    reference Flux sampler, not the number of unpacked latent positions."""
+    denoising_steps = 4
+    seen_timesteps = []
+
+    def model(*, img, timesteps, **kwargs):
+        seen_timesteps.append(timesteps[0].item())
+        return torch.zeros_like(img)
+
+    flux_sampling.denoise(
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        model=model,
+        img_width=img_size,
+        img_height=img_size,
+        denoising_steps=denoising_steps,
+        clip_encodings=torch.zeros(1, 768),
+        t5_encodings=torch.zeros(1, 1, 4096),
+    )
+
+    expected = flux_sampling.get_schedule(denoising_steps, packed_seq_len)[:-1]
+    torch.testing.assert_close(torch.tensor(seen_timesteps), torch.tensor(expected))
