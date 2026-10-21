@@ -24,7 +24,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
-from torchtitan.experiments.graph_trainer.grad_accumulation import (
+from graph_trainer.grad_accumulation import (
     insert_graph_gradient_accumulation,
 )
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
@@ -35,33 +35,33 @@ from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _pack_graph_args,
     GraphTrainerConfigView,
 )
-from torchtitan.experiments.graph_trainer.graph_pp import stage_builder
-from torchtitan.experiments.graph_trainer.graph_pp.partition import (
+from graph_trainer.graph_pp import stage_builder
+from graph_trainer.graph_pp.partition import (
     GraphMeta as PartitionGraphMeta,
     partition_joint_graph,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
+from graph_trainer.graph_pp.split_fsdp_collectives import (
     extract_fsdp_reduce_grad_graph,
     extract_fsdp_unshard_graph,
     remove_fsdp_reduction_tail,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.stage import (
+from graph_trainer.graph_pp.stage import (
     GraphPipelineStage,
     OverlapStageGraphs,
     SplitStageGraphs,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.utils import (
+from graph_trainer.graph_pp.utils import (
     flatten_graph_values,
     graph_pp_value_spec,
     GraphPPValueSpec,
 )
-from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+from graph_trainer.make_fx_tracer import (
     extract_module_state,
     minimal_fx_tracer,
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
-from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
+from graph_trainer.wgrad_accumulation import (
     fuse_wgrad_accumulation_pass,
 )
 

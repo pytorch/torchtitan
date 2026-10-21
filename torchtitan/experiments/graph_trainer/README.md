@@ -2,7 +2,14 @@
 
 [![integration and numerics tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_graph_trainer.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_graph_trainer.yaml?query=branch%3Amain) [![GraphTrainer H100 8 GPU Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_graph_trainer_h100.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_graph_trainer_h100.yaml?query=branch%3Amain)
 
-This experiment demonstrates graph-based distributed training in torchtitan through toolkit-style usage of PyTorch's compiler technologies. The goal is to give users explicit control over the compiler stack in terms of performance, numerics, and debuggability during large-scale distributed training. See the [Manifesto](MANIFESTO.md) for the motivation and design philosophy behind GraphTrainer.
+This experiment integrates the standalone `graph-trainer` package with
+TorchTitan models, configuration, launchers, and end-to-end tests. The package
+owns the reusable tracing, graph-pass, compilation, and graph-runtime code;
+this directory owns the TorchTitan-specific adapters. The goal is to give users
+explicit control over the compiler stack in terms of performance, numerics, and
+debuggability during large-scale distributed training. See the
+[Manifesto](MANIFESTO.md) for the motivation and design philosophy behind
+GraphTrainer.
 
 > [!NOTE]
 > GraphTrainer users and developers are welcome to join the [public PyTorch Slack channel](https://pytorch.slack.com/archives/C0C4ZRE5BL7) for questions, discussion, and updates.

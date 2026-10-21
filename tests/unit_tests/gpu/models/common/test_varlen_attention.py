@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from graph_trainer.make_fx_tracer import minimal_fx_tracer, run_traced
 from torch.distributed.device_mesh import init_device_mesh
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.testing._internal.common_utils import DeterministicGuard
@@ -19,10 +20,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    minimal_fx_tracer,
-    run_traced,
-)
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     VarlenAttentionMetadata,

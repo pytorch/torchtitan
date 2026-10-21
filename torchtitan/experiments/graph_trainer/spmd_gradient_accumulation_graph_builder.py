@@ -25,7 +25,7 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
-from torchtitan.experiments.graph_trainer.grad_accumulation import (
+from graph_trainer.grad_accumulation import (
     insert_graph_gradient_accumulation_before_reduction,
     insert_graph_gradient_accumulation_from_outputs,
 )
@@ -36,23 +36,23 @@ from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _execute_graph_module,
     _pack_graph_args,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.runner import (
+from graph_trainer.graph_pp.runner import (
     _GraphComputationType,
     FORWARD_BACKWARD_FIRST_WITH_UNSHARD,
     FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD,
     FORWARD_BACKWARD_NOGRADACCUM,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
+from graph_trainer.graph_pp.split_fsdp_collectives import (
     extract_fsdp_reduce_grad_graph,
     extract_fsdp_unshard_graph,
     FSDPReduceGradExtraction,
     FSDPUnshardExtraction,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.stage import (
+from graph_trainer.graph_pp.stage import (
     GraphPipelineStage,
     JointStageGraphs,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.utils import (
+from graph_trainer.graph_pp.utils import (
     flatten_graph_values,
     graph_outputs,
     graph_pp_value_spec,
@@ -60,12 +60,12 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     output_names,
     placeholder_names,
 )
-from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+from graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
     _trace_spmd_stage_graph,
 )
-from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
+from graph_trainer.wgrad_accumulation import (
     fuse_wgrad_accumulation_pass,
 )
 

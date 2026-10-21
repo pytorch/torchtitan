@@ -10,10 +10,10 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 import torch
+from graph_trainer.graph_pp.runner import GraphRuntime
 
 from torchtitan.components.validator import Validator
 from torchtitan.distributed.cuda_graph import cuda_graph_manager, cuda_graph_teardown
-from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine

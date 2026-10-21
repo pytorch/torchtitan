@@ -25,6 +25,9 @@ from typing import Any, cast
 
 import torch
 import torch.distributed as dist
+from graph_trainer.memory_policy import validate_memory_policy_config
+from graph_trainer.precompile import _FX_TRACE_ARTIFACT_KEY, _register_coor_ops
+from graph_trainer.storage import DiskStorageAdapter
 
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import apply_overrides, ConfigLoader, TORCH_DTYPE_MAP
@@ -32,14 +35,6 @@ from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.memory_policy import (
-    validate_memory_policy_config,
-)
-from torchtitan.experiments.graph_trainer.precompile import (
-    _FX_TRACE_ARTIFACT_KEY,
-    _register_coor_ops,
-)
-from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
@@ -191,12 +186,13 @@ def _precompile_aot_fx_trace(
     tokenizer,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
-    from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
-    from torchtitan.experiments.graph_trainer.precompile import (
+    from graph_trainer.make_fx_tracer import minimal_fx_tracer
+    from graph_trainer.precompile import (
         compute_config_fingerprint,
         get_spmd_precompile_meshes,
         precompile_fx_trace_save,
     )
+
     from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
         make_fwd_bwd_step,
     )

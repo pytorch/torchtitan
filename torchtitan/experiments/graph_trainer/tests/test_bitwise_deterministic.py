@@ -264,23 +264,21 @@ class BitwiseDeterministicBase(unittest.TestCase):
         the loaded artifact — identical to what happens during
         torchrun training with compile.precompile_artifact_dir configured.
         """
-        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-            minimal_fx_tracer,
-            run_traced,
-        )
-        from torchtitan.experiments.graph_trainer.passes import (
-            apply_graph_passes,
-            compile_time_passes,
-        )
-        from torchtitan.experiments.graph_trainer.precompile import (
+        from graph_trainer.make_fx_tracer import minimal_fx_tracer, run_traced
+        from graph_trainer.precompile import (
             flatten_runtime_inputs,
             precompile_fx_trace_load,
             precompile_fx_trace_save,
         )
+        from graph_trainer.storage import DiskStorageAdapter
+
+        from torchtitan.experiments.graph_trainer.passes import (
+            apply_graph_passes,
+            compile_time_passes,
+        )
         from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
             make_fwd_bwd_step,
         )
-        from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 
         self.annotate_model(model)
         trainer = build_minimal_trainer(

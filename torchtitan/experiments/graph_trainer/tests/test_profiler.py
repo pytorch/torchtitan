@@ -12,6 +12,8 @@ from typing import Any
 from unittest.mock import patch
 
 import torch
+from graph_trainer.cuda_graph import construct_cuda_graph_passes
+from graph_trainer.make_fx_tracer import minimal_fx_tracer, run_traced
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -22,11 +24,6 @@ from torchtitan.distributed.cuda_graph import (
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
-)
-from torchtitan.experiments.graph_trainer.cuda_graph import construct_cuda_graph_passes
-from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    minimal_fx_tracer,
-    run_traced,
 )
 from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 from torchtitan.observability.profiler import _EXPORT_SUPPORTS_ANNOTATIONS, Profiler
