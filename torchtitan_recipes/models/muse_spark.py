@@ -85,17 +85,9 @@ _MUSE_GLIMMER_MAX_IMAGE_TOKENS = 4096
 _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE = (
     "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"
 )
-_MUSE_SPARK_HELION_ROPE_OVERRIDE = (
-    "torchtitan_recipes.overrides.helion_rope.helion_complex_rope"
-)
 _MUSE_SPARK_DIST_MOE_SAVE_REGIONS = [
     "attention.inner_attention",
     "feed_forward.routed_experts.dist_moe",
-]
-_MUSE_SPARK_SCALE_LOCAL_COMPILE_REGIONS = [
-    "muse_spark_input_scaled_rmsnorm",
-    "muse_spark_logit_postprocess",
-    "muse_spark_residual",
 ]
 
 
@@ -186,9 +178,9 @@ def _with_dist_moe(
     )
     # The standard Muse override fuses SwiGLU inside stock routed experts.
     # Dist-MoE replaces every debug and 816B expert and owns that fusion, so
-    # retaining the override would leave no legitimate target. The independent
-    # attention RoPE override remains applicable.
-    config.override.imports = [_MUSE_SPARK_HELION_ROPE_OVERRIDE]
+    # retaining the override would leave no legitimate target. RoPE is compiled
+    # with the q/k norms in the muse_spark_attention_qk region.
+    config.override.imports = []
     return config
 
 
@@ -416,10 +408,7 @@ def _muse_spark_816b_a42b(
         ),
         activation_remat=DefaultActivationRematConfig(),
         override=OverrideConfig(
-            imports=[
-                _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE,
-                _MUSE_SPARK_HELION_ROPE_OVERRIDE,
-            ],
+            imports=[_MUSE_SPARK_FUSED_SWIGLU_OVERRIDE],
         ),
     )
 
@@ -523,14 +512,6 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     p.num_pp_microbatches = 1
     p.fsdp_reshard_after_forward = "always"
 
-    # Compile only the elementwise regions with measured fusion wins. Activation
-    # remat saves the expensive inner-attention and effectful Dist-MoE outputs
-    # while recomputing projections, routing preparation, norms, and pool/unpool.
-    config.model.local_compile_regions.extend(
-        region
-        for region in _MUSE_SPARK_SCALE_LOCAL_COMPILE_REGIONS
-        if region not in config.model.local_compile_regions
-    )
     if fake_backend:
         config.hf_assets_path = "./tests/assets/tokenizer"
         config.tokenizer = HuggingFaceTokenizer.Config()

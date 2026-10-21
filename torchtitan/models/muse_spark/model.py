@@ -124,35 +124,8 @@ class MuseSparkAttention(GQAttention):
         if self.output_gate is not None:
             output_gate_TO = self.output_gate(x_TD)
 
-        if self.q_norm is not None or self.k_norm is not None:
-            assert self.q_norm is not None and self.k_norm is not None
-            remat.recompute_needs_tensor(query_TNH)
-            query_TNH = self.q_norm(query_TNH) * self.scale_query_by
-            remat.recompute_needs_tensor(key_TKH)
-            key_TKH = self.k_norm(key_TKH)
-
-        floor_scale = self.position_temperature_floor_scale
-        query_scale = self.position_temperature_query_scale
-        if floor_scale is not None and query_scale is not None:
-            if positions is None:
-                raise ValueError(
-                    "positions are required for attention temperature tuning"
-                )
-            temperature_T = (
-                torch.log((positions.float() + 1.0) / floor_scale) * query_scale + 1.0
-            ).clamp_min(1.0)
-            remat.recompute_needs_tensor(query_TNH)
-            query_TNH = (query_TNH * temperature_T.reshape(-1, 1, 1)).to(
-                query_TNH.dtype
-            )
-
-        if self.rope is not None:
-            remat.recompute_needs_tensor(query_TNH, key_TKH)
-            query_TNH, key_TKH = self.rope(
-                query_TNH,
-                key_TKH,
-                positions,
-            )
+        remat.recompute_needs_tensor(query_TNH, key_TKH)
+        query_TNH, key_TKH = self._prepare_query_and_key(query_TNH, key_TKH, positions)
 
         output_TNH = remat.region(
             self.inner_attention,
@@ -167,15 +140,70 @@ class MuseSparkAttention(GQAttention):
             enable_gqa=self.enable_gqa,
         )
         remat.recompute_needs_tensor(output_TNH)
+        if output_gate_TO is not None:
+            remat.recompute_needs_tensor(output_gate_TO)
+        output_TO = self._flatten_attention_output(output_TNH, output_gate_TO)
+        # Not in the compiled region: wo runs the TP reduce and its own remat regions.
+        output_TD = self.wo(output_TO)
+        return output_TD
+
+    # Limit 16: RoPE and no-RoPE layers share this region and use 8 graphs, exactly the default limit.
+    # No pointwise autotuning, as in ComplexRoPE.forward: RoPE is inlined here, so this region's options apply.
+    @local_compile(
+        "muse_spark_attention_qk",
+        batch_invariant=False,
+        recompile_limit=16,
+        options={"triton.autotune_pointwise": False},
+    )
+    def _prepare_query_and_key(
+        self,
+        query_TNH: torch.Tensor,
+        key_TKH: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the query and key as attention reads them. Each step runs only if configured.
+
+        query: q_norm -> * scale_query_by -> * position temperature -> RoPE
+        key:   k_norm -> RoPE
+        """
+        if self.q_norm is not None or self.k_norm is not None:
+            if self.q_norm is None or self.k_norm is None:
+                raise ValueError("MuseSparkAttention needs both q_norm and k_norm.")
+            query_TNH = self.q_norm(query_TNH) * self.scale_query_by
+            key_TKH = self.k_norm(key_TKH)
+
+        floor_scale = self.position_temperature_floor_scale
+        query_scale = self.position_temperature_query_scale
+        if floor_scale is not None and query_scale is not None:
+            if positions is None:
+                raise ValueError(
+                    "positions are required for attention temperature tuning"
+                )
+            temperature_T = (
+                torch.log((positions.float() + 1.0) / floor_scale) * query_scale + 1.0
+            ).clamp_min(1.0)
+            query_TNH = (query_TNH * temperature_T.reshape(-1, 1, 1)).to(
+                query_TNH.dtype
+            )
+
+        if self.rope is not None:
+            query_TNH, key_TKH = self.rope(query_TNH, key_TKH, positions)
+        return query_TNH, key_TKH
+
+    @local_compile("muse_spark_attention_output", batch_invariant=False)
+    def _flatten_attention_output(
+        self,
+        output_TNH: torch.Tensor,
+        output_gate_TO: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Flatten the heads, applying the configured per-head norm and sigmoid gate."""
         output_TNH = output_TNH.contiguous()
         if self.output_norm is not None:
             output_TNH = self.output_norm(output_TNH)
         output_TO = output_TNH.reshape(output_TNH.shape[0], -1)
         if output_gate_TO is not None:
-            remat.recompute_needs_tensor(output_gate_TO)
             output_TO = output_TO * torch.sigmoid(output_gate_TO)
-        output_TD = self.wo(output_TO)
-        return output_TD
+        return output_TO
 
 
 class MuseSparkRMSNorm(RMSNorm):
@@ -192,12 +220,19 @@ class MuseSparkRMSNorm(RMSNorm):
             return None
         return self.weight + self.gain_center
 
+    # Limit 16, not the default 8: all residual-stream norms share this region and use 12 graphs.
+    @local_compile("muse_spark_rmsnorm", batch_invariant=False, recompile_limit=16)
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input_dtype = input.dtype
+        effective_weight_D = self._get_effective_weight()
+        if effective_weight_D is not None:
+            # F.rms_norm runs one fused kernel only when weight and input dtypes match.
+            # Without the cast, the fp32 stream and a bf16 weight run ~20 small kernels.
+            effective_weight_D = effective_weight_D.to(input_dtype)
         output_TD = F.rms_norm(
             input,
             self.normalized_shape,
-            self._get_effective_weight(),
+            effective_weight_D,
             self.eps,
         )
         return output_TD.to(input_dtype)
@@ -399,7 +434,17 @@ class MuseSparkModel(MultimodalModel):
         """
 
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "fp32_to_bf16_split"]
+            default_factory=lambda: [
+                "loss",
+                "fp32_to_bf16_split",
+                "rope",
+                "muse_spark_attention_output",
+                "muse_spark_attention_qk",
+                "muse_spark_input_scaled_rmsnorm",
+                "muse_spark_logit_postprocess",
+                "muse_spark_residual",
+                "muse_spark_rmsnorm",
+            ]
         )
         # pyrefly: ignore [bad-override]
         tok_embeddings: MuseSparkEmbeddingWithNorm.Config

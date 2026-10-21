@@ -45,7 +45,6 @@ from torchtitan.trainer import Trainer
 from torchtitan_recipes.models.muse_spark import (
     _muse_spark_context_parallel_transform,
     _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE,
-    _MUSE_SPARK_HELION_ROPE_OVERRIDE,
     _MUSE_SPARK_HF_ASSETS_PATH,
     _muse_spark_mm_dataloader,
     _ultradata_lora_sft_optim,
@@ -141,10 +140,7 @@ def muse_spark_debugmodel(
         checkpointer=None,
         activation_remat=DefaultActivationRematConfig(),
         override=OverrideConfig(
-            imports=[
-                _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE,
-                _MUSE_SPARK_HELION_ROPE_OVERRIDE,
-            ],
+            imports=[_MUSE_SPARK_FUSED_SWIGLU_OVERRIDE],
         ),
     )
     return config
