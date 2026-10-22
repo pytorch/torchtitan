@@ -212,7 +212,7 @@ def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None
         "build",
         lambda self, **kwargs: SimpleNamespace(color=""),
     )
-    monkeypatch.setattr(ft, "cuda_graphs_supported", lambda: True)
+    monkeypatch.setattr(ft, "accelerator_graphs_supported", lambda: True)
 
     with pytest.raises(
         ValueError, match="does not support CUDA-graphed FSDP gradient accumulation"

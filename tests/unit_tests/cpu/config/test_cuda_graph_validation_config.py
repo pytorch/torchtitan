@@ -12,7 +12,10 @@ import pytest
 import torch
 
 from torchtitan.components.validator import Validator
-from torchtitan.distributed.cuda_graph import cuda_graph_manager, cuda_graph_teardown
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_manager,
+    accelerator_graph_teardown,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.trainer import Trainer
@@ -35,9 +38,9 @@ def test_shared_eval_cuda_graph_recipe_enables_capture() -> None:
 
 @pytest.fixture(autouse=True)
 def reset_cuda_graph_manager():
-    cuda_graph_teardown()
+    accelerator_graph_teardown()
     yield
-    cuda_graph_teardown()
+    accelerator_graph_teardown()
 
 
 @pytest.mark.parametrize("engine_cls", [TrainingEngine, GraphTrainingEngine])
@@ -52,7 +55,7 @@ def test_engine_closes_graphs_after_pending_work(engine_cls):
     engine._dist_moe_runtime = SimpleNamespace(close=lambda: events.append("moe"))
     engine.checkpointer = SimpleNamespace(close=lambda: events.append("checkpoint"))
     with patch(
-        "torchtitan.training_engine.cuda_graph_teardown",
+        "torchtitan.training_engine.accelerator_graph_teardown",
         side_effect=lambda: events.append("graphs"),
     ):
         engine.close()
@@ -193,7 +196,7 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
 def test_trainer_keeps_scheduled_eval_during_warmup(
     loaded_step, freq, training_steps, capture_mode, expected
 ):
-    cuda_graph_manager.capture_allowed = capture_mode != "enabled"
+    accelerator_graph_manager.capture_allowed = capture_mode != "enabled"
     events = []
     step_events = []
     model = torch.nn.Identity()
@@ -208,7 +211,9 @@ def test_trainer_keeps_scheduled_eval_during_warmup(
     def validate(*args):
         evaluate = validator._init_validate_fn([model])
         step_events.append(
-            "eval:allowed" if cuda_graph_manager.capture_allowed else "eval:blocked"
+            "eval:allowed"
+            if accelerator_graph_manager.capture_allowed
+            else "eval:blocked"
         )
         evaluate([])
 
@@ -249,11 +254,11 @@ def test_trainer_keeps_scheduled_eval_during_warmup(
     trainer.train_step = train_step
     with (
         patch(
-            "torchtitan.components.validator.wrap_with_cuda_graph",
+            "torchtitan.components.validator.wrap_with_accelerator_graph",
             side_effect=lambda fn, **kwargs: fn,
         ),
         patch.object(
-            type(cuda_graph_manager),
+            type(accelerator_graph_manager),
             "all_wrappers_warmed_up",
             new_callable=PropertyMock,
             side_effect=lambda: engine.num_completed_steps - loaded_step >= 2,

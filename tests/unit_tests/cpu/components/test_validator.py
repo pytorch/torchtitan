@@ -87,7 +87,7 @@ def _generic_validator(loader):
 
 @pytest.mark.parametrize("num_groups", [1, 2])
 def test_eval_wrapper_returns_each_real_run(monkeypatch, num_groups):
-    from torchtitan.distributed.cuda_graph import cuda_graph_manager
+    from torchtitan.distributed.accelerator_graph import accelerator_graph_manager
 
     row = TokenizedTrainingMicrobatch(
         input=torch.ones(1, 1),
@@ -101,7 +101,7 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch, num_groups):
     validator = _generic_validator(loader)
     validator.config.steps = num_groups
     validator._cuda_graph_enabled = True
-    cuda_graph_manager.capture_allowed = False
+    accelerator_graph_manager.capture_allowed = False
     model = _EchoModel()
     model.register_buffer("counter", torch.tensor(0))
     calls = []
@@ -116,7 +116,7 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch, num_groups):
 
     monkeypatch.setattr(model, "forward", forward)
     wrap = mock.Mock(side_effect=lambda fn, **kwargs: fn)
-    monkeypatch.setattr(validator_module, "wrap_with_cuda_graph", wrap)
+    monkeypatch.setattr(validator_module, "wrap_with_accelerator_graph", wrap)
     monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
     rng_before = torch.random.get_rng_state()
     validator.validate([model], step=1)
@@ -124,7 +124,7 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch, num_groups):
     validator.metrics_processor.log_validation.assert_called_once_with(
         loss=(num_groups + 1) / 2, step=1
     )
-    assert not cuda_graph_manager.capture_allowed
+    assert not accelerator_graph_manager.capture_allowed
     validator.validate([model], step=2)
     assert len(calls) == 2 * num_groups
     validator.metrics_processor.log_validation.assert_called_with(
@@ -142,7 +142,7 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch, num_groups):
         "name": "validation",
         "annotation_config": None,
     }
-    cuda_graph_manager.capture_allowed = True
+    accelerator_graph_manager.capture_allowed = True
 
 
 def test_validation_preprocessing_uses_validation_document_limit(monkeypatch):
@@ -456,15 +456,15 @@ def _validator_from_init(
 
 @pytest.mark.parametrize("cuda_graph_enabled", [False, True])
 def test_validator_uses_training_capture_mode(cuda_graph_enabled, monkeypatch):
-    from torchtitan.distributed.cuda_graph import cuda_graph_manager
+    from torchtitan.distributed.accelerator_graph import accelerator_graph_manager
 
-    monkeypatch.setattr(validator_module, "cuda_graphs_supported", lambda: True)
-    monkeypatch.setattr(cuda_graph_manager, "capture_allowed", True)
+    monkeypatch.setattr(validator_module, "accelerator_graphs_supported", lambda: True)
+    monkeypatch.setattr(accelerator_graph_manager, "capture_allowed", True)
     validator = _validator_from_init(
         steps=1, dp_world_size=1, cuda_graph_enabled=cuda_graph_enabled
     )
     assert validator._cuda_graph_enabled == cuda_graph_enabled
-    assert cuda_graph_manager.capture_allowed != cuda_graph_enabled
+    assert accelerator_graph_manager.capture_allowed != cuda_graph_enabled
     assert validator.should_validate(2) == cuda_graph_enabled
 
 

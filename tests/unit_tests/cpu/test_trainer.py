@@ -20,7 +20,7 @@ from torchtitan.components.data.types import (
     TrainingMicrobatch,
 )
 from torchtitan.components.optim import GradientClipper, Optim
-from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
+from torchtitan.distributed.accelerator_graph import wrap_with_accelerator_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability.metrics import compute_training_performance_metrics
@@ -512,7 +512,7 @@ def test_forward_backward_runs_whole_accumulation(
 
 
 def test_cuda_graph_wrapper_returns_graph_owned_output():
-    class PassthroughCUDAGraphWrapper:
+    class PassthroughAcceleratorGraphWrapper:
         def __init__(
             self,
             fn,
@@ -535,15 +535,18 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
     fwd_bwd = MagicMock(return_value=graph_loss)
 
     with (
-        patch("torchtitan.distributed.cuda_graph.utils.device_type", "cuda"),
-        patch("torch.cuda.is_available", return_value=True),
+        patch("torchtitan.distributed.accelerator_graph.utils.device_type", "cuda"),
+        patch(
+            "torch.accelerator.current_accelerator",
+            return_value=torch.device("cuda"),
+        ),
         patch.object(torch.version, "hip", None),
         patch(
-            "torchtitan.distributed.cuda_graph.CUDAGraphWrapper",
-            PassthroughCUDAGraphWrapper,
+            "torchtitan.distributed.accelerator_graph.AcceleratorGraphWrapper",
+            PassthroughAcceleratorGraphWrapper,
         ),
     ):
-        runner = wrap_with_cuda_graph(fwd_bwd)
+        runner = wrap_with_accelerator_graph(fwd_bwd)
         for value in (1.0, 2.0, 3.0):
             graph_loss.fill_(value)
             loss = runner(
@@ -563,7 +566,7 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
 
 
 def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
-    class PassthroughCUDAGraphWrapper:
+    class PassthroughAcceleratorGraphWrapper:
         def __init__(
             self,
             fn,
@@ -584,15 +587,18 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
 
     fn = MagicMock(side_effect=lambda batches, *, scale: batches[1]["x"] * scale)
     with (
-        patch("torchtitan.distributed.cuda_graph.utils.device_type", "cuda"),
-        patch("torch.cuda.is_available", return_value=True),
+        patch("torchtitan.distributed.accelerator_graph.utils.device_type", "cuda"),
+        patch(
+            "torch.accelerator.current_accelerator",
+            return_value=torch.device("cuda"),
+        ),
         patch.object(torch.version, "hip", None),
         patch(
-            "torchtitan.distributed.cuda_graph.CUDAGraphWrapper",
-            PassthroughCUDAGraphWrapper,
+            "torchtitan.distributed.accelerator_graph.AcceleratorGraphWrapper",
+            PassthroughAcceleratorGraphWrapper,
         ),
     ):
-        run = wrap_with_cuda_graph(fn)
+        run = wrap_with_accelerator_graph(fn)
         output = run(
             [{"x": torch.tensor(1.0)}, {"x": torch.tensor(2.0)}],
             scale=torch.tensor(3.0),
@@ -666,10 +672,12 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph(
 
     with (
         patch(
-            "torchtitan.training_engine.wrap_fwd_bwd_with_cuda_graph",
+            "torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph",
             return_value=cuda_graph_forward_backward,
         ) as wrap,
-        patch("torchtitan.training_engine.cuda_graphs_supported", return_value=True),
+        patch(
+            "torchtitan.training_engine.accelerator_graphs_supported", return_value=True
+        ),
         patch("torch.cuda.graph_annotations.is_available", return_value=True),
     ):
         TrainingEngine._initialize_forward_backward(engine)
@@ -724,11 +732,15 @@ def test_training_engine_replays_one_cuda_graph_per_microbatch_group() -> None:
 
     with (
         patch(
-            "torchtitan.training_engine.wrap_with_cuda_graph",
+            "torchtitan.training_engine.wrap_with_accelerator_graph",
             return_value=group_runner,
         ) as wrap_group,
-        patch("torchtitan.training_engine.wrap_fwd_bwd_with_cuda_graph") as wrap_step,
-        patch("torchtitan.training_engine.cuda_graphs_supported", return_value=True),
+        patch(
+            "torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph"
+        ) as wrap_step,
+        patch(
+            "torchtitan.training_engine.accelerator_graphs_supported", return_value=True
+        ),
     ):
         TrainingEngine._initialize_forward_backward(engine)
         result = engine._run_forward_backward(
@@ -780,8 +792,11 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     )
 
     with (
-        patch("torchtitan.training_engine.wrap_fwd_bwd_with_cuda_graph") as wrap,
-        patch("torchtitan.training_engine.cuda_graphs_supported", return_value=False),
+        patch("torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph") as wrap,
+        patch(
+            "torchtitan.training_engine.accelerator_graphs_supported",
+            return_value=False,
+        ),
     ):
         TrainingEngine._initialize_forward_backward(engine)
         torch.testing.assert_close(
@@ -1060,9 +1075,13 @@ def test_engine_prepares_pp_metadata_before_cuda_graph(disable_cuda_graphs, per_
     engine.model_parts = [torch.nn.Linear(4, 4)]
     engine.pp_schedule = MagicMock()
     with (
-        patch("torchtitan.training_engine.cuda_graphs_supported", return_value=True),
-        patch("torchtitan.training_engine.wrap_with_cuda_graph") as wrap_group,
-        patch("torchtitan.training_engine.wrap_fwd_bwd_with_cuda_graph") as wrap_update,
+        patch(
+            "torchtitan.training_engine.accelerator_graphs_supported", return_value=True
+        ),
+        patch("torchtitan.training_engine.wrap_with_accelerator_graph") as wrap_group,
+        patch(
+            "torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph"
+        ) as wrap_update,
         patch(
             "torchtitan.training_engine.prepare_pipeline_schedule_for_cuda_graph"
         ) as prepare,
@@ -1259,28 +1278,33 @@ def test_compute_training_performance_metrics():
 
 
 @pytest.mark.parametrize(
-    ("device_type", "cuda_available", "hip_version"),
+    ("device_type", "accelerator", "hip_version"),
     [
-        ("cpu", False, None),
-        ("cuda", False, None),
-        ("cuda", True, "6.3"),
-        ("xpu", False, None),
+        ("cpu", None, None),
+        ("cuda", None, None),
+        ("cuda", "cuda", "6.3"),
+        ("xpu", None, None),
     ],
 )
-def test_cuda_graph_wrapper_is_noop_without_nvidia_cuda(
+def test_accelerator_graph_wrapper_is_noop_without_accelerator(
     device_type: str,
-    cuda_available: bool,
+    accelerator: str | None,
     hip_version: str | None,
 ) -> None:
     fwd_bwd = MagicMock()
 
     with (
-        patch("torchtitan.distributed.cuda_graph.utils.device_type", device_type),
-        patch("torch.cuda.is_available", return_value=cuda_available),
+        patch(
+            "torchtitan.distributed.accelerator_graph.utils.device_type", device_type
+        ),
+        patch(
+            "torch.accelerator.current_accelerator",
+            return_value=torch.device(accelerator) if accelerator else None,
+        ),
         patch.object(torch.version, "hip", hip_version),
-        patch("torchtitan.distributed.cuda_graph.logger.warning") as warning,
+        patch("torchtitan.distributed.accelerator_graph.logger.warning") as warning,
     ):
-        runner = wrap_with_cuda_graph(fwd_bwd)
+        runner = wrap_with_accelerator_graph(fwd_bwd)
 
     assert runner is fwd_bwd
     warning.assert_called_once()
@@ -1311,10 +1335,12 @@ def test_cuda_graph_accumulation_supports_eager_gradient_reduction() -> None:
 
     with (
         patch(
-            "torchtitan.training_engine.wrap_fwd_bwd_with_cuda_graph",
+            "torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph",
             side_effect=lambda fn, **_: fn,
         ),
-        patch("torchtitan.training_engine.cuda_graphs_supported", return_value=True),
+        patch(
+            "torchtitan.training_engine.accelerator_graphs_supported", return_value=True
+        ),
     ):
         TrainingEngine._initialize_forward_backward(engine)
         engine._run_forward_backward([(), ()], torch.tensor(2))

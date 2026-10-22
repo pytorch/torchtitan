@@ -4,17 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""CUDA graph wrappers with a shared memory pool."""
+"""Accelerator graph wrappers with a shared memory pool."""
 
 import logging
-import warnings
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
 import torch
-from torch.cuda._graph_annotations import get_kernel_annotations
 from torch.nn.attention.flex_attention import BlockMask
 from torch.utils import _pytree as pytree
 
@@ -23,7 +21,7 @@ from torchtitan.tools import utils
 
 logger = logging.getLogger(__name__)
 
-NUM_CUDA_GRAPH_WARMUP_STEPS = 2
+NUM_ACCELERATOR_GRAPH_WARMUP_STEPS = 2
 
 
 @dataclass(frozen=True)
@@ -34,7 +32,7 @@ class _BlockMaskInputSpec:
 
 # TODO(@jinsooihm): Remove this class and use standard pytree flattening after
 # attention mask creation moves into model code and BlockMask is no longer an input.
-class CUDAGraphInputSpec:
+class AcceleratorGraphInputSpec:
     """Flatten structured inputs while exposing tensors stored in ``BlockMask``."""
 
     def __init__(self, tree: Any) -> None:
@@ -62,7 +60,7 @@ class CUDAGraphInputSpec:
         )
         if tree_spec != self._tree_spec or len(outer_leaves) != len(self._leaf_specs):
             raise ValueError(
-                "CUDA graph input structure must remain constant across "
+                "Accelerator graph input structure must remain constant across "
                 "training steps."
             )
 
@@ -71,7 +69,7 @@ class CUDAGraphInputSpec:
             if leaf_spec is None:
                 if isinstance(leaf, BlockMask):
                     raise ValueError(
-                        "CUDA graph input structure must remain constant "
+                        "Accelerator graph input structure must remain constant "
                         "across training steps."
                     )
                 flat_leaves.append(leaf)
@@ -79,7 +77,7 @@ class CUDAGraphInputSpec:
 
             if not isinstance(leaf, BlockMask):
                 raise ValueError(
-                    "CUDA graph input structure must remain constant "
+                    "Accelerator graph input structure must remain constant "
                     "across training steps."
                 )
             block_mask_leaves, context = leaf._flatten()
@@ -88,7 +86,7 @@ class CUDAGraphInputSpec:
                 or context != leaf_spec.context
             ):
                 raise ValueError(
-                    "CUDA graph BlockMask structure must remain constant across "
+                    "Accelerator graph BlockMask structure must remain constant across "
                     "training steps."
                 )
             flat_leaves.extend(block_mask_leaves)
@@ -98,7 +96,7 @@ class CUDAGraphInputSpec:
     def unflatten(self, flat_leaves: Sequence[Any]) -> Any:
         if len(flat_leaves) != self._num_flat_leaves:
             raise ValueError(
-                f"CUDA graph expected {self._num_flat_leaves} inputs, "
+                f"Accelerator graph expected {self._num_flat_leaves} inputs, "
                 f"got {len(flat_leaves)}."
             )
 
@@ -120,7 +118,7 @@ class CUDAGraphInputSpec:
         return pytree.tree_unflatten(outer_leaves, self._tree_spec)
 
 
-class _CUDAGraphGradientState:
+class _AcceleratorGraphGradientState:
     """Keep capture-created parameter gradients alive across graph replays.
 
     Why this state can reduce memory use:
@@ -129,12 +127,12 @@ class _CUDAGraphGradientState:
        first capture.
        Autograd allocates a gradient during capture and assigns it to
        ``param.grad``. The next ``zero_grad`` clears that Python reference.
-       CUDA graph replay runs the captured GPU work, but it does not repeat the
+       Graph replay runs the captured device work, but it does not repeat the
        ``param.grad`` assignment. The optimizer then sees ``param.grad is None``
        and skips the parameter update.
 
     2. ``set_to_none=False`` avoids that failure, but eager warmup allocates the
-       gradient before capture, outside the CUDA graph memory pool. Capture only
+       gradient before capture, outside the graph memory pool. Capture only
        records writes into that existing gradient buffer. Its lifetime overlaps
        the complete forward-backward graph::
 
@@ -147,7 +145,7 @@ class _CUDAGraphGradientState:
        tensors because their lifetimes overlap.
 
     3. With this state, ``set_to_none=True`` leaves gradients
-       absent when capture starts. Autograd allocates them from the CUDA graph
+       absent when capture starts. Autograd allocates them from the graph
        memory pool during backward, after many forward tensors have expired::
 
            time           forward             backward          optimizer
@@ -155,7 +153,7 @@ class _CUDAGraphGradientState:
            gradient                            [=========================]
            shared block   [forward temp]       [gradient                 ]
 
-       During capture, the CUDA graph pool may reuse storage released by forward
+       During capture, the graph pool may reuse storage released by forward
        tensors for later gradients. This state then keeps those gradient tensors
        alive and restores each ``param.grad`` reference after replay. This makes
        ``set_to_none=True`` safe.
@@ -181,14 +179,14 @@ class _CUDAGraphGradientState:
     def require_cleared(self) -> None:
         if any(parameter.grad is not None for parameter in self._parameters):
             raise RuntimeError(
-                "All parameter gradients must be None before CUDA graph capture "
+                "All parameter gradients must be None before accelerator graph capture "
                 "and replay."
             )
 
     def record(self) -> None:
         assert (
             self._captured_parameter_gradients is None
-        ), "CUDA graph gradients were already recorded"
+        ), "Accelerator graph gradients were already recorded"
         self._captured_parameter_gradients = tuple(
             (parameter, gradient)
             for parameter in self._parameters
@@ -198,7 +196,7 @@ class _CUDAGraphGradientState:
     def restore(self) -> None:
         assert (
             self._captured_parameter_gradients is not None
-        ), "CUDA graph gradients were not recorded"
+        ), "Accelerator graph gradients were not recorded"
         for parameter, gradient in self._captured_parameter_gradients:
             parameter.grad = gradient
 
@@ -211,15 +209,81 @@ class _CUDAGraphGradientState:
         self._captured_parameter_gradients = None
 
 
-class CUDAGraphManager:
+class GraphBackend:
+    """Graph capture through ``torch.accelerator.Graph``."""
+
+    def unsupported_reason(self) -> str | None:
+        """Return why graph capture is unavailable, or None if it is usable."""
+        try:
+            torch.accelerator.Graph()
+        except RuntimeError as e:
+            return str(e)
+        return None
+
+    def new_stream(self) -> torch.Stream:
+        """Return the stream used for warmup and capture."""
+        return torch.Stream()
+
+    def initialize(self, stream: torch.Stream) -> Any:
+        """Return the shared graph pool, or None to share the first graph's pool."""
+        return None
+
+    def capture(
+        self,
+        fn: Callable,
+        args: tuple[Any, ...],
+        *,
+        pool: Any,
+        stream: torch.Stream,
+        annotation_config: dict[str, Any] | None,
+    ) -> tuple[Any, Any]:
+        """Capture ``fn(*args)`` into a new graph and return the graph and output."""
+        graph = torch.accelerator.Graph(pool=pool)
+        with stream, graph:
+            output = fn(*args)
+        return graph, output
+
+    def annotations(self) -> dict[int, list[Any]]:
+        """Return kernel annotations recorded by captures so far."""
+        return {}
+
+    def teardown(self) -> None:
+        pass
+
+
+_default_backend = GraphBackend()
+_backends: dict[str, GraphBackend] = {}
+
+
+def register_graph_backend(device_type: str, backend: GraphBackend) -> None:
+    """Use ``backend`` for graph capture on ``device_type``."""
+    _backends[device_type] = backend
+
+
+def _backend() -> GraphBackend:
+    return _backends.get(utils.device_type, _default_backend)
+
+
+def _unsupported_reason() -> str | None:
+    accelerator = torch.accelerator.current_accelerator(check_available=True)
+    if accelerator is None:
+        return "no accelerator is available"
+    if accelerator.type != utils.device_type:
+        return (
+            f"the active device type is {utils.device_type!r}, "
+            f"not {accelerator.type!r}"
+        )
+    return _backend().unsupported_reason()
+
+
+class AcceleratorGraphManager:
     """Own the shared graph pool, capture stream, and wrappers."""
 
     def __init__(self) -> None:
         self._initialized = False
-        self._wrappers: list["CUDAGraphWrapper"] = []
+        self._wrappers: list["AcceleratorGraphWrapper"] = []
         self._graph_pool: Any = None
-        self._stream: torch.cuda.Stream | None = None
-        self._dummy_graph: torch.cuda.CUDAGraph | None = None
+        self._stream: torch.Stream | None = None
         self.all_annotations: dict[int, list[Any]] = {}
         self.capture_allowed = True
 
@@ -230,44 +294,56 @@ class CUDAGraphManager:
 
     @property
     def graph_pool(self) -> Any:
-        assert self._graph_pool is not None
         return self._graph_pool
 
     @property
-    def stream(self) -> torch.cuda.Stream:
+    def stream(self) -> torch.Stream:
         assert self._stream is not None
         return self._stream
 
     def maybe_initialize(self) -> None:
         if self._initialized:
             return
-        graph_pool = torch.cuda.graph_pool_handle()
-        stream = torch.cuda.Stream()
-        dummy_graph = torch.cuda.CUDAGraph()
-        self._graph_pool = graph_pool
-        self._stream = stream
-        self._dummy_graph = dummy_graph
-        with (
-            warnings.catch_warnings(record=True),
-            torch.cuda.graph(
-                dummy_graph,
-                pool=graph_pool,
-                stream=stream,
-                capture_error_mode="thread_local",
-            ),
-        ):
-            pass
+        reason = _unsupported_reason()
+        if reason is not None:
+            raise RuntimeError(f"Graph capture is unavailable: {reason}")
+        backend = _backend()
+        self._stream = backend.new_stream()
+        self._graph_pool = backend.initialize(self._stream)
         self._initialized = True
 
-    def register(self, wrapper: "CUDAGraphWrapper") -> None:
+    def capture(
+        self,
+        fn: Callable,
+        args: tuple[Any, ...],
+        *,
+        annotation_config: dict[str, Any] | None,
+    ) -> tuple[Any, Any]:
+        """Capture ``fn(*args)`` into a new graph and return the graph and output."""
+        backend = _backend()
+        graph, output = backend.capture(
+            fn,
+            args,
+            pool=self._graph_pool,
+            stream=self.stream,
+            annotation_config=annotation_config,
+        )
+        if self._graph_pool is None:
+            self._graph_pool = graph.pool()
+        self.all_annotations.update(backend.annotations())
+        return graph, output
+
+    def register(self, wrapper: "AcceleratorGraphWrapper") -> None:
         self._wrappers.append(wrapper)
 
     def teardown(self) -> None:
+        if self._initialized:
+            torch.accelerator.synchronize()
         for wrapper in self._wrappers:
             wrapper.teardown()
         self._wrappers.clear()
         self.all_annotations.clear()
-        self._dummy_graph = None
+        _backend().teardown()
         self._stream = None
         self._graph_pool = None
         self._initialized = False
@@ -276,10 +352,10 @@ class CUDAGraphManager:
     def log_memory(self, name: str | None, boundary: str) -> None:
         if not logger.isEnabledFor(logging.DEBUG):
             return
-        stats = torch.cuda.memory_stats()
-        free, total = torch.cuda.mem_get_info()
+        stats = torch.accelerator.memory_stats()
+        free, total = torch.accelerator.get_memory_info()
         logger.debug(
-            "CUDA graph name=%s pool=%s boundary=%s allocated=%d reserved=%d "
+            "Accelerator graph name=%s pool=%s boundary=%s allocated=%d reserved=%d "
             "active=%d inactive_split=%d peak_allocated=%d peak_reserved=%d "
             "device_free=%d device_total=%d",
             name,
@@ -296,63 +372,34 @@ class CUDAGraphManager:
         )
 
 
-cuda_graph_manager = CUDAGraphManager()
+accelerator_graph_manager = AcceleratorGraphManager()
 
 
-def cuda_graph_teardown() -> None:
-    """Destroy all CUDA graphs and release the shared memory pool."""
-    cuda_graph_manager.teardown()
+def accelerator_graph_teardown() -> None:
+    """Destroy all accelerator graphs and release the shared memory pool."""
+    accelerator_graph_manager.teardown()
 
 
-def get_cuda_graph_annotations() -> dict[int, list[Any]]:
-    """Return all kernel annotations accumulated across CUDA graph captures."""
-    return cuda_graph_manager.all_annotations
+def get_accelerator_graph_annotations() -> dict[int, list[Any]]:
+    """Return all kernel annotations accumulated across accelerator graph captures."""
+    return accelerator_graph_manager.all_annotations
 
 
-def get_cuspy_cuda_graph_annotation_config(
-    *, enable_event_node_ids: bool, record_py_stacks: bool = False
-) -> dict[str, Any] | None:
-    """``torch.cuda.graph`` annotation options for a Cuspy-profiled run.
-
-    ``backend="cupti"`` finds each ``mark_kernels`` scope's nodes through CUPTI
-    node-creation callbacks instead of walking the capture graph's edges, which
-    misses nodes created before the stream began capturing. ``key_by="auto"``
-    keeps annotations keyed to the capture graph, which Cuspy resolves through
-    CUPTI's ``sourceGraphNodeId``, falling back to the exec graph where CUPTI or
-    the driver is too old. Cuspy resolves graph event-record nodes (NCCL's under
-    ``NCCL_GRAPH_MIXING_SUPPORT``) only by exec-graph id, so ``enable_event_node_ids``
-    keys by the exec graph instead. ``record_py_stacks`` records each node's Python
-    launch stack, which needs the CUPTI backend.
-
-    Returns ``None`` when graph annotations are unavailable, so capture does not
-    take a CUPTI subscription for nothing; the profiler warns about that once.
-    """
-    if not torch.cuda.graph_annotations.is_available():
-        return None
-    config: dict[str, Any] = {
-        "backend": "cupti",
-        "key_by": "exec" if enable_event_node_ids else "auto",
-    }
-    if record_py_stacks:
-        config["record_py_stacks"] = True
-    return config
-
-
-def _run_eager_on_cuda_graph_stream(
+def _run_eager_on_accelerator_graph_stream(
     fn: Callable[..., Any], *args: Any, **kwargs: Any
 ) -> Any:
-    """Run a callable eagerly on the stream reserved for CUDA graph capture."""
-    cuda_graph_manager.maybe_initialize()
-    current_stream = torch.cuda.current_stream()
-    cuda_graph_manager.stream.wait_stream(current_stream)
-    with torch.cuda.stream(cuda_graph_manager.stream):
+    """Run a callable eagerly on the stream reserved for accelerator graph capture."""
+    accelerator_graph_manager.maybe_initialize()
+    current_stream = torch.accelerator.current_stream()
+    accelerator_graph_manager.stream.wait_stream(current_stream)
+    with accelerator_graph_manager.stream:
         output = fn(*args, **kwargs)
-    current_stream.wait_stream(cuda_graph_manager.stream)
+    current_stream.wait_stream(accelerator_graph_manager.stream)
     return output
 
 
-class CUDAGraphWrapper:
-    """Wrap a callable with CUDA graph capture and replay.
+class AcceleratorGraphWrapper:
+    """Wrap a callable with accelerator graph capture and replay.
 
     Args:
         fn: Callable to capture.
@@ -397,7 +444,7 @@ class CUDAGraphWrapper:
         }
         if invalid_static_indices:
             raise ValueError(
-                "CUDA graph static input indices are out of range: "
+                "Accelerator graph static input indices are out of range: "
                 f"{sorted(invalid_static_indices)}"
             )
 
@@ -421,7 +468,7 @@ class CUDAGraphWrapper:
             for i, inp in enumerate(example_inputs)
             if not isinstance(inp, torch.Tensor)
         }
-        self._graph: torch.cuda.CUDAGraph | None = None
+        self._graph: Any = None
         self._warmup_remaining = num_warmup_iterations
         self._annotation_config = annotation_config
         self._args: tuple | None = None
@@ -429,8 +476,8 @@ class CUDAGraphWrapper:
         self._should_check_address = should_check_address
         self._static_input_addresses: dict[int, int] = {}
 
-        cuda_graph_manager.maybe_initialize()
-        cuda_graph_manager.register(self)
+        accelerator_graph_manager.maybe_initialize()
+        accelerator_graph_manager.register(self)
 
     def _record_static_input_addresses(self, args: tuple[Any, ...]) -> None:
         for i in self._static_input_indices:
@@ -453,19 +500,19 @@ class CUDAGraphWrapper:
     def _validate_inputs(self, args: tuple[Any, ...]) -> None:
         if len(args) != self._num_inputs:
             raise ValueError(
-                f"CUDA graph expected {self._num_inputs} inputs, got {len(args)}"
+                f"Accelerator graph expected {self._num_inputs} inputs, got {len(args)}"
             )
 
         for i, expected_metadata in self._tensor_metadata.items():
             arg = args[i]
             if not isinstance(arg, torch.Tensor):
                 raise ValueError(
-                    f"CUDA graph input {i} changed from a tensor to {type(arg)}"
+                    f"Accelerator graph input {i} changed from a tensor to {type(arg)}"
                 )
             actual_metadata = (arg.shape, arg.dtype, arg.device)
             if actual_metadata != expected_metadata:
                 raise ValueError(
-                    "CUDA graph tensor inputs must keep the same shape, dtype, "
+                    "Accelerator graph tensor inputs must keep the same shape, dtype, "
                     f"and device, but input {i} changed from "
                     f"{expected_metadata} to {actual_metadata}"
                 )
@@ -474,7 +521,7 @@ class CUDAGraphWrapper:
             actual = args[i]
             if type(actual) is not type(expected) or actual != expected:
                 raise ValueError(
-                    "CUDA graph non-tensor inputs must remain constant, but input "
+                    "Accelerator graph non-tensor inputs must remain constant, but input "
                     f"{i} changed from {expected!r} to {actual!r}"
                 )
 
@@ -482,32 +529,28 @@ class CUDAGraphWrapper:
         self._validate_inputs(args)
 
         if self._warmup_remaining > 0 or (
-            self._graph is None and not cuda_graph_manager.capture_allowed
+            self._graph is None and not accelerator_graph_manager.capture_allowed
         ):
             self._warmup_remaining = max(0, self._warmup_remaining - 1)
-            return _run_eager_on_cuda_graph_stream(self._fn, *args)
+            return _run_eager_on_accelerator_graph_stream(self._fn, *args)
 
         if self._graph is None:
             if self._prepare_for_capture is not None:
-                _run_eager_on_cuda_graph_stream(self._prepare_for_capture, *args)
-            cuda_graph_manager.log_memory(self.name, "before_empty_cache")
-            torch.cuda.empty_cache()
-            cuda_graph_manager.log_memory(self.name, "after_empty_cache")
+                _run_eager_on_accelerator_graph_stream(self._prepare_for_capture, *args)
+            accelerator_graph_manager.log_memory(self.name, "before_empty_cache")
+            torch.accelerator.empty_cache()
+            accelerator_graph_manager.log_memory(self.name, "after_empty_cache")
             self._args = args
             self._record_static_input_addresses(args)
-            self._graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(
-                self._graph,
-                pool=cuda_graph_manager.graph_pool,
-                stream=cuda_graph_manager.stream,
-                enable_annotations=True,
-                annotation_config=self._annotation_config,
-                capture_error_mode="thread_local",
-            ):
-                self._output = self._fn(*args)
-            cuda_graph_manager.all_annotations.update(get_kernel_annotations())
-            cuda_graph_manager.log_memory(self.name, "after_capture")
-            logger.info("Recorded CUDA graph%s", f" {self.name}" if self.name else "")
+            self._graph, self._output = accelerator_graph_manager.capture(
+                self._fn, args, annotation_config=self._annotation_config
+            )
+            accelerator_graph_manager.log_memory(self.name, "after_capture")
+            logger.info(
+                "Recorded %s graph%s",
+                utils.device_type.upper(),
+                f" {self.name}" if self.name else "",
+            )
 
         if self._should_check_address:
             self._check_static_input_addresses(args)
@@ -527,7 +570,7 @@ class CUDAGraphWrapper:
         self._non_tensor_inputs.clear()
 
 
-class _ForwardBackwardCUDAGraphWrapper(CUDAGraphWrapper):
+class _ForwardBackwardAcceleratorGraphWrapper(AcceleratorGraphWrapper):
     """Preserve capture-created parameter gradients across graph replays."""
 
     def __init__(
@@ -541,7 +584,7 @@ class _ForwardBackwardCUDAGraphWrapper(CUDAGraphWrapper):
         name: str | None = None,
         annotation_config: dict[str, Any] | None = None,
     ) -> None:
-        self._gradient_state = _CUDAGraphGradientState(parameters)
+        self._gradient_state = _AcceleratorGraphGradientState(parameters)
         super().__init__(
             fn,
             example_inputs,
@@ -553,7 +596,7 @@ class _ForwardBackwardCUDAGraphWrapper(CUDAGraphWrapper):
 
     def __call__(self, *args: Any) -> Any:
         if self._warmup_remaining > 0 or (
-            self._graph is None and not cuda_graph_manager.capture_allowed
+            self._graph is None and not accelerator_graph_manager.capture_allowed
         ):
             return super().__call__(*args)
 
@@ -570,21 +613,13 @@ class _ForwardBackwardCUDAGraphWrapper(CUDAGraphWrapper):
         super().teardown()
 
 
-def cuda_graphs_supported() -> bool:
-    """Whether CUDA graph capture can actually run on this build/device.
-
-    ROCm is excluded: capture is unsupported there, so anything gated on CUDA
-    graphs must agree that they are inert.
-    """
-    return (
-        utils.device_type == "cuda"
-        and torch.cuda.is_available()
-        and torch.version.hip is None
-    )
+def accelerator_graphs_supported() -> bool:
+    """Whether graph capture can actually run on this build/device."""
+    return _unsupported_reason() is None
 
 
 # TODO: Unify PP and non-PP callable signatures to restore strict input typing.
-def _wrap_with_cuda_graph(
+def _wrap_with_accelerator_graph(
     fn: Callable[..., Any],
     *,
     num_warmup_iterations: int,
@@ -593,24 +628,24 @@ def _wrap_with_cuda_graph(
     name: str | None,
     annotation_config: dict[str, Any] | None,
 ) -> Callable[..., Any]:
-    """Implement structured CUDA graph wrapping."""
+    """Implement structured accelerator graph wrapping."""
 
-    if not cuda_graphs_supported():
+    reason = _unsupported_reason()
+    if reason is not None:
         logger.warning(
-            "CUDA graph capture is only supported on NVIDIA CUDA; "
-            "using eager execution."
+            f"Graph capture is unavailable ({reason}); using eager execution."
         )
         return fn
 
     # The manager keeps each captured wrapper alive until teardown.
-    graph_wrapper: CUDAGraphWrapper | None = None
-    input_spec: CUDAGraphInputSpec | None = None
+    graph_wrapper: AcceleratorGraphWrapper | None = None
+    input_spec: AcceleratorGraphInputSpec | None = None
 
     def run(*args: Any, **kwargs: Any) -> Any:
         nonlocal graph_wrapper, input_spec
 
         if graph_wrapper is None:
-            input_spec = CUDAGraphInputSpec((args, kwargs))
+            input_spec = AcceleratorGraphInputSpec((args, kwargs))
 
             def run_flat(fn: Callable[..., Any], *flat_inputs: Any) -> Any:
                 assert input_spec is not None
@@ -624,7 +659,7 @@ def _wrap_with_cuda_graph(
                 else None
             )
             if gradient_parameters is None:
-                graph_wrapper = CUDAGraphWrapper(
+                graph_wrapper = AcceleratorGraphWrapper(
                     partial(run_flat, fn),
                     flat_inputs,
                     num_warmup_iterations=num_warmup_iterations,
@@ -633,7 +668,7 @@ def _wrap_with_cuda_graph(
                     annotation_config=annotation_config,
                 )
             else:
-                graph_wrapper = _ForwardBackwardCUDAGraphWrapper(
+                graph_wrapper = _ForwardBackwardAcceleratorGraphWrapper(
                     partial(run_flat, fn),
                     flat_inputs,
                     parameters=gradient_parameters,
@@ -651,7 +686,7 @@ def _wrap_with_cuda_graph(
     return run
 
 
-def wrap_with_cuda_graph(
+def wrap_with_accelerator_graph(
     fn: Callable[..., Any],
     *,
     num_warmup_iterations: int = 0,
@@ -659,7 +694,7 @@ def wrap_with_cuda_graph(
     name: str | None = None,
     annotation_config: dict[str, Any] | None = None,
 ) -> Callable[..., Any]:
-    """Decorate a structured callable with CUDA graph capture and replay.
+    """Decorate a structured callable with accelerator graph capture and replay.
 
     The positional and keyword inputs must keep the same pytree structure and
     tensor metadata across calls. After capture, tensor outputs alias
@@ -671,10 +706,10 @@ def wrap_with_cuda_graph(
         prepare_for_capture: Initialize state that cannot run inside capture.
             Runs once on the shared stream before capture, with the inputs for fn.
         name: Label used in capture logs.
-        annotation_config: Passed to ``torch.cuda.graph`` at capture.
+        annotation_config: Backend-specific annotation options used at capture.
     """
 
-    return _wrap_with_cuda_graph(
+    return _wrap_with_accelerator_graph(
         fn,
         num_warmup_iterations=num_warmup_iterations,
         gradient_parameters=None,
@@ -684,7 +719,7 @@ def wrap_with_cuda_graph(
     )
 
 
-def wrap_fwd_bwd_with_cuda_graph(
+def wrap_fwd_bwd_with_accelerator_graph(
     fn: Callable[..., Any],
     *,
     parameters: Iterable[torch.nn.Parameter],
@@ -702,10 +737,10 @@ def wrap_fwd_bwd_with_cuda_graph(
         prepare_for_capture: Initialize state that cannot run inside capture.
             Runs once on the shared stream before capture, with the inputs for fn.
         name: Label used in capture logs.
-        annotation_config: Passed to ``torch.cuda.graph`` at capture.
+        annotation_config: Backend-specific annotation options used at capture.
     """
 
-    return _wrap_with_cuda_graph(
+    return _wrap_with_accelerator_graph(
         fn,
         num_warmup_iterations=num_warmup_iterations,
         gradient_parameters=tuple(parameters),
