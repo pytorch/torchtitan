@@ -76,6 +76,24 @@ def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
     assert [next(resumed) for _ in range(3)] == expected
 
 
+def test_verifiers_task_dataset_keeps_the_first_num_tasks(monkeypatch) -> None:
+    samples = [
+        DapoMathSample(prompt=f"problem {i}", ground_truth="1") for i in range(3)
+    ]
+    monkeypatch.setattr(data, "_load_math_dataset", lambda name: (iter(samples), 3))
+    dataset = VerifiersTaskDataset.Config(
+        verifiers_taskset=data.VerifiersMathTasksetConfig(
+            id="torchtitan.rl.examples.verifiers.dapo_math.data",
+            dataset="dapo_math",
+        ),
+        num_tasks=2,
+        shuffle=False,
+    ).build()
+
+    task_indices = [next(dataset).verifiers_task_data["idx"] for _ in range(4)]
+    assert task_indices == [0, 1, 0, 1]
+
+
 def test_verifiers_environment_uses_no_sandbox() -> None:
     rollouter_config = _verifiers_math_rollouter_config(max_rollout_tokens=10240)
     config = rollouter_config.verifiers_env_server
