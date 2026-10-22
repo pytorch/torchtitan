@@ -27,11 +27,11 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.validator import Validator
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.cuda_graph import (
-    cuda_graph_manager,
-    cuda_graph_teardown,
-    wrap_fwd_bwd_with_cuda_graph,
-    wrap_with_cuda_graph,
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_manager,
+    accelerator_graph_teardown,
+    wrap_fwd_bwd_with_accelerator_graph,
+    wrap_with_accelerator_graph,
 )
 from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_cuda_graph,
@@ -42,9 +42,9 @@ from torchtitan.models.muse_glimmer import build_model_config
 
 @pytest.fixture(autouse=True)
 def reset_cuda_graph_manager():
-    cuda_graph_teardown()
+    accelerator_graph_teardown()
     yield
-    cuda_graph_teardown()
+    accelerator_graph_teardown()
 
 
 def _validator(*, schedule=None, first=True, last=True):
@@ -117,7 +117,7 @@ def test_train_eval_optimizer_shared_pool(optimizer_graph, monkeypatch):
         model.parameters(), lr=0.01, fused=True, capturable=optimizer_graph
     )
     reference_optimizer = torch.optim.AdamW(reference.parameters(), lr=0.01, fused=True)
-    cuda_graph_manager.capture_allowed = False
+    accelerator_graph_manager.capture_allowed = False
     validator = _validator()
 
     def body(inputs, target):
@@ -125,14 +125,16 @@ def test_train_eval_optimizer_shared_pool(optimizer_graph, monkeypatch):
         loss.backward()
         return loss.detach()
 
-    train = wrap_fwd_bwd_with_cuda_graph(
+    train = wrap_fwd_bwd_with_accelerator_graph(
         body,
         parameters=model.parameters(),
         num_warmup_iterations=2,
         name="train",
     )
     update = (
-        wrap_with_cuda_graph(optimizer.step, num_warmup_iterations=2, name="optimizer")
+        wrap_with_accelerator_graph(
+            optimizer.step, num_warmup_iterations=2, name="optimizer"
+        )
         if optimizer_graph
         else optimizer.step
     )
@@ -143,7 +145,7 @@ def test_train_eval_optimizer_shared_pool(optimizer_graph, monkeypatch):
         if boundary == "after_capture":
             captures.append((step, name))
 
-    monkeypatch.setattr(cuda_graph_manager, "log_memory", record_capture)
+    monkeypatch.setattr(accelerator_graph_manager, "log_memory", record_capture)
     try:
         for step in range(10):
             inputs = torch.full((4, 16), (step + 1) / 100, device="cuda")
@@ -187,17 +189,17 @@ def test_train_eval_optimizer_shared_pool(optimizer_graph, monkeypatch):
                 torch.testing.assert_close(result, expected_eval, rtol=0, atol=0)
             if step == 0:
                 assert validator._run_eval is not None
-                assert cuda_graph_manager._wrappers[-1]._graph is None
+                assert accelerator_graph_manager._wrappers[-1]._graph is None
                 assert captures == []
             elif step == 1:
                 assert captures == [(1, "validation")]
             torch.testing.assert_close(actual, expected.detach(), rtol=0, atol=0)
-        assert len(cuda_graph_manager._wrappers) == (3 if optimizer_graph else 2)
+        assert len(accelerator_graph_manager._wrappers) == (3 if optimizer_graph else 2)
         assert captures == [(1, "validation"), (2, "train")] + (
             [(2, "optimizer")] if optimizer_graph else []
         )
     finally:
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
 
 
 def test_eval_warmup_keeps_rng_and_buffer_updates():
@@ -213,7 +215,7 @@ def test_eval_warmup_keeps_rng_and_buffer_updates():
 
     model.forward = forward
     validator = _validator()
-    cuda_graph_manager.capture_allowed = False
+    accelerator_graph_manager.capture_allowed = False
     with torch.no_grad():
         for run in range(10):
             value = inputs * (run + 1)
@@ -235,7 +237,7 @@ def test_eval_warmup_keeps_rng_and_buffer_updates():
 
 
 def test_per_group_graph_waits_for_eval_capture():
-    cuda_graph_manager.capture_allowed = False
+    accelerator_graph_manager.capture_allowed = False
     parameter = torch.nn.Parameter(torch.ones(1024, device="cuda"))
     inputs = torch.ones_like(parameter)
 
@@ -244,7 +246,7 @@ def test_per_group_graph_waits_for_eval_capture():
         loss.backward()
         return loss.detach()
 
-    train = wrap_with_cuda_graph(body, name="train", num_warmup_iterations=2)
+    train = wrap_with_accelerator_graph(body, name="train", num_warmup_iterations=2)
     model = torch.nn.Module()
     model.register_parameter("weight", parameter)
     model.forward = lambda value: parameter * value
@@ -253,15 +255,15 @@ def test_per_group_graph_waits_for_eval_capture():
     try:
         for _ in range(4):
             train(inputs)
-        assert cuda_graph_manager._wrappers[0]._graph is None
+        assert accelerator_graph_manager._wrappers[0]._graph is None
         with torch.no_grad():
             _validate_loss(validator, [model], prepared, step=1)
         for _ in range(4):
             train(inputs)
-        assert cuda_graph_manager._wrappers[0]._graph is None
+        assert accelerator_graph_manager._wrappers[0]._graph is None
         with torch.no_grad():
             _validate_loss(validator, [model], prepared, step=2)
-        assert cuda_graph_manager._wrappers[-1]._graph is not None
+        assert accelerator_graph_manager._wrappers[-1]._graph is not None
         for count in (1, 4, 2, 5):
             parameter.grad.zero_()
             for _ in range(count):
@@ -272,7 +274,7 @@ def test_per_group_graph_waits_for_eval_capture():
                     _validate_loss(validator, [model], prepared, step=3).item() == 1024
                 )
     finally:
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
 
 
 def test_varlen_eval_replays_different_document_counts():
@@ -340,7 +342,7 @@ def test_varlen_eval_replays_different_document_counts():
                 ).clone()
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     finally:
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
         dist.destroy_process_group()
 
 
@@ -348,7 +350,7 @@ def _measure_pool(mode, results):
     torch.cuda.set_device(0)
     parameter = torch.nn.Parameter(torch.ones(8 * 1024 * 1024, device="cuda"))
     inputs = torch.ones_like(parameter)
-    cuda_graph_manager.maybe_initialize()
+    accelerator_graph_manager.maybe_initialize()
     optimizer = torch.optim.SGD([parameter], lr=0.01)
 
     def eval_body():
@@ -361,11 +363,11 @@ def _measure_pool(mode, results):
         loss.backward()
         return loss.detach()
 
-    evaluate = wrap_with_cuda_graph(eval_body, name="eval")
-    train = wrap_fwd_bwd_with_cuda_graph(
+    evaluate = wrap_with_accelerator_graph(eval_body, name="eval")
+    train = wrap_fwd_bwd_with_accelerator_graph(
         train_body, parameters=[parameter], name="train"
     )
-    update = wrap_with_cuda_graph(optimizer.step, name="optimizer")
+    update = wrap_with_accelerator_graph(optimizer.step, name="optimizer")
     try:
         if mode == "train_first":
             train()
@@ -382,7 +384,7 @@ def _measure_pool(mode, results):
             return sum(
                 segment["total_size"]
                 for segment in torch.cuda.memory_snapshot()
-                if segment["segment_pool_id"] == cuda_graph_manager.graph_pool
+                if segment["segment_pool_id"] == accelerator_graph_manager.graph_pool
             )
 
         size = pool_bytes()
@@ -407,7 +409,7 @@ def _measure_pool(mode, results):
             flush=True,
         )
     finally:
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
 
 
 def test_eval_first_reuses_training_workspace():
@@ -430,7 +432,7 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
     os.environ["MASTER_PORT"] = str(port)
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=4)
-    cuda_graph_manager.capture_allowed = False
+    accelerator_graph_manager.capture_allowed = False
     try:
         mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("pp", "dp"))
         pp_rank, dp_rank = rank // 2, rank % 2
@@ -512,14 +514,14 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
                 loss_kwargs={},
             )
 
-        train = wrap_fwd_bwd_with_cuda_graph(
+        train = wrap_fwd_bwd_with_accelerator_graph(
             body,
             parameters=parameters,
             num_warmup_iterations=2,
             prepare_for_capture=prepare_for_capture,
             name="train",
         )
-        update = wrap_with_cuda_graph(
+        update = wrap_with_accelerator_graph(
             optimizer.step, num_warmup_iterations=2, name="optimizer"
         )
         addresses = None
@@ -570,7 +572,9 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
                     torch.testing.assert_close(
                         actual_eval, expected_eval, rtol=0, atol=0
                     )
-            assert (cuda_graph_manager._wrappers[-1]._graph is not None) == (step >= 1)
+            assert (accelerator_graph_manager._wrappers[-1]._graph is not None) == (
+                step >= 1
+            )
             for stage in stages:
                 assert not stage._forward_chunk_states
         for local, model in enumerate(models):
@@ -588,7 +592,7 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
                     actual = state.to_local() if hasattr(state, "to_local") else state
                     torch.testing.assert_close(actual, expected_state, rtol=0, atol=0)
     finally:
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
     # Let mp.spawn stop peers if this rank fails during communication.
     dist.destroy_process_group()
 
@@ -635,7 +639,9 @@ def _run_grouped_eval(rank, port):
                 post_validate_fsdp_for_cuda_graph([model])
                 return result
 
-        graph = wrap_with_cuda_graph(evaluate, num_warmup_iterations=1, name="eval")
+        graph = wrap_with_accelerator_graph(
+            evaluate, num_warmup_iterations=1, name="eval"
+        )
         for step in range(10):
             inputs.fill_(1 + step / 10)
             training_losses = []
@@ -672,7 +678,7 @@ def _run_grouped_eval(rank, port):
                 reference.lm_head._get_fsdp_state()._modules_to_run_forward
             )
     finally:
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
         dist.destroy_process_group()
 
 

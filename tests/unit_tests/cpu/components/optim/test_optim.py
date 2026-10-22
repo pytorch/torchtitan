@@ -107,10 +107,10 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
     wrapped_update = MagicMock()
 
     with patch(
-        "torchtitan.components.optim.optim.wrap_with_cuda_graph",
+        "torchtitan.components.optim.optim.wrap_with_accelerator_graph",
         return_value=wrapped_update,
     ) as wrap, patch(
-        "torchtitan.components.optim.optim.cuda_graphs_supported",
+        "torchtitan.components.optim.optim.accelerator_graphs_supported",
         return_value=enable_cuda_graph,
     ):
         optim = Optim(
@@ -168,9 +168,9 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
     )
 
     with patch(
-        "torchtitan.components.optim.optim.cuda_graphs_supported",
+        "torchtitan.components.optim.optim.accelerator_graphs_supported",
         return_value=runtime_supported,
-    ), patch("torchtitan.components.optim.optim.wrap_with_cuda_graph") as wrap:
+    ), patch("torchtitan.components.optim.optim.wrap_with_accelerator_graph") as wrap:
         optim = Optim(
             config,
             model_parts=[model],

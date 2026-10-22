@@ -20,7 +20,7 @@ from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import apply_overrides, Configurable
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
-from torchtitan.distributed.cuda_graph import cuda_graphs_supported
+from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import maybe_semi_sync_training
@@ -246,7 +246,7 @@ class FaultTolerantTrainer(Configurable):
         )
         if (
             config.fault_tolerance.enable
-            and cuda_graphs_supported()
+            and accelerator_graphs_supported()
             and not config.training.disable_cuda_graphs
             and parallelism_context.fsdp_enabled
             and self.gradient_accumulation_steps > 1
