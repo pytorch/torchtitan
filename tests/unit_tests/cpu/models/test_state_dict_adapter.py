@@ -20,6 +20,7 @@ from torch.distributed.checkpoint._consolidate_hf_safetensors import (
 )
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -28,7 +29,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.components.checkpointer.base import ModelWrapper
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.base.state_dict_adapter import StateDictAdapter
+from torchtitan.models.base.state_dict_adapter import stack_or_view, StateDictAdapter
 from torchtitan.models.deepseek_v3 import MODEL_FLAVORS as DEEPSEEK_V3_MODEL_FLAVORS
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 from torchtitan.models.deepseek_v4 import (
@@ -314,6 +315,48 @@ class UnsupportedQuantizedKeysTest(unittest.TestCase):
                     adapter.from_hf({}, is_quantized_layout=True)
 
 
+class StackOrViewTest(unittest.TestCase):
+    def test_slices_of_one_parameter_come_back_as_a_view(self) -> None:
+        w13 = torch.randn(4, 2, 3, 5)
+        w1, w3 = w13.unbind(1)
+        experts_w1 = [expert.squeeze(0) for expert in w1.split(1)]
+        experts_w3 = [expert.squeeze(0) for expert in w3.split(1)]
+
+        stacked_w1 = stack_or_view(experts_w1, dim=0)
+        stacked_w13 = stack_or_view(
+            [stacked_w1, stack_or_view(experts_w3, dim=0)], dim=1
+        )
+
+        torch.testing.assert_close(stacked_w13, w13, rtol=0, atol=0)
+        self.assertEqual(stacked_w13.data_ptr(), w13.data_ptr())
+        self.assertEqual(stacked_w13.stride(), w13.stride())
+
+    def test_dtensor_slices_keep_strided_shard_placements(self) -> None:
+        # FSDP strided over TP on the same dim, as the generator shards w13 at TP 2.
+        dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=4)
+        self.addCleanup(dist.destroy_process_group)
+        mesh = init_device_mesh("cpu", (2, 2), mesh_dim_names=("dp", "tp"))
+        placements = (_StridedShard(1, split_factor=2), Shard(1))
+        w13 = distribute_tensor(torch.zeros(2, 16, 4), mesh, placements)
+
+        stacked = stack_or_view(list(w13.unbind(0)), dim=0)
+
+        self.assertEqual(stacked.placements, placements)
+        self.assertEqual(
+            stacked.to_local().untyped_storage().data_ptr(),
+            w13.to_local().untyped_storage().data_ptr(),
+        )
+        w13.copy_(stacked)
+
+    def test_independent_tensors_are_stacked(self) -> None:
+        tensors = [torch.randn(3, 5) for _ in range(4)]
+
+        stacked = stack_or_view(tensors, dim=1)
+
+        torch.testing.assert_close(stacked, torch.stack(tensors, dim=1))
+        self.assertNotIn(stacked.data_ptr(), {tensor.data_ptr() for tensor in tensors})
+
+
 class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -496,6 +539,11 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
                 self.assertIsInstance(restored[key], DTensor)
                 self.assertEqual(restored[key].placements, weight.placements)
                 torch.testing.assert_close(restored[key], weight, rtol=0, atol=0)
+                # to_hf's expert views come back as a view, not a second copy.
+                self.assertEqual(
+                    restored[key].to_local().untyped_storage().data_ptr(),
+                    local_weight.untyped_storage().data_ptr(),
+                )
 
 
 class KimiK3StateDictAdapterTest(unittest.TestCase):

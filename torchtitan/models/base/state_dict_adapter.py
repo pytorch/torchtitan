@@ -17,12 +17,71 @@ import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate
-from torch.distributed.tensor.placement_types import Placement
+from torch.distributed.tensor.placement_types import _StridedShard, Placement, Shard
 
 from .model import BaseModel
 
 
 logger = logging.getLogger(__name__)
+
+
+def stack_or_view(tensors: list[torch.Tensor], dim: int) -> torch.Tensor:
+    """``torch.stack(tensors, dim)``, as a view when the tensors already are its slices.
+
+    ``to_hf`` exposes a stacked parameter as views of it (``unbind``, per-expert
+    slicing) and an HF load fills those views in place, so on the load path the
+    tensors ``from_hf`` stacks are slices of the destination parameter. Stacking
+    them would allocate a second copy of that parameter (every routed expert on
+    the rank for MoE models). When all tensors share one storage, dtype, shape
+    and strides and each starts a fixed offset after the previous one, return
+    that strided view of the storage instead; otherwise stack. DTensors are
+    checked by their local tensors and keep their mesh; their placements gain
+    the new dimension.
+    """
+    first = tensors[0]
+    if isinstance(first, DTensor):
+        if any(
+            t.device_mesh != first.device_mesh or t.placements != first.placements
+            for t in tensors
+        ):
+            return torch.stack(tensors, dim=dim)
+        local = stack_or_view([t._local_tensor for t in tensors], dim)
+        placements = []
+        for p in first.placements:
+            # _StridedShard is not a Shard subclass in every PyTorch version.
+            if isinstance(p, _StridedShard) and p.dim >= dim:
+                p = _StridedShard(p.dim + 1, split_factor=p.split_factor)
+            elif isinstance(p, Shard) and p.dim >= dim:
+                p = Shard(p.dim + 1)
+            placements.append(p)
+        shape = (*first.shape[:dim], len(tensors), *first.shape[dim:])
+        return DTensor.from_local(
+            local,
+            first.device_mesh,
+            placements,
+            run_check=False,
+            shape=torch.Size(shape),
+            stride=torch.empty(shape, device="meta").stride(),
+        )
+    if len(tensors) == 1:
+        return first.unsqueeze(dim)
+    step = tensors[1].storage_offset() - first.storage_offset()
+    storage = first.untyped_storage().data_ptr()
+    is_view = step > 0 and all(
+        t.untyped_storage().data_ptr() == storage
+        and t.dtype == first.dtype
+        and t.shape == first.shape
+        and t.stride() == first.stride()
+        and t.storage_offset() == first.storage_offset() + i * step
+        for i, t in enumerate(tensors)
+    )
+    if not is_view:
+        return torch.stack(tensors, dim=dim)
+    return first.as_strided(
+        (*first.shape[:dim], len(tensors), *first.shape[dim:]),
+        (*first.stride()[:dim], step, *first.stride()[dim:]),
+        first.storage_offset(),
+    )
 
 
 def dtensor_safe(fn):
@@ -217,7 +276,7 @@ class StateDictAdapter(BaseStateDictAdapter):
         """Stack logical projection parameters into one native parameter."""
         if not all(key in state_dict for key in logical_keys):
             return
-        state_dict[fused_key] = torch.stack(
+        state_dict[fused_key] = stack_or_view(
             [state_dict.pop(key) for key in logical_keys], dim=dim
         )
 
