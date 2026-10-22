@@ -20,9 +20,9 @@ from typing import Any, cast
 import spmd_types as spmd
 
 import torch
+import torch.cuda._pin_memory_utils as pin_memory_utils
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import FSDPModule
-from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torch.distributed.tensor import DTensor, Replicate
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -267,6 +267,52 @@ def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:
             yield sharded_data
 
 
+def _create_pinned_cpu_state_dict(
+    state_dict: Mapping[str, Any],
+) -> tuple[dict[str, Any], torch.Tensor]:
+    """Pinned CPU tensors shaped like ``state_dict``'s local tensors, as views of one
+    allocation; returns the buffers and that allocation (keep it alive with them).
+
+    Pinning each tensor separately (``_create_cpu_state_dict(pin_memory=True)``) goes
+    through CUDA's caching host allocator, which rounds every block up to a power of
+    two: a 2.3 GiB expert shard took 4 GiB, 1.74x what Kimi K3's generator buffers
+    need, ~240 GiB more per 4-GPU node than the weights. Registering one allocation
+    with ``cudaHostRegister`` pins exactly the bytes needed. DTensors keep their mesh
+    and placements around a CPU local tensor, as ``_create_cpu_state_dict`` builds them.
+    """
+    alignment = 64
+    offsets: dict[str, int] = {}
+    total = 0
+    for key, value in state_dict.items():
+        if isinstance(value, torch.Tensor):
+            local = value._local_tensor if isinstance(value, DTensor) else value
+            offsets[key] = total
+            nbytes = local.numel() * local.element_size()
+            total += (nbytes + alignment - 1) // alignment * alignment
+    slab = torch.empty(total, dtype=torch.uint8, device="cpu")
+    if total:
+        pin_memory_utils.pin_memory(slab.data_ptr(), total)
+    buffers: dict[str, Any] = {}
+    for key, value in state_dict.items():
+        if key not in offsets:
+            buffers[key] = copy.deepcopy(value)
+            continue
+        local = value._local_tensor if isinstance(value, DTensor) else value
+        nbytes = local.numel() * local.element_size()
+        cpu_local = (
+            slab[offsets[key] : offsets[key] + nbytes]
+            .view(local.dtype)
+            .view(local.shape)
+        )
+        if isinstance(value, DTensor):
+            buffer = cast(DTensor, value.to(device="cpu"))
+            buffer._local_tensor = cpu_local
+            buffers[key] = buffer
+        else:
+            buffers[key] = cpu_local
+    return buffers, slab
+
+
 def _restore_sharded_params(module: FSDPModule) -> None:
     """Re-allocate the sharded buffers of `module`'s FSDP group so new weights can be copied in.
 
@@ -420,10 +466,10 @@ class VLLMModelWrapper(Module):
         # is still sharded. Bind first so first-touch places them on the
         # NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
-        with torch.device("cpu"):
-            self._prefetched_model_state_dict = _create_cpu_state_dict(
-                self.model.state_dict(), pin_memory=True
-            )
+        (
+            self._prefetched_model_state_dict,
+            self._prefetched_model_state_dict_storage,
+        ) = _create_pinned_cpu_state_dict(self.model.state_dict())
 
         # Unshard the model here so vLLM performs its GPU memory profiling
         # based on the model's actual representation used during forward
