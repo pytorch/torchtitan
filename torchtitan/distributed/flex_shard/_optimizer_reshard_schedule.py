@@ -11,7 +11,6 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import math
-import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -62,10 +61,6 @@ def _bind_bucket_configs(
         if not matched_items:
             continue
         if not redistributed_items:
-            warnings.warn(
-                f"Bucket {config.name!r} has no parameters requiring redistribution",
-                stacklevel=2,
-            )
             specs.append(config._bind(None))
             continue
 
@@ -82,16 +77,17 @@ def _bind_bucket_configs(
             mesh_axis_name = mesh_axis_names[storage_mesh_axis]
             transport_groups.append((mesh_axis_name, storage_mesh[mesh_axis_name]))
 
-        mesh_axis_name, mesh = transport_groups[0]
+        mesh_axis_name, storage_axis_mesh = transport_groups[0]
         if any(
             candidate_axis_name != mesh_axis_name
-            or not torch.equal(candidate_mesh.mesh, mesh.mesh)
+            or not torch.equal(candidate_mesh.mesh, storage_axis_mesh.mesh)
             for candidate_axis_name, candidate_mesh in transport_groups[1:]
         ):
             raise NotImplementedError(
                 f"bucket {config.name!r} requires heterogeneous transport groups; "
                 "split its BucketConfig patterns"
             )
+        selected_axis_mesh = storage_axis_mesh
         if config.mesh is not None:
             configured_axis_names = config.mesh.mesh_dim_names
             if (
@@ -102,14 +98,14 @@ def _bind_bucket_configs(
                     f"bucket {config.name!r} mesh is missing redistribution axis "
                     f"{mesh_axis_name!r}"
                 )
-            configured_mesh = config.mesh[mesh_axis_name]
-            if not torch.equal(configured_mesh.mesh, mesh.mesh):
+            configured_axis_mesh = config.mesh[mesh_axis_name]
+            if not torch.equal(configured_axis_mesh.mesh, storage_axis_mesh.mesh):
                 raise ValueError(
                     f"bucket {config.name!r} mesh axis {mesh_axis_name!r} does "
                     "not match the parameter storage mesh layout"
                 )
-            mesh = configured_mesh
-        specs.append(config._bind(mesh))
+            selected_axis_mesh = configured_axis_mesh
+        specs.append(config._bind(selected_axis_mesh))
     return tuple(specs)
 
 

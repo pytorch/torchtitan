@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast, Literal, overload
 
 import torch
@@ -20,6 +21,7 @@ from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.flex_shard import (
     BucketConfig,
     ComputeLayout,
@@ -53,6 +55,15 @@ class BaseOptimizer(Optimizer, Configurable):
     class Config(Configurable.Config):
         pattern: str
         """Regex matched against parameter fully qualified names."""
+
+        def build_optimizer(
+            self,
+            *,
+            params: Iterable[dict[str, Any]] | Iterable[Tensor],
+            parallelism_context: ParallelismContext | None,
+        ) -> Optimizer:
+            """Build with the runtime context required by this optimizer."""
+            return self.build(params=params)
 
 
 def _validate_moment_dtype(
@@ -184,7 +195,16 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
 
 
 class DistMuon(FlexShardDistMuon, BaseOptimizer):
-    """Configurable TorchTitan wrapper around FlexShard's ``DistMuon``."""
+    """Configurable TorchTitan wrapper around FlexShard's ``DistMuon``.
+
+    Note:
+        The CTA cap is disabled by default because it is a workload-dependent
+        memory/performance tradeoff. Enabling it builds explicit redistribution
+        meshes backed by resource-independent NCCL child communicators and
+        passes them through ``BucketConfig``. Each communicator adds fixed
+        memory and may reduce throughput; the cap benefits workloads only when
+        the reduction in all-peer connection state outweighs that overhead.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseOptimizer.Config):
@@ -202,16 +222,69 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         ] | None = None
         redistribution_max_ctas: int = -1  # Cap NCCL CTAs to save memory; <0 disables.
 
+        def build_optimizer(
+            self,
+            *,
+            params: Iterable[dict[str, Any]] | Iterable[Tensor],
+            parallelism_context: ParallelismContext | None,
+        ) -> Optimizer:
+            """Build DistMuon with access to runtime device meshes."""
+            if parallelism_context is None:
+                raise ValueError("DistMuon requires a ParallelismContext")
+            return self.build(
+                params=params,
+                parallelism_context=parallelism_context,
+            )
+
     def __init__(
         self,
         config: Config,
         *,
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
+        parallelism_context: ParallelismContext,
     ) -> None:
+        param_groups = tuple(cast(Iterable[dict[str, Any]], params))
+        bucket_configs = config.bucket_configs
+        if config.redistribution_max_ctas > 0:
+            if len(param_groups) != 1:
+                raise ValueError("DistMuon requires exactly one parameter group")
+            param_group = param_groups[0]
+            group_names = param_group.get("param_names")
+            if group_names is None:
+                raise ValueError("DistMuon requires param_names")
+            named_parameters = tuple(
+                zip(group_names, param_group["params"], strict=True)
+            )
+
+            resolved_bucket_configs = []
+            for bucket_config in bucket_configs:
+                matched_parameter = next(
+                    (
+                        parameter
+                        for fqn, parameter in named_parameters
+                        if any(
+                            fnmatch.fnmatchcase(fqn, pattern)
+                            for pattern in bucket_config.patterns
+                        )
+                    ),
+                    None,
+                )
+                if matched_parameter is None:
+                    resolved_bucket_configs.append(bucket_config)
+                    continue
+                redistribution_mesh = parallelism_context.get_redistribution_mesh(
+                    cast(Any, matched_parameter).device_mesh,
+                    max_ctas=config.redistribution_max_ctas,
+                )
+                resolved_bucket_configs.append(
+                    replace(bucket_config, mesh=redistribution_mesh)
+                )
+            bucket_configs = resolved_bucket_configs
+
         super().__init__(
-            cast(Iterable[dict[str, Any]], params),
+            param_groups,
             compute_sharding_by_fqn=config.compute_sharding_by_fqn,
-            bucket_configs=config.bucket_configs,
+            bucket_configs=bucket_configs,
             lr=config.lr,
             weight_decay=config.weight_decay,
             momentum=config.momentum,
@@ -220,7 +293,6 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             eps=config.eps,
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
-            redistribution_max_ctas=config.redistribution_max_ctas,
         )
 
 
@@ -242,6 +314,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
     Args:
         config (Config): Ordered optimizer configurations.
         model_parts (List[nn.Module]): List of model parts to be optimized.
+        parallelism_context: Runtime device meshes and process groups.
         enable_cuda_graph: Prepare every optimizer for CUDA graph capture.
     """
 
@@ -287,6 +360,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         config: Config,
         *,
         model_parts: list[nn.Module],
+        parallelism_context: ParallelismContext | None = None,
         enable_cuda_graph: bool = False,
     ) -> None:
         all_params: list[nn.Parameter] = []
@@ -301,7 +375,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                     optimizer_config,
                     claimed,
                 )
-                optimizer = optimizer_config.build(params=[param_group])
+                optimizer = optimizer_config.build_optimizer(
+                    params=[param_group],
+                    parallelism_context=parallelism_context,
+                )
                 if enable_cuda_graph:
                     if any(
                         "capturable" not in group for group in optimizer.param_groups

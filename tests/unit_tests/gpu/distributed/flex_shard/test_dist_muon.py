@@ -36,9 +36,9 @@ from torchtitan.distributed.flex_shard import (
 )
 from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
-    _get_capped_redistribution_mesh,
     DistMuon,
 )
+from torchtitan.distributed.parallelism_context import ParallelismContext
 
 
 pytestmark = pytest.mark.multi_gpu
@@ -58,28 +58,43 @@ class TestDistMuon(DTensorTestBase):
     def test_isolated_redistribution_process_group(self):
         mesh = init_device_mesh(
             self.device_type,
-            (self.world_size,),
-            mesh_dim_names=("dp_shard",),
+            (1, self.world_size),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
         )
-        parent_group = mesh.get_group()
-        redistribution_mesh = _get_capped_redistribution_mesh(
+        parent_group = mesh.get_group("dp_shard")
+        replicate_group = mesh.get_group("dp_replicate")
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=self.world_size,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+        redistribution_mesh = parallelism_context.get_redistribution_mesh(
             mesh,
             max_ctas=8,
         )
-        redistribution_group = redistribution_mesh.get_group()
+        redistribution_group = redistribution_mesh.get_group("dp_shard")
         redistribution_backend = redistribution_group._get_backend(
             torch.device(self.device_type, self.rank)
         )
-        assert isinstance(
-            redistribution_backend,
-            torch.distributed.ProcessGroupNCCL,
+        self.assertEqual(
+            torch.distributed.get_backend(redistribution_group),
+            torch.distributed.Backend.NCCL,
         )
         self.assertEqual(redistribution_backend.options.config.max_ctas, 8)
 
         self.assertIsNot(redistribution_group, parent_group)
         self.assertIs(
-            _get_capped_redistribution_mesh(mesh, max_ctas=8).get_group(),
-            redistribution_group,
+            redistribution_mesh.get_group("dp_replicate"),
+            replicate_group,
+        )
+        self.assertIs(
+            parallelism_context.get_redistribution_mesh(mesh, max_ctas=8),
+            redistribution_mesh,
         )
         self.assertEqual(
             torch.distributed.get_process_group_ranks(redistribution_group),
