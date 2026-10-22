@@ -10,17 +10,13 @@ from __future__ import annotations
 
 import heapq
 import math
-import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, cast, Literal, NoReturn, overload
-from weakref import WeakKeyDictionary
 
 import torch
-import torch.distributed as dist
 from torch import Tensor
-from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
@@ -59,69 +55,6 @@ from .optimizer_reshard import (
 __all__ = [
     "DistMuon",
 ]
-
-
-# Reuse child communicators across buckets and DistMuon instances that share a
-# parent group and CTA cap; duplicates would undermine the memory savings. Weak
-# keys avoid extending the parent process group's lifetime.
-_redistribution_process_groups: WeakKeyDictionary[
-    dist.ProcessGroup, dict[int, dist.ProcessGroup | None]
-] = WeakKeyDictionary()
-
-
-def _get_capped_redistribution_mesh(
-    mesh: DeviceMesh,
-    *,
-    max_ctas: int,
-) -> DeviceMesh:
-    """Return a mesh backed by a cached, CTA-capped child communicator."""
-    assert mesh.ndim == 1
-    mesh_axis_names = mesh.mesh_dim_names
-    assert mesh_axis_names is not None and len(mesh_axis_names) == 1
-    parent_group = mesh.get_group()
-    child_groups = _redistribution_process_groups.setdefault(parent_group, {})
-    # DistMuon instances reuse a child group when their parent and max_ctas match.
-    if max_ctas in child_groups:
-        child_group = child_groups[max_ctas]
-        if child_group is None:
-            return mesh
-    else:
-        backend = dist.get_backend(parent_group)
-        if backend == "fake":
-            warnings.warn(
-                "DistMuon redistribution_max_ctas is not modeled by the fake "
-                "process group; using the storage-mesh process group",
-                stacklevel=2,
-            )
-            child_groups[max_ctas] = None
-            return mesh
-        if backend != dist.Backend.NCCL:
-            raise ValueError(
-                "DistMuon redistribution_max_ctas requires an NCCL process group, "
-                f"got {backend!r}"
-            )
-
-        options = dist.ProcessGroupNCCL.Options()
-        options.config.max_ctas = max_ctas
-        # Keep redistribution channels independent from the storage parent.
-        options.config.split_share = 0  # pyrefly: ignore [missing-attribute]
-        num_ranks = dist.get_world_size(parent_group)
-        child_group = dist.split_group(
-            parent_pg=parent_group,
-            split_ranks=[list(range(num_ranks))],
-            pg_options=options,
-            group_desc=f"dist_muon_redistribution_{mesh_axis_names[0]}",
-            backend="nccl",
-        )
-        assert isinstance(child_group, dist.ProcessGroup)
-        child_groups[max_ctas] = child_group
-
-    return DeviceMesh.from_group(
-        child_group,
-        mesh.device_type,
-        mesh=mesh.mesh,
-        mesh_dim_names=mesh_axis_names,
-    )
 
 
 def _normalize_param_groups(
@@ -166,7 +99,6 @@ def _initialize_dist_muon(
     *,
     compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
-    redistribution_max_ctas: int,
 ) -> None:
     """Initialize FlexShard for one newly constructed DistMuon.
 
@@ -192,7 +124,7 @@ def _initialize_dist_muon(
     compute_layouts = optimizer._build_parameter_compute_layouts(
         compute_sharding_by_fqn
     )
-    bucket_specs = _bind_bucket_configs(
+    optimizer._specs = _bind_bucket_configs(
         tuple(bucket_configs),
         compute_layouts,
         get_fqn=lambda layout: layout.fqn,
@@ -202,20 +134,6 @@ def _initialize_dist_muon(
             layout.redistribution_storage_mesh_axis
         ),
     )
-    if redistribution_max_ctas > 0:
-        bucket_specs = tuple(
-            replace(
-                spec,
-                mesh=_get_capped_redistribution_mesh(
-                    spec.mesh,
-                    max_ctas=redistribution_max_ctas,
-                ),
-            )
-            if spec.mesh is not None
-            else spec
-            for spec in bucket_specs
-        )
-    optimizer._specs = bucket_specs
     optimizer._initialize_plan(compute_layouts)
     optimizer._validate_plan_across_ranks()
     optimizer._redistribution_runtime = _BucketedRedistributionRuntime[
@@ -248,14 +166,6 @@ class DistMuon(Optimizer):
     back.
     Momentum, parameters, gradients and redistribution buffers stay where they
     are, so this only changes anything when the parameters live on the host.
-    A positive ``redistribution_max_ctas`` runs redistribution
-    on cached, isolated NCCL child process groups with the requested CTA cap.
-
-    Note:
-        The CTA cap is disabled by default because it is a workload-dependent
-        memory/performance tradeoff. Its child NCCL communicator adds fixed
-        memory and may reduce throughput; it benefits workloads only when the
-        reduction in all-peer connection state outweighs that overhead.
     """
 
     _specs: tuple[_BucketSpec, ...]
@@ -279,7 +189,6 @@ class DistMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
         ns_device: Literal["accelerator"] | None = None,
-        redistribution_max_ctas: int = -1,
     ) -> None:
         self._ns_device = self._resolve_ns_device(ns_device)
         defaults = {
@@ -301,7 +210,6 @@ class DistMuon(Optimizer):
             self,
             compute_sharding_by_fqn=compute_sharding_by_fqn,
             bucket_configs=bucket_configs,
-            redistribution_max_ctas=redistribution_max_ctas,
         )
 
     @staticmethod
