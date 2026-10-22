@@ -8,6 +8,7 @@
 
 import asyncio
 import dataclasses
+import socket
 
 import numpy as np
 import pytest
@@ -78,7 +79,7 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
     batcher = Batcher.Config().build(**_BATCHER_KWARGS)
     expected = [batcher.add_group(rollout_group=group) for group in groups]
 
-    async def run() -> tuple[list, list, list]:
+    async def run() -> tuple[list, list, list, str]:
         mesh = this_host().spawn_procs(per_host={"cpus": 1})
         try:
             spawn_kwargs = dict(
@@ -116,11 +117,21 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
             no_advantage.rollouts[0].advantage = None
             with pytest.raises(ActorError, match="has no advantage"):
                 await actor.add_group.call_one(rollout_group=no_advantage)
-            return results, by_value_results, microbatch_groups_b
+            hostname = await actor.get_hostname.call_one()
+            return results, by_value_results, microbatch_groups_b, hostname
         finally:
             await mesh.stop()
 
-    results, by_value_results, microbatch_groups_b = asyncio.run(run())
+    results, by_value_results, microbatch_groups_b, hostname = asyncio.run(run())
+
+    assert hostname == socket.gethostname()
+    # The batcher reports its own memory: the controller's host scan misses it on another host.
+    [rss_anon] = [
+        metric
+        for metric in results[4][0].metrics
+        if metric.key == "perf/batcher/rss_anon_gib"
+    ]
+    assert rss_anon.value.value > 0
 
     assert [(batch is None, trainable) for batch, trainable in results] == [
         (True, True),

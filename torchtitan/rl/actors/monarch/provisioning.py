@@ -295,12 +295,35 @@ def spawn_proc_mesh(
     return trainer_mesh, generator_meshes
 
 
-def spawn_cpu_procs(num_procs: int, *, role: str) -> ProcMesh:
-    """Spawn ``num_procs`` CPU procs on the controller host, tagged ``role`` for host memory metrics."""
-    return this_host().spawn_procs(
+def spawn_cpu_procs(
+    num_procs: int, *, role: str, host_mesh: HostMesh | None = None
+) -> ProcMesh:
+    """Spawn ``num_procs`` CPU procs on ``host_mesh`` (None: the controller host), tagged ``role``
+    for host memory metrics."""
+    return (this_host() if host_mesh is None else host_mesh).spawn_procs(
         per_host={"cpus": num_procs},
         bootstrap_command=default_bootstrap_cmd().with_env({RL_ROLE_ENV: role}),
     )
+
+
+def batcher_host_mesh(host_meshes: HostMeshes | None) -> HostMesh:
+    """The host for the batcher's proc: the last trainer host, so the packed batches it holds stay
+    off the controller's host, which also runs the rollout workers.
+
+        host_meshes None (one node)    this_host()    logs a warning
+        trainer hosts [h0]             this_host()    logs a warning
+        trainer hosts [h0, h1, h2]     h2
+
+    The controller runs on trainer host 0 (a Slurm job's first node); `MonarchActorSystem.spawn_batcher`
+    raises if the batcher's host is the controller's anyway.
+    """
+    if host_meshes is None or len(host_meshes.trainer) == 1:
+        logger.warning(
+            "One trainer host: the batcher runs on the controller's host and holds its packed "
+            "batches there"
+        )
+        return this_host()
+    return host_meshes.trainer.slice(hosts=len(host_meshes.trainer) - 1)
 
 
 def shutdown() -> None:

@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import dataclasses
+import socket
+from pathlib import Path
 
 from monarch.actor import Actor, endpoint
 
@@ -73,14 +75,16 @@ class _BatcherActorEndpoints:
         stateful batcher in arrival order. `async` because Monarch rejects mixing sync and async endpoints."""
         batch, has_samples = super().add_group(rollout_group=rollout_group)
         if batch is not None:
-            # This process's GC time and event-loop lag since the previous batch, logged with
-            # the step it trains.
+            # This process's GC time and event-loop lag since the previous batch, and its memory
+            # (mostly the batches it holds), logged with the step it trains. The controller's
+            # `host_memory/*` scan sees only its own host, and the batcher may run on another.
             batch = dataclasses.replace(
                 batch,
                 metrics=[
                     *batch.metrics,
                     *self._gc_timer.flush(),
                     *self._loop_lag.flush(),
+                    m.Metric("perf/batcher/rss_anon_gib", m.NoReduce(_rss_anon_gib())),
                 ],
             )
         return batch, has_samples
@@ -88,6 +92,10 @@ class _BatcherActorEndpoints:
     @endpoint
     async def maybe_release_oldest_batch(self) -> None:
         await super().maybe_release_oldest_batch()
+
+    @endpoint
+    async def get_hostname(self) -> str:
+        return socket.gethostname()
 
     @endpoint
     async def sync_log_step(self, step: int) -> None:
@@ -114,3 +122,15 @@ class BatcherActor(Actor, _BatcherActorEndpoints, Batcher):
         await batcher.add_group.call_one(rollout_group=group1)  # -> (batch of MonarchRDMAMicrobatches, True)
         batcher.maybe_release_oldest_batch.broadcast()  # once every trainer rank has read group1's batch
     """
+
+
+def _rss_anon_gib() -> float:
+    """This process's anonymous memory, read as `compute_host_memory_metrics` reads each process's."""
+    rollup = Path("/proc/self/smaps_rollup").read_text()
+    # "Anonymous:   123456 kB"
+    rss_anon_kib = next(
+        int(line.split()[1])
+        for line in rollup.splitlines()
+        if line.startswith("Anonymous:")
+    )
+    return rss_anon_kib / 2**20

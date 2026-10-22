@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -411,6 +412,9 @@ class _FakeHostMesh:
         self.visible_devices.append(bootstrap_command["CUDA_VISIBLE_DEVICES"])
         self.roles.append(bootstrap_command[RL_ROLE_ENV])
 
+    def slice(self, *, hosts):
+        return f"host {hosts} of {self.num_hosts}"
+
 
 @pytest.fixture
 def bootstrap_cmd_returns_env(monkeypatch):
@@ -472,6 +476,32 @@ def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
     assert all(mesh.visible_devices == [] for mesh in meshes.values())
 
 
+def _host_meshes(num_trainer_hosts: int) -> provisioning.HostMeshes:
+    return provisioning.HostMeshes(
+        trainer=_FakeHostMesh(num_trainer_hosts),
+        generators=[_FakeHostMesh()],
+        gpus_per_node=4,
+    )
+
+
+def test_batcher_host_mesh_is_the_last_trainer_host():
+    """Trainer host 0 runs the controller, so the batcher goes to the last one."""
+    assert provisioning.batcher_host_mesh(_host_meshes(3)) == "host 2 of 3"
+
+
+@pytest.mark.parametrize(
+    "host_meshes", [None, _host_meshes(1)], ids=["one_node", "one_trainer_host"]
+)
+def test_batcher_host_mesh_warns_and_shares_the_controller_host(
+    monkeypatch, caplog, host_meshes
+):
+    """Without host meshes, or with one trainer host, no trainer host is free of the controller."""
+    monkeypatch.setattr(provisioning, "this_host", lambda: "controller host")
+
+    assert provisioning.batcher_host_mesh(host_meshes) == "controller host"
+    assert "the batcher runs on the controller's host" in caplog.text
+
+
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):
     """`provision` spawns the GPU meshes on the launcher's hosts, then the router's and
     the batcher's procs, then sets up torch elastic on each GPU mesh, before any actor
@@ -492,8 +522,15 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
     monkeypatch.setattr(monarch_system, "spawn_proc_mesh", spawn_proc_mesh)
     monkeypatch.setattr(
         monarch_system,
+        "batcher_host_mesh",
+        lambda host_meshes: f"the batcher's host in {host_meshes}",
+    )
+    monkeypatch.setattr(
+        monarch_system,
         "spawn_cpu_procs",
-        lambda num_procs, *, role: events.append(f"cpu procs {num_procs}")
+        lambda num_procs, *, role, host_mesh=None: events.append(
+            f"cpu procs {num_procs} for {role} on {host_mesh}"
+        )
         or "cpu_mesh",
     )
     monkeypatch.setattr(
@@ -513,8 +550,8 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
 
     assert events == [
         "gpu meshes 2+2x2 on host_meshes with {'KEY': 'value'}",
-        "cpu procs 1",
-        "cpu procs 1",
+        "cpu procs 1 for router on None",
+        "cpu procs 1 for batcher on the batcher's host in host_meshes",
         "torch elastic trainer_mesh",
         "torch elastic generator_mesh_0",
         "torch elastic generator_mesh_1",
@@ -585,6 +622,33 @@ def test_monarch_actor_system_spans_pipeline_stages_per_dp_rank():
 def test_monarch_actor_system_rejects_a_trainer_not_laid_out_as_dp_cp_tp():
     with pytest.raises(RuntimeError, match="DP rank 0 report DP ranks"):
         _spawn_trainer(_FakeTrainerRanks([0, 1, 0, 1]), dp_degree=2)
+
+
+@pytest.mark.parametrize(
+    "num_trainer_hosts, on_controller_host, raises",
+    [(2, True, True), (2, False, False), (1, True, False)],
+)
+def test_spawn_batcher_rejects_the_controller_host_with_two_trainer_hosts(
+    num_trainer_hosts, on_controller_host, raises
+):
+    """With one trainer host the batcher shares the controller's host on purpose; with more, never."""
+
+    async def get_hostname():
+        return socket.gethostname() if on_controller_host else "another-host"
+
+    batcher = SimpleNamespace(get_hostname=SimpleNamespace(call_one=get_hostname))
+    actor_system = MonarchActorSystem(
+        MonarchActorSystem.Config(), host_meshes=_host_meshes(num_trainer_hosts)
+    )
+    actor_system._batcher_mesh = SimpleNamespace(
+        spawn=lambda name, actor_cls, config, **kwargs: batcher
+    )
+
+    if raises:
+        with pytest.raises(RuntimeError, match="runs on the controller's host"):
+            asyncio.run(actor_system.spawn_batcher(SimpleNamespace()))
+    else:
+        assert asyncio.run(actor_system.spawn_batcher(SimpleNamespace())) is batcher
 
 
 def test_controller_defaults_to_the_monarch_actor_system():

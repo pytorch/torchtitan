@@ -351,7 +351,9 @@ def compute_host_memory_metrics() -> list[m.Metric]:
 
         controller                         this process
         trainer, generator                 Monarch procs and their children
-        batcher, router, rollout_worker    the controller host's CPU procs (`spawn_cpu_procs`)
+        batcher, router, rollout_worker    the controller host's CPU procs (`spawn_cpu_procs`); with 2+
+                                           trainer hosts the batcher runs on another host and reports
+                                           its own memory (`perf/batcher/rss_anon_gib`)
         env_server                         each Verifiers env server
         env_server_worker                  processes an env server spawns, and their children
         other                              the rest, e.g. Monarch host agents and the job's other

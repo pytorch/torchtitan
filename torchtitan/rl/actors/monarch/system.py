@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +22,7 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
 from torchtitan.rl.actors.monarch.generator import GeneratorActor
 from torchtitan.rl.actors.monarch.provisioning import (
+    batcher_host_mesh,
     compute_generator_world_size,
     compute_trainer_world_size,
     HostMeshes,
@@ -49,8 +51,8 @@ class MonarchActorSystem(ActorSystem):
     The trainer and each generator get their own GPU proc mesh: on this host,
     partitioned with ``CUDA_VISIBLE_DEVICES``, or on the ``host_meshes`` a
     launcher passes in. ``generator_env`` adds environment variables to the
-    generator procs. The router, the batcher and the rollout worker pool get CPU
-    procs on this host.
+    generator procs. The router and the rollout worker pool get CPU procs on this
+    host, and the batcher one on the last trainer host (``batcher_host_mesh``).
 
     Example:
         # A launcher that allocates its own hosts (e.g. from a Slurm job)
@@ -101,7 +103,9 @@ class MonarchActorSystem(ActorSystem):
         self._router_mesh = spawn_cpu_procs(1, role="router")
         # Same for the batcher: build + pack would contend for the controller's GIL.
         # It drops its own buffers (maybe_release_oldest_batch): Monarch's drop must run on the owner's host.
-        self._batcher_mesh = spawn_cpu_procs(1, role="batcher")
+        self._batcher_mesh = spawn_cpu_procs(
+            1, role="batcher", host_mesh=batcher_host_mesh(self._host_meshes)
+        )
 
         await setup_torch_elastic_env(self._trainer_mesh)
         for generator_mesh in self._generator_meshes:
@@ -171,7 +175,19 @@ class MonarchActorSystem(ActorSystem):
 
     async def spawn_batcher(self, config: Batcher.Config, **kwargs: Any) -> Any:
         assert self._batcher_mesh is not None, "provision before spawning"
-        return self._batcher_mesh.spawn("batcher", BatcherActor, config, **kwargs)
+        batcher = self._batcher_mesh.spawn("batcher", BatcherActor, config, **kwargs)
+        hostname = await batcher.get_hostname.call_one()
+        logger.info("The batcher runs on host %s", hostname)
+        num_trainer_hosts = (
+            1 if self._host_meshes is None else len(self._host_meshes.trainer)
+        )
+        if num_trainer_hosts > 1 and hostname == socket.gethostname():
+            raise RuntimeError(
+                f"The batcher runs on the controller's host {hostname}, the last of the trainer's "
+                f"{num_trainer_hosts} hosts; `batcher_host_mesh` expects the controller on "
+                "trainer host 0."
+            )
+        return batcher
 
     async def spawn_rollout_workers(
         self, config: RolloutWorker.Config, *, num_workers: int, num_threads: int
