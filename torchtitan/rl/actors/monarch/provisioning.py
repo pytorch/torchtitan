@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 """Monarch proc meshes for the RL roles: GPU meshes for the trainer and generators,
-CPU meshes on the controller host, and the Monarch client's shutdown."""
+CPU meshes on the controller host (the batcher's on the last trainer host), and the Monarch
+client's shutdown."""
 
 import logging
 from collections.abc import Callable
@@ -310,18 +311,14 @@ def batcher_host_mesh(host_meshes: HostMeshes | None) -> HostMesh:
     """The host for the batcher's proc: the last trainer host, so the packed batches it holds stay
     off the controller's host, which also runs the rollout workers.
 
-        host_meshes None (one node)    this_host()    logs a warning
-        trainer hosts [h0]             this_host()    logs a warning
+        host_meshes None (one node)    this_host()
+        trainer hosts [h0]             this_host()
         trainer hosts [h0, h1, h2]     h2
 
     The controller runs on trainer host 0 (a Slurm job's first node); `MonarchActorSystem.spawn_batcher`
     raises if the batcher's host is the controller's anyway.
     """
     if host_meshes is None or len(host_meshes.trainer) == 1:
-        logger.warning(
-            "One trainer host: the batcher runs on the controller's host and holds its packed "
-            "batches there"
-        )
         return this_host()
     return host_meshes.trainer.slice(hosts=len(host_meshes.trainer) - 1)
 

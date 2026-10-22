@@ -484,22 +484,21 @@ def _host_meshes(num_trainer_hosts: int) -> provisioning.HostMeshes:
     )
 
 
-def test_batcher_host_mesh_is_the_last_trainer_host():
-    """Trainer host 0 runs the controller, so the batcher goes to the last one."""
-    assert provisioning.batcher_host_mesh(_host_meshes(3)) == "host 2 of 3"
-
-
 @pytest.mark.parametrize(
-    "host_meshes", [None, _host_meshes(1)], ids=["one_node", "one_trainer_host"]
+    "host_meshes, expected",
+    [
+        (_host_meshes(3), "host 2 of 3"),
+        (_host_meshes(1), "controller host"),
+        (None, "controller host"),
+    ],
+    ids=["three_trainer_hosts", "one_trainer_host", "one_node"],
 )
-def test_batcher_host_mesh_warns_and_shares_the_controller_host(
-    monkeypatch, caplog, host_meshes
-):
-    """Without host meshes, or with one trainer host, no trainer host is free of the controller."""
+def test_batcher_host_mesh_is_the_last_trainer_host(monkeypatch, host_meshes, expected):
+    """Trainer host 0 runs the controller, so the batcher goes to the last one; with one trainer
+    host, or one node, it shares the controller's host."""
     monkeypatch.setattr(provisioning, "this_host", lambda: "controller host")
 
-    assert provisioning.batcher_host_mesh(host_meshes) == "controller host"
-    assert "the batcher runs on the controller's host" in caplog.text
+    assert provisioning.batcher_host_mesh(host_meshes) == expected
 
 
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):
