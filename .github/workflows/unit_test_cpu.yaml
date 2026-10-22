@@ -18,6 +18,35 @@ permissions:
   contents: read
 
 jobs:
+  torch-compat-rc:
+    name: PyTorch 2.15 RC compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install PyTorch RC and test dependencies
+        run: |
+          python -m pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/test/cpu
+          python -m pip install pytest==7.3.2 numpy
+
+      - name: Verify automatic backports and run compatibility tests
+        run: |
+          python - <<'PY'
+          import torch
+          import torchtitan
+          from torch.distributed.pipelining import _backward, stage
+          from torchtitan._torch_compat import apply_patches
+
+          assert torch.__version__.split("+")[0] == "2.15.0"
+          assert apply_patches() == (199884, 200238, 200199)
+          assert stage.stage_backward_input is _backward.stage_backward_input
+          PY
+          python -m pytest tests/unit_tests/cpu/test_torch_compat.py -v
+
   set-matrix:
     uses: ./.github/workflows/set-matrix.yaml
 

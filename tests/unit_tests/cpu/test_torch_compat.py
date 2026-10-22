@@ -177,7 +177,9 @@ def test_split_backward_view_output():
         )
 
 
-@pytest.mark.parametrize("mode", ["disabled", "other_version", "bad_source"])
+@pytest.mark.parametrize(
+    "mode", ["disabled", "other_version", "bad_source", "already_patched"]
+)
 def test_import_gates_and_atomicity(mode):
     script = r"""
 import os
@@ -200,16 +202,30 @@ if mode == "other_version":
 elif mode == "bad_source":
     del os.environ["TORCHTITAN_DISABLE_TORCH_COMPAT"]
     PATCHES[1]["functions"][0]["before_sha256"] = "unsupported"
-    try:
-        apply_patches()
-    except RuntimeError as exc:
-        assert "Unsupported torch" in str(exc)
-    else:
-        raise AssertionError("Unknown source was accepted")
+    # Require #200238 even when this torch wheel already contains the fix.
+    with patch.object(schedules.PipelineScheduleSingle, "step", lambda self: None):
+        try:
+            apply_patches()
+        except RuntimeError as exc:
+            assert "Unsupported torch" in str(exc)
+        else:
+            raise AssertionError("Unknown source was accepted")
+elif mode == "already_patched":
+    del os.environ["TORCHTITAN_DISABLE_TORCH_COMPAT"]
+    apply_patches()
+    original = schedules._PipelineSchedule.__init__
+    original_step = schedules.PipelineScheduleSingle.step
+    # Recheck the installed features instead of returning the cached result.
+    with patch("torchtitan._torch_compat._applied_patches", None):
+        assert apply_patches() == ()
+    assert schedules.PipelineScheduleSingle.step is original_step
 assert schedules._PipelineSchedule.__init__ is original
 """
-    if mode == "bad_source" and torch.__version__.split("+")[0] != "2.15.0":
-        pytest.skip("Source fingerprint check targets the validated 2.15 RC")
+    if (
+        mode in ("bad_source", "already_patched")
+        and torch.__version__.split("+")[0] != "2.15.0"
+    ):
+        pytest.skip("Backport application checks target the validated 2.15 RC")
     subprocess.run(
         [sys.executable, "-c", script, mode],
         check=True,
