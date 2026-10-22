@@ -304,6 +304,10 @@ class GenerationServer:
                 *self._gc_timer.flush(),
                 *self._loop_lag.flush(),  # set by `start`, before any request
             ]
+        else:
+            # Validation never trains, so its router-replay rows (one per token) would only fill
+            # the callers' memory until the pass ends.
+            completion.routed_expert_ids = None
         if response_format == TORCHTITAN_RESPONSE_FORMAT:
             return web.json_response(completion_to_response(completion))
         if completion.finish_reason not in ("stop", "length"):

@@ -190,6 +190,28 @@ def test_verifiers_response_returns_routed_experts_from_the_prompt_start() -> No
     np.testing.assert_array_equal(data.reshape(payload["shape"]), rows)
 
 
+def test_validation_replies_carry_no_routed_experts() -> None:
+    rows = np.zeros((4, 2, 2), dtype=np.uint8)
+
+    async def run() -> tuple[dict, dict, dict]:
+        async def generate(prompt_token_ids, **kwargs):
+            return _completion(kwargs["request_id"], routed_expert_ids=rows)
+
+        async with _Server(generate) as server:
+            _, training = await _post(server, _body(group_id=7))
+            _, validation = await _post(server, _body(group_id=-1))
+            _, native_validation = await _post(
+                server, _body(group_id=-1, response_format="torchtitan")
+            )
+        return training, validation, native_validation
+
+    training, validation, native_validation = asyncio.run(run())
+    assert "routed_experts" in training["choices"][0]
+    # Negative group ids are validation, which never trains: no rows in either format.
+    assert "routed_experts" not in validation["choices"][0]
+    assert response_to_completion(native_validation).routed_expert_ids is None
+
+
 def test_topk_logprobs_reach_both_response_formats() -> None:
     topk_token_ids = np.array([[31, 5], [32, 6], [33, 7]], dtype=np.int32)
     topk_logprobs = np.array([[-0.1, -2.0], [-0.2, -3.0], [-0.3, -1.5]], np.float32)
