@@ -189,9 +189,15 @@ class ComplexRoPE(RoPE):
     # each half with one store, instead of one masked kernel over both.
     # No pointwise autotuning: the rotation's kernel configs can round differently (likely FMA
     # contraction), so picking one by timing could change numerics from run to run.
+    # recompile_limit counts graphs per process; one more raises. DeepSeek-V4 calls this from
+    # 4 sites, one graph each, so its recipes compile 4. no_grad calls double that to 8. A
+    # second token count recompiles each graph with a dynamic size: up to 16. Unpacked batches
+    # and calls without positions take other paths through the compressor, and a token count
+    # that leaves one compressed entry adds a few more: up to 26 in one process. Hence 32.
     @local_compile(
         "rope",
         batch_invariant=True,
+        recompile_limit=32,
         options={
             "max_pointwise_cat_inputs": 0,
             "max_complex_pointwise_cat_inputs": 0,

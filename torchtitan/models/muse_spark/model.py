@@ -436,6 +436,7 @@ class MuseSparkModel(MultimodalModel):
         local_compile_regions: list[str] = field(
             default_factory=lambda: [
                 "loss",
+                "fused_binary_activation",
                 "fp32_to_bf16_split",
                 "rope",
                 "muse_spark_attention_output",
