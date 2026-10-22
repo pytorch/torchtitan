@@ -18,7 +18,7 @@ from torchtitan.distributed.accelerator_graph import (
     NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
     wrap_with_accelerator_graph,
 )
-from torchtitan.tools.utils import device_module
+from torchtitan.tools.utils import device_module, device_type
 
 from .ema import EMA
 from .lr_scheduler import LRSchedulersContainer
@@ -113,12 +113,14 @@ class Optim(Configurable):
         enable_cuda_graph = (
             config.enable_cuda_graph
             and accelerator_graphs_supported()
-            and all(parameter.device.type == "cuda" for parameter in self.parameters)
+            and all(
+                parameter.device.type == device_type for parameter in self.parameters
+            )
         )
         if config.enable_cuda_graph and not enable_cuda_graph:
             logger.warning(
-                "Optim CUDA graph is disabled because the runtime or model "
-                "parameter device does not support CUDA graphs."
+                "Optim graph capture is disabled because the runtime or model "
+                "parameter device does not support graph capture."
             )
         self.optimizers = config.optimizer.build(
             model_parts=model_parts,

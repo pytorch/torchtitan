@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from torchtitan.components.optim import GradientClipper, Optim
+from torchtitan.tools.utils import device_type
 
 
 @dataclass
@@ -83,7 +84,7 @@ def test_optim_config_rejects_negative_max_norm() -> None:
 def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
     model = MagicMock(spec=torch.nn.Module)
     parameter = MagicMock(spec=torch.nn.Parameter)
-    parameter.device = torch.device("cuda" if enable_cuda_graph else "cpu")
+    parameter.device = torch.device(device_type if enable_cuda_graph else "cpu")
     model.parameters.return_value = [parameter]
     optimizers = MagicMock()
     lr_schedulers = MagicMock()
@@ -186,7 +187,7 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
     gradient_clipper_config.build.assert_called_once_with()
     wrap.assert_not_called()
     assert optim._run_update == optim._update
-    assert "Optim CUDA graph is disabled" in caplog.text
+    assert "Optim graph capture is disabled" in caplog.text
 
 
 def test_optim_builds_configured_grad_clip() -> None:
