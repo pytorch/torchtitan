@@ -549,11 +549,12 @@ class VerifiersRolloutWorker(RolloutWorker):
         if trace.is_timeout or verifiers_episode.is_timeout:
             return RolloutStatus.ERROR_TIMEOUT
         if not verifiers_episode.ok or not trace.ok:
-            # Verifiers records a failure as data instead of raising; the first error stopped the
-            # rollout. Only a generator 4xx (e.g. a prompt past the context) or the agent's own
-            # exit after the policy's first turn is the policy's doing. Any other error (a sandbox,
-            # env or tool failure, a generator 5xx or failed connection, a harness that failed
-            # before the first turn) makes the rollout ERROR_SYSTEM.
+            # Verifiers records a failure as data instead of raising; the first error
+            # stopped the rollout.
+            #   generator 4xx (e.g. a prompt past the context)    -> ERROR, the policy's
+            #   HarnessError after the first turn (agent's exit)  -> ERROR, the policy's
+            #   HarnessError before the first turn                -> ERROR_SYSTEM
+            #   anything else (sandbox, env, tool, 5xx, untyped)  -> ERROR_SYSTEM
             errors = trace.errors or verifiers_episode.errors
             if not errors:
                 return RolloutStatus.ERROR
