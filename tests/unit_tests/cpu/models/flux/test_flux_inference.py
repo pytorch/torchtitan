@@ -98,9 +98,13 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
     assert not context_active
 
 
-# 256px -> 32x32 latents -> 256 packed tokens; 512px -> 1024 packed tokens.
-@pytest.mark.parametrize("img_size, packed_seq_len", [(256, 256), (512, 1024)])
-def test_denoise_shifts_schedule_by_packed_sequence_length(img_size, packed_seq_len):
+# 256px -> 32x32 latents -> 256 packed tokens; 512px -> 1024 packed tokens. The
+# expected values are the reference Flux schedule (mu = 0.5 at 256 tokens) for 4 steps.
+@pytest.mark.parametrize(
+    "img_size, expected",
+    [(256, [1.0, 0.8318, 0.6225, 0.3547]), (512, [1.0, 0.8492, 0.6525, 0.3849])],
+)
+def test_denoise_shifts_schedule_by_packed_sequence_length(img_size, expected):
     """The schedule shift uses the packed 2x2-patch sequence length, as in the
     reference Flux sampler, not the number of unpacked latent positions."""
     denoising_steps = 4
@@ -121,5 +125,6 @@ def test_denoise_shifts_schedule_by_packed_sequence_length(img_size, packed_seq_
         t5_encodings=torch.zeros(1, 1, 4096),
     )
 
-    expected = flux_sampling.get_schedule(denoising_steps, packed_seq_len)[:-1]
-    torch.testing.assert_close(torch.tensor(seen_timesteps), torch.tensor(expected))
+    torch.testing.assert_close(
+        torch.tensor(seen_timesteps), torch.tensor(expected), atol=1e-4, rtol=0
+    )
