@@ -164,6 +164,22 @@ class TestTorchFTNonFiniteStep(unittest.TestCase):
         optim._update(torch.tensor(1.0))
         manager.report_error.assert_not_called()
 
+    def test_finite_step_uses_configured_grad_clip(self):
+        optim, manager = self._optim()
+        gradient_clipper = Mock()
+        gradient_clipper.clip_grad_norm_.return_value = torch.tensor(2.0)
+        optim.gradient_clipper = gradient_clipper
+
+        grad_norm = optim._update(torch.tensor(1.0))
+
+        gradient_clipper.clip_grad_norm_.assert_called_once_with(
+            optim.parameters,
+            optim.config.max_norm,
+            parallelism_context=optim.parallelism_context,
+        )
+        torch.testing.assert_close(grad_norm, torch.tensor(2.0))
+        manager.report_error.assert_not_called()
+
     def test_persistent_non_finite_step_raises(self):
         optim, manager = self._optim()
         limit = optim.MAX_CONSECUTIVE_NON_FINITE_STEPS

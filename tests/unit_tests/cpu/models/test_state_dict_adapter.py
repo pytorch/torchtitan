@@ -4,13 +4,26 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import tempfile
 import unittest
 
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint import (
+    HuggingFaceStorageReader,
+    HuggingFaceStorageWriter,
+)
+from torch.distributed.checkpoint._consolidate_hf_safetensors import (
+    consolidate_safetensors_files_on_every_rank,
+)
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.components.checkpointer.base import ModelWrapper
 
@@ -27,6 +40,9 @@ from torchtitan.models.flux import MODEL_FLAVORS as FLUX_MODEL_FLAVORS
 from torchtitan.models.flux.state_dict_adapter import FluxStateDictAdapter
 from torchtitan.models.gpt_oss import MODEL_FLAVORS as GPT_OSS_MODEL_FLAVORS
 from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
+from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
+from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
@@ -136,6 +152,47 @@ class HuggingFaceStorageReaderTest(unittest.TestCase):
                     thread_count=3,
                 )
                 self.assertEqual(reader.thread_count, 3)
+
+
+def _small_kimi_k3_config() -> KimiK3Model.Config:
+    dim = 64
+    return _kimi_k3_config(
+        max_context_length=128,
+        parallelism=ParallelismConfig(),
+        dim=dim,
+        vocab_size=32,
+        num_layers=2,
+        full_attention_layers={1},
+        attn_res_block_size=1,
+        num_heads=2,
+        q_lora_rank=32,
+        kv_lora_rank=32,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=16,
+        v_head_dim=16,
+        kda_head_dim=128,
+        conv_kernel_size=3,
+        dense_hidden_dim=128,
+        latent_dim=32,
+        expert_hidden_dim=32,
+        num_experts=2,
+        top_k=1,
+        num_shared_experts=1,
+        vision_encoder=_vision_encoder_config(
+            text_dim=dim,
+            dim=48,
+            qkv_dim=48,
+            hidden_dim=96,
+            num_layers=1,
+            num_heads=3,
+            patch_size=2,
+            merge_kernel_size=(2, 2),
+            init_pos_emb_height=2,
+            init_pos_emb_width=2,
+            max_num_frames=1,
+        ),
+        attn_backend="flex",
+    )
 
 
 class NativeFusedLinearStateDictAdapterTest(unittest.TestCase):
@@ -276,6 +333,104 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
             dist.destroy_process_group()
         cls._temporary_directory.cleanup()
 
+    def test_released_index_drops_unsaved_entries(self) -> None:
+        build_config, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
+        for num_mtp_layers in (0, 1):
+            config = build_config(
+                attn_backend="flex",
+                seq_len=max_context_length,
+                num_mtp_layers=num_mtp_layers,
+                parallelism=ParallelismConfig(),
+            )
+            mtp_layer = f"model.layers.{len(config.layers)}"
+            weight_map = {
+                "model.layers.0.self_attn.q_a_proj.weight": "model-00001-of-00002.safetensors",
+                "model.layers.0.self_attn.q_a_proj.weight_scale_inv": (
+                    "model-00001-of-00002.safetensors"
+                ),
+                f"{mtp_layer}.eh_proj.weight": "model-00002-of-00002.safetensors",
+                "model.norm.weight": "model-00002-of-00002.safetensors",
+            }
+            with tempfile.TemporaryDirectory() as hf_assets_path:
+                with open(f"{hf_assets_path}/model.safetensors.index.json", "w") as f:
+                    json.dump({"weight_map": weight_map}, f)
+                adapter = DeepSeekV3StateDictAdapter(
+                    config, hf_assets_path=hf_assets_path
+                )
+
+            expected = {
+                "model.layers.0.self_attn.q_a_proj.weight": 1,
+                "model.norm.weight": 2,
+            }
+            if num_mtp_layers:
+                expected[f"{mtp_layer}.eh_proj.weight"] = 2
+            with self.subTest(num_mtp_layers=num_mtp_layers):
+                self.assertEqual(adapter.fqn_to_index_mapping, expected)
+
+    def test_mtp_layers_save_independent_embedding_and_head_copies(self) -> None:
+        build_config, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
+        for num_mtp_layers in (1, 2):
+            with self.subTest(num_mtp_layers=num_mtp_layers):
+                config = build_config(
+                    attn_backend="flex",
+                    seq_len=max_context_length,
+                    num_mtp_layers=num_mtp_layers,
+                    parallelism=ParallelismConfig(),
+                )
+                model = config.build()
+                model.init_states()
+                state_dict = model.state_dict()
+                adapter = DeepSeekV3StateDictAdapter(config, hf_assets_path=None)
+
+                hf_state_dict = adapter.to_hf(state_dict)
+                copy_sources = {
+                    f"model.layers.{len(config.layers) + mtp_layer}.{suffix}": tt_key
+                    for mtp_layer in range(num_mtp_layers)
+                    for suffix, tt_key in (
+                        ("embed_tokens.weight", "tok_embeddings.weight"),
+                        ("shared_head.head.weight", "lm_head.weight"),
+                    )
+                }
+                # Exercise serialization of the shared tensors independently of
+                # unrelated expert-weight layout conversions.
+                exported = {
+                    key: hf_state_dict[key]
+                    for key in (
+                        "model.embed_tokens.weight",
+                        "lm_head.weight",
+                        *copy_sources,
+                    )
+                }
+                with tempfile.TemporaryDirectory() as checkpoint_dir:
+                    dcp.save(
+                        exported,
+                        storage_writer=HuggingFaceStorageWriter(
+                            path=checkpoint_dir,
+                            save_distributed=True,
+                            enable_consolidation=True,
+                        ),
+                    )
+                    restored = {
+                        key: torch.empty_like(value) for key, value in exported.items()
+                    }
+                    dcp.load(
+                        restored,
+                        storage_reader=HuggingFaceStorageReader(checkpoint_dir),
+                    )
+                for key, value in exported.items():
+                    torch.testing.assert_close(restored[key], value, rtol=0, atol=0)
+                for hf_key, tt_key in copy_sources.items():
+                    self.assertNotEqual(
+                        hf_state_dict[hf_key].untyped_storage().data_ptr(),
+                        state_dict[tt_key].untyped_storage().data_ptr(),
+                    )
+                    torch.testing.assert_close(
+                        hf_state_dict[hf_key], state_dict[tt_key], rtol=0, atol=0
+                    )
+                self.assertEqual(
+                    adapter.from_hf(hf_state_dict).keys(), state_dict.keys()
+                )
+
     def test_to_hf_handles_replicated_grouped_experts(self) -> None:
         build_config, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
         config = build_config(
@@ -341,6 +496,257 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
                 self.assertIsInstance(restored[key], DTensor)
                 self.assertEqual(restored[key].placements, weight.placements)
                 torch.testing.assert_close(restored[key], weight, rtol=0, atol=0)
+
+
+class KimiK3StateDictAdapterTest(unittest.TestCase):
+    def test_a_log_padding_is_only_for_quantized_layout(self) -> None:
+        a_log = torch.tensor([1.0, 2.0])
+        state_dict = {"layers.0.attention.A_log": a_log}
+        for quantized_layout in (False, True):
+            with self.subTest(quantized_layout=quantized_layout):
+                adapter = KimiK3StateDictAdapter(
+                    _small_kimi_k3_config(), hf_assets_path=None
+                )
+                hf_state_dict = adapter.to_hf(
+                    state_dict, to_quantized_layout=quantized_layout
+                )
+                expected = (
+                    torch.cat((a_log, torch.zeros(126))) if quantized_layout else a_log
+                )
+                torch.testing.assert_close(
+                    hf_state_dict["language_model.model.layers.0.self_attn.A_log"],
+                    expected,
+                    rtol=0,
+                    atol=0,
+                )
+                restored = adapter.from_hf(
+                    hf_state_dict, is_quantized_layout=quantized_layout
+                )
+                torch.testing.assert_close(
+                    restored["layers.0.attention.A_log"], a_log, rtol=0, atol=0
+                )
+
+    def test_first_pipeline_stage_synthesizes_unused_residual_weights(self) -> None:
+        adapter = KimiK3StateDictAdapter(_small_kimi_k3_config(), hf_assets_path=None)
+        state_dict = {
+            "layers.0.ffn_res_norm.weight": torch.arange(64, dtype=torch.bfloat16),
+            "layers.0.ffn_res_proj.weight": torch.arange(
+                64, dtype=torch.bfloat16
+            ).reshape(1, 64),
+        }
+
+        hf_state_dict = adapter.to_hf(state_dict)
+
+        prefix = "language_model.model.layers.0"
+        torch.testing.assert_close(
+            hf_state_dict[f"{prefix}.self_attention_res_norm.weight"],
+            torch.ones(64, dtype=torch.bfloat16),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            hf_state_dict[f"{prefix}.self_attention_res_proj.weight"],
+            torch.zeros(1, 64, dtype=torch.bfloat16),
+            rtol=0,
+            atol=0,
+        )
+        restored_state_dict = adapter.from_hf(hf_state_dict)
+        self.assertEqual(restored_state_dict.keys(), state_dict.keys())
+        for key, value in state_dict.items():
+            torch.testing.assert_close(restored_state_dict[key], value, rtol=0, atol=0)
+
+    def test_later_pipeline_stage_omits_layer_zero_residual_weights(self) -> None:
+        adapter = KimiK3StateDictAdapter(_small_kimi_k3_config(), hf_assets_path=None)
+        state_dict = {
+            "layers.1.attention_res_norm.weight": torch.arange(
+                64, dtype=torch.bfloat16
+            ),
+            "layers.1.attention_res_proj.weight": torch.arange(
+                64, dtype=torch.bfloat16
+            ).reshape(1, 64),
+        }
+
+        hf_state_dict = adapter.to_hf(state_dict)
+
+        prefix = "language_model.model.layers.1"
+        self.assertEqual(
+            set(hf_state_dict),
+            {
+                f"{prefix}.self_attention_res_norm.weight",
+                f"{prefix}.self_attention_res_proj.weight",
+            },
+        )
+        restored_state_dict = adapter.from_hf(hf_state_dict)
+        self.assertEqual(restored_state_dict.keys(), state_dict.keys())
+        for key, value in state_dict.items():
+            torch.testing.assert_close(restored_state_dict[key], value, rtol=0, atol=0)
+
+    def test_quantized_names_round_trip(self) -> None:
+        config = _small_kimi_k3_config()
+        with torch.device("meta"):
+            state_dict = config.build().state_dict()
+        adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
+
+        hf_state_dict = adapter.to_hf(state_dict, to_quantized_layout=True)
+
+        prefix = "language_model.model.layers.1.block_sparse_moe"
+        for name in ("w1", "w2", "w3"):
+            self.assertIn(f"{prefix}.experts.0.{name}.weight_packed", hf_state_dict)
+            self.assertNotIn(f"{prefix}.experts.0.{name}.weight", hf_state_dict)
+        self.assertIn(f"{prefix}.shared_experts.gate_proj.weight", hf_state_dict)
+        self.assertEqual(
+            adapter.to_hf(state_dict).keys(),
+            {key.removesuffix("_packed") for key in hf_state_dict},
+        )
+        self.assertEqual(
+            adapter.from_hf(hf_state_dict, is_quantized_layout=True).keys(),
+            state_dict.keys(),
+        )
+        with self.assertRaisesRegex(ValueError, "weight_packed"):
+            adapter.from_hf(hf_state_dict)
+        with self.assertRaisesRegex(ValueError, r"experts\.0\.w1\.weight'"):
+            adapter.from_hf(adapter.to_hf(state_dict), is_quantized_layout=True)
+
+    def test_released_index_maps_to_unquantized_names(self) -> None:
+        experts = "language_model.model.layers.1.block_sparse_moe.experts.0"
+        weight_map = {
+            f"{experts}.w1.weight_packed": "model-00001-of-00002.safetensors",
+            f"{experts}.w1.weight_scale": "model-00001-of-00002.safetensors",
+            "language_model.model.norm.weight": "model-00002-of-00002.safetensors",
+            "vision_tower.patch_embed.proj.weight": "model-00001-of-00002.safetensors",
+            "mm_projector.proj.0.weight": "model-00002-of-00002.safetensors",
+        }
+        with tempfile.TemporaryDirectory() as hf_assets_path:
+            with open(f"{hf_assets_path}/model.safetensors.index.json", "w") as f:
+                json.dump({"weight_map": weight_map}, f)
+            adapter = KimiK3StateDictAdapter(
+                _small_kimi_k3_config(), hf_assets_path=hf_assets_path
+            )
+
+        self.assertEqual(
+            adapter.fqn_to_index_mapping,
+            {
+                f"{experts}.w1.weight": 1,
+                "language_model.model.norm.weight": 2,
+                "vision_tower.patch_embed.proj.weight": 1,
+                "mm_projector.proj.0.weight": 2,
+            },
+        )
+
+    def test_text_only_export_consolidates_without_vision_entries(self) -> None:
+        config = _small_kimi_k3_config()
+        config.vision_encoder = None
+        hf_key = "language_model.model.norm.weight"
+        weight_map = {
+            hf_key: "model-00001-of-00002.safetensors",
+            "vision_tower.patch_embed.proj.weight": "model-00002-of-00002.safetensors",
+            "mm_projector.proj.0.weight": "model-00002-of-00002.safetensors",
+        }
+        with tempfile.TemporaryDirectory() as checkpoint_dir:
+            with open(f"{checkpoint_dir}/model.safetensors.index.json", "w") as f:
+                json.dump({"weight_map": weight_map}, f)
+            adapter = KimiK3StateDictAdapter(config, hf_assets_path=checkpoint_dir)
+            exported = adapter.to_hf(
+                {"norm.weight": torch.arange(64, dtype=torch.float32)}
+            )
+            sharded_dir = f"{checkpoint_dir}/sharded"
+            dcp.save(
+                exported,
+                storage_writer=HuggingFaceStorageWriter(
+                    path=sharded_dir,
+                    save_distributed=True,
+                    fqn_to_index_mapping=adapter.fqn_to_index_mapping,
+                    enable_consolidation=False,
+                ),
+            )
+            consolidate_safetensors_files_on_every_rank(
+                input_dir=sharded_dir,
+                output_dir=checkpoint_dir,
+                fqn_to_index_mapping=adapter.fqn_to_index_mapping,
+            )
+            restored = {hf_key: torch.empty_like(exported[hf_key])}
+            dcp.load(restored, storage_reader=HuggingFaceStorageReader(checkpoint_dir))
+        self.assertEqual(adapter.fqn_to_index_mapping, {hf_key: 1})
+        torch.testing.assert_close(restored[hf_key], exported[hf_key], rtol=0, atol=0)
+
+
+class KimiK3StateDictAdapterUnevenShardingTest(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 3
+
+    @with_comms
+    def test_kda_parameters_round_trip(self) -> None:
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        full_a_log = torch.arange(2, dtype=torch.float32, device=self.device_type)
+        sharded_a_log = distribute_tensor(full_a_log, mesh, (Shard(0),))
+        full_bias = torch.arange(
+            2 * 128,
+            dtype=torch.float32,
+            device=self.device_type,
+        ).reshape(2, 128)
+        sharded_bias = distribute_tensor(full_bias, mesh, (Shard(0),))
+
+        for quantized_layout in (False, True):
+            with self.subTest(quantized_layout=quantized_layout):
+                adapter = KimiK3StateDictAdapter(
+                    _small_kimi_k3_config(), hf_assets_path=None
+                )
+                hf_state_dict = adapter.to_hf(
+                    {
+                        "layers.0.attention.A_log": sharded_a_log,
+                        "layers.0.attention.dt_bias": sharded_bias,
+                        "layers.1.attention_res_norm.weight": torch.ones(
+                            1, device=self.device_type
+                        ),
+                        "layers.1.attention_res_proj.weight": torch.ones(
+                            1, device=self.device_type
+                        ),
+                    },
+                    to_quantized_layout=quantized_layout,
+                )
+                hf_a_log = hf_state_dict[
+                    "language_model.model.layers.0.self_attn.A_log"
+                ]
+                self.assertIsInstance(hf_a_log, DTensor)
+                self.assertEqual(hf_a_log.placements, (Replicate(),))
+                expected_a_log = (
+                    torch.cat((full_a_log, torch.zeros(126, device=self.device_type)))
+                    if quantized_layout
+                    else full_a_log
+                )
+                torch.testing.assert_close(
+                    hf_a_log.full_tensor(), expected_a_log, rtol=0, atol=0
+                )
+                hf_bias = hf_state_dict[
+                    "language_model.model.layers.0.self_attn.dt_bias"
+                ]
+                self.assertIsInstance(hf_bias, DTensor)
+                self.assertEqual(hf_bias.placements, (Replicate(),))
+                torch.testing.assert_close(
+                    hf_bias.full_tensor(), full_bias.reshape(-1), rtol=0, atol=0
+                )
+
+                restored_state_dict = adapter.from_hf(
+                    hf_state_dict, is_quantized_layout=quantized_layout
+                )
+                restored_a_log = restored_state_dict["layers.0.attention.A_log"]
+                self.assertIsInstance(restored_a_log, DTensor)
+                self.assertEqual(restored_a_log.placements, (Shard(0),))
+                torch.testing.assert_close(
+                    restored_a_log.full_tensor(), full_a_log, rtol=0, atol=0
+                )
+
+                restored_bias = restored_state_dict["layers.0.attention.dt_bias"]
+                self.assertIsInstance(restored_bias, DTensor)
+                self.assertEqual(restored_bias.placements, (Shard(0),))
+                torch.testing.assert_close(
+                    restored_bias.full_tensor(), full_bias, rtol=0, atol=0
+                )
 
 
 class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
@@ -476,34 +882,98 @@ class GptOssStateDictAdapterTest(unittest.TestCase):
             state_dict[key].fill_(1.0)
 
         adapter = GptOssStateDictAdapter(config, hf_assets_path=None)
-        hf_state_dict = adapter.to_hf(state_dict)
-
-        hf_expert_names = {
-            "gate_up_proj_blocks",
-            "gate_up_proj_bias",
-            "down_proj_blocks",
-            "down_proj_bias",
-        }
-        expected_hf_expert_keys = {
-            f"model.layers.{layer_num}.mlp.experts.{name}"
-            for layer_num in range(len(config.layers))
-            for name in hf_expert_names
-        }
-        actual_hf_expert_keys = {key for key in hf_state_dict if ".mlp.experts." in key}
-        self.assertEqual(actual_hf_expert_keys, expected_hf_expert_keys)
-        self.assertFalse(any("expert_bias_E" in key for key in hf_state_dict))
-
-        roundtrip_state_dict = adapter.from_hf(hf_state_dict)
-        self.assertEqual(roundtrip_state_dict.keys(), state_dict.keys())
-        for key, value in state_dict.items():
-            if key in expert_bias_keys:
-                torch.testing.assert_close(
-                    roundtrip_state_dict[key], torch.zeros_like(value)
+        hf_state_dicts = {}
+        for quantized_layout, weight_suffix in ((False, ""), (True, "_blocks")):
+            with self.subTest(quantized_layout=quantized_layout):
+                hf_state_dict = adapter.to_hf(
+                    state_dict, to_quantized_layout=quantized_layout
                 )
-            else:
-                torch.testing.assert_close(
-                    roundtrip_state_dict[key], value, rtol=0, atol=0
+                hf_state_dicts[quantized_layout] = hf_state_dict
+
+                hf_expert_names = {
+                    f"gate_up_proj{weight_suffix}",
+                    "gate_up_proj_bias",
+                    f"down_proj{weight_suffix}",
+                    "down_proj_bias",
+                }
+                expected_hf_expert_keys = {
+                    f"model.layers.{layer_num}.mlp.experts.{name}"
+                    for layer_num in range(len(config.layers))
+                    for name in hf_expert_names
+                }
+                actual_hf_expert_keys = {
+                    key for key in hf_state_dict if ".mlp.experts." in key
+                }
+                self.assertEqual(actual_hf_expert_keys, expected_hf_expert_keys)
+                self.assertFalse(any("expert_bias_E" in key for key in hf_state_dict))
+
+                roundtrip_state_dict = adapter.from_hf(
+                    hf_state_dict, is_quantized_layout=quantized_layout
                 )
+                self.assertEqual(roundtrip_state_dict.keys(), state_dict.keys())
+                for key, value in state_dict.items():
+                    if key in expert_bias_keys:
+                        torch.testing.assert_close(
+                            roundtrip_state_dict[key], torch.zeros_like(value)
+                        )
+                    else:
+                        torch.testing.assert_close(
+                            roundtrip_state_dict[key], value, rtol=0, atol=0
+                        )
+
+        # Unquantized HF experts are [in, out]; MXFP4 blocks dequantize to [out, in].
+        dim = state_dict["tok_embeddings.weight"].shape[1]
+        experts = "model.layers.0.mlp.experts"
+        for name in ("gate_up_proj", "down_proj"):
+            unquantized = hf_state_dicts[False][f"{experts}.{name}"]
+            torch.testing.assert_close(
+                hf_state_dicts[True][f"{experts}.{name}_blocks"],
+                unquantized.transpose(1, 2),
+                rtol=0,
+                atol=0,
+            )
+        self.assertEqual(hf_state_dicts[False][f"{experts}.gate_up_proj"].shape[1], dim)
+        self.assertEqual(hf_state_dicts[False][f"{experts}.down_proj"].shape[2], dim)
+
+        # from_hf reads only the names for its quantized flag, so a mismatched
+        # flag leaves the expert weights out instead of loading the wrong layout.
+        for quantized_layout in (False, True):
+            mismatched = adapter.from_hf(
+                hf_state_dicts[not quantized_layout],
+                is_quantized_layout=quantized_layout,
+            )
+            self.assertNotIn(
+                "layers.0.feed_forward.routed_experts.w13.weight", mismatched
+            )
+            self.assertNotIn(
+                "layers.0.feed_forward.routed_experts.w2.weight", mismatched
+            )
+
+    def test_released_index_maps_to_unquantized_names(self) -> None:
+        build_config, _ = GPT_OSS_MODEL_FLAVORS["debugmodel"]
+        config = build_config(
+            attn_backend="flex", seq_len=128, parallelism=ParallelismConfig()
+        )
+        experts = "model.layers.0.mlp.experts"
+        weight_map = {
+            f"{experts}.gate_up_proj_blocks": "model-00001-of-00002.safetensors",
+            f"{experts}.gate_up_proj_scales": "model-00001-of-00002.safetensors",
+            f"{experts}.gate_up_proj_bias": "model-00001-of-00002.safetensors",
+            "model.norm.weight": "model-00002-of-00002.safetensors",
+        }
+        with tempfile.TemporaryDirectory() as hf_assets_path:
+            with open(f"{hf_assets_path}/model.safetensors.index.json", "w") as f:
+                json.dump({"weight_map": weight_map}, f)
+            adapter = GptOssStateDictAdapter(config, hf_assets_path=hf_assets_path)
+
+        self.assertEqual(
+            adapter.fqn_to_index_mapping,
+            {
+                f"{experts}.gate_up_proj": 1,
+                f"{experts}.gate_up_proj_bias": 1,
+                "model.norm.weight": 2,
+            },
+        )
 
 
 class Llama3DTensorStateDictAdapterTest(unittest.TestCase):

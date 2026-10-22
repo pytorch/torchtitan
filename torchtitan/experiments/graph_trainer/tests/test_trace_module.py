@@ -37,6 +37,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     annotate_flex_attention_for_regional_inductor_pass,
 )
+from torchtitan.observability.profiler import Profiler
 
 
 def get_loss(logits, labels):
@@ -186,6 +187,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             compile=SimpleNamespace(memory_policy="none"),
             dist_moe_runtime=None,
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
+            profiler=Profiler.Config(),
             sdc_replayer=None,
             training=SimpleNamespace(
                 disable_cuda_graphs=False,
@@ -248,6 +250,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             input_dict["input"],
             input_dict["labels"],
             {"positions": input_dict["positions"]},
+            {},
         )
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
@@ -354,6 +357,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             (main_tokens, mtp_tokens),
             (main_labels, mtp_labels),
             {"mtp_input_valid_masks": (torch.tensor([True, False]),)},
+            {},
         )
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
@@ -1877,6 +1881,7 @@ class TestTraceModels(unittest.TestCase):
             FlexInnerAttention,
             get_causal_mask_mod,
             get_document_mask_mod,
+            MLAAttention,
         )
         from torchtitan.models.common.linear import Linear
         from torchtitan.models.common.nn_modules import RMSNorm
@@ -1913,7 +1918,6 @@ class TestTraceModels(unittest.TestCase):
                     ),
                     q_norm=RMSNorm.Config(normalized_shape=1),
                     kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
-                    inner_attention=FlexInnerAttention.Config(),
                     wq=Linear.Config(
                         in_features=dim,
                         out_features=n_heads * qk_head_dim,
@@ -1922,9 +1926,13 @@ class TestTraceModels(unittest.TestCase):
                         in_features=dim,
                         out_features=kv_lora_rank + rope_dim,
                     ),
-                    wkv_b=Linear.Config(
-                        in_features=kv_lora_rank,
-                        out_features=n_heads * (qk_nope_head_dim + v_head_dim),
+                    inner_attention=MLAAttention.Config(
+                        wkv_b=Linear.Config(
+                            in_features=kv_lora_rank,
+                            out_features=n_heads * (qk_nope_head_dim + v_head_dim),
+                        ),
+                        packed_kv_head_dim=qk_nope_head_dim + v_head_dim,
+                        inner_attention=FlexInnerAttention.Config(),
                     ),
                     wo=Linear.Config(
                         in_features=n_heads * v_head_dim,
