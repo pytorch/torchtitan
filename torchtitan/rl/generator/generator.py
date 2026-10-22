@@ -430,15 +430,15 @@ class Generator(Configurable):
         )
 
     async def release_groups(self, group_ids: list[int]) -> None:
-        """Drop the pinned cache salts, the held KV and the folded session metadata of finished
-        rollout groups.
+        """Drop the pinned cache salts, the held KV, and the folded session metadata and
+        router-replay rows of finished rollout groups.
 
         Args:
             group_ids: Groups with no more generation calls.
         """
         self._engine_loop.release_groups(group_ids)
         if self._generation_server is not None:
-            self._generation_server.drop_generation_metadata(group_ids)
+            self._generation_server.release_groups(group_ids)
 
     async def release_sessions(
         self, session_ids: list[str]
@@ -459,11 +459,15 @@ class Generator(Configurable):
         return self._generation_server.pop_generation_metadata(session_ids)
 
     async def get_session_kv_metrics(self) -> list[m.Metric]:
-        """This replica's session-KV metrics (levels now, counts since the last call); [] on
-        TP ranks > 0, whose holders mirror TP rank 0's."""
+        """This replica's session-KV metrics, and on rank 0 its HTTP server's session stores
+        (levels now, counts since the last call); [] on TP ranks > 0, whose holders mirror TP
+        rank 0's."""
         if self._tp_rank != 0:
             return []
-        return self._engine_loop.session_kv_metrics()
+        metrics = self._engine_loop.session_kv_metrics()
+        if self._generation_server is not None:
+            metrics += self._generation_server.session_store_metrics()
+        return metrics
 
     async def initialize_torchstore_client(self, requester_index: int) -> None:
         """Initialize this process as a TorchStore routing requester.

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import logging
 import re
@@ -61,6 +62,7 @@ from torchtitan.rl.rollout.types import (
     RolloutTurnID,
     split_prompt,
 )
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 if TYPE_CHECKING:
     from torchtitan.rl.actors.system import ActorSystem
@@ -221,6 +223,7 @@ class VerifiersRollouter(Rollouter):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        training_sample_builder: TrainingSampleBuilder.Config,
     ) -> None:
         """Start the EnvServers, then the rollout workers that connect to them."""
         if not isinstance(renderer_config, RenderersConfigAdapter):
@@ -241,6 +244,7 @@ class VerifiersRollouter(Rollouter):
                 tokenizer_config=tokenizer_config,
                 renderer_config=renderer_config,
                 hf_assets_path=hf_assets_path,
+                training_sample_builder=training_sample_builder,
                 worker_config=VerifiersRolloutWorker.Config(
                     rubric=config.rubric,
                     advantage=config.advantage,
@@ -248,6 +252,7 @@ class VerifiersRollouter(Rollouter):
                     connection_timeout_sec=config.connection_timeout_sec,
                     env_server_address=env_server_address,
                     extra_env_server_addresses=extra_env_server_addresses,
+                    training_sample_builder=training_sample_builder,
                 ),
             )
         except BaseException:
@@ -288,7 +293,7 @@ class VerifiersRollouter(Rollouter):
 
 class VerifiersRolloutWorker(RolloutWorker):
     """Runs Verifiers rollout groups in a rollout worker process: the env client, the trace
-    decode and the conversion to rollout turns.
+    decode, the conversion to rollout turns and the fetch of their router-replay rows.
 
     Unused inherited fields: `token_env`, and `rollout_timeout_s` (set Verifiers'
     `timeout.rollout`, which keeps the trace)."""
@@ -310,9 +315,13 @@ class VerifiersRolloutWorker(RolloutWorker):
         extra_env_server_addresses: dict[str, str] = field(default_factory=dict)
         """Address of each extra validation set's EnvServer, by set name."""
 
+        training_sample_builder: TrainingSampleBuilder.Config
+        """The batcher's: only the rollouts it trains fetch their router-replay rows."""
+
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self._verifiers_config = config
+        self._training_sample_builder = config.training_sample_builder.build()
         # Never closed: the worker process exits with the pool.
         self._verifiers_env_client: VerifiersEnvClient | None = None
         # Extra validation sets' EnvServer clients, by set name.
@@ -376,6 +385,8 @@ class VerifiersRolloutWorker(RolloutWorker):
                 "Verifiers' agents call a generator over HTTP, so generate_fn must be a "
                 f"GeneratorClient, got {type(generate_fn).__name__}"
             )
+        # Rollout id -> (its generator's URL, its trace id): the session holding its router-replay rows.
+        generator_sessions: dict[int, tuple[str, str]] = {}
         # A cancel cancels every sibling, and with return_exceptions the gather still waits for each
         # one's lease release before it raises: the caller releases the group next.
         results, group_metrics = await gather_rollouts(
@@ -389,6 +400,7 @@ class VerifiersRolloutWorker(RolloutWorker):
                 ),
                 group_id=group_id,
                 rollout_id=rollout_id,
+                generator_sessions=generator_sessions,
             )
             for rollout_id in range(group_size)
         )
@@ -409,6 +421,11 @@ class VerifiersRolloutWorker(RolloutWorker):
         )
         for rollout, advantage in zip(scored, advantages, strict=True):
             rollout.advantage = advantage
+        group_metrics += await self._fetch_routed_expert_ids(
+            RolloutGroup(group_id=group_id, rollouts=rollouts),
+            generator_client=generate_fn,
+            generator_sessions=generator_sessions,
+        )
         for key in ("num_compactions", "num_resent_assistant_messages"):
             values = [float(r.logs[key]) for r in rollouts if key in r.logs]
             if values:
@@ -428,6 +445,87 @@ class VerifiersRolloutWorker(RolloutWorker):
         ]
         return RolloutGroup(group_id=group_id, rollouts=rollouts, metrics=group_metrics)
 
+    async def _fetch_routed_expert_ids(
+        self,
+        group: RolloutGroup,
+        *,
+        generator_client: GeneratorClient,
+        generator_sessions: dict[int, tuple[str, str]],
+    ) -> list[m.Metric]:
+        """Swap each trained rollout's handles for the rows its generator holds, one fetch per
+        rollout; drop every other rollout's handles, so none leaves this worker.
+
+        A turn's `routed_expert_ids` arrive as handles (see `GenerationServer`) and leave as:
+
+            trained by the batcher's filters, fetched     rows
+            trained, both fetch attempts failed          None: the batcher drops the group, counted
+            left out (ERROR_SYSTEM, zero-std, ...)       None
+        """
+        rollouts_with_handles = [
+            rollout
+            for rollout in group.rollouts
+            if any(turn.routed_expert_ids is not None for turn in rollout.turns)
+        ]
+        if not rollouts_with_handles:  # no router replay, or validation
+            return []
+        left_out = {
+            id(rollout)
+            for rollout in self._training_sample_builder.rollouts_left_out(group)
+        }
+        rollouts_to_fetch = []
+        for rollout in rollouts_with_handles:
+            if id(rollout) in left_out:
+                for rollout_turn in rollout.turns:
+                    rollout_turn.routed_expert_ids = None
+            else:
+                rollouts_to_fetch.append(rollout)
+        if not rollouts_to_fetch:
+            return []
+
+        async def fetch(rollout: Rollout) -> int:
+            """Fetch one rollout's rows; return how many attempts failed (2: it gets None)."""
+            turns = [
+                turn for turn in rollout.turns if turn.routed_expert_ids is not None
+            ]
+            url, session_id = generator_sessions[rollout.rollout_id]
+            handles = np.concatenate([turn.routed_expert_ids for turn in turns])
+            for attempt in range(2):
+                try:
+                    rows = await generator_client.fetch_routed_expert_ids(
+                        url, session_id=session_id, handles=handles
+                    )
+                except Exception:
+                    logger.warning(
+                        "rollout group=%d/rollout=%d: router-replay fetch attempt %d of 2 failed",
+                        group.group_id,
+                        rollout.rollout_id,
+                        attempt + 1,
+                        exc_info=True,
+                    )
+                    continue
+                turn_ends = np.cumsum([len(turn.routed_expert_ids) for turn in turns])
+                for rollout_turn, turn_rows in zip(
+                    turns, np.split(rows, turn_ends[:-1]), strict=True
+                ):
+                    rollout_turn.routed_expert_ids = turn_rows
+                return attempt
+            for rollout_turn in turns:
+                rollout_turn.routed_expert_ids = None
+            return 2
+
+        failed_attempts = await asyncio.gather(*map(fetch, rollouts_to_fetch))
+        return [
+            m.Metric("rollout/routed_experts/fetches", m.Sum(len(rollouts_to_fetch))),
+            m.Metric(
+                "rollout/routed_experts/fetch_retries",
+                m.Sum(sum(num > 0 for num in failed_attempts)),
+            ),
+            m.Metric(
+                "rollout/routed_experts/fetch_failures",
+                m.Sum(sum(num == 2 for num in failed_attempts)),
+            ),
+        ]
+
     async def _run_single_rollout(
         self,
         *,
@@ -436,9 +534,11 @@ class VerifiersRolloutWorker(RolloutWorker):
         sampling: SamplingConfig,
         group_id: int,
         rollout_id: int,
+        generator_sessions: dict[int, tuple[str, str]],
     ) -> Rollout:
         """Send one task to Verifiers, release its sessions, and convert its trace to a rollout.
-        Replaces the base method with Verifiers' arguments; only this class's `run_group` calls it."""
+        Replaces the base method with Verifiers' arguments; only this class's `run_group` calls it.
+        Records where the trace's router-replay rows are held in `generator_sessions`."""
         if not isinstance(sample, VerifiersTaskSample):
             raise TypeError("Verifiers requires a VerifiersTaskSample")
         if (
@@ -499,6 +599,7 @@ class VerifiersRolloutWorker(RolloutWorker):
 
         # Convert Verifiers' graph trace to TitanRL's linear rollout turns.
         trace = traces[0]
+        generator_sessions[rollout_id] = (endpoint.url, trace.id)
         generation_metadata = generation_metadata_by_session.get(trace.id)
         turns = self.trace_to_rollout_turns(
             trace=trace,
@@ -617,7 +718,7 @@ class VerifiersRolloutWorker(RolloutWorker):
         for branch in trace.branches:
             token_ids = branch.token_ids
             logprobs = branch.logprobs
-            # [len(token_ids), num_layers, top_k] from the generation server; None without replay.
+            # Handles [len(token_ids), 4] to rows the generation server holds; None without replay.
             # TODO: Verifiers gives a continued turn's last token the row of the token before it,
             # so 1 input per turn boundary replays its neighbor's experts (native: next prefill's row).
             routed_expert_ids = branch.routed_experts

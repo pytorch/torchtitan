@@ -145,49 +145,121 @@ def test_torchtitan_response_round_trips_every_completion_field() -> None:
         ) == replace(want, token_logprobs=[], metrics=[], routed_expert_ids=None)
 
 
-def test_verifiers_response_returns_routed_experts_from_the_prompt_start() -> None:
-    # Prompt [1, 2, 3] + completion [31, 32, 33]; the previous turn already returned position 0,
-    # so the generator returns the rows of positions 1..4.
-    rows = np.arange(4 * 2 * 2, dtype=np.uint8).reshape(4, 2, 2)
+def _reply_routed_experts(raw: bytes) -> dict | None:
+    """The `routed_experts` of a default-format reply, its handles decoded."""
+    payload = json.loads(raw)["choices"][0].get("routed_experts")
+    if payload is not None:
+        data = np.frombuffer(base64.b64decode(payload["data"]), dtype=payload["dtype"])
+        payload["data"] = data.reshape(payload["shape"])
+    return payload
 
-    async def run() -> tuple[list[dict], int, bytes]:
+
+async def _generate_four_rows(prompt_token_ids, **kwargs) -> Completion:
+    return _completion(
+        kwargs["request_id"], routed_expert_ids=np.zeros((4, 2, 2), np.uint8)
+    )
+
+
+async def _post_raw(server: GenerationServer, body: dict, session_id: str) -> bytes:
+    async with ClientSession() as session:
+        async with session.post(
+            f"{server.url}/inference/v1/generate",
+            json=body,
+            headers={"X-Session-ID": session_id},
+        ) as response:
+            return await response.read()
+
+
+def test_verifiers_response_returns_handles_to_rows_the_server_holds() -> None:
+    # Prompt [1, 2, 3] + completion [31, 32, 33]; the previous turn already returned position 0,
+    # so the generator returns the rows of positions 1..4. The second call's rows follow.
+    rows = np.arange(8 * 2 * 2, dtype=np.uint8).reshape(8, 2, 2)
+    replies = iter([rows[:4], rows[4:]])
+
+    async def run() -> None:
         calls = []
 
         async def generate(prompt_token_ids, **kwargs):
             calls.append(kwargs)
-            return _completion(kwargs["request_id"], routed_expert_ids=rows)
+            return _completion(kwargs["request_id"], routed_expert_ids=next(replies))
 
         async with _Server(generate) as server:
             body = _body(token_ids=[1, 2, 3])
             body["sampling_params"]["routed_experts_prompt_start"] = 1
             out_of_range = _body(token_ids=[1, 2, 3])
             out_of_range["sampling_params"]["routed_experts_prompt_start"] = 3
-            async with ClientSession() as session:
-                async with session.post(
-                    f"{server.url}/inference/v1/generate",
-                    json=body,
-                    headers={"X-Session-ID": "s0"},
-                ) as response:
-                    raw = await response.read()
+            raw = await _post_raw(server, body, "s0")
+            first = _reply_routed_experts(raw)
+            second = _reply_routed_experts(await _post_raw(server, _body(), "s0"))
             status, _ = await _post(server, out_of_range)
-        return calls, status, raw
+            fetched = await GeneratorClient(router=None).fetch_routed_expert_ids(
+                server.url,
+                session_id="s0",
+                handles=np.concatenate([second["data"], first["data"][:1]]),
+            )
 
-    calls, out_of_range_status, raw = asyncio.run(run())
-    assert [call["sampling_config"].routed_experts_prompt_start for call in calls] == [
-        1
-    ]
-    # A start outside the prompt would assert inside vLLM's engine step.
-    assert out_of_range_status == 400
-    # Compact JSON: Verifiers' client cuts the base64 out at this exact prefix.
-    assert b'"routed_experts":{"data":"' in raw
-    payload = json.loads(raw)["choices"][0]["routed_experts"]
-    assert (payload["shape"], payload["start"], payload["dtype"]) == (
-        [4, 2, 2],
-        1,
-        "uint8",
-    )
-    data = np.frombuffer(base64.b64decode(payload["data"]), dtype=np.uint8)
-    np.testing.assert_array_equal(data.reshape(payload["shape"]), rows)
+        assert [
+            call["sampling_config"].routed_experts_prompt_start for call in calls
+        ] == [1, 0]
+        # A start outside the prompt would assert inside vLLM's engine step.
+        assert status == 400
+        # Compact JSON: Verifiers' client cuts the base64 out at this exact prefix.
+        assert b'"routed_experts":{"data":"' in raw
+        # Each reply carries its rows' handles, little-endian uint32 row numbers in the session.
+        assert (first["shape"], first["start"], first["dtype"]) == ([4, 4], 1, "uint8")
+        assert first["data"].view("<u4").ravel().tolist() == [0, 1, 2, 3]
+        assert second["data"].view("<u4").ravel().tolist() == [4, 5, 6, 7]
+        assert fetched.dtype == rows.dtype
+        np.testing.assert_array_equal(fetched, rows[[4, 5, 6, 7, 0]])
+
+    asyncio.run(run())
+
+
+def test_a_released_group_keeps_nothing_from_a_late_completion() -> None:
+    async def run() -> None:
+        async with _Server(_generate_four_rows) as server:
+            assert (await _post(server, _body(group_id=2), "trace-a"))[0] == 200
+            assert (await _post(server, _body(group_id=-1), "validation"))[0] == 200
+            levels = m.MetricsProcessor._aggregate_metrics(
+                server.session_store_metrics()
+            )
+            assert levels["generator/routed_experts/held_rows/max"] == 4
+
+            server.release_groups([2, -1])
+            assert server.generation_metadata == {} and server.session_stores == {}
+            # trace-b's first call was still in the engine at the release.
+            status, _ = await _post(server, _body(group_id=2), "trace-b")
+            assert status == 409
+            assert server.generation_metadata == {} and server.session_stores == {}
+            # Validation reuses its group ids every pass, so the next pass keeps its metadata.
+            assert (await _post(server, _body(group_id=-1), "validation"))[0] == 200
+            assert set(server.generation_metadata) == {"validation"}
+
+            metrics = m.MetricsProcessor._aggregate_metrics(
+                server.session_store_metrics()
+            )
+            assert metrics["generator/released_group_completions/sum"] == 1
+            assert metrics["generator/routed_experts/held_rows/max"] == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "session_id, row_id, status", [("unknown", 0, 404), ("trace-a", 4, 400)]
+)
+def test_fetch_rejects_an_unknown_session_and_a_handle_past_its_rows(
+    session_id, row_id, status
+) -> None:
+    async def run() -> None:
+        async with _Server(_generate_four_rows) as server:
+            await _post(server, _body(), "trace-a")
+            handles = np.array([row_id], dtype="<u4").view(np.uint8).reshape(1, 4)
+            with pytest.raises(RuntimeError, match=f"with {status}:"):
+                await GeneratorClient(router=None).fetch_routed_expert_ids(
+                    server.url, session_id=session_id, handles=handles
+                )
+
+    asyncio.run(run())
 
 
 def test_validation_replies_carry_no_routed_experts() -> None:
@@ -317,7 +389,7 @@ def test_only_the_default_format_folds_session_metadata() -> None:
                 "generator/queue_time_ms/max": 4.0,
             }
             # A retried trace nobody popped goes when its group is released.
-            server.drop_generation_metadata([2])
+            server.release_groups([2])
             assert server.generation_metadata == {}
 
     asyncio.run(run())

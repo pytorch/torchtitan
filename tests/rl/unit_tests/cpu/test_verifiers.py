@@ -46,8 +46,16 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.rubric import RubricOutput
-from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
+from torchtitan.rl.rollout.types import (
+    Completion,
+    Rollout,
+    RolloutGroup,
+    RolloutStatus,
+    RolloutTurn,
+    RolloutTurnID,
+)
 from torchtitan.rl.routing.inter_generator import GeneratorEndpoint
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 
 def _recorded_error(error_type: str, status_code: int | None = None) -> SimpleNamespace:
@@ -331,6 +339,7 @@ def test_setup_starts_the_env_server_then_spawns_workers_with_its_address(
             tokenizer_config="tokenizer_config",
             renderer_config=from_renderers(Qwen3RendererConfig()),
             hf_assets_path="hf_assets_path",
+            training_sample_builder="training_sample_builder",
         )
         await rollouter.close()
 
@@ -348,6 +357,7 @@ def test_setup_starts_the_env_server_then_spawns_workers_with_its_address(
         renderer_multiplex=8,
         connection_timeout_sec=5.0,
         env_server_address="tcp://127.0.0.1:5555",
+        training_sample_builder="training_sample_builder",
     )
     assert (num_workers, num_threads) == (2, 3)
     assert closes == [("stop_workers",), ("close_env_server",)]
@@ -372,6 +382,7 @@ def test_rollouter_rejects_a_worker_config() -> None:
         renderer_multiplex=8,
         connection_timeout_sec=5.0,
         env_server_address="tcp://127.0.0.1:5555",
+        training_sample_builder=TrainingSampleBuilder.Config(),
     )
     with pytest.raises(ValueError, match="leave worker unset"):
         replace(rollouter_config, worker=worker)
@@ -1079,6 +1090,7 @@ def test_rollout_whose_first_model_call_failed_has_no_turns(
                 sampling=SamplingConfig(),
                 group_id=1,
                 rollout_id=2,
+                generator_sessions={},
             )
         )
 
@@ -1254,6 +1266,7 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
                 sampling=SamplingConfig(),
                 group_id=1,
                 rollout_id=2,
+                generator_sessions={},
             )
         )
 
@@ -1305,6 +1318,7 @@ def test_rollout_releases_every_trace_session_in_one_call() -> None:
         release_rollout=AsyncMock(return_value={}),
     )
 
+    generator_sessions = {}
     rollout = asyncio.run(
         worker._run_single_rollout(
             generator_client=cast(GeneratorClient, client),
@@ -1312,6 +1326,7 @@ def test_rollout_releases_every_trace_session_in_one_call() -> None:
             sampling=SamplingConfig(),
             group_id=1,
             rollout_id=0,
+            generator_sessions=generator_sessions,
         )
     )
 
@@ -1321,6 +1336,8 @@ def test_rollout_releases_every_trace_session_in_one_call() -> None:
         "policy",
     ]
     assert rollout.group_id == 1
+    # Its router-replay rows are fetched from the trainable trace's session.
+    assert generator_sessions == {0: ("http://localhost:1", "policy")}
 
 
 def test_parse_sampling_config_requires_temperature_top_p_max_tokens() -> None:
@@ -1655,3 +1672,337 @@ def test_group_logs_the_share_of_each_stop_condition(monkeypatch) -> None:
         "rollout/stop/agentstalled_error/mean": 0.0,
         "rollout/stop/other/mean": 0.4,
     }
+
+
+def test_rows_fetched_by_handle_are_todays_routed_expert_ids_bitwise() -> None:
+    """Commit one rollout's turns twice through Verifiers' graph and delta stream: once with the
+    rows the generation server used to send, once with the handles it sends now. Fetching rows by
+    handle gives the same bytes per node, per branch and per training turn.
+
+    Two branches share the system node, like a compaction. Bridged turns repair the previous
+    turn's placeholder row over the stream; unbridged ones also return the prefix's rows.
+    """
+    import base64
+
+    import verifiers.v1 as vf
+    from renderers.client import parse_generate_response
+    from verifiers.v1 import graph
+    from verifiers.v1.episode import EnvInfo, Episode, WireEpisode
+    from verifiers.v1.serve.delta import (
+        DeltaStreamer,
+        dump,
+        EpisodeAssembly,
+        pack,
+        TraceSummary,
+        unpack,
+    )
+    from verifiers.v1.types import TurnTokens
+
+    system = vf.SystemMessage(content="s")
+    summary_request = vf.UserMessage(content="sum")
+    users = [vf.UserMessage(content=f"u{i}") for i in range(4)]
+    replies = [vf.AssistantMessage(content=f"a{i}") for i in range(5)]
+    # Turn i samples replies[i]. A bridged prompt is the previous prompt + completion + new tokens.
+    # (prompt messages, prompt ids, message spans, completion ids, bridged)
+    turns = [
+        ([system, users[0]], [1, 2, 3, 4, 5, 6], [(0, 3), (3, 5)], [7, 8], False),
+        (
+            [system, users[0], replies[0], users[1]],
+            [*range(1, 9), 9, 10, 11],
+            [(0, 3), (3, 5), None, (8, 10)],
+            [12, 13],
+            True,
+        ),
+        (
+            [system, users[0], replies[0], users[1], replies[1], users[2]],
+            [*range(1, 14), 14, 15, 16, 17],
+            [(0, 3), (3, 5), None, (8, 10), None, (13, 16)],
+            [18, 19, 20],
+            True,
+        ),
+        (
+            [system, summary_request],
+            [1, 2, 3, 21, 22, 23],
+            [(0, 3), (3, 5)],
+            [24, 25],
+            False,
+        ),
+        (
+            [system, summary_request, replies[3], users[3]],
+            [1, 2, 3, 21, 22, 23, 24, 25, 26, 27],
+            [(0, 3), (3, 5), None, (8, 9)],
+            [28],
+            True,
+        ),
+    ]
+    rng = np.random.default_rng(0)
+    completions = iter(completion_ids for *_, completion_ids, _ in turns)
+    sent_rows: list[np.ndarray] = []
+
+    async def generate(prompt_token_ids, **kwargs):
+        completion_ids = next(completions)
+        start = kwargs["sampling_config"].routed_experts_prompt_start
+        # The engine forwards every position but the last sampled token.
+        num_rows = len(prompt_token_ids) + len(completion_ids) - 1 - start
+        sent_rows.append(rng.integers(0, 256, (num_rows, 3, 2), dtype=np.uint8))
+        return Completion(
+            min_policy_version=1,
+            max_policy_version=1,
+            request_id=kwargs["request_id"],
+            token_ids=completion_ids,
+            token_logprobs=[-0.5] * len(completion_ids),
+            finish_reason="stop",
+            routed_expert_ids=sent_rows[-1],
+        )
+
+    async def run() -> tuple[dict[str, Rollout], list[m.Metric]]:
+        traces = {
+            name: vf.Trace(
+                agent=vf.AgentInfo(config=vf.AgentConfig()),
+                task=vf.TraceTask(type="Task", data=vf.TaskData(idx=0, prompt="x")),
+            )
+            for name in ("rows", "handles")
+        }
+        frames: dict[str, list[bytes]] = {name: [] for name in traces}
+        streamers = {}
+        for name, trace in traces.items():
+
+            async def send(delta: dict, frames=frames[name]) -> None:
+                frames.append(pack(delta))
+
+            streamers[name] = DeltaStreamer(lambda trace=trace: [trace], send)
+        session_id = traces["handles"].id
+        server = GenerationServer(generate=generate, max_context_length=64)
+        await server.start()
+        try:
+            for turn_idx, turn in enumerate(turns):
+                messages, prompt_ids, spans, completion_ids, bridged = turn
+                path_len = graph.prepare_turn(traces["rows"], messages).path_len
+                start = path_len - 1 if bridged else 0
+                sampling_params = {
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "max_tokens": 4,
+                    "stop_token_ids": [99],
+                    "torchtitan_group_id": 7,
+                    "routed_experts_prompt_start": start,
+                }
+                async with ClientSession() as session:
+                    async with session.post(
+                        f"{server.url}/inference/v1/generate",
+                        json={
+                            "token_ids": prompt_ids,
+                            "sampling_params": sampling_params,
+                        },
+                        headers={"X-Session-ID": session_id},
+                    ) as response:
+                        raw = await response.read()
+                payloads = {
+                    # What the server sent before it kept the rows.
+                    "rows": {
+                        "data": base64.b64encode(sent_rows[-1]),
+                        "shape": list(sent_rows[-1].shape),
+                        "start": start,
+                        "dtype": "uint8",
+                    },
+                    "handles": parse_generate_response(raw)["choices"][0][
+                        "routed_experts"
+                    ],
+                }
+                for name, trace in traces.items():
+                    graph.prepare_turn(trace, messages).commit(
+                        vf.Response(
+                            id="",
+                            created=0,
+                            model="t",
+                            message=replies[turn_idx],
+                            finish_reason="stop",
+                            # As Verifiers' train client builds it: no validation.
+                            tokens=TurnTokens.model_construct(
+                                prompt_ids=prompt_ids,
+                                completion_ids=completion_ids,
+                                completion_logprobs=[-0.5] * len(completion_ids),
+                                message_spans=spans,
+                                bridged=bridged,
+                                routed_experts=payloads[name],
+                            ),
+                        )
+                    )
+                    await streamers[name].flush()
+
+            # The client side: assemble each stream and validate it, as Verifiers' client does.
+            wire_traces = {}
+            for name, trace in traces.items():
+                assembly = EpisodeAssembly()
+                for frame in frames[name]:
+                    assembly.apply(unpack(frame))
+                record = assembly.finish(
+                    dump(Episode(env=EnvInfo(), task=trace.task), exclude={"traces"}),
+                    [TraceSummary(id=trace.id, nodes=len(trace.nodes), calls=0)],
+                )
+                wire_traces[name] = WireEpisode.model_validate(record).traces[0]
+            assert any(b"routing_repairs" in frame for frame in frames["handles"])
+
+            store = server.session_stores[session_id]
+            for rows_part, handles_part in [
+                *zip(wire_traces["rows"].nodes, wire_traces["handles"].nodes),
+                *zip(wire_traces["rows"].branches, wire_traces["handles"].branches),
+            ]:
+                row_ids = handles_part.routed_experts.view("<u4").ravel()
+                assert (
+                    store.rows[row_ids].tobytes() == rows_part.routed_experts.tobytes()
+                )
+
+            # The training turns: today's slices of the rows vs the worker's fetch by handle.
+            metadata = VerifiersGenerationMetadata(
+                min_policy_version=1, max_policy_version=1, metrics=[]
+            )
+            rollouts = {
+                name: Rollout(
+                    group_id=7,
+                    rollout_id=0,
+                    status=RolloutStatus.COMPLETED,
+                    reward=1.0,
+                    turns=VerifiersRolloutWorker.trace_to_rollout_turns(
+                        trace=trace,
+                        generation_metadata=metadata,
+                        group_id=7,
+                        rollout_id=0,
+                    ),
+                )
+                for name, trace in wire_traces.items()
+            }
+            worker = object.__new__(VerifiersRolloutWorker)
+            worker._training_sample_builder = TrainingSampleBuilder.Config().build()
+            metrics = await worker._fetch_routed_expert_ids(
+                RolloutGroup(group_id=7, rollouts=[rollouts["handles"]]),
+                generator_client=GeneratorClient(router=None),
+                generator_sessions={0: (server.url, session_id)},
+            )
+        finally:
+            await server.close()
+        return rollouts, metrics
+
+    rollouts, metrics = asyncio.run(run())
+
+    assert len(rollouts["rows"].turns) == len(turns)
+    for rows_turn, fetched_turn in zip(
+        rollouts["rows"].turns, rollouts["handles"].turns, strict=True
+    ):
+        rows, fetched = rows_turn.routed_expert_ids, fetched_turn.routed_expert_ids
+        assert (fetched.dtype, fetched.shape) == (rows.dtype, rows.shape)
+        assert fetched.tobytes() == rows.tobytes()
+    assert m.MetricsProcessor._aggregate_metrics(metrics) == {
+        "rollout/routed_experts/fetches/sum": 1.0,
+        "rollout/routed_experts/fetch_retries/sum": 0.0,
+        "rollout/routed_experts/fetch_failures/sum": 0.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "rewards, failed_attempts, fetched, fetch_metrics",
+    [
+        # Rollout 1's fetch fails twice: it gets None, so the batcher drops the group, counted.
+        ([0.0, 1.0], [0, 2], [True, False], (2, 1, 1)),
+        ([0.0, 1.0], [0, 1], [True, True], (2, 1, 0)),
+        # Zero reward spread: the batcher trains neither rollout, so neither fetches.
+        ([1.0, 1.0], [0, 0], [False, False], None),
+    ],
+)
+def test_only_trained_rollouts_swap_their_handles_for_rows(
+    monkeypatch, rewards, failed_attempts, fetched, fetch_metrics
+) -> None:
+    """Rollouts 0 and 1 carry handles to rows 0-2 and 3-4 of their sessions; rollout 2 raised.
+    No rollout leaves the worker with handles."""
+    # Distinct per row and per session.
+    rows = {
+        f"trace-{i}": (100 * i + np.arange(20, dtype=np.uint8)).reshape(5, 2, 2)
+        for i in range(2)
+    }
+
+    async def run_single_rollout(
+        self, *, group_id, rollout_id, generator_sessions, **kwargs
+    ):
+        if rollout_id == 2:
+            raise RuntimeError("env server request failed")
+        generator_sessions[rollout_id] = ("http://generator", f"trace-{rollout_id}")
+        handles = np.arange(5, dtype="<u4").view(np.uint8).reshape(5, 4)
+        return Rollout(
+            group_id=group_id,
+            rollout_id=rollout_id,
+            status=RolloutStatus.COMPLETED,
+            turns=[
+                RolloutTurn(
+                    rollout_id=RolloutTurnID(
+                        group_id=group_id, rollout_id=rollout_id, turn_id=turn_id
+                    ),
+                    prompt_prefix_len=0,
+                    prompt_delta_token_ids=np.zeros(1, np.int32),
+                    completion_token_ids=np.ones(1, np.int32),
+                    completion_logprobs=np.zeros(1, np.float32),
+                    routed_expert_ids=turn_handles,
+                )
+                for turn_id, turn_handles in enumerate([handles[:3], handles[3:]])
+            ],
+        )
+
+    async def score_group(self, rollouts, sample):
+        return [
+            RubricOutput(reward=rewards[rollout.rollout_id], reward_breakdown={})
+            for rollout in rollouts
+        ]
+
+    attempts = {f"trace-{rollout_id}": 0 for rollout_id in range(2)}
+
+    async def fetch_routed_expert_ids(url, *, session_id, handles):
+        attempts[session_id] += 1
+        rollout_id = int(session_id.removeprefix("trace-"))
+        if attempts[session_id] <= failed_attempts[rollout_id]:
+            raise RuntimeError("connection reset")
+        return rows[session_id][handles.view("<u4").ravel()]
+
+    monkeypatch.setattr(
+        VerifiersRolloutWorker, "_run_single_rollout", run_single_rollout
+    )
+    monkeypatch.setattr(VerifiersRolloutWorker, "score_group", score_group)
+    worker = object.__new__(VerifiersRolloutWorker)
+    worker.advantage_estimator = AdvantageEstimator.Config().build()
+    worker._training_sample_builder = TrainingSampleBuilder.Config().build()
+    client = GeneratorClient(router=None)
+    object.__setattr__(client, "fetch_routed_expert_ids", fetch_routed_expert_ids)
+
+    group = asyncio.run(
+        worker.run_group(
+            generate_fn=client,
+            release_session_fn=None,
+            sample=None,
+            group_id=1,
+            group_size=3,
+            sampling=SamplingConfig(),
+        )
+    )
+
+    for rollout_id, is_fetched in enumerate(fetched):
+        turn_rows = [
+            turn.routed_expert_ids for turn in group.rollouts[rollout_id].turns
+        ]
+        if is_fetched:
+            np.testing.assert_array_equal(turn_rows[0], rows[f"trace-{rollout_id}"][:3])
+            np.testing.assert_array_equal(turn_rows[1], rows[f"trace-{rollout_id}"][3:])
+        else:
+            assert turn_rows == [None, None]
+    assert group.rollouts[2].status is RolloutStatus.ERROR_SYSTEM
+    metrics = {
+        key: value
+        for key, value in m.MetricsProcessor._aggregate_metrics(group.metrics).items()
+        if key.startswith("rollout/routed_experts/")
+    }
+    if fetch_metrics is None:
+        assert metrics == {}
+    else:
+        assert metrics == {
+            f"rollout/routed_experts/{key}/sum": float(value)
+            for key, value in zip(
+                ("fetches", "fetch_retries", "fetch_failures"), fetch_metrics
+            )
+        }

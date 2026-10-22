@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import io
 import weakref
 from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
+import numpy as np
 
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.generator.generation_server import (
@@ -39,6 +41,7 @@ class GeneratorClient:
         native rollout, per turn:  router.acquire(session) -> POST generator -> router.release
         native rollout, at end:    release_session
         Verifiers rollout, once:   acquire_rollout -> agent posts every turn -> release_rollout
+        Verifiers group, at end:   fetch_routed_expert_ids, once per trained rollout
 
     Example:
 
@@ -121,6 +124,23 @@ class GeneratorClient:
         return await self.router.release_rollout.call_one(
             index=endpoint.index, group_id=group_id, session_ids=session_ids
         )
+
+    async def fetch_routed_expert_ids(
+        self, url: str, *, session_id: str, handles: np.ndarray
+    ) -> np.ndarray:
+        """Fetch the router-replay rows `[len(handles), num_layers, top_k]` the generator at `url`
+        holds for a session's handles, uint8 `[len(handles), 4]` (see `GenerationServer`)."""
+        async with _http_session().post(
+            f"{url}/inference/v1/routed_experts",
+            data=handles.tobytes(),
+            headers={SESSION_ID_HEADER: session_id},
+        ) as response:
+            if response.status != 200:
+                raise RuntimeError(
+                    f"{url} answered the routed-experts fetch of session {session_id} with "
+                    f"{response.status}: {await response.text()}"
+                )
+            return np.load(io.BytesIO(await response.read()))
 
 
 # One HTTP session per event loop, shared by every client object in it: a session per call

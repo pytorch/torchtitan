@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.rl.generator.types import SamplingConfig
+    from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 
 logger = logging.getLogger(__name__)
@@ -246,10 +247,14 @@ class Rollouter(Configurable):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        training_sample_builder: TrainingSampleBuilder.Config,
         worker_config: RolloutWorker.Config | None = None,
     ) -> None:
         """Spawn the rollout worker pool through `actor_system` and initialize it.
-        `worker_config` replaces `Config.worker`, for a worker config known only at setup."""
+        `worker_config` replaces `Config.worker`, for a worker config known only at setup.
+        `training_sample_builder` is the batcher's, which tells which rollouts train; unused here
+        (`VerifiersRollouter` fetches router-replay rows for those rollouts only)."""
+        del training_sample_builder
         if self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
 

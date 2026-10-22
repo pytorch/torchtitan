@@ -235,6 +235,15 @@ def test_routed_expert_ids_follow_the_trainer_inputs_across_turns_and_branches()
     assert second.routed_expert_ids.flatten().tolist() == [0, 101, 102, 203, 204]
 
 
+def test_a_sample_with_generator_handles_instead_of_rows_raises() -> None:
+    # Handles, uint8 [tokens, 4], would set the batcher's buffer shape and pack without an error.
+    rollout_turn = _turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1)
+    rollout_turn.routed_expert_ids = np.zeros((2, 4), np.uint8)
+    rollout = _scored_rollout([rollout_turn], reward=1.0, advantage=0.5)
+    with pytest.raises(ValueError, match="generator handles"):
+        rollout_to_training_samples(rollout)
+
+
 def test_router_replay_drops_a_group_with_a_turn_without_routed_expert_ids() -> None:
     def rollout(rows: np.ndarray | None) -> Rollout:
         rollout_turn = _turn(

@@ -111,6 +111,14 @@ class _SampleInProgress:
         routed_expert_ids = (
             np.concatenate(self.routed_expert_ids) if self.routed_expert_ids else None
         )
+        # The batcher shapes its buffer like the first sample's rows, so generator handles
+        # (uint8 [tokens, 4], see `GenerationServer`) would pack without an error.
+        if routed_expert_ids is not None and routed_expert_ids.ndim != 3:
+            raise ValueError(
+                "routed_expert_ids must be [tokens, num_layers, top_k] rows, got shape "
+                f"{routed_expert_ids.shape} for {self.rollout_id}; a [tokens, 4] array is "
+                "generator handles, which the rollout worker swaps for rows"
+            )
         # One row per trainer input: token_ids[:-1].
         assert routed_expert_ids is None or len(routed_expert_ids) == len(token_ids) - 1
         return TrainingSample(

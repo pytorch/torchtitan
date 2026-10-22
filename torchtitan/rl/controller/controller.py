@@ -816,6 +816,7 @@ class Controller(Configurable):
                 tokenizer_config=config.tokenizer,
                 renderer_config=config.renderer,
                 hf_assets_path=config.hf_assets_path,
+                training_sample_builder=config.async_loop.batcher.training_sample_builder,
             )
 
         # Initialize TorchStore, which carries the model state dict from the trainer to the generators.

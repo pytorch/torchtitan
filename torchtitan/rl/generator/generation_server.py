@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import itertools
 import json
 import logging
@@ -83,6 +84,17 @@ class VerifiersGenerationMetadata:
     """
 
 
+@dataclass(frozen=True, slots=True)
+class SessionStore:
+    """One session's router-replay rows, in a buffer that grows by 1.5x as calls append."""
+
+    rows: np.ndarray
+    """`[capacity, num_layers, top_k]`; only the first `num_rows` hold rows."""
+
+    num_rows: int
+    """Rows appended so far; row `i` is the one handle `i` points to."""
+
+
 class GenerationServer:
     """Serve a generator's `generate` over HTTP, so every caller reaches the generator directly.
 
@@ -93,6 +105,16 @@ class GenerationServer:
                                    versions, metrics and top-k for `pop_generation_metadata`.
         "response_format":         token ids, logprobs, top-k as raw arrays; versions, metrics in one
           "torchtitan"             `torchtitan` block; 200 whenever the engine produced a completion.
+
+    Router replay, default format: the server keeps a training session's expert rows in its
+    `SessionStore` and replies with handles, uint8 `[rows, 4]` holding little-endian uint32 row
+    numbers. Verifiers only moves whole rows (slices, copies, repairs), so it builds the same
+    arrays from handles as from rows, and the rollout worker swaps handles for rows at the end:
+
+        generate, session s, 3 new rows   store rows 0-2   reply [[0,0,0,0], [1,0,0,0], [2,0,0,0]]
+        generate, session s, 2 new rows   store rows 3-4   reply [[3,0,0,0], [4,0,0,0]]
+        POST /inference/v1/routed_experts, s, [[4,0,0,0], [0,0,0,0]]   -> rows 4 and 0
+        release_groups([group of s])      drop s's rows; the group's later completions keep nothing
 
     The server mints every request id, so no client can send an id the engine already runs.
     It listens on every interface and is unauthenticated.
@@ -116,8 +138,13 @@ class GenerationServer:
         self.bound_port: int | None = None
         self._request_counter = itertools.count()
         self.generation_metadata: dict[str, VerifiersGenerationMetadata] = {}
-        # Group id -> the sessions with folded metadata, so `drop_generation_metadata` can free them.
+        # Session id -> its router-replay rows, until `release_groups` frees its group.
+        self.session_stores: dict[str, SessionStore] = {}
+        # Group id -> the sessions with folded metadata or rows, so `release_groups` can free them.
         self._group_sessions: dict[int, set[str]] = {}
+        # Training groups `release_groups` freed, and the completions of theirs that came after.
+        self._released_groups: set[int] = set()
+        self._num_released_group_completions = 0
         # This process (the engine's) GC time and event-loop lag, attached to each completion's
         # metrics. The lag task needs the running loop, so `start` creates it.
         self._gc_timer = m.GCTimer("generator")
@@ -142,6 +169,9 @@ class GenerationServer:
         app.router.add_get("/healthz", self._handle_health_request)
         app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
+        app.router.add_post(
+            "/inference/v1/routed_experts", self._handle_routed_experts_request
+        )
         # A handler whose client hung up is cancelled, so a request still on the engine loop's queue
         # never runs. No access log: one line per request would run in the engine's process.
         runner = web.AppRunner(app, handler_cancellation=True, access_log=None)
@@ -171,7 +201,9 @@ class GenerationServer:
         self.runner = None
         self.bound_port = None
         self.generation_metadata.clear()
+        self.session_stores.clear()
         self._group_sessions.clear()
+        self._released_groups.clear()
 
     def pop_generation_metadata(
         self, session_ids: list[str]
@@ -183,12 +215,45 @@ class GenerationServer:
             if session_id in self.generation_metadata
         }
 
-    def drop_generation_metadata(self, group_ids: list[int]) -> None:
-        """Drop the folded metadata of every session of these groups, including sessions nobody
-        popped (e.g. a retried Verifiers trace)."""
+    def release_groups(self, group_ids: list[int]) -> None:
+        """Drop the folded metadata and the rows of every session of these finished groups,
+        including sessions nobody popped (e.g. a retried Verifiers trace).
+
+        A completion that lands after its group's release, e.g. a sibling's call still in the
+        engine when the group was cancelled:
+
+            training group     keeps nothing, or nothing would free it (ids never repeat in a run)
+            validation group   kept: the next pass reuses the negative id, and its release frees it
+        """
         for group_id in group_ids:
+            if group_id >= 0:
+                self._released_groups.add(group_id)
             for session_id in self._group_sessions.pop(group_id, ()):
                 self.generation_metadata.pop(session_id, None)
+                self.session_stores.pop(session_id, None)
+
+    def session_store_metrics(self) -> list[m.Metric]:
+        """The rows the session stores hold now, and the completions of released groups since
+        the last call. Levels get Mean and Max over generators, counts a Sum."""
+        stores = self.session_stores.values()
+        levels = {
+            "held_rows": sum(store.num_rows for store in stores),
+            # Allocated: up to 1.5x the rows' bytes, as each buffer grows 1.5x at a time.
+            "held_gib": sum(store.rows.nbytes for store in stores) / 2**30,
+        }
+        num_released_group_completions = self._num_released_group_completions
+        self._num_released_group_completions = 0
+        return [
+            *(
+                m.Metric(f"generator/routed_experts/{key}", metric_type(value))
+                for key, value in levels.items()
+                for metric_type in (m.Mean, m.Max)
+            ),
+            m.Metric(
+                "generator/released_group_completions",
+                m.Sum(num_released_group_completions),
+            ),
+        ]
 
     async def _handle_health_request(self, request: web.Request) -> web.Response:
         del request
@@ -318,6 +383,12 @@ class GenerationServer:
                 },
                 status=502,
             )
+        if group_id in self._released_groups:
+            # Its rollout ended while this call ran, and anything kept for it would never be freed.
+            self._num_released_group_completions += 1
+            return web.json_response(
+                {"error": f"rollout group {group_id} was released"}, status=409
+            )
 
         previous = self.generation_metadata.get(session_id)
         topk_by_generation = {} if previous is None else previous.topk_by_generation
@@ -348,6 +419,11 @@ class GenerationServer:
             topk_by_generation=topk_by_generation,
         )
         self._group_sessions.setdefault(group_id, set()).add(session_id)
+        handles = (
+            None
+            if completion.routed_expert_ids is None
+            else self._store_routed_experts(session_id, completion.routed_expert_ids)
+        )
         # Text, not one dict per token: 1.4x faster, and no GC pass every ~700 tokens.
         # A finite Python float's repr is valid JSON; vLLM's logprobs are Python floats.
         logprobs_content = ",".join(
@@ -367,13 +443,13 @@ class GenerationServer:
                         "finish_reason": completion.finish_reason,
                         **(
                             {}
-                            if completion.routed_expert_ids is None
+                            if handles is None
                             else {
                                 "routed_experts": {
                                     "data": _ROUTED_EXPERTS_PLACEHOLDER,
-                                    "shape": list(completion.routed_expert_ids.shape),
+                                    "shape": list(handles.shape),
                                     "start": routed_experts_prompt_start,
-                                    "dtype": str(completion.routed_expert_ids.dtype),
+                                    "dtype": str(handles.dtype),
                                 }
                             }
                         ),
@@ -389,10 +465,10 @@ class GenerationServer:
             json.dumps(_LOGPROBS_CONTENT_PLACEHOLDER)
         )
         response_text = f"{head}[{logprobs_content}]{tail}"
-        if completion.routed_expert_ids is None:
+        if handles is None:
             return web.Response(text=response_text, content_type="application/json")
         # Base64 needs no JSON escaping: splice it in as bytes instead of json.dumps scanning
-        # and copying it (~33 MB at a 64k-token context; 112 -> 27 ms per response).
+        # and copying it.
         head, _, tail = response_text.rpartition(
             json.dumps(_ROUTED_EXPERTS_PLACEHOLDER)
         )
@@ -400,12 +476,66 @@ class GenerationServer:
             (
                 head.encode(),
                 b'"',
-                base64.b64encode(np.ascontiguousarray(completion.routed_expert_ids)),
+                base64.b64encode(handles),
                 b'"',
                 tail.encode(),
             )
         )
         return web.Response(body=body, content_type="application/json", charset="utf-8")
+
+    def _store_routed_experts(self, session_id: str, rows: np.ndarray) -> np.ndarray:
+        """Append a completion's rows `[num_rows, num_layers, top_k]` to its session's store and
+        return their handles, uint8 `[num_rows, 4]`; see the class docstring."""
+        store = self.session_stores.get(session_id)
+        start = 0 if store is None else store.num_rows
+        end = start + len(rows)
+        if store is not None and end <= len(store.rows):
+            buffer = store.rows
+        else:
+            # Grow into a new buffer: a fetch thread may still be reading the old one.
+            # Growing 1.5x holds at most 1.5x the rows and copies each row about 3 times.
+            buffer = np.empty((max(end, start * 3 // 2), *rows.shape[1:]), rows.dtype)
+            if store is not None:
+                buffer[:start] = store.rows[:start]
+        buffer[start:end] = rows
+        self.session_stores[session_id] = SessionStore(rows=buffer, num_rows=end)
+        return np.arange(start, end, dtype="<u4").view(np.uint8).reshape(-1, 4)
+
+    async def _handle_routed_experts_request(
+        self, request: web.Request
+    ) -> web.Response:
+        """Return the rows of a session's handles, in handle order, as `.npy` bytes.
+
+        The request carries the session in `X-Session-ID` and the handles' raw bytes as the body.
+        An unknown session is a 404, a handle past the session's rows a 400.
+        """
+        session_id = request.headers.get(SESSION_ID_HEADER)
+        row_ids = np.frombuffer(await request.read(), dtype="<u4")
+        # Taken on this loop. The snapshot's first `num_rows` rows never change: a later append
+        # writes past them or into a new buffer, so the thread below reads stable rows.
+        store = self.session_stores.get(session_id)
+        if store is None:
+            return web.json_response(
+                {"error": f"no router-replay rows for session {session_id!r}"},
+                status=404,
+            )
+        if row_ids.size and int(row_ids.max()) >= store.num_rows:
+            return web.json_response(
+                {
+                    "error": f"handle {int(row_ids.max())} is past the {store.num_rows} "
+                    f"rows of session {session_id!r}"
+                },
+                status=400,
+            )
+
+        def rows_to_npy() -> bytes:
+            npy = io.BytesIO()
+            np.save(npy, store.rows[row_ids])
+            return npy.getvalue()
+
+        # A thread: gathering a mean rollout's ~38 MB would stall every generate call on this loop.
+        body = await asyncio.to_thread(rows_to_npy)
+        return web.Response(body=body, content_type="application/octet-stream")
 
 
 def _encode_metrics(metrics: list[m.Metric]) -> list[list]:
