@@ -6,7 +6,10 @@
 
 """Exact function edits from PyTorch PRs #199884, #200238, and #200199.
 
-Based on torch 2.15.0+cu130, commit
+Targets the official PyTorch 2.15.0 RC, installed as torch==2.15.0 from
+https://download.pytorch.org/whl/test/cu130 for the CUDA 13.0 variant.
+
+The validated wheel reports 2.15.0+cu130, with source commit
 dd1fefe31baf1bc8efbab6dc5291eebfb948b7bf. Only changed functions are patched;
 unchanged PyTorch implementation stays in the installed wheel.
 """
