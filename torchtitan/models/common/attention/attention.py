@@ -41,6 +41,7 @@ from torch.nn.attention.varlen import (
 )
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import compiled
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
@@ -168,7 +169,9 @@ class QKVLinear(Module):
         # The split below copies the wqkv projection output with bare ops.
         remat.recompute_needs_tensor(qkv)
         num_tokens = qkv.shape[0]
-        with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
+        with (
+            spmd.local()
+        ):  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
             qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
             if spmd.is_type_checking():
                 spmd.assert_type(
@@ -389,9 +392,9 @@ class VarlenInnerAttention(InnerAttention):
         ) = None,
         **kwargs,
     ) -> torch.Tensor:
-        assert isinstance(
-            attention_metadata, VarlenAttentionMetadata
-        ), f"attention_metadata must be instance of VarlenAttentionMetadata but got {type(attention_metadata)}"
+        assert isinstance(attention_metadata, VarlenAttentionMetadata), (
+            f"attention_metadata must be instance of VarlenAttentionMetadata but got {type(attention_metadata)}"
+        )
 
         cu_seq_q = attention_metadata.cu_seq_q
         cu_seq_k = attention_metadata.cu_seq_k
@@ -523,11 +526,10 @@ class FlexInnerAttention(InnerAttention):
 
     # fullgraph=True: a graph break or a 17th graph raises, instead of silently running flex eagerly.
     # recompile_limit=16: one compile serves every layer; Muse Spark needs 10 graphs (default 8).
-    # pyrefly: ignore[no-matching-overload]
-    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
+    _compiled_flex_attn: ClassVar[Callable] = compiled(
         flex_attention,
+        inductor_options=inductor_configs,
         fullgraph=True,
-        options=inductor_configs,
         recompile_limit=16,
     )
 
@@ -612,9 +614,9 @@ class FlexInnerAttention(InnerAttention):
         ) = None,
         **kwargs,
     ) -> torch.Tensor:
-        assert isinstance(
-            attention_metadata, BlockMask
-        ), f"attention_metadata must be instance of BlockMask, got {type(attention_metadata)}"
+        assert isinstance(attention_metadata, BlockMask), (
+            f"attention_metadata must be instance of BlockMask, got {type(attention_metadata)}"
+        )
 
         q_1HTK = q_THK.transpose(0, 1).unsqueeze(0)
         k_1HTK = k_THK.transpose(0, 1).unsqueeze(0)
@@ -864,7 +866,7 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     return sliding_window_mod
 
 
-_compiled_create_block_mask = torch.compile(create_block_mask)
+_compiled_create_block_mask = compiled(create_block_mask)
 
 
 def create_attention_mask(*args, **kwargs):

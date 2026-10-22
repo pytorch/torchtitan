@@ -12,7 +12,7 @@ from torchtitan_recipes.tests.models.qwen3_8 import qwen38_debugmodel
 def test_qwen35_architecture_enables_offset_rmsnorm_local_compile() -> None:
     for config_factory in (qwen35_debugmodel, qwen36_debugmodel, qwen38_debugmodel):
         config = config_factory()
-        assert config.model.local_compile_regions == [
+        assert config.model.local_compile.regions == [
             "loss",
             "fused_binary_activation",
             "gated_rmsnorm",

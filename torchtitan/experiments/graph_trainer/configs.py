@@ -9,6 +9,7 @@ from typing import Literal
 
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -59,9 +60,9 @@ class SPMDGradientAccumulationConfig:
     ``UNSHARD`` and ``REDUCE_GRAD`` schedule actions.
     """
 
-    fsdp_param_unshard_mode: Literal[
-        "every_microbatch", "first_microbatch"
-    ] = "first_microbatch"
+    fsdp_param_unshard_mode: Literal["every_microbatch", "first_microbatch"] = (
+        "first_microbatch"
+    )
     """Choose where FSDP parameter all-gathers run.
 
     - ``every_microbatch``
@@ -76,9 +77,9 @@ class SPMDGradientAccumulationConfig:
     the compiled graphs.
     """
 
-    fsdp_grad_reduce_mode: Literal[
-        "every_microbatch", "last_microbatch"
-    ] = "last_microbatch"
+    fsdp_grad_reduce_mode: Literal["every_microbatch", "last_microbatch"] = (
+        "last_microbatch"
+    )
     """Choose where FSDP gradient reduction runs.
 
     - ``every_microbatch``
@@ -352,7 +353,7 @@ def to_graph_trainer_config(
         }
     )
     # GraphTrainer compiles the whole step (config.compile), so it drops the model's local compile regions.
-    graph_model.local_compile_regions = []
+    graph_model.local_compile = LocalCompileConfig()
     disable_inplace_wgrad_accum(graph_model)
     d["model"] = graph_model
 

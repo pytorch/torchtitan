@@ -215,7 +215,7 @@ def test_lm_head_converter_swaps_only_lm_head():
     # The head keeps 2 pieces: summed over the vocab, a third doesn't help.
     assert config.lm_head.backward_mode == "hi_mid"
     # It turns on the split's local_compile region.
-    assert "fp32_to_bf16_split" in config.local_compile_regions
+    assert "fp32_to_bf16_split" in config.local_compile.regions
     # Converting an already converted head is a no-op.
     converted = config.lm_head
     LMHeadFP32OutputConverter.Config().build().convert(config)
