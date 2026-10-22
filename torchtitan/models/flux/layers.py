@@ -236,8 +236,6 @@ class SelfAttention(Module):
         self.norm = config.norm.build()
         self.proj = config.proj.build()
         self.inner_attention = config.inner_attention.build()
-        head_dim = config.qkv.out_features // (3 * config.num_heads)
-        self.inner_attention.validate_head_dims(head_dim, v_head_dim=head_dim)
 
     def forward(
         self, x: Tensor, pe: Tensor, *, attention_metadata: VarlenAttentionMetadata
@@ -338,8 +336,6 @@ class DoubleStreamBlock(Module):
         )
 
         self.inner_attention = config.inner_attention.build()
-        head_dim = config.hidden_size // config.num_heads
-        self.inner_attention.validate_head_dims(head_dim, v_head_dim=head_dim)
 
     def forward(
         self,
@@ -458,7 +454,6 @@ class SingleStreamBlock(Module):
         self.mlp_act = GELU.Config(approximate="tanh").build()
         self.modulation = config.modulation.build()
         self.inner_attention = config.inner_attention.build()
-        self.inner_attention.validate_head_dims(head_dim, v_head_dim=head_dim)
 
     def forward(
         self,

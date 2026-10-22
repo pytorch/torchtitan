@@ -94,9 +94,6 @@ class DeepSeekMLAAttention(Attention):
         self.softmax_scale = config.softmax_scale
 
         self.inner_attention = config.inner_attention.build()
-        self.inner_attention.validate_head_dims(
-            self.qk_head_dim, v_head_dim=self.v_head_dim
-        )
         self.rope = config.rope.build()
 
     def forward(

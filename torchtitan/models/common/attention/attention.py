@@ -19,7 +19,10 @@ from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from torch.nn.attention import current_flash_attention_impl
+from torch.nn.attention import (
+    activate_flash_attention_impl,
+    current_flash_attention_impl,
+)
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
     _mask_mod_signature,
@@ -41,11 +44,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.tools.utils import (
-    activate_cuda_flash_attention,
-    round_up,
-    validate_flash_attention_head_dims,
-)
+from torchtitan.tools.utils import round_up
 
 if TYPE_CHECKING:
     from . import AttentionMetadata
@@ -73,9 +72,6 @@ __all__ = [
 
 class InnerAttention(Module):
     """Base class for attention kernels used by outer attention modules."""
-
-    def validate_head_dims(self, qk_head_dim: int, *, v_head_dim: int) -> None:
-        """Validate kernel-specific dimensions once the outer attention knows them."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -243,7 +239,6 @@ class GQAttention(Attention):
         self.qkv_linear = config.qkv_linear.build()
         self.wo = config.wo.build()
         self.inner_attention = config.inner_attention.build()
-        self.inner_attention.validate_head_dims(self.head_dim, v_head_dim=self.head_dim)
 
         # Optional QK normalization (Qwen3-style)
         self.q_norm: RMSNorm | None = None
@@ -360,10 +355,14 @@ class VarlenInnerAttention(InnerAttention):
         super().__init__()
         self.window_size = config.window_size
 
-        activate_cuda_flash_attention()
+        from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
-    def validate_head_dims(self, qk_head_dim: int, *, v_head_dim: int) -> None:
-        validate_flash_attention_head_dims(qk_head_dim, v_head_dim=v_head_dim)
+        flash_attention_impl = get_cuda_flash_attention_impl()
+        if (
+            flash_attention_impl is not None
+            and current_flash_attention_impl() != flash_attention_impl
+        ):
+            activate_flash_attention_impl(flash_attention_impl)
 
     def forward(
         self,

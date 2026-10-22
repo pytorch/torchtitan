@@ -5,21 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from unittest.mock import patch
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
-from torch.nn.attention import (
-    activate_flash_attention_impl,
-    current_flash_attention_impl,
-    restore_flash_attention_impl,
-    sdpa_kernel,
-    SDPBackend,
-)
-from torch.nn.attention.varlen import varlen_attn
+from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.testing._internal.common_utils import DeterministicGuard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -45,86 +37,6 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires 
 def _metadata():
     boundaries = torch.tensor([0, 32, 64], device="cuda", dtype=torch.int32)
     return VarlenAttentionMetadata(boundaries, boundaries, 32, 32)
-
-
-@pytest.mark.parametrize("compile_attention", [False, True])
-@pytest.mark.parametrize(
-    "missing_backend",
-    [
-        pytest.param(None, id="installed"),
-        pytest.param(("FA3", "flash_attn_interface"), id="missing-fa3"),
-        pytest.param(("FA4", "flash_attn.cute.interface"), id="missing-fa4"),
-    ],
-)
-def test_backend_setup_matches_explicit_backend(compile_attention, missing_backend):
-    from torchtitan.tools.utils import get_cuda_flash_attention_impl
-
-    if torch.version.hip is not None:
-        pytest.skip("requires CUDA FlashAttention")
-    impl = get_cuda_flash_attention_impl()
-    if missing_backend is None and impl is None:
-        pytest.skip("requires the architecture's FlashAttention wheel")
-    previous_impl = current_flash_attention_impl()
-    try:
-        if previous_impl is not None:
-            restore_flash_attention_impl()
-        if missing_backend is None:
-            activate_flash_attention_impl(impl)
-
-        with DeterministicGuard(True):
-            torch.manual_seed(42)
-            inputs = [
-                torch.randn(
-                    64, 4, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True
-                )
-                for _ in range(3)
-            ]
-            metadata = _metadata()
-            kwargs = {"num_splits": 1} if missing_backend is not None else {}
-            expected = varlen_attn(*inputs, *metadata, window_size=(-1, 0), **kwargs)
-            expected_loss = expected.float().square().mean()
-            expected_grads = torch.autograd.grad(expected_loss, inputs)
-
-            if missing_backend is not None:
-                # Exercise missing-wheel fallback even on FA2-only CI GPUs.
-                with (
-                    patch(
-                        "torchtitan.tools.utils._cuda_flash_attention_backend",
-                        return_value=missing_backend,
-                    ),
-                    patch(
-                        "torchtitan.tools.utils.importlib.util.find_spec",
-                        return_value=None,
-                    ) as find_spec,
-                ):
-                    attention = VarlenInnerAttention.Config().build()
-                find_spec.assert_called_once_with(missing_backend[1])
-            else:
-                # A layer must not re-register an already active backend.
-                with patch(
-                    "torch.nn.attention.activate_flash_attention_impl",
-                    side_effect=AssertionError,
-                ):
-                    attention = VarlenInnerAttention.Config().build()
-            assert current_flash_attention_impl() == (
-                None if missing_backend is not None else impl
-            )
-            if compile_attention:
-                attention = torch.compile(attention, fullgraph=True)
-            actual = attention(*inputs, attention_metadata=metadata)
-            actual_loss = actual.float().square().mean()
-            actual_grads = torch.autograd.grad(actual_loss, inputs)
-            torch.testing.assert_close(
-                (actual, actual_loss, actual_grads),
-                (expected, expected_loss, expected_grads),
-                atol=0,
-                rtol=0,
-            )
-    finally:
-        if current_flash_attention_impl() is not None:
-            restore_flash_attention_impl()
-        if previous_impl is not None:
-            activate_flash_attention_impl(previous_impl)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

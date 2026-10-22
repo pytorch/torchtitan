@@ -5,13 +5,17 @@
 # LICENSE file in the root directory of this source tree.
 
 import itertools
+import logging
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import spmd_types as spmd
 
 import torch
-from torch.nn.attention import current_flash_attention_impl
+from torch.nn.attention import (
+    activate_flash_attention_impl,
+    current_flash_attention_impl,
+)
 from torch.nn.attention.varlen import AuxRequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
@@ -33,10 +37,10 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.tools.utils import (
-    activate_cuda_flash_attention,
-    validate_flash_attention_head_dims,
-)
+from torchtitan.observability.logging import warn_once
+from torchtitan.tools.utils import get_cuda_flash_attention_impl
+
+logger = logging.getLogger(__name__)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM)
@@ -104,7 +108,24 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
 
         self.enable_gqa = self.num_heads > self.num_kv_heads
 
-        activate_cuda_flash_attention()
+        flash_attention_impl = get_cuda_flash_attention_impl()
+        if flash_attention_impl is not None:
+            # activate_flash_attention_impl() will restore internal global state
+            # and re-run register function, so we want to only call it once.
+            if current_flash_attention_impl() != flash_attention_impl:
+                try:
+                    activate_flash_attention_impl(flash_attention_impl)
+                except (ImportError, RuntimeError, ValueError) as error:
+                    capability = torch.cuda.get_device_capability()
+                    raise RuntimeError(
+                        f"{flash_attention_impl} is required on detected SM "
+                        f"{capability[0]}.{capability[1]}, but activation failed."
+                    ) from error
+        else:
+            warn_once(
+                logger,
+                "FA3/FA4 not available on this CUDA architecture, falling back to FA2. ",
+            )
 
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
@@ -380,7 +401,6 @@ class VLLMInnerAttention(InnerAttention):
             prefix=f"model.layers.{layer_id}.attention.inner_attention",
             **diff_kv_kwargs,
         )
-        self.validate_head_dims(head_dim, v_head_dim=value_head_dim)
         # Set sharding config for the inner vLLM attention module, which has scale
         # buffers that need to be replicated on all ranks in the dense mesh
         replicated_dense = dense_param_placement(tp=spmd.R)
@@ -389,9 +409,6 @@ class VLLMInnerAttention(InnerAttention):
                 name: replicated_dense for name in self.vllm_attn_scale_buffer_names
             },
         )
-
-    def validate_head_dims(self, qk_head_dim: int, *, v_head_dim: int) -> None:
-        validate_flash_attention_head_dims(qk_head_dim, v_head_dim=v_head_dim)
 
     def forward(
         self,

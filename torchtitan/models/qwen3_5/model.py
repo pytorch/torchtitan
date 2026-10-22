@@ -144,7 +144,6 @@ class Qwen35Attention(Attention):
         self.scaling = self.head_dim**-0.5
 
         self.inner_attention = config.inner_attention.build()
-        self.inner_attention.validate_head_dims(self.head_dim, v_head_dim=self.head_dim)
 
     def forward(
         self,

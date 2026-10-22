@@ -78,9 +78,6 @@ class KimiMLAAttention(Attention):
         self.gate = config.gate.build()
         self.wo = config.wo.build()
         self.inner_attention = config.inner_attention.build()
-        self.inner_attention.validate_head_dims(
-            self.q_head_dim, v_head_dim=self.v_head_dim
-        )
 
     def forward(
         self,
