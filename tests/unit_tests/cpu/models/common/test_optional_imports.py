@@ -551,11 +551,20 @@ configs = {
 assert failing <= set(configs), failing
 
 
+# A broken export keeps attn_gym's message, which names the backend; a broken
+# module reports the backend's own error.
+expected_message = (
+    f"{broken} needs {missing_backend}"
+    if broken in facade._EXPORTS
+    else "blocked dependency"
+)
+
+
 def backend_of(config):
     try:
         config.build()
     except ModuleNotFoundError as error:
-        assert str(error) == "blocked dependency", error
+        assert str(error) == expected_message, error
         return error.name
     return None
 
@@ -633,12 +642,15 @@ assert facade.is_missing_kernel(facade.causal_conv1d)
 assert facade.causal_conv1d is not facade._MissingKernel
 recorded = facade._BACKEND_ERRORS["attn_gym.linear.short_conv.causal_conv1d"]
 assert recorded.name == "cutlass", recorded
+# attn_gym's message is kept, and the backend's own error stays in the chain.
+assert str(recorded) == "causal_conv1d requires the optional CuTeDSL backend", recorded
+assert str(recorded.__cause__.__cause__) == "No module named 'cutlass'", recorded
 for use in (facade.causal_conv1d, lambda: facade.require_attn_gym(facade.causal_conv1d)):
     try:
         use()
     except ModuleNotFoundError as error:
         assert error.name == "cutlass", error
-        assert str(error) == "No module named 'cutlass'", error
+        assert str(error) == "causal_conv1d requires the optional CuTeDSL backend", error
     else:
         raise AssertionError("A kernel with a missing backend ran")
 

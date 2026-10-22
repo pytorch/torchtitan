@@ -131,8 +131,8 @@ _BACKEND_ERRORS: dict[str, ModuleNotFoundError] = {}
 def _raise_for(error: ModuleNotFoundError | None) -> NoReturn:
     """Raise for a missing export.
 
-    ``error`` is the backend error recorded for the export's module. Without
-    one, attn_gym itself is not installed.
+    ``error`` is the backend error recorded for the export or its module.
+    Without one, attn_gym itself is not installed.
     """
     if error is not None:
         # A fresh exception each time: re-raising the recorded instance would
@@ -174,15 +174,15 @@ class _MissingKernel:
 _BACKEND_KERNELS: dict[str, type[_MissingKernel]] = {}
 
 
-def _missing_backend_kernel(module_name: str) -> type[_MissingKernel]:
-    kernel = _BACKEND_KERNELS.get(module_name)
+def _missing_backend_kernel(key: str) -> type[_MissingKernel]:
+    kernel = _BACKEND_KERNELS.get(key)
     if kernel is None:
         kernel = type(
-            f"_MissingKernel[{module_name}]",
+            f"_MissingKernel[{key}]",
             (_MissingKernel,),
-            {"__module__": __name__, "_error": _BACKEND_ERRORS[module_name]},
+            {"__module__": __name__, "_error": _BACKEND_ERRORS[key]},
         )
-        _BACKEND_KERNELS[module_name] = kernel
+        _BACKEND_KERNELS[key] = kernel
     return kernel
 
 
@@ -221,6 +221,9 @@ def _load_export(module: ModuleType, name: str) -> Any:
     attn_gym resolves backend-backed exports on first access (see
     ``attn_gym.linear._lazy``) and wraps the backend's ModuleNotFoundError in
     an ImportError, so for those the backend fails here, not in _load_module.
+    This relies on attn_gym raising that ImportError with ``from``: only
+    ``__cause__`` is inspected, an implicitly chained error (``__context__``)
+    raises at import.
     """
     try:
         return getattr(module, name)
@@ -229,7 +232,12 @@ def _load_export(module: ModuleType, name: str) -> Any:
         if not isinstance(cause, ModuleNotFoundError) or not _is_backend_error(cause):
             raise
         key = f"{module.__name__}.{name}"
-        _BACKEND_ERRORS.setdefault(key, cause)
+        # Keep attn_gym's message, which names the optional backend and how to
+        # get it, where the chained ModuleNotFoundError only says what import
+        # failed. The backend's name stays on the error for callers.
+        recorded = ModuleNotFoundError(str(error), name=cause.name, path=cause.path)
+        recorded.__cause__ = error
+        _BACKEND_ERRORS.setdefault(key, recorded)
         return _missing_backend_kernel(key)
 
 
