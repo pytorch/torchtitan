@@ -8,6 +8,7 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -19,13 +20,83 @@ from torchtitan.models.common.attn_gym import (
     require_attn_gym,
 )
 
-from .cp_attention import CPInnerAttention
+from .cp_attention import CPInnerAttention, Ulysses
 from .cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
     prepare_linear_attention_cp_metadata,
 )
 from .kda import InnerKDA
 from .linear_attention import LinearAttentionMetadata
+
+# Shape suffixes: T = tokens, C = channels, H = heads, K/V = head dimensions,
+# F = packed features per head, W = convolution kernel width.
+
+
+class UlyssesInnerKDA(Ulysses[LinearAttentionMetadata], InnerKDA):
+    """Run convolution and KDA on full sequences with CP-sharded heads."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Ulysses.Config, InnerKDA.Config):
+        pass
+
+    def forward(
+        self,
+        query_TC: torch.Tensor,
+        key_TC: torch.Tensor,
+        value_TC: torch.Tensor,
+        raw_gate_THK: torch.Tensor,
+        raw_beta_TH: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_HK: torch.Tensor,
+        *,
+        attention_metadata: LinearAttentionMetadata | None,
+    ) -> torch.Tensor:
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is None:
+            raise RuntimeError(
+                "Ulysses KDA requires an active multi-rank CP mesh axis."
+            )
+        packed_THF = torch.cat(
+            (
+                query_TC.unflatten(-1, (-1, self.head_dim)),
+                key_TC.unflatten(-1, (-1, self.head_dim)),
+                value_TC.unflatten(-1, (-1, self.head_dim)),
+                raw_gate_THK,
+                raw_beta_TH.unsqueeze(-1),
+            ),
+            dim=-1,
+        )
+        packed_THF = spmd.redistribute(
+            packed_THF, cp_group, src=spmd.S(0), dst=spmd.S(1)
+        )
+        q_THK, k_THK, v_THV, raw_gate_THK, beta_TH1 = packed_THF.split(
+            [self.head_dim] * 4 + [1], dim=-1
+        )
+        # Parameters remain CP-replicated outside this region. Shard their heads
+        # locally; backward contributes zeros for heads owned by other CP ranks.
+        parameters = tuple(
+            spmd.shard(parameter, cp_group, src=spmd.R, dst=spmd.S(0))
+            for parameter in (
+                conv_q_weight_C1W,
+                conv_k_weight_C1W,
+                conv_v_weight_C1W,
+                A_log_H,
+                dt_bias_HK,
+            )
+        )
+        out_THV = super().forward(
+            q_THK.flatten(-2),
+            k_THK.flatten(-2),
+            v_THV.flatten(-2),
+            raw_gate_THK,
+            beta_TH1.squeeze(-1),
+            *parameters,
+            attention_metadata=attention_metadata,
+        )
+        return spmd.redistribute(out_THV, cp_group, src=spmd.S(1), dst=spmd.S(0))
 
 
 class ContextParallelInnerKDA(

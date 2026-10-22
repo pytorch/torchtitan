@@ -8,6 +8,7 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -20,13 +21,93 @@ from torchtitan.models.common.attn_gym import (
     require_attn_gym,
 )
 
-from .cp_attention import CPInnerAttention
+from .cp_attention import CPInnerAttention, Ulysses
 from .cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
     prepare_linear_attention_cp_metadata,
 )
 from .gdn import InnerGDN
 from .linear_attention import LinearAttentionMetadata
+
+# Shape suffixes: T = tokens, C = channels, H = heads, K/V = head dimensions,
+# F = packed features per head, W = convolution kernel width.
+# Q/K and V may have different head counts.
+
+
+class UlyssesInnerGDN(Ulysses[LinearAttentionMetadata], InnerGDN):
+    """Run convolution and GDN on full sequences with CP-sharded heads."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Ulysses.Config, InnerGDN.Config):
+        pass
+
+    def forward(
+        self,
+        query_TC: torch.Tensor,
+        key_TC: torch.Tensor,
+        value_TC: torch.Tensor,
+        a_TH: torch.Tensor,
+        b_TH: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_H: torch.Tensor,
+        *,
+        key_head_dim: int,
+        value_head_dim: int,
+        attention_metadata: LinearAttentionMetadata | None,
+    ) -> torch.Tensor:
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is None:
+            raise RuntimeError(
+                "Ulysses GDN requires an active multi-rank CP mesh axis."
+            )
+        packed_qk_THF = torch.cat(
+            (
+                query_TC.unflatten(-1, (-1, key_head_dim)),
+                key_TC.unflatten(-1, (-1, key_head_dim)),
+            ),
+            dim=-1,
+        )
+        packed_qk_THF = spmd.redistribute(
+            packed_qk_THF, cp_group, src=spmd.S(0), dst=spmd.S(1)
+        )
+        q_THK, k_THK = packed_qk_THF.split([key_head_dim] * 2, dim=-1)
+        packed_vab_THF = torch.cat(
+            (
+                value_TC.unflatten(-1, (-1, value_head_dim)),
+                a_TH.unsqueeze(-1),
+                b_TH.unsqueeze(-1),
+            ),
+            dim=-1,
+        )
+        packed_vab_THF = spmd.redistribute(
+            packed_vab_THF, cp_group, src=spmd.S(0), dst=spmd.S(1)
+        )
+        v_THV, a_TH1, b_TH1 = packed_vab_THF.split([value_head_dim, 1, 1], dim=-1)
+        parameters = tuple(
+            spmd.shard(parameter, cp_group, src=spmd.R, dst=spmd.S(0))
+            for parameter in (
+                conv_q_weight_C1W,
+                conv_k_weight_C1W,
+                conv_v_weight_C1W,
+                A_log_H,
+                dt_bias_H,
+            )
+        )
+        out_THV = super().forward(
+            q_THK.flatten(-2),
+            k_THK.flatten(-2),
+            v_THV.flatten(-2),
+            a_TH1.squeeze(-1),
+            b_TH1.squeeze(-1),
+            *parameters,
+            key_head_dim=key_head_dim,
+            value_head_dim=value_head_dim,
+            attention_metadata=attention_metadata,
+        )
+        return spmd.redistribute(out_THV, cp_group, src=spmd.S(1), dst=spmd.S(0))
 
 
 class ContextParallelInnerGDN(

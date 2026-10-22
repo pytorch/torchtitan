@@ -20,6 +20,8 @@ from torch.nn.attention.flex_attention import BlockMask
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import ContextParallelTransform
+from torchtitan.config.validation import validate_context_parallel
 from torchtitan.distributed import context_parallel
 from torchtitan.distributed.context_parallel import (
     ContextParallelLoadBalancer,
@@ -32,6 +34,7 @@ from torchtitan.models.common.attention import (
     Attention,
     FlexInnerAttention,
     InnerAttention,
+    LinearAttention,
     MLAAttention,
     SlidingWindowFlexInnerAttention,
     VarlenAttentionMetadata,
@@ -46,10 +49,15 @@ from torchtitan.models.common.attention.cp_attention import (
     UlyssesSlidingWindowFlexInnerAttention,
     UlyssesVarlenInnerAttention,
 )
+from torchtitan.models.common.attention.cp_gdn import UlyssesInnerGDN
+from torchtitan.models.common.attention.cp_kda import UlyssesInnerKDA
 from torchtitan.models.common.attention.cp_mla import (
     AllGatherKVMLAFlexAttention,
     UlyssesMLAAttention,
 )
+from torchtitan.models.common.attention.gdn import InnerGDN
+from torchtitan.models.common.attention.kda import InnerKDA
+from torchtitan.models.common.attention.linear_attention import LinearAttentionMetadata
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import (
@@ -917,6 +925,63 @@ class TestAllGatherCollective(unittest.TestCase):
 
 
 class TestUlysses(unittest.TestCase):
+    def _linear_attention_config(self, family):
+        model = importlib.import_module(
+            f"torchtitan.models.{family}"
+        ).build_model_config(
+            "debugmodel", parallelism=ParallelismConfig(), attn_backend="flex"
+        )
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: AllGatherKVFlexInnerAttention,
+                MLAAttention: AllGatherKVMLAFlexAttention,
+                InnerKDA: UlyssesInnerKDA,
+                InnerGDN: UlyssesInnerGDN,
+            }
+        ).transform(model)
+        return model, ParallelismConfig(context_parallel_degree=2)
+
+    def test_linear_attention_metadata(self):
+        metadata = LinearAttentionMetadata(
+            varlen=VarlenInnerAttention.Config().build_attention_metadata(
+                torch.tensor([0, 1, 2, 0, 1, 2])
+            ),
+            num_conv_history_tokens=3,
+        )
+        for backend in (UlyssesInnerKDA, UlyssesInnerGDN):
+            with self.subTest(backend=backend):
+                self.assertIs(
+                    backend.prepare_cp_metadata(metadata, permutation=None), metadata
+                )
+                with self.assertRaisesRegex(ValueError, "contiguous token shards"):
+                    backend.prepare_cp_metadata(
+                        metadata, permutation=torch.tensor([[0, 1, 4, 5, 2, 3]])
+                    )
+
+    def test_linear_attention_config(self):
+        for family, backend in (
+            ("kimi_k3", UlyssesInnerKDA),
+            ("qwen3_5", UlyssesInnerGDN),
+        ):
+            with self.subTest(family=family):
+                model, parallelism = self._linear_attention_config(family)
+                validate_context_parallel(model, parallelism)
+                for layer in model.layers:
+                    if isinstance(layer.attention, LinearAttention.Config):
+                        self.assertIs(layer.attention.inner_attention._owner, backend)
+
+                parallelism.context_parallel_load_balancer = (
+                    HeadTailCPLoadBalancer.Config()
+                )
+                with self.assertRaisesRegex(ValueError, "must be None"):
+                    validate_context_parallel(model, parallelism)
+
+    def test_rejects_gdn_key_heads_indivisible_by_tp_times_cp(self):
+        model, parallelism = self._linear_attention_config("qwen3_5")
+        parallelism.tensor_parallel_degree = 2
+        with self.assertRaisesRegex(ValueError, r"n_kv_heads \(2\)"):
+            validate_context_parallel(model, parallelism)
+
     def test_shared_base_is_a_cp_attention(self):
         self.assertTrue(issubclass(UlyssesInnerAttention, CPInnerAttention))
         self.assertTrue(
