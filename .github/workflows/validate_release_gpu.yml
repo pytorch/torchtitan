@@ -64,8 +64,8 @@ jobs:
       timeout: 180
       script: |
         VALIDATION_SUITE="${{ matrix.validation-suite }}" \
-        TORCH_VERSION="2.14.0" \
-        TORCHVISION_VERSION="0.29.0" \
+        TORCH_VERSION="2.15.0" \
+        TORCHVISION_VERSION="0.29.2" \
         TORCHAO_VERSION="0.18.0" \
         PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
         bash .github/scripts/validate_release_gpu.sh
@@ -97,8 +97,8 @@ jobs:
       timeout: 180
       script: |
         VALIDATION_SUITE="h100" \
-        TORCH_VERSION="2.14.0" \
-        TORCHVISION_VERSION="0.29.0" \
+        TORCH_VERSION="2.15.0" \
+        TORCHVISION_VERSION="0.29.2" \
         TORCHAO_VERSION="0.18.0" \
         PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
         bash .github/scripts/validate_release_gpu.sh
@@ -122,8 +122,8 @@ jobs:
       timeout: 180
       script: |
         VALIDATION_SUITE="graph-trainer-h100" \
-        TORCH_VERSION="2.14.0" \
-        TORCHVISION_VERSION="0.29.0" \
+        TORCH_VERSION="2.15.0" \
+        TORCHVISION_VERSION="0.29.2" \
         TORCHAO_VERSION="0.18.0" \
         PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
         bash .github/scripts/validate_release_gpu.sh
@@ -152,8 +152,8 @@ jobs:
           bash .ci/docker/common/install_base.sh
 
           VALIDATION_SUITE="b200" \
-          TORCH_VERSION="2.14.0" \
-          TORCHVISION_VERSION="0.29.0" \
+          TORCH_VERSION="2.15.0" \
+          TORCHVISION_VERSION="0.29.2" \
           TORCHAO_VERSION="0.18.0" \
           PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
           bash .github/scripts/validate_release_gpu.sh
