@@ -21,6 +21,7 @@ import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torch.distributed.tensor import DTensor, Replicate
@@ -48,6 +49,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.vllm.registry import uses_vllm_compressed_mla
 
 
 logger = init_logger(__name__)
@@ -63,7 +65,9 @@ def _replace_vllm_layer_configs(model_config):
         get_attention_dimensions,
         VLLMInnerAttention,
     )
+    from torchtitan.rl.generator.vllm.mla import VLLMMLAAttention, VLLMMLAInnerAttention
 
+    compressed_mla = uses_vllm_compressed_mla(model_config)
     new_layers = []
     for layer_idx, layer_cfg in enumerate(model_config.layers):
         new_layer_cfg = layer_cfg
@@ -72,27 +76,50 @@ def _replace_vllm_layer_configs(model_config):
         if isinstance(attention_cfg, Attention.Config) and not isinstance(
             attention_cfg, LinearAttention.Config
         ):
-            if isinstance(attention_cfg.inner_attention, MLAAttention.Config):
-                raise ValueError(
-                    f"layers[{layer_idx}]: MLA attention is not supported by the "
-                    "TorchTitan vLLM wrapper yet."
-                )
             (
                 num_heads,
                 num_kv_heads,
                 head_dim,
                 value_head_dim,
             ) = get_attention_dimensions(attention_cfg, model_config.dim)
-            vllm_attention_cfg = VLLMInnerAttention.Config(
-                hidden_size=model_config.dim,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                value_head_dim=value_head_dim,
-                scale=attention_cfg.softmax_scale,
-                sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
-                sharding_config=attention_cfg.inner_attention.sharding_config,
-            )
+            backend_cfg = attention_cfg.inner_attention
+            is_mla = isinstance(backend_cfg, MLAAttention.Config)
+            if is_mla and compressed_mla:
+                vllm_attention_cfg = VLLMMLAAttention.Config(
+                    wkv_b=backend_cfg.wkv_b,
+                    packed_kv_head_dim=backend_cfg.packed_kv_head_dim,
+                    inner_attention=VLLMMLAInnerAttention.Config(
+                        num_heads=num_heads,
+                        kv_lora_rank=attention_cfg.kv_lora_rank,
+                        qk_nope_head_dim=attention_cfg.qk_nope_head_dim,
+                        qk_rope_head_dim=attention_cfg.qk_rope_head_dim,
+                        v_head_dim=attention_cfg.v_head_dim,
+                        scale=attention_cfg.softmax_scale,
+                        sharding_config=backend_cfg.inner_attention.sharding_config,
+                    ),
+                    sharding_config=backend_cfg.sharding_config,
+                )
+            else:
+                kernel_cfg = backend_cfg.inner_attention if is_mla else backend_cfg
+                vllm_attention_cfg = VLLMInnerAttention.Config(
+                    hidden_size=model_config.dim,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=head_dim,
+                    value_head_dim=value_head_dim,
+                    scale=attention_cfg.softmax_scale,
+                    sliding_window_size=getattr(
+                        attention_cfg, "sliding_window_size", None
+                    ),
+                    sharding_config=kernel_cfg.sharding_config,
+                )
+                if is_mla:
+                    vllm_attention_cfg = MLAAttention.Config(
+                        wkv_b=backend_cfg.wkv_b,
+                        packed_kv_head_dim=backend_cfg.packed_kv_head_dim,
+                        inner_attention=vllm_attention_cfg,
+                        sharding_config=backend_cfg.sharding_config,
+                    )
             attention_cfg = dataclasses.replace(
                 attention_cfg,
                 inner_attention=vllm_attention_cfg,
@@ -301,6 +328,15 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
             free_storage(sharded_data)
 
 
+def _refresh_absorbed_mla_weights(model: nn.Module) -> None:
+    """Re-derive vLLM's absorbed MLA decode weights from the loaded ``wkv_b``."""
+    from torchtitan.rl.generator.vllm.mla import _VLLMNativeMLAAttention
+
+    for module in model.modules():
+        if isinstance(module, _VLLMNativeMLAAttention):
+            module.refresh_absorbed_weights()
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -479,6 +515,7 @@ class VLLMModelWrapper(Module):
         incompatible_keys = self.model.load_state_dict(state_dict, strict=True)
         for handle in handles:
             handle.remove()
+        _refresh_absorbed_mla_weights(self.model)
         return incompatible_keys
 
     def set_num_valid_tokens(self, num_valid_tokens: int) -> None:

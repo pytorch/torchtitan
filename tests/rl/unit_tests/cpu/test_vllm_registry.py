@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -11,11 +12,15 @@ import pytest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import LinearAttention, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    LinearAttention,
+    MLAAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.generator.vllm import gdn, kda
+from torchtitan.rl.generator.vllm import gdn, kda, registry
 from torchtitan.rl.generator.vllm.registry import model_config_to_hf_config_dict
 
 from transformers import GenerationConfig, PretrainedConfig
@@ -213,3 +218,98 @@ def test_batch_invariant_kda_registers_attention_gym_replay_state(monkeypatch):
         temporal_copy,
         *(temporal_copy for _ in range(6)),
     )
+
+
+def test_compressed_mla_hf_config_and_backend():
+    from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
+
+    config = build_kimi_k3_config(
+        "debugmodel", parallelism=ParallelismConfig(), attn_backend="varlen"
+    )
+    for layer in config.layers:
+        if isinstance(layer.attention.inner_attention, MLAAttention.Config):
+            layer.attention = dataclasses.replace(layer.attention, kv_lora_rank=512)
+    mla_attention = registry.first_mla_attention(config)
+    assert mla_attention is not None
+
+    assert registry.uses_vllm_compressed_mla(config)
+    assert registry.vllm_attention_backend(config) is None
+    hf = model_config_to_hf_config_dict(config)
+    assert hf["head_dim"] == 512 + mla_attention.qk_rope_head_dim
+    assert hf["num_key_value_heads"] == 1
+    assert hf["kv_lora_rank"] == 512
+    assert hf["qk_nope_head_dim"] == mla_attention.qk_nope_head_dim
+    assert hf["qk_rope_head_dim"] == mla_attention.qk_rope_head_dim
+    assert hf["v_head_dim"] == mla_attention.v_head_dim
+
+
+def test_batch_invariant_mla_keeps_materialized_kv(monkeypatch):
+    from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    config = build_kimi_k3_config(
+        "debugmodel", parallelism=ParallelismConfig(), attn_backend="varlen"
+    )
+    for layer in config.layers:
+        if isinstance(layer.attention.inner_attention, MLAAttention.Config):
+            layer.attention = dataclasses.replace(layer.attention, kv_lora_rank=512)
+    monkeypatch.setattr(registry, "is_in_batch_invariant_mode", lambda: True)
+
+    assert not registry.uses_vllm_compressed_mla(config)
+    assert registry.vllm_attention_backend(config) == AttentionBackendEnum.CUSTOM
+    assert "kv_lora_rank" not in model_config_to_hf_config_dict(config)
+
+
+def test_unsupported_mla_latent_rank_keeps_materialized_kv():
+    from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
+
+    config = build_kimi_k3_config(
+        "debugmodel", parallelism=ParallelismConfig(), attn_backend="varlen"
+    )
+
+    assert not registry.uses_vllm_compressed_mla(config)
+    assert "kv_lora_rank" not in model_config_to_hf_config_dict(config)
+
+
+@pytest.mark.parametrize(
+    "wkv_b_variant, compressed",
+    [
+        ("plain", True),
+        ("lora", True),
+        ("mxfp8", True),
+        ("nvfp4", True),
+        ("bias", False),
+    ],
+)
+def test_wkv_b_variant_selects_kv_cache(wkv_b_variant, compressed):
+    """Bias-free linear wkv_b variants keep the compressed cache; others fall back."""
+    from torchtitan.models.common.linear import Linear
+    from torchtitan.models.common.lora import get_lora_linear
+    from torchtitan.models.deepseek_v3 import build_model_config as build_dsv3_config
+
+    if wkv_b_variant in ("mxfp8", "nvfp4"):
+        pytest.importorskip("torchao")
+    config = build_dsv3_config("debugmodel", parallelism=ParallelismConfig())
+    for layer in config.layers:
+        mla_config = layer.attention.inner_attention
+        wkv_b = mla_config.wkv_b
+        fields = {
+            "in_features": wkv_b.in_features,
+            "out_features": wkv_b.out_features,
+            "sharding_config": wkv_b.sharding_config,
+        }
+        if wkv_b_variant == "lora":
+            wkv_b = get_lora_linear(Linear).Config(**fields, rank=4, alpha=8.0)
+        elif wkv_b_variant == "mxfp8":
+            from torchtitan.quantization.mxfp8.linear import MXFP8Linear
+
+            wkv_b = MXFP8Linear.Config(**fields)
+        elif wkv_b_variant == "nvfp4":
+            from torchtitan.quantization.nvfp4.linear import NVFP4Linear
+
+            wkv_b = NVFP4Linear.Config(**fields)
+        elif wkv_b_variant == "bias":
+            wkv_b = dataclasses.replace(wkv_b, bias=True)
+        layer.attention.inner_attention = dataclasses.replace(mla_config, wkv_b=wkv_b)
+
+    assert registry.uses_vllm_compressed_mla(config) is compressed

@@ -6,6 +6,7 @@
 
 import dataclasses
 import importlib
+from unittest import mock
 
 import pytest
 import torch
@@ -16,6 +17,8 @@ from torch.distributed.fsdp import FSDPModule, fully_shard
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention, MLAAttention
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.lora import get_lora_linear
 from torchtitan.models.deepseek_v3 import build_model_config as build_deepseek_config
 from torchtitan.models.kimi_k2_7 import build_model_config as build_kimi_k2_7_config
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
@@ -23,6 +26,12 @@ from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.generator.vllm import model_wrapper
 from torchtitan.rl.generator.vllm.attention import VLLMInnerAttention
+from torchtitan.rl.generator.vllm.mla import (
+    _VLLMKVBProj,
+    _VLLMNativeMLAAttention,
+    VLLMMLAAttention,
+    VLLMMLAInnerAttention,
+)
 from torchtitan.rl.generator.vllm.model_wrapper import (
     _replace_vllm_layer_configs,
     VLLMModelWrapper,
@@ -228,16 +237,17 @@ def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
 
 
 @pytest.mark.parametrize(
-    ("build_config", "attn_backend"),
+    ("build_config", "attn_backend", "compressed"),
     [
-        pytest.param(build_deepseek_config, "flex", id="deepseek_v3-flex"),
-        pytest.param(build_deepseek_config, "varlen", id="deepseek_v3-varlen"),
-        pytest.param(build_kimi_k2_7_config, "flex", id="kimi_k2_7-flex"),
-        pytest.param(build_kimi_k3_config, "flex", id="kimi_k3-flex"),
-        pytest.param(build_kimi_k3_config, "varlen", id="kimi_k3-varlen"),
+        pytest.param(build_deepseek_config, "flex", True, id="deepseek_v3-flex"),
+        pytest.param(build_deepseek_config, "varlen", True, id="deepseek_v3-varlen"),
+        pytest.param(build_kimi_k2_7_config, "flex", True, id="kimi_k2_7-flex"),
+        pytest.param(build_kimi_k3_config, "flex", False, id="kimi_k3-flex"),
+        pytest.param(build_kimi_k3_config, "varlen", False, id="kimi_k3-varlen"),
     ],
 )
-def test_vllm_rejects_mla(build_config, attn_backend) -> None:
+def test_vllm_replaces_mla(build_config, attn_backend, compressed) -> None:
+    """Debug models with a vLLM-supported latent size use the compressed cache."""
     model_config = build_config(
         "debugmodel",
         parallelism=ParallelismConfig(),
@@ -245,5 +255,192 @@ def test_vllm_rejects_mla(build_config, attn_backend) -> None:
         seq_len=128,
     )
 
-    with pytest.raises(ValueError, match="MLA attention is not supported"):
-        _replace_vllm_layer_configs(model_config)
+    vllm_config = _replace_vllm_layer_configs(model_config)
+
+    num_mla_layers = 0
+    for model_layer, vllm_layer in zip(
+        model_config.layers, vllm_config.layers, strict=True
+    ):
+        if not isinstance(model_layer.attention.inner_attention, MLAAttention.Config):
+            continue
+        num_mla_layers += 1
+        attention = model_layer.attention
+        vllm_mla_config = vllm_layer.attention.inner_attention
+        inner_config = vllm_mla_config.inner_attention
+        if compressed:
+            assert type(vllm_mla_config) is VLLMMLAAttention.Config
+            assert type(inner_config) is VLLMMLAInnerAttention.Config
+        else:
+            assert type(vllm_mla_config) is MLAAttention.Config
+            assert type(inner_config) is VLLMInnerAttention.Config
+        assert vllm_mla_config.wkv_b is attention.inner_attention.wkv_b
+        assert inner_config.is_full_attention
+        assert inner_config.scale == attention.softmax_scale
+        if compressed:
+            assert inner_config.num_heads == attention.n_heads
+            assert inner_config.kv_lora_rank == attention.kv_lora_rank
+            assert inner_config.qk_nope_head_dim == attention.qk_nope_head_dim
+            assert inner_config.qk_rope_head_dim == attention.qk_rope_head_dim
+            assert inner_config.v_head_dim == attention.v_head_dim
+    assert num_mla_layers > 0
+
+
+def test_vllm_compressed_mla_owns_wkv_b_and_forwards_compact_inputs():
+    config = VLLMMLAAttention.Config(
+        wkv_b=Linear.Config(in_features=5, out_features=28),
+        packed_kv_head_dim=7,
+        inner_attention=VLLMMLAInnerAttention.Config(
+            num_heads=4,
+            kv_lora_rank=5,
+            qk_nope_head_dim=4,
+            qk_rope_head_dim=2,
+            v_head_dim=3,
+            scale=0.5,
+        ),
+    )
+    kv_b_projs = []
+
+    def initialize_module(attention, config, *, kv_b_proj):
+        torch.nn.Module.__init__(attention)
+        kv_b_projs.append(kv_b_proj)
+
+    with mock.patch.object(
+        VLLMMLAInnerAttention,
+        "__init__",
+        autospec=True,
+        side_effect=initialize_module,
+    ):
+        attention = VLLMMLAAttention(config)
+
+    assert kv_b_projs == [attention.wkv_b]
+    assert "wkv_b.weight" in attention.state_dict()
+    q_THK = torch.randn(8, 4, 6)
+    kv_c_normed_TL = torch.randn(8, 5)
+    k_shared_TR = torch.randn(8, 2)
+    out_THV = torch.randn(8, 4, 3)
+    with mock.patch.object(
+        VLLMMLAInnerAttention, "forward", autospec=True, return_value=out_THV
+    ) as inner_forward:
+        result = attention(q_THK, kv_c_normed_TL, k_shared_TR, scale=0.5)
+
+    assert result is out_THV
+    inner_forward.assert_called_once_with(
+        attention.inner_attention, q_THK, kv_c_normed_TL, k_shared_TR, scale=0.5
+    )
+
+
+def test_vllm_mla_inner_attention_passes_headless_shared_key():
+    attention = VLLMMLAInnerAttention.__new__(VLLMMLAInnerAttention)
+    torch.nn.Module.__init__(attention)
+    attention.num_heads = 4
+    attention.v_head_dim = 3
+    vllm_mla = mock.Mock(scale=0.5, return_value=torch.randn(8, 12))
+    object.__setattr__(attention, "vllm_mla", vllm_mla)
+    q_THK = torch.randn(8, 4, 6)
+    kv_c_normed_TL = torch.randn(8, 5)
+    k_shared_TR = torch.randn(8, 2)
+
+    out_THV = attention(q_THK, kv_c_normed_TL, k_shared_TR, scale=0.5)
+
+    args, kwargs = vllm_mla.call_args
+    assert args[0] is q_THK
+    assert args[1] is kv_c_normed_TL
+    torch.testing.assert_close(args[2], k_shared_TR.unsqueeze(1))
+    assert kwargs == {"output_shape": (8, 12)}
+    torch.testing.assert_close(out_THV, vllm_mla.return_value.view(8, 4, 3))
+
+
+@pytest.mark.parametrize("use_lora", [False, True], ids=["plain", "lora"])
+def test_vllm_native_mla_derives_decode_weights_from_wkv_b(use_lora):
+    """vLLM's decode weights match what wkv_b computes, after every weight load."""
+    torch.manual_seed(0)
+    linear_cls = get_lora_linear(Linear) if use_lora else Linear
+    lora_kwargs = {"rank": 2, "alpha": 4.0} if use_lora else {}
+    wkv_b = linear_cls.Config(
+        in_features=5, out_features=2 * (3 + 4), **lora_kwargs
+    ).build()
+    wkv_b = wkv_b.to(torch.bfloat16)
+    for param in wkv_b.parameters():
+        torch.nn.init.normal_(param)
+
+    def effective_weight():
+        weight = wkv_b.weight.detach()
+        if use_lora:
+            weight = weight + wkv_b._lora_scaling * (
+                wkv_b.lora_b.weight.detach() @ wkv_b.lora_a.weight.detach()
+            )
+        return weight
+
+    attention = _VLLMNativeMLAAttention.__new__(_VLLMNativeMLAAttention)
+    torch.nn.Module.__init__(attention)
+    attention.impl = mock.Mock()
+    attention.is_amx_bmm_enabled = False
+    attention.is_aiter_triton_fp4_bmm_enabled = False
+    attention.is_aiter_triton_fp8_bmm_enabled = False
+    attention.dcp_q_replicate = False
+    attention.quant_config = None
+    attention.kv_lora_rank = 5
+    attention.num_heads = 2
+    attention.qk_nope_head_dim = 3
+    attention.v_head_dim = 4
+    attention.kv_b_proj = _VLLMKVBProj(wkv_b)
+    for name in VLLMInnerAttention.vllm_attn_scale_buffer_names:
+        attention.register_buffer(name, torch.tensor(0.0))
+
+    attention.process_weights_after_loading(torch.bfloat16)
+
+    assert not any(name in attention.state_dict() for name in ("W_UK_T", "W_UV"))
+    assert {"W_UK_T", "W_UV"} <= {name for name, _ in attention.named_buffers()}
+    data_ptrs = (attention.W_UK_T.data_ptr(), attention.W_UV.data_ptr())
+    for _ in range(2):
+        w_uk, w_uv = effective_weight().T.view(5, 2, 7).split([3, 4], dim=-1)
+        torch.testing.assert_close(attention.W_UK_T, w_uk.permute(1, 2, 0))
+        torch.testing.assert_close(attention.W_UV, w_uv.transpose(0, 1))
+        with torch.no_grad():
+            (wkv_b.lora_b.weight if use_lora else wkv_b.weight).mul_(3.0)
+        model_wrapper._refresh_absorbed_mla_weights(nn.Sequential(attention))
+    assert (attention.W_UK_T.data_ptr(), attention.W_UV.data_ptr()) == data_ptrs
+    shares_wkv_b_storage = (
+        attention.W_UK_T.untyped_storage().data_ptr()
+        == wkv_b.weight.untyped_storage().data_ptr()
+    )
+    assert shares_wkv_b_storage is not use_lora
+
+
+def test_vllm_native_mla_keeps_kv_cache_scales_out_of_state_dict():
+    """vLLM's KV-cache scale buffers are not weights, so they stay out of the state dict."""
+
+    def vllm_mla_init(attention, **kwargs):
+        torch.nn.Module.__init__(attention)
+        for name in VLLMInnerAttention.vllm_attn_scale_buffer_names:
+            attention.register_buffer(name, torch.tensor(1.0))
+
+    with mock.patch.object(
+        _VLLMNativeMLAAttention.__mro__[1], "__init__", vllm_mla_init
+    ):
+        attention = _VLLMNativeMLAAttention()
+
+    assert set(VLLMInnerAttention.vllm_attn_scale_buffer_names) <= {
+        name for name, _ in attention.named_buffers()
+    }
+    assert not set(VLLMInnerAttention.vllm_attn_scale_buffer_names) & set(
+        attention.state_dict()
+    )
+
+
+@pytest.mark.parametrize("use_lora", [False, True], ids=["plain", "lora"])
+def test_vllm_kv_b_proj_prefill_matches_wkv_b(use_lora):
+    """Prefill runs wkv_b's own local projection, including LoRA."""
+    torch.manual_seed(0)
+    linear_cls = get_lora_linear(Linear) if use_lora else Linear
+    lora_kwargs = {"rank": 2, "alpha": 4.0} if use_lora else {}
+    wkv_b = linear_cls.Config(in_features=16, out_features=32, **lora_kwargs).build()
+    for param in wkv_b.parameters():
+        torch.nn.init.normal_(param)
+    x = torch.randn(4, 16)
+
+    out, bias = _VLLMKVBProj(wkv_b)(x)
+
+    assert bias is None
+    with torch.no_grad():
+        torch.testing.assert_close(out, wkv_b(x), rtol=0, atol=0)

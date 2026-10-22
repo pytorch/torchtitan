@@ -26,15 +26,31 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.common.attention import (
+    Attention,
+    FlexInnerAttention,
+    MLAAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.lora import _LoRALinearMixin
+from torchtitan.observability.logging import warn_once
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+logger = logging.getLogger(__name__)
 
 # Model-agnostic name used for vLLM model registration.
 VLLM_MODEL_NAME = "TorchTitanCausalLM"
@@ -45,6 +61,96 @@ TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 
 # Selects the experiment-owned runner that pads tokens for dense and expert SP.
 TORCHTITAN_WORKER_CLS = "torchtitan.rl.generator.vllm.worker.TorchTitanGPUWorker"
+
+VLLM_MLA_LATENT_HEAD_DIMS = frozenset({320, 512, 576})
+"""``kv_lora_rank + qk_rope_head_dim`` values vLLM's MLA backends support.
+
+Mirrors ``MLACommonBackend.get_supported_head_sizes()``. Importing that module
+here would freeze vLLM's breakable CUDA graph setting before the engine sets it.
+"""
+
+
+def first_mla_attention(cfg: Decoder.Config) -> Attention.Config | None:
+    """Return the first attention config whose backend is MLA, else None."""
+    return next(
+        (
+            layer.attention
+            for layer in cfg.layers
+            if isinstance(layer.attention.inner_attention, MLAAttention.Config)
+        ),
+        None,
+    )
+
+
+def uses_vllm_compressed_mla(cfg: Decoder.Config) -> bool:
+    """Whether vLLM caches compressed MLA latents instead of materialized K/V.
+
+    Batch-invariant mode keeps materialized K/V so the generator runs the
+    trainer's attention ops and stays bitwise identical to it.
+    """
+    mla_attention = first_mla_attention(cfg)
+    if mla_attention is None or is_in_batch_invariant_mode():
+        return False
+    latent_head_dim = mla_attention.kv_lora_rank + mla_attention.qk_rope_head_dim
+    if latent_head_dim not in VLLM_MLA_LATENT_HEAD_DIMS:
+        warn_once(
+            logger,
+            f"vLLM MLA backends do not support kv_lora_rank + qk_rope_head_dim = "
+            f"{latent_head_dim} (supported: {sorted(VLLM_MLA_LATENT_HEAD_DIMS)}). "
+            "Falling back to a materialized K/V cache, which uses more memory.",
+        )
+        return False
+    wkv_b = mla_attention.inner_attention.wkv_b
+    owner = wkv_b._owner
+    if owner is not None and issubclass(owner, _LoRALinearMixin):
+        owner = owner.__bases__[-1]
+    if owner not in _probeable_linears() or wkv_b.num_linears != 1 or wkv_b.bias:
+        warn_once(
+            logger,
+            f"vLLM's native MLA needs wkv_b to be a bias-free linear map it can read "
+            f"as one matrix, but wkv_b is {type(wkv_b).__qualname__} "
+            f"(num_linears={wkv_b.num_linears}, bias={wkv_b.bias}). Falling back to "
+            "a materialized K/V cache, which uses more memory.",
+        )
+        return False
+    return True
+
+
+def _probeable_linears() -> set[type]:
+    """``Linear`` classes whose local projection is a linear map without bias.
+
+    LoRA on top of any of these is also probeable. The quantized classes need
+    torchao, so they are only listed when it is installed.
+    """
+    linears: set[type] = {Linear}
+    try:
+        from torchtitan.quantization.mxfp8.linear import MXFP8Linear
+        from torchtitan.quantization.nvfp4.linear import NVFP4Linear
+    except ImportError:
+        return linears
+    return linears | {MXFP8Linear, NVFP4Linear}
+
+
+def vllm_attention_backend(cfg: Decoder.Config) -> AttentionBackendEnum | None:
+    """Return the vLLM attention backend for ``cfg``'s full attention layers.
+
+    ``None`` lets vLLM select a native MLA backend for compressed MLA caches.
+    """
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    attention = cfg.first_full_attention
+    if attention is None:
+        raise ValueError("No full attention layer found in the model spec.")
+    if uses_vllm_compressed_mla(cfg):
+        return None
+    kernel_config = attention.inner_attention
+    if isinstance(kernel_config, MLAAttention.Config):
+        kernel_config = kernel_config.inner_attention
+    if isinstance(kernel_config, FlexInnerAttention.Config):
+        return AttentionBackendEnum.FLEX_ATTENTION
+    if isinstance(kernel_config, VarlenInnerAttention.Config):
+        return AttentionBackendEnum.CUSTOM
+    raise ValueError("Only varlen and flex attention backends are supported.")
 
 
 def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
@@ -109,6 +215,15 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
         "bos_token_id": None,
         "eos_token_id": None,
     }
+
+    mla_attention = first_mla_attention(cfg)
+    if mla_attention is not None and uses_vllm_compressed_mla(cfg):
+        hf["head_dim"] = mla_attention.kv_lora_rank + mla_attention.qk_rope_head_dim
+        hf["num_key_value_heads"] = 1
+        hf["kv_lora_rank"] = mla_attention.kv_lora_rank
+        hf["qk_nope_head_dim"] = mla_attention.qk_nope_head_dim
+        hf["qk_rope_head_dim"] = mla_attention.qk_rope_head_dim
+        hf["v_head_dim"] = mla_attention.v_head_dim
 
     if ffn is not None:
         # Unused: only v1/metrics/perf.py reads it (off by default).
