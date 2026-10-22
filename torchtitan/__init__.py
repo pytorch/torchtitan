@@ -6,7 +6,11 @@
 
 from importlib.metadata import version
 
+from ._torch_compat import apply_patches as _apply_torch_patches
+
 try:
     __version__ = version("torchtitan")
 except Exception:
     __version__ = "0.0.0+unknown"
+
+_apply_torch_patches()
