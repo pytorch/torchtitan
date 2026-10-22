@@ -348,9 +348,18 @@ def apply_fsdp_to_decoder(
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-            # Embedding weight grads only need the token indices, so skip the
-            # backward all-gather.
-            model.tok_embeddings.set_unshard_in_backward(False)
+            # Embedding backward needs only grad_output and the token indices,
+            # not the weight, so skip the backward all-gather. The flag covers
+            # the whole FSDP unit, so only set it when the unit holds nothing
+            # but embedding weights (e.g. a learned norm weight inside
+            # tok_embeddings would be read after being freed).
+            embedding_weights = {
+                m.weight
+                for m in model.tok_embeddings.modules()
+                if isinstance(m, nn.Embedding)
+            }
+            if all(p in embedding_weights for p in model.tok_embeddings.parameters()):
+                model.tok_embeddings.set_unshard_in_backward(False)
         # As an optimization, do not reshard_after_forward the last layers
         # by default since FSDP would prefetch them immediately.
         if model.norm is not None and model.lm_head is not None:
