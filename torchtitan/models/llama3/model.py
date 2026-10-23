@@ -14,6 +14,7 @@ from torch import nn
 
 from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
+    GQAttention,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -37,7 +38,7 @@ class Llama3TransformerBlock(TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config):
+    class Config(TransformerBlock.Config[GQAttention.Config]):
         pass
 
     def __init__(self, config: Config):
@@ -81,7 +82,7 @@ class Llama3Model(Decoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[Llama3TransformerBlock.Config]):
         dim: int = 4096
         vocab_size: int = 128256
         local_compile_regions: list[str] = field(

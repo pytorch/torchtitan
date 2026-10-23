@@ -28,7 +28,6 @@ from torchtitan.models.common import (
     RoPE,
     RowParallelLinear,
     Softmax,
-    TransformerBlock,
 )
 from torchtitan.models.common.activation import ClampedSwiGLU
 from torchtitan.models.common.attention import (
@@ -219,7 +218,7 @@ def _build_gptoss_layers(
     rope: RoPE.Config,
     enable_sp: bool,
     enable_ep: bool,
-) -> list[TransformerBlock.Config]:
+) -> list[GptOssTransformerBlock.Config]:
     """Build sharded per-layer configs for GPT-OSS.
 
     Even-indexed layers (0, 2, 4, ...) use sliding window attention.
