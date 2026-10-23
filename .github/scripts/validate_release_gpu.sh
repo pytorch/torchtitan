@@ -14,7 +14,7 @@ required_env_vars=(
   PYTORCH_INDEX_URL
 )
 if [[ "${VALIDATION_SUITE:-}" != rl* ]]; then
-  required_env_vars+=(TORCHAO_VERSION)
+  required_env_vars+=(TORCHAO_INDEX_URL)
 fi
 for var in "${required_env_vars[@]}"; do
   if [[ -z "${!var:-}" ]]; then
@@ -42,7 +42,7 @@ if [[ "${RC_VERSION}" != *rc* ]]; then
   echo "Expected an RC version, got: ${RC_VERSION}"
   exit 1
 fi
-export RC_VERSION VALIDATION_SUITE TORCH_VERSION TORCHVISION_VERSION TORCHAO_VERSION
+export RC_VERSION VALIDATION_SUITE TORCH_VERSION TORCHVISION_VERSION TORCHAO_INDEX_URL
 
 if [[ "${VALIDATION_SUITE}" == "b200" || "${VALIDATION_SUITE}" == "rl-b200" ]]; then
   # The B200 CUDA container has no Conda environment.
@@ -70,7 +70,7 @@ PIP_EXTRA_INDEX_URL='' python -m pip install --pre \
 # RL CI does not explicitly install torchao; quantization CI installs it separately.
 if [[ "${VALIDATION_SUITE}" != rl* ]]; then
   USE_CPP=0 PIP_EXTRA_INDEX_URL='' python -m pip install --pre \
-    --index-url "${PYTORCH_INDEX_URL}" "torchao==${TORCHAO_VERSION}"
+    --no-deps --index-url "${TORCHAO_INDEX_URL}" torchao
 fi
 
 RC_PACKAGE="torchtitan"
@@ -207,7 +207,7 @@ if os.environ["VALIDATION_SUITE"].startswith("rl"):
 else:
     import torchao
 
-    assert torchao.__version__.split("+")[0] == os.environ["TORCHAO_VERSION"]
+    assert ".dev" in torchao.__version__, torchao.__version__
     print(f"torchao={torchao.__version__}")
 print(f"torchtitan={torchtitan.__version__} ({torchtitan.__file__})")
 print(f"torch={torch.__version__} ({torch.version.git_version})")
