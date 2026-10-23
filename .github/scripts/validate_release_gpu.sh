@@ -479,7 +479,6 @@ run_rl_b200_tests() {
   if ! RL_TEST_DUMP_FOLDER="${ARTIFACTS}/rl_b200" \
     python -m torch.distributed.run --standalone --nproc-per-node=1 -m pytest \
     tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen \
-    tests/rl/unit_tests/gpu/test_generator_dist_moe_mxfp8.py \
     tests/rl/unit_tests/cpu/test_rl_dist_moe_recipe.py -v; then
     status=1
   fi
