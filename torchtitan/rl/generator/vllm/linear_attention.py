@@ -150,26 +150,38 @@ class TorchTitanLinearAttentionMetadataBuilder(
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
         )[:, 0]
-        self.query_start_loc[: m.num_reqs + 1].copy_(
-            m.query_start_loc[: m.num_reqs + 1]
-        )
-        # Under FULL, num_actual_tokens is the padded capacity, while the last
-        # query offset is the real token count. The appended interval is null.
-        self.query_start_loc[m.num_reqs + 1 :].fill_(m.num_actual_tokens)
-        self.state_indices[: m.num_reqs].copy_(slots[: m.num_reqs])
-        self.state_indices[m.num_reqs :].zero_()
-        self.has_initial_state[: m.num_reqs].copy_(
-            m.compute_num_computed_tokens()[: m.num_reqs] > 0
-        )
-        self.has_initial_state[m.num_reqs :].zero_()
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(m, decode_threshold=1)
-            if m.num_reqs
-            else (0, 0, 0, 0)
-        )
         # If every request is processing one token, use the single-token
         # (decode-style) path.
         single_token = m.max_query_len == 1
+        self.state_indices[: m.num_reqs].copy_(slots[: m.num_reqs])
+        self.state_indices[m.num_reqs :].zero_()
+        # Past max_num_seqs tokens there is no decode graph, so a padded one-token
+        # step (DP>1) replays the mixed-batch graph, which reads query_start_loc.
+        if not single_token or m.num_actual_tokens > self.num_reqs_capacity:
+            self.query_start_loc[: m.num_reqs + 1].copy_(
+                m.query_start_loc[: m.num_reqs + 1]
+            )
+            # Under FULL, num_actual_tokens is the padded capacity, while the last
+            # query offset is the real token count. The appended interval is null.
+            self.query_start_loc[m.num_reqs + 1 :].fill_(m.num_actual_tokens)
+        if single_token:
+            # Decode reads the fixed decode_query_start_loc. With one query token,
+            # a request has state to resume only when its sequence is longer than 1.
+            torch.gt(
+                m.seq_lens[: m.num_reqs], 1, out=self.has_initial_state[: m.num_reqs]
+            )
+            num_decodes, num_prefills = m.num_reqs, 0
+            num_decode_tokens, num_prefill_tokens = m.num_reqs, 0
+        else:
+            self.has_initial_state[: m.num_reqs].copy_(
+                m.compute_num_computed_tokens()[: m.num_reqs] > 0
+            )
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+                split_decodes_and_prefills(m, decode_threshold=1)
+                if m.num_reqs
+                else (0, 0, 0, 0)
+            )
+        self.has_initial_state[m.num_reqs :].zero_()
         return TorchTitanLinearAttentionMetadata(
             execution_path=(
                 LinearAttentionExecutionPath.SINGLE_TOKEN
