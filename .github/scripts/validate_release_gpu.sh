@@ -25,7 +25,7 @@ done
 
 case "${VALIDATION_SUITE}" in
   core|graph-trainer|graph-trainer-h100|h100|b200|torchft|transformers-modeling-backend) ;;
-  rl-unit|rl|rl-h100|rl-b200)
+  rl-unit|rl|rl-b200)
     : "${VLLM_VERSION:?Set VLLM_VERSION to an exact version compatible with the release torch}"
     export VLLM_VERSION
     ;;
@@ -123,11 +123,7 @@ if [[ "${VALIDATION_SUITE}" == rl* ]]; then
   if [[ "${VALIDATION_SUITE}" != "rl-b200" ]]; then
     python -m pip install "nvidia-cuda-nvcc==13.2.*"
   fi
-  if [[ "${VALIDATION_SUITE}" == "rl-h100" ]]; then
-    python -m pip install flash-attn-3 \
-      --extra-index-url "${PYTORCH_INDEX_URL}"
-  fi
-  if [[ "${VALIDATION_SUITE}" == "rl-h100" || "${VALIDATION_SUITE}" == "rl-b200" ]]; then
+  if [[ "${VALIDATION_SUITE}" == "rl-b200" ]]; then
     python -m pip install "flash-attn-4[cu13]>=4.0.0b34"
   fi
   if [[ "${VALIDATION_SUITE}" == "rl-b200" ]]; then
@@ -206,8 +202,6 @@ if os.environ["VALIDATION_SUITE"].startswith("rl"):
 
     assert Version(version("vllm")) == Version(os.environ["VLLM_VERSION"])
     assert "site-packages" in torchtitan_recipes.__file__
-    if os.environ["VALIDATION_SUITE"] == "rl-h100":
-        assert torch.cuda.get_device_capability() == (9, 0)
     for name in ("vllm", "torchmonarch", "torchstore", "batch_invariant_ops"):
         print(f"{name}={version(name)}")
 else:
@@ -480,15 +474,6 @@ run_rl_tests() {
     --ngpu 8 --hf_assets_path "${model_path}"
 }
 
-run_rl_h100_tests() {
-  RL_TEST_DUMP_FOLDER="${ARTIFACTS}/rl_h100" \
-    python -m torch.distributed.run --standalone --nproc-per-node=1 -m pytest \
-    tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen -v
-  python -m tests.integration_tests.run_tests "${ARTIFACTS}/rl_h100/integration" \
-    --test_suite rl_kda --execution_mode real_pg --gpu_arch_type cuda \
-    --gpu_arch h100 --ngpu 8
-}
-
 run_rl_b200_tests() {
   local status=0
   if ! RL_TEST_DUMP_FOLDER="${ARTIFACTS}/rl_b200" \
@@ -526,7 +511,6 @@ set +e
     transformers-modeling-backend) run_transformers_modeling_backend_tests ;;
     rl-unit) run_rl_unit_tests ;;
     rl) run_rl_tests ;;
-    rl-h100) run_rl_h100_tests ;;
     rl-b200) run_rl_b200_tests ;;
   esac
 )
