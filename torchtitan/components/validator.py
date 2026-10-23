@@ -25,10 +25,10 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
-from torchtitan.distributed.cuda_graph import (
-    cuda_graph_manager,
-    cuda_graphs_supported,
-    wrap_with_cuda_graph,
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_manager,
+    accelerator_graphs_supported,
+    wrap_with_accelerator_graph,
 )
 from torchtitan.distributed.fsdp import post_validate_fsdp_for_cuda_graph
 from torchtitan.distributed.pipeline_parallel import (
@@ -165,10 +165,10 @@ class Validator(BaseValidator):
         self.pp_has_last_stage = pp_has_last_stage
         self._run_eval = None
         self._cuda_graph_annotation_config = cuda_graph_annotation_config
-        self._cuda_graph_enabled = cuda_graph_enabled and cuda_graphs_supported()
+        self._cuda_graph_enabled = cuda_graph_enabled and accelerator_graphs_supported()
         if self._cuda_graph_enabled:
             # Keep training and optimizer eager until eval captures.
-            cuda_graph_manager.capture_allowed = False
+            accelerator_graph_manager.capture_allowed = False
         elif cuda_graph_enabled:
             logger.warning(
                 "CUDA graph capture is only supported on NVIDIA CUDA; "
@@ -182,7 +182,7 @@ class Validator(BaseValidator):
         eval captures. These passes warm up eval and capture it before training capture.
         """
         return super().should_validate(step) or (
-            self._cuda_graph_enabled and not cuda_graph_manager.capture_allowed
+            self._cuda_graph_enabled and not accelerator_graph_manager.capture_allowed
         )
 
     def _init_validate_fn(self, model_parts):
@@ -211,7 +211,7 @@ class Validator(BaseValidator):
                     )
 
             # Keep the first validation pass eager, including all its groups.
-            self._run_eval = wrap_with_cuda_graph(
+            self._run_eval = wrap_with_accelerator_graph(
                 evaluate,
                 num_warmup_iterations=1,
                 prepare_for_capture=prepare_for_capture
@@ -221,10 +221,10 @@ class Validator(BaseValidator):
                 annotation_config=self._cuda_graph_annotation_config,
             )
         elif (
-            not cuda_graph_manager.capture_allowed
-            and cuda_graph_manager.all_wrappers_warmed_up
+            not accelerator_graph_manager.capture_allowed
+            and accelerator_graph_manager.all_wrappers_warmed_up
         ):
-            cuda_graph_manager.capture_allowed = True
+            accelerator_graph_manager.capture_allowed = True
         return self._run_eval
 
     def _validate_body(self, model_parts, prepared):

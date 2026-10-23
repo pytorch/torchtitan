@@ -35,7 +35,7 @@ def validate_model_training_config(
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
-    from torchtitan.distributed.cuda_graph import cuda_graphs_supported
+    from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE
@@ -109,7 +109,7 @@ def validate_model_training_config(
         if mtp_layers and parallelism.pipeline_parallel_degree > 1:
             raise NotImplementedError("MTP does not support pipeline parallelism yet.")
 
-    if not training.disable_cuda_graphs and cuda_graphs_supported():
+    if not training.disable_cuda_graphs and accelerator_graphs_supported():
         if max_num_documents is None:
             for fqn, _, _, _ in model.traverse(VarlenInnerAttention.Config):
                 raise ValueError(

@@ -60,15 +60,15 @@ TorchFT keep validation eager and warn when training capture is enabled.
 
 ## Shared pool and capture order
 
-`CUDAGraphManager` owns one memory pool, one capture stream, and the graph wrappers.
-The module exposes one instance, `cuda_graph_manager`. Training, optimizer, and
+`AcceleratorGraphManager` owns one memory pool, one capture stream, and the graph wrappers.
+The module exposes one instance, `accelerator_graph_manager`. Training, optimizer, and
 validation graphs share its pool. They run one at a time.
 
 During capture, the allocator can reuse storage after its tensor is released.
 This includes temporary tensors from another graph in the pool. Storage still
 held by a live tensor is not available for a capture allocation.
 
-`CUDAGraphWrapper` handles warmup, capture, and replay. Training and optimizer
+`AcceleratorGraphWrapper` handles warmup, capture, and replay. Training and optimizer
 wrappers each use two eager warmup calls. The first initializes state, such as
 optimizer tensors. The second runs with that state in place. This is TorchTitan's
 warmup policy, not a requirement that CUDA graphs always need two warmup calls.
@@ -252,13 +252,13 @@ validation use the same cleanup.
 Before replay, the wrapper copies tensor input values into the buffers used for
 capture. Inputs marked as static are not copied. Their addresses must stay fixed.
 Non-tensor input values and tensor shapes, dtypes, and devices must also stay fixed.
-`CUDAGraphInputSpec` exposes tensors stored in `BlockMask` so replay can update them.
+`AcceleratorGraphInputSpec` exposes tensors stored in `BlockMask` so replay can update them.
 
 Graph outputs point into storage owned by the graph. Read or clone results before
 a later replay can overwrite them. Another graph sharing the pool may also
 overwrite that storage.
 
-`cuda_graph_teardown()` destroys all registered graphs and clears saved inputs,
+`accelerator_graph_teardown()` destroys all registered graphs and clears saved inputs,
 outputs, and gradient references. `TrainingEngine.close()` finishes pending work
 before teardown. Gradient storage remains live until those references are released.
 
