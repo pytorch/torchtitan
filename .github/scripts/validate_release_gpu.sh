@@ -102,21 +102,17 @@ install_release_candidate
 
 if [[ "${VALIDATION_SUITE}" == rl* ]]; then
   python -m pip install "pytest==7.3.2" "expecttest>=0.2.0" uv
+  vllm_requirement="vllm==${VLLM_VERSION}"
   if [[ "${TORCH_VERSION}" == "2.15.0" && \
         "${VLLM_VERSION}" == "1.0.0.dev20261005+cu132" && \
         "${PYTORCH_INDEX_URL}" == "https://download.pytorch.org/whl/test/cu132" ]]; then
-    # Test the branch-cut vLLM binary against the RC instead of its exact
-    # torch nightly dependency. Resolve every other dependency normally.
+    # Use the RC in place of this wheel's torch nightly dependency.
     export UV_OVERRIDE="${RUNNER_TEMP}/release-vllm-torch-override.txt"
-    echo 'torch==2.15.0+cu132' > "${UV_OVERRIDE}"
-    echo 'Testing vLLM built for torch 2.15.0.dev20261005+cu132 with torch 2.15.0+cu132; binary and RL compatibility must be validated.'
-    uv pip install --constraint "${PIP_CONSTRAINT}" \
-      --extra-index-url "${PYTORCH_INDEX_URL}" \
-      "vllm @ https://download.pytorch.org/whl/nightly/cu132/vllm-1.0.0.dev20261005%2Bcu132-cp38-abi3-manylinux_2_28_x86_64.whl"
-  else
-    python -m pip install --extra-index-url "${PYTORCH_INDEX_URL}" \
-      "vllm==${VLLM_VERSION}"
+    grep '^torch==' "${PIP_CONSTRAINT}" > "${UV_OVERRIDE}"
+    vllm_requirement="vllm @ https://download.pytorch.org/whl/nightly/cu132/vllm-1.0.0.dev20261005%2Bcu132-cp38-abi3-manylinux_2_28_x86_64.whl"
   fi
+  uv pip install --constraint "${PIP_CONSTRAINT}" \
+    --extra-index-url "${PYTORCH_INDEX_URL}" "${vllm_requirement}"
   python -m pip install --no-deps \
     "git+https://github.com/meta-pytorch/torchstore.git@main" \
     "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
