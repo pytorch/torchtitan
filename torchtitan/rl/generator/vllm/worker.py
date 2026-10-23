@@ -9,7 +9,7 @@
 from collections.abc import Set
 from contextlib import nullcontext
 
-from vllm.config import CUDAGraphMode, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode, get_layers_from_vllm_config, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.utils.math_utils import round_up
@@ -18,27 +18,47 @@ from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.rl.generator.vllm.linear_attention import (
     TorchTitanLinearAttentionBackend,
 )
 
 
 class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
-    """Keep native FULL descriptors distinct for packed linear attention and fused decode.
+    """Replay graphs captured for decode on uniform decode batches under FULL.
 
-    Currently installed only for TorchTitan's Attention Gym linear attention
-    backends (GDN/KDA).
     vLLM at c6fa1f0 erases the uniform-decode discriminator in FULL mode:
-    four one-token decodes collide with one four-token prefill. Attention Gym's
-    different numerical paths need distinct keys. Delegate decode keys to the
+    four one-token decodes collide with one four-token prefill, and the shared
+    graph is captured with ``max_query_len`` equal to its token count. Decode
+    then replays kernel launches sized for prefill (FA4 attention at 256
+    decodes: 2.2x slower per call on GB300), and Attention Gym's linear
+    attention needs a different numerical path. Delegate decode keys to the
     native FULL_DECODE_ONLY dispatcher until upstream supports FULL decode
     specialization; native capture, replay and graph ownership stay intact.
     The single-token key also covers fresh requests: initialization is GPU mask
     data, not another dispatch key or a reason to switch to packed arithmetic.
 
+    A uniform decode batch above the largest decode graph replays the mixed
+    graph, as vLLM's own FULL dispatch does:
+    - at DP > 1, vLLM pads a decoding or idle rank to the busiest rank's token
+      count and allows only the DP-synced mode, so no decode graph fits;
+    - capture sizes that skip ``max_num_seqs`` leave decode batches between the
+      largest decode graph and ``max_num_seqs``.
+    DP ranks may therefore replay different graphs in one step. Every graph of a
+    step still has the step's token count, which is what Dist-MoE's EP ranks
+    must agree on; padded rows are ``-1`` routes and never leave the rank.
+
+    Batch-invariant runs of linear-attention models keep those batches on the
+    decode kernels instead: the packed kernels in the mixed graph do not match
+    them bitwise.
+
     This costs one additional graph capture per decode-specialized batch size
     and additional memory for the expanded graph pool.
     """
+
+    def __init__(self, vllm_config: VllmConfig, *, has_linear_attention: bool):
+        super().__init__(vllm_config)
+        self.has_linear_attention = has_linear_attention
 
     def initialize_cudagraph_keys(
         self, cudagraph_mode: CUDAGraphMode, uniform_decode_query_len: int = 1
@@ -49,9 +69,13 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
             self.decode_dispatcher.initialize_cudagraph_keys(
                 CUDAGraphMode.FULL_DECODE_ONLY, uniform_decode_query_len
             )
+            self.max_decode_capture_size = 0
             for mode, descriptors in self.decode_dispatcher.get_capture_descs():
                 for descriptor in descriptors:
                     self.add_cudagraph_key(mode, descriptor)
+                    self.max_decode_capture_size = max(
+                        self.max_decode_capture_size, descriptor.num_tokens
+                    )
 
     def dispatch(
         self,
@@ -67,6 +91,10 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
             self.keys_initialized
             and self.cudagraph_mode == CUDAGraphMode.FULL
             and uniform_decode
+            and (
+                num_tokens <= self.max_decode_capture_size
+                or (self.has_linear_attention and is_in_batch_invariant_mode())
+            )
         ):
             dispatch = self.decode_dispatcher.dispatch
         return dispatch(
@@ -80,18 +108,20 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
 
 
 class TorchTitanGPUModelRunner(GPUModelRunner):
-    """V1 runner with sequence-parallel padding and linear attention (GDN/KDA) decode specialization."""
+    """V1 runner with sequence-parallel padding and FULL-mode decode specialization."""
 
     def load_model(self, load_dummy_weights: bool = False) -> None:
         super().load_model(load_dummy_weights)
-        if any(
+        has_linear_attention = any(
             layer.get_attn_backend() is TorchTitanLinearAttentionBackend
             for layer in get_layers_from_vllm_config(
                 self.vllm_config, MambaBase
             ).values()
-        ):
-            assert not self.cudagraph_dispatcher.keys_initialized
-            self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
+        )
+        assert not self.cudagraph_dispatcher.keys_initialized
+        self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(
+            self.vllm_config, has_linear_attention=has_linear_attention
+        )
 
     def _determine_batch_execution_and_padding(self, num_tokens: int, *args, **kwargs):
         """Tell the model how many of this step's tokens are real, before padding.
