@@ -141,6 +141,9 @@ def set_determinism(
         )
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        # No cuDNN attention: varlen picks it when it can, and its backward is not deterministic.
+        # Flash (FA3 on H100, FA4 on Blackwell) reads the deterministic flag in its backward.
+        torch.backends.cuda.enable_cudnn_sdp(False)
         # use_deterministic_algorithms(True) enables fill_uninitialized_memory,
         # which makes torch.empty() run a fill kernel. This kernel races with
         # DeepEP comm streams, causing errors.
