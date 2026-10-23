@@ -18,6 +18,7 @@ from torchtitan.models.common.attention import (
     Attention,
     InnerAttention,
     LinearAttention,
+    MLAAttention,
     SlidingWindowFlexInnerAttention,
     VarlenInnerAttention,
 )
@@ -62,7 +63,8 @@ def test_model_defaults_to_varlen(model):
     attention_configs = [
         attention
         for layer in layers
-        for _, attention, _, _ in layer.traverse(InnerAttention.Config)
+        for _, attention, _, _ in layer.traverse(InnerAttention.Config, recurse=True)
+        if not isinstance(attention, MLAAttention.Config)
     ]
     assert attention_configs
     assert all(

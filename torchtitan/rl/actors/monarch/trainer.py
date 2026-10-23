@@ -47,12 +47,14 @@ class _TrainerActorEndpoints:
     @concurrent_endpoint
     async def forward_backward(
         self,
-        microbatches: list[TrainingMicrobatch] | list[RDMAMicrobatch],
+        microbatch_groups: (
+            list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
+        ),
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
-    ) -> dict[str, float]:
+    ) -> dict[str, float] | None:
         return await super().forward_backward(
-            microbatches,
+            microbatch_groups,
             global_loss_token_counts,
             global_routing_token_counts,
         )

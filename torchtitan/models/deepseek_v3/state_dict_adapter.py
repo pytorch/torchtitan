@@ -29,18 +29,45 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
 
     hf_experts_key_fragment = "mlp.experts"
 
+    # HF checkpoints store embedding and output-head copies under each MTP
+    # layer. TorchTitan shares the native tensors; HF exports need independent
+    # copies because safetensors rejects aliases stored in the same file.
+    _MTP_SHARED_COPIES: dict[str, str] = {
+        "model.layers.{}.embed_tokens.weight": "tok_embeddings.weight",
+        "model.layers.{}.shared_head.head.weight": "lm_head.weight",
+    }
+
     def __init__(
         self,
         model_config: DeepSeekV3Model.Config,
         hf_assets_path: str | None,
     ):
         super().__init__(model_config, hf_assets_path)
+        # fqn_to_index_mapping lists the tensors an HF save writes. hf_assets_path
+        # may hold the released FP8 index, whose X.weight_scale_inv tensors are not
+        # saved, and whose MTP layer (61) is not saved by a config without MTP.
+        if self.fqn_to_index_mapping is not None:
+            num_hf_layers = len(model_config.layers) + len(
+                getattr(model_config, "mtp_layers", None) or []
+            )
+            fqn_to_index_for_save = {}
+            for key, index in self.fqn_to_index_mapping.items():
+                is_fp8_scale = key.endswith(".weight_scale_inv")
+                layer_match = re.match(r"model\.layers\.(\d+)\.", key)
+                is_layer_not_in_config = (
+                    layer_match is not None
+                    and int(layer_match.group(1)) >= num_hf_layers
+                )
+                if is_fp8_scale or is_layer_not_in_config:
+                    continue
+                fqn_to_index_for_save[key] = index
+            self.fqn_to_index_mapping = fqn_to_index_for_save
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention Module
             "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": "layers.{}.attention.wkv_a.weight",
             "model.layers.{}.self_attn.kv_a_layernorm.weight": "layers.{}.attention.kv_norm.weight",
-            "model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.wkv_b.weight",
+            "model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.inner_attention.wkv_b.weight",
             "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             # MLP Module
             "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
@@ -163,6 +190,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         """
         1. Convert between the HF shape and the torchtitan shape.
         2. Split grouped-linear weights into individual expert weights.
+        3. Materialize the shared embedding and output-head copies for MTP.
         """
         state_dict = self._native_fused_linears_to_hf(
             state_dict,
@@ -220,6 +248,15 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
 
+        # pyrefly: ignore [missing-attribute]
+        num_main_layers = len(self.model_config.layers)
+        num_mtp_layers = len(getattr(self.model_config, "mtp_layers", None) or [])
+        for mtp_layer in range(num_mtp_layers):
+            for hf_abstract_key, tt_key in self._MTP_SHARED_COPIES.items():
+                if tt_key in state_dict:
+                    hf_key = hf_abstract_key.format(num_main_layers + mtp_layer)
+                    hf_state_dict[hf_key] = state_dict[tt_key].clone()
+
         return hf_state_dict
 
     def from_hf(
@@ -234,8 +271,21 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
+        # pyrefly: ignore [missing-attribute]
+        num_main_layers = len(self.model_config.layers)
+        num_mtp_layers = len(getattr(self.model_config, "mtp_layers", None) or [])
+        mtp_shared_copy_keys = {
+            hf_abstract_key.format(num_main_layers + mtp_layer)
+            for mtp_layer in range(num_mtp_layers)
+            for hf_abstract_key in self._MTP_SHARED_COPIES
+        }
 
         for key, value in hf_state_dict.items():
+            if key in mtp_shared_copy_keys:
+                # Titan uses the main embedding and output head for MTP. Restore
+                # them from model.embed_tokens.weight and lm_head.weight below,
+                # and omit the serialized copies under each MTP layer.
+                continue
             if self.hf_experts_key_fragment in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
                 layer_num, expert_num = re.findall(r"\d+", key)[:2]

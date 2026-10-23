@@ -4,19 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
 import unittest
 
 import torch
 
 from torchtitan.distributed.local_compile import apply_local_compile
-from torchtitan.models.common.rope import CosSinRoPE
+from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE
 from torchtitan.models.qwen3_5.rope import MRoPE
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestRoPELocalCompile(unittest.TestCase):
     def setUp(self):
-        apply_local_compile(["cos_sin_rope"])
+        apply_local_compile(["rope"])
 
     def tearDown(self):
         apply_local_compile([])
@@ -239,6 +240,132 @@ class TestRoPELocalCompile(unittest.TestCase):
             strict=True,
         ):
             torch.testing.assert_close(compiled, eager, rtol=0, atol=0)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestComplexRoPELocalCompile(unittest.TestCase):
+    def tearDown(self):
+        apply_local_compile([])
+        torch._dynamo.reset()
+
+    def _run(self, rope, query_base, key, positions, inverse):
+        # RoPE reads the last 64 dims of query_base: all of it, or a strided slice.
+        query_base = query_base.detach().clone().requires_grad_()
+        query = query_base[..., -64:]
+        key = key.detach().clone().requires_grad_()
+        if inverse:
+            inputs = (query_base,)
+            outputs = (rope(query, positions=positions, inverse=True),)
+        else:
+            inputs = (query_base, key)
+            outputs = rope(query, key, positions)
+        generator = torch.Generator(device="cuda").manual_seed(1)
+        grad_outputs = [
+            torch.randn(out.shape, dtype=out.dtype, device="cuda", generator=generator)
+            for out in outputs
+        ]
+        grads = torch.autograd.grad(outputs, inputs, grad_outputs)
+        return outputs, grads
+
+    def test_compiled_matches_eager_complex(self):
+        torch.manual_seed(42)
+        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        positions = torch.randperm(128, device="cuda")[:64]
+
+        # bf16 and fp32; a contiguous query and a strided slice of a wider one (DeepSeek-V3's q_pe).
+        # Compiled real arithmetic can differ from eager complex by 1 bf16 ulp in rare elements.
+        for dtype, query_dim, inverse in itertools.product(
+            (torch.bfloat16, torch.float32), (64, 192), (False, True)
+        ):
+            query_base = torch.randn(64, 8, query_dim, device="cuda", dtype=dtype)
+            key = torch.randn(64, 1, 64, device="cuda", dtype=dtype)
+            with self.subTest(dtype=dtype, query_dim=query_dim, inverse=inverse):
+                torch._dynamo.reset()  # 8 cases: stay clear of the 8-graph limit
+                apply_local_compile([])
+                eager_outputs, eager_grads = self._run(
+                    rope, query_base, key, positions, inverse
+                )
+                apply_local_compile(["rope"])
+                outputs, grads = self._run(rope, query_base, key, positions, inverse)
+                for compiled, eager in zip(
+                    (*outputs, *grads), (*eager_outputs, *eager_grads), strict=True
+                ):
+                    torch.testing.assert_close(compiled, eager)
+
+    def test_compiled_matches_eager_complex_non_contiguous(self):
+        # A split key with an inserted head dim, and a query with transposed head strides:
+        # the compiled path rotates these without the contiguous int32 shortcut.
+        torch.manual_seed(42)
+        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        positions = torch.randperm(128, device="cuda")[:64]
+        query_storage = torch.randn(8, 64, 64, device="cuda", dtype=torch.bfloat16)
+        key_full = torch.randn(64, 96, device="cuda", dtype=torch.bfloat16)
+
+        def run():
+            query_leaf = query_storage.detach().clone().requires_grad_()
+            key_leaf = key_full.detach().clone().requires_grad_()
+            query = query_leaf.transpose(0, 1)
+            key = key_leaf[..., -64:].unsqueeze(1)
+            outputs = rope(query, key, positions)
+            grads = torch.autograd.grad(
+                outputs, (query_leaf, key_leaf), [torch.ones_like(o) for o in outputs]
+            )
+            return (*outputs, *grads)
+
+        apply_local_compile([])
+        eager = run()
+        apply_local_compile(["rope"])
+        for compiled, expected in zip(run(), eager, strict=True):
+            torch.testing.assert_close(compiled, expected)
+
+    def test_compiled_is_batch_invariant(self):
+        torch.manual_seed(42)
+        apply_local_compile(["rope"])
+        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        query = torch.randn(64, 8, 64, device="cuda", dtype=torch.bfloat16)
+        key = torch.randn(64, 1, 64, device="cuda", dtype=torch.bfloat16)
+        positions = torch.randperm(128, device="cuda")[:64]
+        grad_query = torch.randn_like(query)
+        grad_key = torch.randn_like(key)
+
+        def run(query, key, positions, grad_query, grad_key):
+            query = query.detach().clone().requires_grad_()
+            key = key.detach().clone().requires_grad_()
+            outputs = rope(query, key, positions)
+            grads = torch.autograd.grad(outputs, (query, key), (grad_query, grad_key))
+            return (*outputs, *grads)
+
+        full = run(query, key, positions, grad_query, grad_key)
+        first, second = (
+            run(*inputs)
+            for inputs in zip(
+                query.chunk(2),
+                key.chunk(2),
+                positions.chunk(2),
+                grad_query.chunk(2),
+                grad_key.chunk(2),
+                strict=True,
+            )
+        )
+        for whole, *parts in zip(full, first, second, strict=True):
+            self.assertTrue(torch.equal(whole, torch.cat(parts)))
+
+    def test_compiled_accepts_complex_cache(self):
+        # Direct callers (the vision encoders) pass the complex cache, not the real view.
+        torch.manual_seed(42)
+        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        query, key = (
+            torch.randn(64, 8, 64, device="cuda", dtype=torch.bfloat16)
+            for _ in range(2)
+        )
+        cache = rope.cache[torch.randperm(128, device="cuda")[:64]].unsqueeze(1)
+        compiled = torch.compile(ComplexRoPE.apply_rotary_emb, fullgraph=True)
+        for out, ref in zip(
+            compiled(query, key, cache),
+            ComplexRoPE.apply_rotary_emb(query, key, cache),
+            strict=True,
+        ):
+            torch.testing.assert_close(out, ref)
 
 
 if __name__ == "__main__":
