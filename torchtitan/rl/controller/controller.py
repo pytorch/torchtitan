@@ -91,6 +91,7 @@ _trainer_loop
 
 import asyncio
 import copy
+import functools
 import json
 import logging
 import math
@@ -378,8 +379,8 @@ class AsyncLoopConfig(Configurable.Config):
 
     @property
     def max_stragglers(self) -> int | None:
-        """Most unfinished rollouts a group may have for them to be cut at its last batch, from the adaptive
-        buffer's `max_straggler_fraction`; None: never cut.
+        """Most unfinished rollouts a group may have for them to be cut, from the adaptive buffer's
+        `max_straggler_fraction`; None: never cut.
 
         Example:
             16 samples per prompt, fraction 0.05     -> 1 (never below 1)
@@ -1455,8 +1456,11 @@ class Controller(Configurable):
                         {}
                         if max_stragglers is None
                         else {
-                            "cut_stragglers": work.cut_stragglers,
                             "max_stragglers": max_stragglers,
+                            "cut_requests": work.straggler_cut_requests,
+                            "on_straggler_gate": functools.partial(
+                                group_buffer.record_straggler_gate, work
+                            ),
                         }
                     ),
                 ),

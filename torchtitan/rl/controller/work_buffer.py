@@ -30,6 +30,9 @@ from torchtitan.rl.rollout import RolloutGroup
 
 logger = logging.getLogger(__name__)
 
+# Why a batch asks a group to cut its stragglers; see `AdaptiveRolloutGroupWorkBuffer.Config.max_straggler_fraction`.
+_STRAGGLER_CUT_REASONS = ("grace", "cap_minus_1", "cap")
+
 # Sequences one generator DP shard runs at once when `generation_capacity` falls back to filling vLLM;
 # matches the controller's `max_num_seqs` cap.
 DEFAULT_SEQS_PER_GENERATOR_DP_SHARD = 512
@@ -68,9 +71,15 @@ class RolloutGroupWork:
     cancelled: bool = field(default=False, init=False)
     """Set when the buffer cancelled this group's generation (the adaptive buffer, once the group is too old to
     ever train); its slot stays charged until the generation task ends, then the rollout loop releases it."""
-    cut_stragglers: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    """Set by the adaptive buffer when the batch it starts is the last this group can join while still generating;
-    see `AdaptiveRolloutGroupWorkBuffer.Config.max_straggler_fraction`."""
+    straggler_gate_version: int | None = field(default=None, init=False)
+    """Batch version when the group's worker reported that at most `max_stragglers` rollouts were unfinished;
+    None: not yet. See `AdaptiveRolloutGroupWorkBuffer.Config.max_straggler_fraction`."""
+    straggler_cut_requests: asyncio.Queue[str] = field(
+        default_factory=asyncio.Queue, init=False
+    )
+    """The reason of each cut the adaptive buffer asks of this group's worker, for the Rollouter to send."""
+    straggler_cut_requested: bool = field(default=False, init=False)
+    """Set with the first cut request; for the metrics."""
     # TODO(async-rl): emit JSON lifecycle logging per RolloutGroupWork keyed by group_id:
     # admitted/claimed/finalized/batched/trained/dropped timestamps + policy version at admission and
     # at trainer consumption, for faithful end-to-end visibility.
@@ -391,8 +400,7 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
        ends, so a replacement group never overlaps it. The mean age is held under `target_offpolicy_steps` if set,
        else under `max_offpolicy_steps` if set, by the demand ceiling, at the price of stalls when the workload needs
        more groups than the ceiling allows. With neither, the demand follows the workload alone. With
-       `max_straggler_fraction`, a group still generating when the last batch it can join starts may have its few
-       unfinished rollouts cut, so the rest join that batch.
+       `max_straggler_fraction`, a group with few unfinished rollouts may have them cut, so the rest train.
 
     Example:
         buffer = AdaptiveRolloutGroupWorkBuffer.Config(
@@ -457,15 +465,29 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
         """
 
         max_straggler_fraction: float | None = None
-        """Share of a group's rollouts that may be cut so the others still train, rounded down but at least 1
-        (see `AsyncLoopConfig.max_stragglers`). Checked once, when the batcher starts the last batch a group can
-        join (`max_offpolicy_steps` versions after its claim) while it is still generating. Cut rollouts become
-        ERROR_SYSTEM and are not trained. None: never cut.
+        """Share of a group's rollouts that may be cut so the others still train: k = this times
+        `num_samples_per_prompt`, rounded down, at least 1 and at most n - 1 (see `AsyncLoopConfig.max_stragglers`).
+        A group claimed at version c reaches the gate when at most k of its rollouts are unfinished; g is the batch
+        version then. When the batcher starts batch V, the unfinished rollouts of a group still generating are cut
+        if at most k are left, at the first of:
 
-        Example (16 samples per prompt, 0.05 -> at most 1):
-            15 finished, 1 running    -> the 1 is cut; the 15 train
-            14 finished, 2 running    -> nothing is cut; still running at the next batch -> cancelled as too old
+            V == g + straggler_grace_steps    "grace"
+            V - c == max_offpolicy_steps - 1  "cap_minus_1": the finished rollouts have a full step to reach a batch
+            V - c == max_offpolicy_steps      "cap": the last batch the group can join
+
+        Cut rollouts become ERROR_SYSTEM and are not trained. Past `max_offpolicy_steps` the group is cancelled
+        whole, as without a cut. None: never cut.
+
+        Example (16 samples per prompt, 0.05 -> k = 1; max_offpolicy_steps 10, grace 2; claimed at version 0):
+            15 finished at version 3, the 16th still running at batch 5    -> the 16th is cut; the 15 train
+            15 finished at version 9, the 16th still running at batch 10   -> cut at batch 10 ("cap")
+            14 finished, 2 running at batch 10                             -> nothing is cut; still running at
+                                                                              batch 11 -> cancelled as too old
         """
+
+        straggler_grace_steps: int = 2
+        """With `max_straggler_fraction`: batch versions a group that reached the gate waits for its stragglers
+        before they are cut."""
 
         def __post_init__(self) -> None:
             if self.max_offpolicy_steps is not None and self.max_offpolicy_steps < 1:
@@ -513,6 +535,10 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
                     raise ValueError(
                         "max_straggler_fraction needs max_offpolicy_steps, which sets a group's last batch"
                     )
+            if self.straggler_grace_steps < 1:
+                raise ValueError(
+                    f"straggler_grace_steps must be >= 1, got {self.straggler_grace_steps}"
+                )
 
         def resolve_generation_capacity(
             self,
@@ -575,6 +601,7 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
         self._num_prompts_per_train_step = num_prompts_per_train_step
         self._max_offpolicy_steps = config.max_offpolicy_steps
         self._max_straggler_fraction = config.max_straggler_fraction
+        self._straggler_grace_steps = config.straggler_grace_steps
         self._generation_capacity = config.resolve_generation_capacity(
             num_prompts_per_train_step
         )
@@ -592,7 +619,11 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
         self._cancelled_too_old_since_flush = 0
         self._dropped_too_old_after_cut_since_flush = 0
         self._cancelled_too_old_after_cut_request_since_flush = 0
-        self._straggler_cut_requests_since_flush = 0
+        self._straggler_gates_since_flush = 0
+        self._straggler_cut_requests_since_flush = dict.fromkeys(
+            _STRAGGLER_CUT_REASONS, 0
+        )
+        self._straggler_cut_groups_since_flush = 0
         self._dropped_group_ids: list[int] = []
         # Highest version the batcher assembled a batch for; in-flight groups are checked when it advances.
         self._consuming_policy_version = policy_version
@@ -676,7 +707,7 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
                 work.generation_task.cancel()
             self._dropped_group_ids.append(work.group_id)
             self._cancelled_too_old_since_flush += 1
-            if work.cut_stragglers.is_set():
+            if work.straggler_cut_requested:
                 self._cancelled_too_old_after_cut_request_since_flush += 1
             self._completed_since_step_start += 1
             self._dropped_since_step_start += 1
@@ -685,10 +716,59 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
         dropped_group_ids, self._dropped_group_ids = self._dropped_group_ids, []
         return dropped_group_ids
 
+    def record_straggler_gate(self, work: RolloutGroupWork) -> None:
+        """The group's worker reported that at most `max_stragglers` rollouts are unfinished: its grace starts at
+        the batch version being assembled."""
+        if (
+            work.state is _RolloutGroupWorkState.INFLIGHT
+            and not work.cancelled
+            and work.straggler_gate_version is None
+        ):
+            work.straggler_gate_version = self._consuming_policy_version
+            self._straggler_gates_since_flush += 1
+
+    def _straggler_cut_reason(
+        self, work: RolloutGroupWork, *, consuming_policy_version: int
+    ) -> str | None:
+        """Why batch `consuming_policy_version` asks this group to cut its stragglers, or None (see
+        `Config.max_straggler_fraction`)."""
+        assert work.policy_version_at_claim is not None
+        assert self._max_offpolicy_steps is not None
+        age = consuming_policy_version - work.policy_version_at_claim
+        if (
+            work.straggler_gate_version is not None
+            and consuming_policy_version
+            == work.straggler_gate_version + self._straggler_grace_steps
+        ):
+            return "grace"
+        if age == self._max_offpolicy_steps - 1:
+            return "cap_minus_1"
+        if age == self._max_offpolicy_steps:
+            return "cap"
+        return None
+
+    def _request_straggler_cuts(self, *, consuming_policy_version: int) -> None:
+        """Queue a cut request for each in-flight group whose stragglers this batch may cut; the Rollouter sends
+        it, so this never waits for a worker. Caller holds the condition."""
+        for work in self._work_by_group_id.values():
+            if work.state is not _RolloutGroupWorkState.INFLIGHT or work.cancelled:
+                continue
+            reason = self._straggler_cut_reason(
+                work, consuming_policy_version=consuming_policy_version
+            )
+            if reason is not None:
+                work.straggler_cut_requests.put_nowait(reason)
+                work.straggler_cut_requested = True
+                self._straggler_cut_requests_since_flush[reason] += 1
+
     async def finalize_work(self, rollout_group: RolloutGroup) -> bool:
         stored = await super().finalize_work(rollout_group)
         if stored:
             self._completed_since_step_start += 1
+            if any(
+                "straggler_cut" in rollout.logs for rollout in rollout_group.rollouts
+            ):
+                self._straggler_cut_groups_since_flush += 1
         return stored
 
     async def release_active_groups(self, count: int, *, reason: str) -> None:
@@ -719,15 +799,9 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
                     consuming_policy_version=consuming_policy_version
                 )
                 if self._max_straggler_fraction is not None:
-                    # This batch is the last these groups can join: their workers may cut their stragglers.
-                    for work in self._work_by_group_id.values():
-                        if (
-                            work.state is _RolloutGroupWorkState.INFLIGHT
-                            and consuming_policy_version - work.policy_version_at_claim
-                            == self._max_offpolicy_steps
-                        ):
-                            work.cut_stragglers.set()
-                            self._straggler_cut_requests_since_flush += 1
+                    self._request_straggler_cuts(
+                        consuming_policy_version=consuming_policy_version
+                    )
             while True:
                 if self._closed:
                     return None
@@ -846,20 +920,33 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
             ),
         ]
         if self._max_straggler_fraction is not None:
-            # Groups. Applied cuts are rollout/stragglers_cut (rollouts, in groups that reached a batch).
+            # Groups. The cut rollouts are rollout/stragglers_cut/<reason> (in groups that reached a batch).
             out += [
-                # groups asked to cut their stragglers at their last batch
+                # groups whose worker reported at most max_stragglers unfinished rollouts (their grace started)
                 m.Metric(
-                    "rollout_buffer/straggler_cut_requests",
-                    m.NoReduce(float(self._straggler_cut_requests_since_flush)),
+                    "rollout_buffer/straggler_gates",
+                    m.NoReduce(float(self._straggler_gates_since_flush)),
+                ),
+                # cut requests sent, by reason; a request with more than max_stragglers unfinished cuts nothing
+                *(
+                    m.Metric(
+                        f"rollout_buffer/straggler_cut_requests/{reason}",
+                        m.NoReduce(float(count)),
+                    )
+                    for reason, count in self._straggler_cut_requests_since_flush.items()
+                ),
+                # groups that finalized with cut rollouts
+                m.Metric(
+                    "rollout_buffer/straggler_cut_groups",
+                    m.NoReduce(float(self._straggler_cut_groups_since_flush)),
                 ),
                 # of dropped_too_old: groups whose stragglers were cut that still missed their last batch
                 m.Metric(
                     "rollout_buffer/dropped_too_old_after_cut",
                     m.NoReduce(float(self._dropped_too_old_after_cut_since_flush)),
                 ),
-                # of cancelled_too_old: groups asked to cut that were still generating one batch later (more
-                # than max_stragglers unfinished, a failed cut call, or slow scoring after the cut)
+                # of cancelled_too_old: groups asked to cut that were still generating past their last batch
+                # (more than max_stragglers unfinished, a failed cut call, or slow scoring after the cut)
                 m.Metric(
                     "rollout_buffer/cancelled_too_old_after_cut_request",
                     m.NoReduce(
@@ -871,5 +958,9 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
         self._cancelled_too_old_since_flush = 0
         self._dropped_too_old_after_cut_since_flush = 0
         self._cancelled_too_old_after_cut_request_since_flush = 0
-        self._straggler_cut_requests_since_flush = 0
+        self._straggler_gates_since_flush = 0
+        self._straggler_cut_requests_since_flush = dict.fromkeys(
+            _STRAGGLER_CUT_REASONS, 0
+        )
+        self._straggler_cut_groups_since_flush = 0
         return out

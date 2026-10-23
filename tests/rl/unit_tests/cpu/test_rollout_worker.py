@@ -25,7 +25,12 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup, RolloutStatus
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
-from torchtitan.rl.rollout.rollouter import gather_rollouts, Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import (
+    gather_rollouts,
+    Rollouter,
+    RolloutWorker,
+    StragglerCut,
+)
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
@@ -584,18 +589,20 @@ def test_gather_rollouts_times_the_group_and_its_straggler() -> None:
 
 async def _start_group_with_unfinished_rollouts(
     num_unfinished: int,
-) -> tuple[asyncio.Task, asyncio.Future, list[str]]:
-    """Start a group of 4 whose last `num_unfinished` rollouts hang; return once the others ended."""
+) -> tuple[asyncio.Task, StragglerCut, list[str], asyncio.Event]:
+    """Start a group of 4 whose last `num_unfinished` rollouts wait for the returned event; return
+    once the others ended. The group may cut 1 straggler."""
     group_size = 4
     hanging = {
         f"group=7/rollout={rollout_id}"
         for rollout_id in range(group_size - num_unfinished, group_size)
     }
     released = []
+    finish = asyncio.Event()
 
     async def generate_fn(prompt_token_ids, **kwargs) -> Completion:
         if kwargs["routing_session_id"] in hanging:
-            await asyncio.Event().wait()
+            await finish.wait()
         return await _GenerateFn()(prompt_token_ids, **kwargs)
 
     async def release_session_fn(*, routing_session_id: str) -> None:
@@ -615,7 +622,7 @@ async def _start_group_with_unfinished_rollouts(
         renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         hf_assets_path="tests/assets/tokenizer",
     )
-    cut_stragglers = asyncio.get_running_loop().create_future()
+    straggler_cut = StragglerCut(max_stragglers=1)
     group = asyncio.create_task(
         worker.run_group(
             generate_fn=generate_fn,
@@ -624,18 +631,22 @@ async def _start_group_with_unfinished_rollouts(
             group_id=7,
             group_size=group_size,
             sampling=SamplingConfig(),
-            cut_stragglers=cut_stragglers,
+            straggler_cut=straggler_cut,
         )
     )
     while len(released) < group_size - num_unfinished:
         await asyncio.sleep(0)
-    return group, cut_stragglers, released
+    await asyncio.sleep(0)  # the last finished rollout's done callback
+    return group, straggler_cut, released, finish
 
 
 def test_cut_stragglers_cuts_the_unfinished_rollout_and_the_rest_train() -> None:
     async def run() -> RolloutGroup:
-        group, cut_stragglers, released = await _start_group_with_unfinished_rollouts(1)
-        cut_stragglers.set_result(1)
+        group, straggler_cut, released, _ = await _start_group_with_unfinished_rollouts(
+            1
+        )
+        assert straggler_cut.gate_reached.result() is True
+        straggler_cut.request("grace")
         # The group returns at once instead of raising the cut rollout's CancelledError.
         group = await group
         assert sorted(released) == [f"group=7/rollout={i}" for i in range(4)]
@@ -645,12 +656,12 @@ def test_cut_stragglers_cuts_the_unfinished_rollout_and_the_rest_train() -> None
 
     *trained, cut = group.rollouts
     assert cut.status is RolloutStatus.ERROR_SYSTEM
-    assert cut.logs["straggler_cut"] is True
+    assert cut.logs["straggler_cut"] == "grace"
     assert (cut.reward, cut.advantage) == (None, None)
     # `_Rubric` rewards rollout_id + 1, so 1, 2 and 3, centered on their mean 2.
     assert [rollout.advantage for rollout in trained] == [-1.0, 0.0, 1.0]
     values = m.MetricsProcessor._aggregate_metrics(group.metrics)
-    assert values["rollout/stragglers_cut/sum"] == 1
+    assert values["rollout/stragglers_cut/grace/sum"] == 1
     # The 3 that finished are not a fair sample of the task: the group records no outcome.
     rollouter = object.__new__(Rollouter)
     rollouter._group_outcomes = {}
@@ -660,13 +671,35 @@ def test_cut_stragglers_cuts_the_unfinished_rollout_and_the_rest_train() -> None
 
 def test_cut_stragglers_cuts_nothing_when_more_than_max_stragglers_are_unfinished() -> None:
     async def run() -> None:
-        group, cut_stragglers, _ = await _start_group_with_unfinished_rollouts(2)
-        cut_stragglers.set_result(1)
+        group, straggler_cut, _, _ = await _start_group_with_unfinished_rollouts(2)
+        # Gate never reached: a request (the cap) cuts nothing
+        assert not straggler_cut.gate_reached.done()
+        straggler_cut.request("cap")
         await asyncio.sleep(0.1)
         # Both keep running; the group's own cancel (too old, or shutdown) still raises.
         assert not group.done()
         group.cancel()
         with pytest.raises(asyncio.CancelledError):
             await group
+        # Cancelled siblings don't reach the gate
+        assert not straggler_cut.gate_reached.done()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=30))
+
+
+def test_cut_stragglers_cuts_nothing_when_the_straggler_finishes_first() -> None:
+    async def run() -> None:
+        group, straggler_cut, _, finish = await _start_group_with_unfinished_rollouts(1)
+        assert straggler_cut.gate_reached.result() is True
+        # The 4th finishes inside the grace: the group trains whole, and a later request does nothing
+        finish.set()
+        group = await group
+        straggler_cut.request("grace")
+        assert [rollout.status for rollout in group.rollouts] == [
+            RolloutStatus.COMPLETED
+        ] * 4
+        assert not any(
+            metric.key.startswith("rollout/stragglers_cut") for metric in group.metrics
+        )
 
     asyncio.run(asyncio.wait_for(run(), timeout=30))

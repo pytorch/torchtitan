@@ -50,6 +50,7 @@ from torchtitan.rl.rollout.rollouter import (
     Rollouter,
     rollouts_from_gather,
     RolloutWorker,
+    StragglerCut,
 )
 from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
@@ -376,7 +377,7 @@ class VerifiersRolloutWorker(RolloutWorker):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
-        cut_stragglers: asyncio.Future[int] | None = None,
+        straggler_cut: StragglerCut | None = None,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
         # Each rollout releases its own generator sessions; see `_run_single_rollout`.
@@ -406,7 +407,7 @@ class VerifiersRolloutWorker(RolloutWorker):
             for rollout_id in range(group_size)
         )
         results, group_metrics = await gather_rollouts(
-            sibling_rollouts, group_id=group_id, cut_stragglers=cut_stragglers
+            sibling_rollouts, group_id=group_id, straggler_cut=straggler_cut
         )
         rollouts = rollouts_from_gather(results, group_id=group_id)
 

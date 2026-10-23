@@ -44,7 +44,7 @@ from torchtitan.rl.generator.http_client import GeneratorClient
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.rollouter import Rollouter
+from torchtitan.rl.rollout.rollouter import Rollouter, StragglerCut
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.types import (
     Completion,
@@ -1453,7 +1453,7 @@ def test_cut_stragglers_cuts_the_unfinished_rollout_and_the_rest_train(
     worker.advantage_estimator = AdvantageEstimator.Config().build()
 
     async def run():
-        cut_stragglers = asyncio.get_running_loop().create_future()
+        straggler_cut = StragglerCut(max_stragglers=1)
         group = asyncio.create_task(
             worker.run_group(
                 generate_fn=GeneratorClient(router=None),
@@ -1462,23 +1462,24 @@ def test_cut_stragglers_cuts_the_unfinished_rollout_and_the_rest_train(
                 group_id=1,
                 group_size=4,
                 sampling=SamplingConfig(),
-                cut_stragglers=cut_stragglers,
+                straggler_cut=straggler_cut,
             )
         )
         while len(released) < 3:
             await asyncio.sleep(0)
-        cut_stragglers.set_result(1)
+        straggler_cut.request("cap_minus_1")
         return await group
 
     group = asyncio.run(asyncio.wait_for(run(), timeout=30))
 
     *trained, cut = group.rollouts
-    assert cut.status is RolloutStatus.ERROR_SYSTEM and cut.logs["straggler_cut"]
+    assert cut.status is RolloutStatus.ERROR_SYSTEM
+    assert cut.logs["straggler_cut"] == "cap_minus_1"
     assert (cut.reward, cut.advantage) == (None, None)
     assert [rollout.advantage for rollout in trained] == [-1.0, 0.0, 1.0]
     assert sorted(released) == [0, 1, 2, 3]
     values = m.MetricsProcessor._aggregate_metrics(group.metrics)
-    assert values["rollout/stragglers_cut/sum"] == 1
+    assert values["rollout/stragglers_cut/cap_minus_1/sum"] == 1
     # The cut rollout has no stop condition: it counts as "other"
     assert values["rollout/stop/other/mean"] == 0.25
 

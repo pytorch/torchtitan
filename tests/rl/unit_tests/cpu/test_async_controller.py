@@ -1789,65 +1789,39 @@ def test_max_stragglers_rounds_down_but_allows_at_least_one(
 
 
 @pytest.mark.parametrize(
-    "fraction, max_offpolicy_steps, match",
+    "fraction, max_offpolicy_steps, grace, match",
     [
-        (0.0, 10, r"in \(0, 1\)"),
-        (1.0, 10, r"in \(0, 1\)"),
-        (0.05, None, "needs max_offpolicy_steps"),
+        (0.0, 10, 2, r"in \(0, 1\)"),
+        (1.0, 10, 2, r"in \(0, 1\)"),
+        (0.05, None, 2, "needs max_offpolicy_steps"),
+        (0.05, 10, 0, "straggler_grace_steps must be >= 1"),
     ],
 )
-def test_adaptive_buffer_config_rejects_a_bad_max_straggler_fraction(
-    fraction, max_offpolicy_steps, match
+def test_adaptive_buffer_config_rejects_a_bad_straggler_cut(
+    fraction, max_offpolicy_steps, grace, match
 ) -> None:
     with pytest.raises(ValueError, match=match):
         AdaptiveRolloutGroupWorkBuffer.Config(
-            max_offpolicy_steps=max_offpolicy_steps, max_straggler_fraction=fraction
-        )
-
-
-@pytest.mark.parametrize("fraction", [0.05, None])
-def test_adaptive_buffer_signals_a_straggler_cut_only_at_the_last_batch(
-    fraction,
-) -> None:
-    async def run() -> None:
-        buffer = AdaptiveRolloutGroupWorkBuffer.Config(
-            max_offpolicy_steps=2,
-            generation_capacity=4,
+            max_offpolicy_steps=max_offpolicy_steps,
             max_straggler_fraction=fraction,
-        ).build(num_prompts_per_train_step=1)
-        generating, waiting = (
-            RolloutGroupWork(group_id=group_id, sample=object()) for group_id in (0, 1)
+            straggler_grace_steps=grace,
         )
-        for work in (generating, waiting):
-            await buffer.add_work(work)
-        await buffer.claim_next()  # g0 generates under version 0; g1 waits
-
-        # The batch for version 1 is not g0's last (age 1 of 2)
-        takers = [
-            asyncio.create_task(buffer.take_finalized(consuming_policy_version=1))
-        ]
-        await asyncio.sleep(0)
-        assert not generating.cut_stragglers.is_set()
-
-        # The batch for version 2 is g0's last; a waiting group has no claim version
-        takers.append(
-            asyncio.create_task(buffer.take_finalized(consuming_policy_version=2))
-        )
-        await asyncio.sleep(0)
-        assert generating.cut_stragglers.is_set() == (fraction is not None)
-        assert not waiting.cut_stragglers.is_set()
-        await buffer.close()
-        assert await asyncio.gather(*takers) == [None, None]
-
-    asyncio.run(run())
 
 
-def _cut_buffer(*, max_offpolicy_steps: int) -> AdaptiveRolloutGroupWorkBuffer:
+def _cut_buffer(
+    *, max_offpolicy_steps: int, fraction: float | None = 0.05
+) -> AdaptiveRolloutGroupWorkBuffer:
     return AdaptiveRolloutGroupWorkBuffer.Config(
         max_offpolicy_steps=max_offpolicy_steps,
         generation_capacity=4,
-        max_straggler_fraction=0.05,
+        max_straggler_fraction=fraction,
+        straggler_grace_steps=2,
     ).build(num_prompts_per_train_step=1)
+
+
+def _cut_requests(work: RolloutGroupWork) -> list[str]:
+    queue = work.straggler_cut_requests
+    return [queue.get_nowait() for _ in range(queue.qsize())]
 
 
 def _cut_rollout(group_id: int) -> Rollout:
@@ -1855,8 +1829,67 @@ def _cut_rollout(group_id: int) -> Rollout:
         group_id=group_id,
         rollout_id=1,
         status=RolloutStatus.ERROR_SYSTEM,
-        logs={"straggler_cut": True},
+        logs={"straggler_cut": "cap"},
     )
+
+
+@pytest.mark.parametrize(
+    "fraction, gate_version, requests",
+    [
+        # Gate at version 1: the grace ends at batch 3; the cap requests still follow (they cut nothing
+        # once the cut went through)
+        (0.05, 1, {3: "grace", 5: "cap_minus_1", 6: "cap"}),
+        # Gate never reached: only the cap requests, which the worker declines with more than k unfinished
+        (0.05, None, {5: "cap_minus_1", 6: "cap"}),
+        # Gate at version 4: the step before the last batch comes first; the grace ends at the last batch
+        (0.05, 4, {5: "cap_minus_1", 6: "grace"}),
+        (None, 1, {}),
+    ],
+)
+def test_adaptive_buffer_requests_a_straggler_cut_at_each_trigger(
+    fraction, gate_version, requests
+) -> None:
+    async def run() -> None:
+        buffer = _cut_buffer(max_offpolicy_steps=6, fraction=fraction)
+        generating, waiting = (
+            RolloutGroupWork(group_id=group_id, sample=object()) for group_id in (0, 1)
+        )
+        for work in (generating, waiting):
+            await buffer.add_work(work)
+        await buffer.claim_next()  # g0 generates under version 0; g1 waits
+
+        takers, seen = [], {}
+        for version in range(1, 7):
+            takers.append(
+                asyncio.create_task(
+                    buffer.take_finalized(consuming_policy_version=version)
+                )
+            )
+            await asyncio.sleep(0)
+            if version == gate_version:
+                # g0's worker reports the gate while batch `version` is assembled; a repeat is ignored
+                buffer.record_straggler_gate(generating)
+                buffer.record_straggler_gate(generating)
+                assert generating.straggler_gate_version == version
+            # At most one request per batch
+            for reason in _cut_requests(generating):
+                assert version not in seen
+                seen[version] = reason
+        assert seen == requests
+        # A waiting group has no claim version and no worker
+        assert _cut_requests(waiting) == []
+        if fraction is not None:
+            metrics = {metric.key: metric.value.value for metric in buffer.metrics()}
+            assert metrics["rollout_buffer/straggler_gates"] == (
+                gate_version is not None
+            )
+            for reason in ("grace", "cap_minus_1", "cap"):
+                key = f"rollout_buffer/straggler_cut_requests/{reason}"
+                assert metrics[key] == (reason in requests.values())
+        await buffer.close()
+        assert await asyncio.gather(*takers) == [None] * 6
+
+    asyncio.run(run())
 
 
 def test_adaptive_buffer_trains_a_cut_group_in_its_last_batch_once() -> None:
@@ -1866,23 +1899,31 @@ def test_adaptive_buffer_trains_a_cut_group_in_its_last_batch_once() -> None:
         work = await buffer.claim_next()  # under version 0
 
         # The batch for version 2 is g0's last: the cut is requested, then the group finalizes with its cut
-        taker = asyncio.create_task(buffer.take_finalized(consuming_policy_version=2))
+        takers = [
+            asyncio.create_task(buffer.take_finalized(consuming_policy_version=1))
+        ]
         await asyncio.sleep(0)
-        assert work.cut_stragglers.is_set()
+        takers.append(
+            asyncio.create_task(buffer.take_finalized(consuming_policy_version=2))
+        )
+        await asyncio.sleep(0)
+        assert _cut_requests(work) == ["cap_minus_1", "cap"]
         await buffer.finalize_work(RolloutGroup(group_id=0, rollouts=[_cut_rollout(0)]))
-        assert (await taker).group_id == 0
+        (taken,), _ = await asyncio.wait(takers, return_when=asyncio.FIRST_COMPLETED)
+        assert taken.result().group_id == 0
         await buffer.release_active_groups(1, reason="trained")
 
         # Trained once: not dropped, not cancelled, its slot released once, nothing left in the buffer
         assert buffer.pop_dropped_group_ids() == []
         assert not work.cancelled
         metrics = {metric.key: metric.value.value for metric in buffer.metrics()}
-        assert metrics["rollout_buffer/straggler_cut_requests"] == 1
+        assert metrics["rollout_buffer/straggler_cut_groups"] == 1
         assert metrics["rollout_buffer/dropped_too_old"] == 0
         assert metrics["rollout_buffer/cancelled_too_old"] == 0
         assert metrics["rollout_buffer/num_groups_inflight"] == 0
         assert buffer._active_rollout_groups == 0
         await buffer.close()
+        await asyncio.gather(*takers)  # the other taker returns None
 
     asyncio.run(run())
 
@@ -1900,18 +1941,17 @@ def test_adaptive_buffer_counts_a_cut_group_still_generating_at_the_next_batch()
             asyncio.create_task(buffer.take_finalized(consuming_policy_version=1))
         ]
         await asyncio.sleep(0)
-        assert work.cut_stragglers.is_set()
-        # The batch for version 2 cancels it as too old, as without a cut
+        assert _cut_requests(work) == ["cap"]
+        # The batch for version 2 cancels it as too old, as without a cut, and requests nothing more
         takers.append(
             asyncio.create_task(buffer.take_finalized(consuming_policy_version=2))
         )
         await asyncio.sleep(0)
-        assert work.cancelled
+        assert work.cancelled and _cut_requests(work) == []
         with pytest.raises(asyncio.CancelledError):
             await generation_task
         assert buffer.pop_dropped_group_ids() == [0]
         metrics = {metric.key: metric.value.value for metric in buffer.metrics()}
-        assert metrics["rollout_buffer/straggler_cut_requests"] == 1
         assert metrics["rollout_buffer/cancelled_too_old"] == 1
         assert metrics["rollout_buffer/cancelled_too_old_after_cut_request"] == 1
         await buffer.close()
@@ -1925,11 +1965,13 @@ def test_rollout_loop_passes_the_cut_signal_only_when_the_cut_is_on(
     max_stragglers,
 ) -> None:
     async def run() -> None:
-        buffer = _adaptive_buffer(num_prompts=1, max_offpolicy_steps=1)
+        buffer = _cut_buffer(max_offpolicy_steps=4)
         calls = []
 
         async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
             calls.append(kwargs)
+            if max_stragglers is not None:
+                kwargs["on_straggler_gate"]()  # the worker reports the gate
             return RolloutGroup(group_id=group_id, rollouts=[])
 
         async def release_groups(group_ids: list[int]) -> None:
@@ -1964,19 +2006,33 @@ def test_rollout_loop_passes_the_cut_signal_only_when_the_cut_is_on(
 
         (kwargs,) = calls
         if max_stragglers is None:  # off: the call is the one before the cut existed
-            assert "cut_stragglers" not in kwargs and "max_stragglers" not in kwargs
+            assert not {"max_stragglers", "cut_requests", "on_straggler_gate"} & set(
+                kwargs
+            )
         else:
-            assert kwargs["cut_stragglers"] is work.cut_stragglers
             assert kwargs["max_stragglers"] == max_stragglers
+            assert kwargs["cut_requests"] is work.straggler_cut_requests
+            assert work.straggler_gate_version == 0
 
     asyncio.run(run())
 
 
 def test_adaptive_buffer_logs_cut_metrics_only_when_the_cut_is_on() -> None:
-    buffer = _adaptive_buffer(num_prompts=1, max_offpolicy_steps=1)
-    keys = {metric.key for metric in buffer.metrics()}
-    assert "rollout_buffer/straggler_cut_requests" not in keys
-    assert "rollout_buffer/dropped_too_old_after_cut" not in keys
+    keys = {metric.key for metric in _cut_buffer(max_offpolicy_steps=1).metrics()}
+    assert {
+        "rollout_buffer/straggler_gates",
+        "rollout_buffer/straggler_cut_requests/grace",
+        "rollout_buffer/straggler_cut_requests/cap_minus_1",
+        "rollout_buffer/straggler_cut_requests/cap",
+        "rollout_buffer/straggler_cut_groups",
+        "rollout_buffer/dropped_too_old_after_cut",
+        "rollout_buffer/cancelled_too_old_after_cut_request",
+    } <= keys
+    off = _cut_buffer(max_offpolicy_steps=1, fraction=None)
+    assert not any(
+        "straggler" in key or "after_cut" in key
+        for key in {metric.key for metric in off.metrics()}
+    )
 
 
 def test_adaptive_buffer_counts_cut_groups_that_missed_their_last_batch() -> None:
