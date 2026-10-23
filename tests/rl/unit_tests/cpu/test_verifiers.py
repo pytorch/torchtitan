@@ -1421,6 +1421,68 @@ def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage(
     assert [rollout.advantage for rollout in scored] == advantages
 
 
+def test_cut_stragglers_cuts_the_unfinished_rollout_and_the_rest_train(
+    monkeypatch,
+) -> None:
+    released = []
+
+    async def run_single_rollout(self, *, group_id, rollout_id, **kwargs):
+        try:
+            if rollout_id == 3:
+                await asyncio.Event().wait()
+            return Rollout(
+                group_id=group_id,
+                rollout_id=rollout_id,
+                status=RolloutStatus.COMPLETED,
+                logs={"stop_condition": "agent_completed"},
+            )
+        finally:
+            released.append(rollout_id)
+
+    async def score_group(self, rollouts, sample):
+        return [
+            RubricOutput(reward=float(rollout.rollout_id), reward_breakdown={})
+            for rollout in rollouts
+        ]
+
+    monkeypatch.setattr(
+        VerifiersRolloutWorker, "_run_single_rollout", run_single_rollout
+    )
+    monkeypatch.setattr(VerifiersRolloutWorker, "score_group", score_group)
+    worker = object.__new__(VerifiersRolloutWorker)
+    worker.advantage_estimator = AdvantageEstimator.Config().build()
+
+    async def run():
+        cut_stragglers = asyncio.get_running_loop().create_future()
+        group = asyncio.create_task(
+            worker.run_group(
+                generate_fn=GeneratorClient(router=None),
+                release_session_fn=None,
+                sample=None,
+                group_id=1,
+                group_size=4,
+                sampling=SamplingConfig(),
+                cut_stragglers=cut_stragglers,
+            )
+        )
+        while len(released) < 3:
+            await asyncio.sleep(0)
+        cut_stragglers.set_result(1)
+        return await group
+
+    group = asyncio.run(asyncio.wait_for(run(), timeout=30))
+
+    *trained, cut = group.rollouts
+    assert cut.status is RolloutStatus.ERROR_SYSTEM and cut.logs["straggler_cut"]
+    assert (cut.reward, cut.advantage) == (None, None)
+    assert [rollout.advantage for rollout in trained] == [-1.0, 0.0, 1.0]
+    assert sorted(released) == [0, 1, 2, 3]
+    values = m.MetricsProcessor._aggregate_metrics(group.metrics)
+    assert values["rollout/stragglers_cut/sum"] == 1
+    # The cut rollout has no stop condition: it counts as "other"
+    assert values["rollout/stop/other/mean"] == 0.25
+
+
 def test_cancelled_run_group_waits_for_every_sibling_release() -> None:
     """A cancelled group returns only after each sibling gave its lease back with
     `release_rollout(session_ids=[])`: no sibling's lease outlives `cancel_group`."""

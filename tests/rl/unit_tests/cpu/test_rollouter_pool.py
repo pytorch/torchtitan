@@ -440,6 +440,8 @@ def test_dispatch_forwards_the_cut_signal_and_still_returns_the_group(
             )
         )
         await actor_mesh.run_group.started.wait()
+        # The worker is told to watch for a cut (without a cut, the call has no such kwarg)
+        assert actor_mesh.run_group.calls[0]["straggler_cut"] is True
         if signalled:
             cut_stragglers.set()
             await asyncio.wait_for(actor_mesh.cut_stragglers.called.wait(), timeout=5)
@@ -517,12 +519,63 @@ def test_cancel_group_stops_the_group_on_real_worker_processes(tmp_path) -> None
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("straggler_cut", [True, False])
+def test_rollout_worker_actor_passes_a_cut_future_only_when_asked(
+    straggler_cut,
+) -> None:
+    async def run() -> None:
+        calls = []
+
+        class Worker:
+            async def run_group(self, **kwargs) -> RolloutGroup:
+                calls.append(kwargs)
+                if straggler_cut:
+                    # A second cut of the same group is ignored instead of raising InvalidStateError.
+                    for max_stragglers in (2, 3):
+                        await cut_endpoint(
+                            actor, group_id=-1, max_stragglers=max_stragglers
+                        )
+                    assert kwargs["cut_stragglers"].result() == 2
+                return RolloutGroup(group_id=-1, rollouts=[])
+
+        actor = object.__new__(RolloutWorkerActor)
+        RolloutWorkerActor.__init__(
+            actor,
+            worker_config=SimpleNamespace(build=Worker),
+            num_threads=1,
+            structured_logger_init_fn=None,
+        )
+        run_group = RolloutWorkerActor.__dict__["run_group"]._method.__wrapped__
+        cut_endpoint = RolloutWorkerActor.__dict__["cut_stragglers"]._method.__wrapped__
+        kwargs = {"straggler_cut": True} if straggler_cut else {}
+        await run_group(
+            actor,
+            generate_fn=None,
+            release_session_fn=None,
+            sample=None,
+            group_id=-1,  # validation id: no group metrics added
+            group_size=1,
+            sampling=None,
+            **kwargs,
+        )
+        (worker_kwargs,) = calls
+        assert ("cut_stragglers" in worker_kwargs) == straggler_cut
+        assert actor._straggler_cuts == {}
+
+    asyncio.run(run())
+
+
 class _CutReportingWorker:
-    """A rollout worker whose group returns, as a metric, the `max_stragglers` its cut request carried."""
+    """A rollout worker whose group returns, as a metric, the `max_stragglers` its cut request carried.
+    It marks the group's start in a file."""
+
+    def __init__(self, marker_dir: str) -> None:
+        self.marker_dir = marker_dir
 
     async def run_group(
         self, *, group_id: int, cut_stragglers, **kwargs
     ) -> RolloutGroup:
+        pathlib.Path(self.marker_dir, f"{group_id}.started").touch()
         max_stragglers = await cut_stragglers
         return RolloutGroup(
             group_id=group_id,
@@ -532,11 +585,14 @@ class _CutReportingWorker:
 
 
 class _CutReportingWorkerConfig:
+    def __init__(self, marker_dir: str) -> None:
+        self.marker_dir = marker_dir
+
     def build(self) -> _CutReportingWorker:
-        return _CutReportingWorker()
+        return _CutReportingWorker(self.marker_dir)
 
 
-def test_cut_stragglers_reaches_the_group_on_real_worker_processes() -> None:
+def test_cut_stragglers_reaches_the_group_on_real_worker_processes(tmp_path) -> None:
     async def run() -> None:
         mesh = this_host().spawn_procs(per_host={"cpus": 2})
         # The worker processes can't import this test module, so ship the fakes by value.
@@ -545,7 +601,7 @@ def test_cut_stragglers_reaches_the_group_on_real_worker_processes() -> None:
             workers = mesh.spawn(
                 "rollout_worker",
                 RolloutWorkerActor,
-                worker_config=_CutReportingWorkerConfig(),
+                worker_config=_CutReportingWorkerConfig(str(tmp_path)),
                 num_threads=1,
                 structured_logger_init_fn=None,
             )
@@ -557,14 +613,15 @@ def test_cut_stragglers_reaches_the_group_on_real_worker_processes() -> None:
                     group_id=7,
                     group_size=1,
                     sampling=None,
+                    straggler_cut=True,
                 )
             )
-            # Sent to every worker; only the one running group 7 resolves its request. Resent
-            # until it lands, in case it reaches the worker before `run_group` does.
-            while not group.done():
-                await workers.cut_stragglers.call(group_id=7, max_stragglers=3)
-                await asyncio.wait([group], timeout=0.5)
-            metrics = group.result().metrics
+            # Once the group runs, one cut is enough: sent to every worker, only the one running
+            # group 7 resolves its request.
+            while not (tmp_path / "7.started").exists():
+                await asyncio.sleep(0.05)
+            await workers.cut_stragglers.call(group_id=7, max_stragglers=3)
+            metrics = (await asyncio.wait_for(group, timeout=30)).metrics
             assert [mt.value.value for mt in metrics if mt.key == "max_stragglers"] == [
                 3.0
             ]

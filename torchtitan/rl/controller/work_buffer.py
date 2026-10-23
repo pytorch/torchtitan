@@ -591,6 +591,8 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
         self._dropped_too_old_since_flush = 0
         self._cancelled_too_old_since_flush = 0
         self._dropped_too_old_after_cut_since_flush = 0
+        self._cancelled_too_old_after_cut_request_since_flush = 0
+        self._straggler_cut_requests_since_flush = 0
         self._dropped_group_ids: list[int] = []
         # Highest version the batcher assembled a batch for; in-flight groups are checked when it advances.
         self._consuming_policy_version = policy_version
@@ -674,6 +676,8 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
                 work.generation_task.cancel()
             self._dropped_group_ids.append(work.group_id)
             self._cancelled_too_old_since_flush += 1
+            if work.cut_stragglers.is_set():
+                self._cancelled_too_old_after_cut_request_since_flush += 1
             self._completed_since_step_start += 1
             self._dropped_since_step_start += 1
 
@@ -723,6 +727,7 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
                             == self._max_offpolicy_steps
                         ):
                             work.cut_stragglers.set()
+                            self._straggler_cut_requests_since_flush += 1
             while True:
                 if self._closed:
                     return None
@@ -834,18 +839,37 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
                 "rollout_buffer/cancelled_too_old",
                 m.NoReduce(float(self._cancelled_too_old_since_flush)),
             ),
-            # of dropped_too_old: groups whose stragglers were cut that still missed their last batch
-            m.Metric(
-                "rollout_buffer/dropped_too_old_after_cut",
-                m.NoReduce(float(self._dropped_too_old_after_cut_since_flush)),
-            ),
             # 1 while the mean-age ceiling caps the demand, else 0
             m.Metric(
                 "rollout_buffer/demand_age_limited",
                 m.NoReduce(float(self._demand.state == "age-limited")),
             ),
         ]
+        if self._max_straggler_fraction is not None:
+            # Groups. Applied cuts are rollout/stragglers_cut (rollouts, in groups that reached a batch).
+            out += [
+                # groups asked to cut their stragglers at their last batch
+                m.Metric(
+                    "rollout_buffer/straggler_cut_requests",
+                    m.NoReduce(float(self._straggler_cut_requests_since_flush)),
+                ),
+                # of dropped_too_old: groups whose stragglers were cut that still missed their last batch
+                m.Metric(
+                    "rollout_buffer/dropped_too_old_after_cut",
+                    m.NoReduce(float(self._dropped_too_old_after_cut_since_flush)),
+                ),
+                # of cancelled_too_old: groups asked to cut that were still generating one batch later (more
+                # than max_stragglers unfinished, a failed cut call, or slow scoring after the cut)
+                m.Metric(
+                    "rollout_buffer/cancelled_too_old_after_cut_request",
+                    m.NoReduce(
+                        float(self._cancelled_too_old_after_cut_request_since_flush)
+                    ),
+                ),
+            ]
         self._dropped_too_old_since_flush = 0
         self._cancelled_too_old_since_flush = 0
         self._dropped_too_old_after_cut_since_flush = 0
+        self._cancelled_too_old_after_cut_request_since_flush = 0
+        self._straggler_cut_requests_since_flush = 0
         return out

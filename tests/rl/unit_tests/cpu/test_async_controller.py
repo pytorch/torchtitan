@@ -1772,6 +1772,8 @@ def test_adaptive_buffer_warns_once_when_generation_capacity_caps_demand(
         (16, 0.05, 1),  # 0.8 rounds down to 0, but one is always allowed
         (64, 0.05, 3),
         (100, 0.29, 29),  # 0.29 * 100 is 28.999... in floats
+        (2, 0.9, 1),  # at most n - 1: one rollout always trains
+        (1, 0.5, None),  # a group of 1 has nothing to keep
     ],
 )
 def test_max_stragglers_rounds_down_but_allows_at_least_one(
@@ -1840,21 +1842,150 @@ def test_adaptive_buffer_signals_a_straggler_cut_only_at_the_last_batch(
     asyncio.run(run())
 
 
+def _cut_buffer(*, max_offpolicy_steps: int) -> AdaptiveRolloutGroupWorkBuffer:
+    return AdaptiveRolloutGroupWorkBuffer.Config(
+        max_offpolicy_steps=max_offpolicy_steps,
+        generation_capacity=4,
+        max_straggler_fraction=0.05,
+    ).build(num_prompts_per_train_step=1)
+
+
+def _cut_rollout(group_id: int) -> Rollout:
+    return Rollout(
+        group_id=group_id,
+        rollout_id=1,
+        status=RolloutStatus.ERROR_SYSTEM,
+        logs={"straggler_cut": True},
+    )
+
+
+def test_adaptive_buffer_trains_a_cut_group_in_its_last_batch_once() -> None:
+    async def run() -> None:
+        buffer = _cut_buffer(max_offpolicy_steps=2)
+        await _admit(buffer, 0)
+        work = await buffer.claim_next()  # under version 0
+
+        # The batch for version 2 is g0's last: the cut is requested, then the group finalizes with its cut
+        taker = asyncio.create_task(buffer.take_finalized(consuming_policy_version=2))
+        await asyncio.sleep(0)
+        assert work.cut_stragglers.is_set()
+        await buffer.finalize_work(RolloutGroup(group_id=0, rollouts=[_cut_rollout(0)]))
+        assert (await taker).group_id == 0
+        await buffer.release_active_groups(1, reason="trained")
+
+        # Trained once: not dropped, not cancelled, its slot released once, nothing left in the buffer
+        assert buffer.pop_dropped_group_ids() == []
+        assert not work.cancelled
+        metrics = {metric.key: metric.value.value for metric in buffer.metrics()}
+        assert metrics["rollout_buffer/straggler_cut_requests"] == 1
+        assert metrics["rollout_buffer/dropped_too_old"] == 0
+        assert metrics["rollout_buffer/cancelled_too_old"] == 0
+        assert metrics["rollout_buffer/num_groups_inflight"] == 0
+        assert buffer._active_rollout_groups == 0
+        await buffer.close()
+
+    asyncio.run(run())
+
+
+def test_adaptive_buffer_counts_a_cut_group_still_generating_at_the_next_batch() -> None:
+    async def run() -> None:
+        buffer = _cut_buffer(max_offpolicy_steps=1)
+        await _admit(buffer, 0)
+        work = await buffer.claim_next()  # under version 0
+        generation_task = asyncio.create_task(asyncio.sleep(3600))
+        buffer.track_generation(work, generation_task)
+
+        # The batch for version 1 requests the cut; the group still generates (e.g. slow scoring after it)
+        takers = [
+            asyncio.create_task(buffer.take_finalized(consuming_policy_version=1))
+        ]
+        await asyncio.sleep(0)
+        assert work.cut_stragglers.is_set()
+        # The batch for version 2 cancels it as too old, as without a cut
+        takers.append(
+            asyncio.create_task(buffer.take_finalized(consuming_policy_version=2))
+        )
+        await asyncio.sleep(0)
+        assert work.cancelled
+        with pytest.raises(asyncio.CancelledError):
+            await generation_task
+        assert buffer.pop_dropped_group_ids() == [0]
+        metrics = {metric.key: metric.value.value for metric in buffer.metrics()}
+        assert metrics["rollout_buffer/straggler_cut_requests"] == 1
+        assert metrics["rollout_buffer/cancelled_too_old"] == 1
+        assert metrics["rollout_buffer/cancelled_too_old_after_cut_request"] == 1
+        await buffer.close()
+        assert await asyncio.gather(*takers) == [None, None]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("max_stragglers", [1, None])
+def test_rollout_loop_passes_the_cut_signal_only_when_the_cut_is_on(
+    max_stragglers,
+) -> None:
+    async def run() -> None:
+        buffer = _adaptive_buffer(num_prompts=1, max_offpolicy_steps=1)
+        calls = []
+
+        async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+            calls.append(kwargs)
+            return RolloutGroup(group_id=group_id, rollouts=[])
+
+        async def release_groups(group_ids: list[int]) -> None:
+            pass
+
+        controller = object.__new__(Controller)
+        controller.config = SimpleNamespace(
+            async_loop=SimpleNamespace(
+                num_samples_per_prompt=2, max_stragglers=max_stragglers
+            )
+        )
+        controller._sampling = None
+        controller.generator_router = SimpleNamespace(
+            release_groups=SimpleNamespace(call_one=release_groups)
+        )
+        controller.rollout_recorder = SimpleNamespace(record=lambda **kwargs: None)
+        controller._rollouter = SimpleNamespace(
+            run_group_rollouts=run_group_rollouts,
+            record_group_outcome=lambda group: None,
+        )
+        worker = asyncio.create_task(
+            controller._rollout_loop(
+                group_buffer=buffer, generate_fn=None, release_session_fn=None
+            )
+        )
+        work = RolloutGroupWork(group_id=0, sample=object())
+        await buffer.wait_for_slot()
+        await buffer.add_work(work)
+        assert (await buffer.take_finalized(consuming_policy_version=0)).group_id == 0
+        await buffer.close()
+        await worker
+
+        (kwargs,) = calls
+        if max_stragglers is None:  # off: the call is the one before the cut existed
+            assert "cut_stragglers" not in kwargs and "max_stragglers" not in kwargs
+        else:
+            assert kwargs["cut_stragglers"] is work.cut_stragglers
+            assert kwargs["max_stragglers"] == max_stragglers
+
+    asyncio.run(run())
+
+
+def test_adaptive_buffer_logs_cut_metrics_only_when_the_cut_is_on() -> None:
+    buffer = _adaptive_buffer(num_prompts=1, max_offpolicy_steps=1)
+    keys = {metric.key for metric in buffer.metrics()}
+    assert "rollout_buffer/straggler_cut_requests" not in keys
+    assert "rollout_buffer/dropped_too_old_after_cut" not in keys
+
+
 def test_adaptive_buffer_counts_cut_groups_that_missed_their_last_batch() -> None:
     async def run() -> None:
-        buffer = _adaptive_buffer(
-            num_prompts=1, max_offpolicy_steps=1, generation_capacity=4
-        )
+        buffer = _cut_buffer(max_offpolicy_steps=1)
         for group_id in range(2):
             await _admit(buffer, group_id)
             await buffer.claim_next()  # under version 0
-        cut = Rollout(
-            group_id=0,
-            rollout_id=1,
-            status=RolloutStatus.ERROR_SYSTEM,
-            logs={"straggler_cut": True},
-        )
-        await buffer.finalize_work(RolloutGroup(group_id=0, rollouts=[cut]))
+        await buffer.finalize_work(RolloutGroup(group_id=0, rollouts=[_cut_rollout(0)]))
         await _finalize(buffer, 1)
 
         # The batch for version 2: both groups finished too late and are dropped; only g0 had a cut

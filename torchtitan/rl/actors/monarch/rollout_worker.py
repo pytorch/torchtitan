@@ -71,11 +71,18 @@ class RolloutWorkerActor(Actor):
         group_id: int,
         group_size: int,
         sampling: Any,
+        straggler_cut: bool = False,
     ) -> RolloutGroup:
+        """Run one group on this worker. `straggler_cut`: the caller may send `cut_stragglers` for
+        it; only then does the worker's `run_group` get a `cut_stragglers` future."""
         task = asyncio.current_task()
         self._group_tasks[group_id] = task
-        cut_stragglers = asyncio.get_running_loop().create_future()
-        self._straggler_cuts[group_id] = cut_stragglers
+        extra_kwargs = {}
+        cut_stragglers = None
+        if straggler_cut:
+            cut_stragglers = asyncio.get_running_loop().create_future()
+            self._straggler_cuts[group_id] = cut_stragglers
+            extra_kwargs["cut_stragglers"] = cut_stragglers
         try:
             group = await self._worker.run_group(
                 generate_fn=generate_fn,
@@ -84,7 +91,7 @@ class RolloutWorkerActor(Actor):
                 group_id=group_id,
                 group_size=group_size,
                 sampling=sampling,
-                cut_stragglers=cut_stragglers,
+                **extra_kwargs,
             )
             # This process's GC time and event-loop lag since the last finished training group;
             # summed over a step's groups. Validation (negative group ids) ignores group metrics,
@@ -97,7 +104,10 @@ class RolloutWorkerActor(Actor):
             # don't drop a newer call's entry.
             if self._group_tasks.get(group_id) is task:
                 del self._group_tasks[group_id]
-            if self._straggler_cuts.get(group_id) is cut_stragglers:
+            if (
+                cut_stragglers is not None
+                and self._straggler_cuts.get(group_id) is cut_stragglers
+            ):
                 del self._straggler_cuts[group_id]
 
     @concurrent_endpoint

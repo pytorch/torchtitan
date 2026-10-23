@@ -385,6 +385,8 @@ class AsyncLoopConfig(Configurable.Config):
             16 samples per prompt, fraction 0.05     -> 1 (never below 1)
             64 samples per prompt, fraction 0.05     -> 3
             100 samples per prompt, fraction 0.29    -> 29
+            2 samples per prompt, fraction 0.9       -> 1 (never above n - 1: one rollout always trains)
+            1 sample per prompt                      -> None
         """
         if (
             not isinstance(self.group_buffer, AdaptiveRolloutGroupWorkBuffer.Config)
@@ -395,7 +397,10 @@ class AsyncLoopConfig(Configurable.Config):
         num_stragglers = round(
             self.group_buffer.max_straggler_fraction * self.num_samples_per_prompt, 9
         )
-        return max(1, math.floor(num_stragglers))
+        max_stragglers = min(
+            max(1, math.floor(num_stragglers)), self.num_samples_per_prompt - 1
+        )
+        return max_stragglers if max_stragglers >= 1 else None
 
 
 def _default_actor_system_config() -> ActorSystem.Config:
@@ -1445,8 +1450,15 @@ class Controller(Configurable):
                     group_id=work.group_id,
                     group_size=self.config.async_loop.num_samples_per_prompt,
                     sampling=self._sampling,
-                    cut_stragglers=work.cut_stragglers,
-                    max_stragglers=max_stragglers,
+                    # Off (None): the old call.
+                    **(
+                        {}
+                        if max_stragglers is None
+                        else {
+                            "cut_stragglers": work.cut_stragglers,
+                            "max_stragglers": max_stragglers,
+                        }
+                    ),
                 ),
                 name=f"rollout_group_{work.group_id}",
             )

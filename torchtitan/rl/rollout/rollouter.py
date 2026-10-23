@@ -340,6 +340,9 @@ class Rollouter(Configurable):
         if self._worker_actors is None:
             raise RuntimeError("rollout worker pool is not initialized")
 
+        # Off: the old `run_group` call, so a worker's `run_group` override need not take `cut_stragglers`.
+        straggler_cut = cut_stragglers is not None and max_stragglers is not None
+        extra_kwargs = {"straggler_cut": True} if straggler_cut else {}
         # `choose` (see ActorSystem's call convention) sends the call to the `run_group`
         # endpoint of one worker in the pool.
         call = asyncio.ensure_future(
@@ -350,6 +353,7 @@ class Rollouter(Configurable):
                 group_id=group_id,
                 group_size=group_size,
                 sampling=sampling,
+                **extra_kwargs,
             )
         )
         self._inflight_run_group_calls.add(call)
@@ -370,7 +374,7 @@ class Rollouter(Configurable):
 
         # A task of its own, so the buffer only sets the event and never waits for a worker.
         cut_forwarder = None
-        if cut_stragglers is not None and max_stragglers is not None:
+        if straggler_cut:
             cut_forwarder = asyncio.create_task(forward_cut())
         try:
             # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
@@ -730,8 +734,9 @@ async def gather_rollouts(
         results, metrics = await gather_rollouts(coroutines, group_id=7)
         # metrics: rollout/group_wall_s 900, rollout/group_straggler_wait_s 780 (Mean and Max each)
 
-    `cut_stragglers` resolves to k when the group's last batch starts. The unfinished siblings are
-    counted once, then:
+    `cut_stragglers` resolves to k when the group's last batch starts. The unfinished siblings
+    (tasks not done, including a rollout whose episode ended but whose `finally` cleanup still
+    runs) are counted once, then:
 
         at most k unfinished   -> each is cancelled and returned at once as an ERROR_SYSTEM rollout
                                   with `logs["straggler_cut"]`; rollout/stragglers_cut counts them
