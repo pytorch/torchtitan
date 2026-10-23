@@ -13,7 +13,6 @@ TorchTitan models for vLLM.
 
 import copy
 import dataclasses
-import weakref
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
 from typing import Any, cast
@@ -21,9 +20,9 @@ from typing import Any, cast
 import spmd_types as spmd
 
 import torch
-import torch.cuda._pin_memory_utils as pin_memory_utils
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import FSDPModule
+from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torch.distributed.tensor import DTensor, Replicate
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -268,69 +267,36 @@ def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:
             yield sharded_data
 
 
-def _create_pinned_cpu_state_dict(
-    state_dict: Mapping[str, Any],
-) -> tuple[dict[str, Any], torch.Tensor]:
-    """Allocate pinned CPU receive buffers for ``state_dict``, all inside one allocation.
+# Pinned host blocks above this size are allocated at their exact size; see
+# _pin_large_blocks_exactly.
+_PINNED_MAX_ROUND_THRESHOLD_MB = 64
 
-    Returns ``(buffers, allocation)``. ``buffers`` has ``state_dict``'s keys: each
-    tensor gets an uninitialized pinned CPU tensor with its dtype and local shape, and
-    a DTensor's buffer is a DTensor with the same mesh and placements around one. The
-    weights are not read. Every buffer is a view of ``allocation``, so keep
-    ``allocation`` alive as long as the buffers.
 
-    Example (bf16):
-        {"w": DTensor [64, 1024], Shard(0) over 2 ranks; "norm": tensor [1024]}
-        -> allocation: pinned uint8 [67584]
-           buffers: "w"    DTensor [64, 1024], Shard(0); local = allocation[0:65536]
-                    "norm" tensor [1024] = allocation[65536:67584]
+def _pin_large_blocks_exactly() -> None:
+    """Make the CUDA caching host allocator pin blocks above 64 MiB at their exact size.
 
-    Why one allocation: pinning each tensor separately, as
-    ``_create_cpu_state_dict(pin_memory=True)`` does, rounds every block up to a power
-    of two (a 2.3 GiB expert shard pins 4 GiB; 1.74x over a reduced Kimi K3
-    generator's buffers). Registering one allocation with ``cudaHostRegister`` pins
-    exactly the bytes needed.
+    The allocator rounds every pinned block up to a power of two so freed blocks can be
+    reused; ``pinned_max_round_threshold_mb`` turns that off above a size. The
+    generator's weight-sync buffers are allocated once and kept for the whole run, so
+    the rounding only wastes host memory: a 2.3 GiB expert shard pins 4 GiB, and a
+    reduced Kimi K3 generator's buffers took 1.74x their bytes.
+
+    NOTE: this takes effect for large models, where the rounding decides whether the
+    buffers fit in host memory. Kimi K3's generator at TP 4 needs ~424 GiB of buffers
+    per 4-GPU node, ~740 GiB at 1.74x, on hosts with 855 GiB. Small models waste little.
+
+    The setting is process-wide: other pinned allocations above 64 MiB are exact too.
+    PyTorch resets some unlisted options on every settings call, so this re-applies the
+    current settings with the threshold appended, and keeps a threshold the user
+    already set in ``PYTORCH_CUDA_ALLOC_CONF``.
     """
-    local_tensors = {
-        key: value._local_tensor if isinstance(value, DTensor) else value
-        for key, value in state_dict.items()
-        if isinstance(value, torch.Tensor)
-    }
-
-    # 1. Lay the local tensors out back to back, each at a 64-byte boundary.
-    alignment = 64
-    offsets: dict[str, int] = {}
-    total_bytes = 0
-    for key, local in local_tensors.items():
-        offsets[key] = total_bytes
-        total_bytes += (local.nbytes + alignment - 1) // alignment * alignment
-
-    # 2. Allocate and pin all of it at once.
-    allocation = torch.empty(total_bytes, dtype=torch.uint8, device="cpu")
-    if total_bytes:
-        pin_memory_utils.pin_memory(allocation.data_ptr(), total_bytes)
-        # Unregister when freed, as _create_cpu_state_dict does: a later allocation at
-        # the same address cannot be registered while this one still is.
-        weakref.finalize(
-            allocation, pin_memory_utils.unpin_memory, allocation.data_ptr()
-        )
-
-    # 3. Give each key its slice of the allocation, viewed as its dtype and shape.
-    buffers: dict[str, Any] = {}
-    for key, value in state_dict.items():
-        if key not in local_tensors:
-            buffers[key] = copy.deepcopy(value)  # non-tensor entries
-            continue
-        local = local_tensors[key]
-        start = offsets[key]
-        buffer = (
-            allocation[start : start + local.nbytes].view(local.dtype).view(local.shape)
-        )
-        if isinstance(value, DTensor):
-            # Not DTensor.from_local, which moves the local tensor to the mesh's device.
-            buffer = DTensor(buffer, value._spec, requires_grad=False)
-        buffers[key] = buffer
-    return buffers, allocation
+    settings = torch._C._accelerator_getAllocatorSettings()
+    if "pinned_max_round_threshold_mb" in settings:
+        return
+    threshold = f"pinned_max_round_threshold_mb:{_PINNED_MAX_ROUND_THRESHOLD_MB}"
+    torch._C._accelerator_setAllocatorSettings(
+        f"{settings},{threshold}" if settings else threshold
+    )
 
 
 def _restore_sharded_params(module: FSDPModule) -> None:
@@ -486,10 +452,11 @@ class VLLMModelWrapper(Module):
         # is still sharded. Bind first so first-touch places them on the
         # NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
-        (
-            self._prefetched_model_state_dict,
-            self._prefetched_model_state_dict_storage,
-        ) = _create_pinned_cpu_state_dict(self.model.state_dict())
+        _pin_large_blocks_exactly()
+        with torch.device("cpu"):
+            self._prefetched_model_state_dict = _create_cpu_state_dict(
+                self.model.state_dict(), pin_memory=True
+            )
 
         # Unshard the model here so vLLM performs its GPU memory profiling
         # based on the model's actual representation used during forward

@@ -247,3 +247,29 @@ def test_vllm_rejects_mla(build_config, attn_backend) -> None:
 
     with pytest.raises(ValueError, match="MLA attention is not supported"):
         _replace_vllm_layer_configs(model_config)
+
+
+@pytest.mark.parametrize(
+    ("current", "expected"),
+    [
+        ("", "pinned_max_round_threshold_mb:64"),
+        # Re-applied: PyTorch resets max_split_size_mb and a few others when unlisted.
+        (
+            "expandable_segments:True,max_split_size_mb:512",
+            "expandable_segments:True,max_split_size_mb:512,"
+            "pinned_max_round_threshold_mb:64",
+        ),
+        # A threshold the user set is kept.
+        ("pinned_max_round_threshold_mb:8", None),
+    ],
+)
+def test_pin_large_blocks_exactly_keeps_current_allocator_settings(
+    monkeypatch, current, expected
+):
+    applied = []
+    monkeypatch.setattr(torch._C, "_accelerator_getAllocatorSettings", lambda: current)
+    monkeypatch.setattr(torch._C, "_accelerator_setAllocatorSettings", applied.append)
+
+    model_wrapper._pin_large_blocks_exactly()
+
+    assert applied == ([] if expected is None else [expected])
