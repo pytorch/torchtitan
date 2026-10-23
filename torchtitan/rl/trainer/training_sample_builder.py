@@ -132,6 +132,8 @@ class TrainingSampleBuilder(Configurable):
         """
         metrics: list[m.Metric] = list(rollout_group.metrics)
         # An ERROR_SYSTEM rollout has no reward or advantage: skip it, not its group.
+        # TODO: nothing reweights a group that lost rollouts: with 10 of 16 left, its advantages come
+        # from 10 rewards and it adds 10 samples. Check whether other libraries weight such groups.
         rollouts = [
             rollout
             for rollout in rollout_group.rollouts
