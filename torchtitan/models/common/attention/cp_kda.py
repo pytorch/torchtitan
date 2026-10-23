@@ -28,7 +28,8 @@ from .cp_linear_attention import (
 from .kda import InnerKDA
 from .linear_attention import LinearAttentionMetadata
 
-# Shape suffixes: T = tokens, C = channels, H = heads, K/V = head dimensions,
+# Shape suffixes:
+# T = tokens, C = channels, H = heads, K/V = head dimensions,
 # F = packed features per head, W = convolution kernel width.
 
 
