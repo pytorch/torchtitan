@@ -41,8 +41,11 @@ jobs:
             --index-url https://download.pytorch.org/whl/test/cpu \
             "torch==2.15.0" \
             "torchvision==0.29.2" \
-            "torchao==0.18.0" \
             "triton==3.9.0"
+          USE_CPP=0 "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pip install \
+            --pre \
+            --index-url https://download.pytorch.org/whl/nightly/cpu \
+            torchao
 
       - name: Install RC from TestPyPI
         run: |
