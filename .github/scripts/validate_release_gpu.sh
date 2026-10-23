@@ -102,17 +102,29 @@ install_release_candidate() {
 install_release_candidate
 
 if [[ "${VALIDATION_SUITE}" == rl* ]]; then
-  # install_rl_env.sh selects CUDA nightlies, so resolve the requested vLLM
-  # against the release constraints here instead.
-  python -m pip install --extra-index-url "${PYTORCH_INDEX_URL}" \
-    "vllm==${VLLM_VERSION}" "pytest==7.3.2" "expecttest>=0.2.0" uv
+  python -m pip install "pytest==7.3.2" "expecttest>=0.2.0" uv
+  if [[ "${TORCH_VERSION}" == "2.15.0" && \
+        "${VLLM_VERSION}" == "1.0.0.dev20261005+cu132" && \
+        "${PYTORCH_INDEX_URL}" == "https://download.pytorch.org/whl/test/cu132" ]]; then
+    # Test the branch-cut vLLM binary against the RC instead of its exact
+    # torch nightly dependency. Resolve every other dependency normally.
+    export UV_OVERRIDE="${RUNNER_TEMP}/release-vllm-torch-override.txt"
+    echo 'torch==2.15.0+cu132' > "${UV_OVERRIDE}"
+    echo 'Testing vLLM built for torch 2.15.0.dev20261005+cu132 with torch 2.15.0+cu132; binary and RL compatibility must be validated.'
+    uv pip install --constraint "${PIP_CONSTRAINT}" \
+      --extra-index-url "${PYTORCH_INDEX_URL}" \
+      "vllm @ https://download.pytorch.org/whl/nightly/cu132/vllm-1.0.0.dev20261005%2Bcu132-cp38-abi3-manylinux_2_28_x86_64.whl"
+  else
+    python -m pip install --extra-index-url "${PYTORCH_INDEX_URL}" \
+      "vllm==${VLLM_VERSION}"
+  fi
   python -m pip install --no-deps \
     "git+https://github.com/meta-pytorch/torchstore.git@main" \
     "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
   # Match RL CI's Attention Gym kernels instead of the optional tilelang path.
   python -m pip uninstall -y tilelang
   if [[ "${VALIDATION_SUITE}" != "rl-b200" ]]; then
-    python -m pip install "nvidia-cuda-nvcc==13.0.*"
+    python -m pip install "nvidia-cuda-nvcc==13.2.*"
   fi
   if [[ "${VALIDATION_SUITE}" == "rl-h100" ]]; then
     python -m pip install flash-attn-3 \
@@ -175,7 +187,8 @@ assert "site-packages" in torchtitan.__file__
 assert torch.__version__.split("+")[0] == os.environ["TORCH_VERSION"]
 assert torchvision.__version__.split("+")[0] == os.environ["TORCHVISION_VERSION"]
 assert torchao.__version__.split("+")[0] == os.environ["TORCHAO_VERSION"]
-assert torch.version.cuda == "13.0"
+expected_cuda = "13.2" if os.environ["VALIDATION_SUITE"].startswith("rl") else "13.0"
+assert torch.version.cuda == expected_cuda
 assert torch.cuda.is_available()
 assert torch.cuda.device_count() >= 8
 if os.environ["VALIDATION_SUITE"] in ("b200", "rl-b200"):
@@ -440,6 +453,7 @@ PY
   # As in RL CPU CI, test Verifiers last: it constrains mcp differently from
   # vLLM. Keep the release wheels fixed while resolving the optional extra.
   uv pip install --constraint "${PIP_CONSTRAINT}" \
+    --extra-index-url "${PYTORCH_INDEX_URL}" \
     -r "${REPO_ROOT}/torchtitan/rl/examples/verifiers/dapo_math/requirements.txt"
   CUDA_VISIBLE_DEVICES='' python -m pytest \
     tests/rl/unit_tests/cpu/test_verifiers.py \
