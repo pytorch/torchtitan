@@ -33,6 +33,10 @@ def _get_nvfp4_grouped_linear_cls(parent_cls: type) -> type:
     parent_config_cls = parent_cls.Config  # type: ignore[attr-defined]
 
     class NVFP4GroupedLinear(parent_cls):  # type: ignore[valid-type, misc]
+        _dtype_pinned_buffers = cast(
+            type[Module], parent_cls
+        )._dtype_pinned_buffers | frozenset({"_sr_seed", "_rht_sign_vector"})
+
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             pass

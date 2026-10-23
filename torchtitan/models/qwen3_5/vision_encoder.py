@@ -221,6 +221,8 @@ def _compute_2d_rope_cache(
 class VisionRotaryEmbedding(Module):
     """2D Rotary Position Embedding for Vision Transformer."""
 
+    _dtype_pinned_buffers = frozenset({"inv_freq"})
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int

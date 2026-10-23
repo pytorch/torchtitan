@@ -11,7 +11,7 @@ import inspect
 from collections.abc import Callable, Iterator, Sequence, ValuesView
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Any, Generic, TYPE_CHECKING, TypeVar
+from typing import Any, ClassVar, Generic, TYPE_CHECKING, TypeVar
 
 import spmd_types as spmd
 import torch
@@ -42,7 +42,14 @@ class Module(nn.Module, Configurable):
     Subclasses should NOT override ``init_states`` unless they need custom
     ordering (e.g., weight tying before init). Override ``_init_self_buffers``
     for buffer initialization.
+
+    Materialized buffers named in ``_dtype_pinned_buffers`` reject dtype changes.
+    Cast meta models before ``to_empty`` and ``init_states``. The guard preserves
+    the current dtype, not a canonical dtype after direct assignment or loading.
+    Failed conversions may leave earlier parameters or children changed.
     """
+
+    _dtype_pinned_buffers: ClassVar[frozenset[str]] = frozenset()
 
     _param_init: dict[str, Callable] | None = None
     _sharding_config: ShardingConfig | None = None
@@ -139,9 +146,36 @@ class Module(nn.Module, Configurable):
             self._init_self_buffers(buffer_device=buffer_device)
 
     def _apply(self, fn, recurse=True):
-        """Override to preserve annotations across model.to_empty() in trainer.py"""
+        """Preserve SPMD annotations and reject dtype changes to pinned buffers.
+
+        Check each conversion result before PyTorch installs it. The conversion
+        runs once per tensor, with no rollback of earlier changes. Functions that
+        mutate their input in place are outside this guard's contract.
+        """
+        protected = {
+            id(buffer): (name, buffer.dtype)
+            for name, buffer in self.named_buffers(
+                recurse=False, remove_duplicate=False
+            )
+            if name in self._dtype_pinned_buffers and not buffer.is_meta
+        }
+
+        def checked_fn(tensor):
+            result = fn(tensor)
+            if (requirement := protected.get(id(tensor))) is not None:
+                name, dtype = requirement
+                if result.dtype != dtype:
+                    raise ValueError(
+                        f"Cannot convert {type(self).__name__}.{name} from "
+                        f"{dtype} to {result.dtype}; this buffer's dtype is pinned. "
+                        "For a model constructed on meta, apply the dtype cast "
+                        "before to_empty() and init_states(). Earlier tensors may "
+                        "already have changed; recreate the model after failure."
+                    )
+            return result
+
         with self._preserve_buffer_spmd_types():
-            return super()._apply(fn, recurse=recurse)
+            return super()._apply(checked_fn if protected else fn, recurse=recurse)
 
     @contextlib.contextmanager
     def _preserve_buffer_spmd_types(self) -> Iterator[None]:
