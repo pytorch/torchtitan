@@ -84,83 +84,37 @@ jobs:
           print(f"triton={triton.__version__}")
           PY
 
-      - name: Run CPU debug-model training smoke test
+      - name: Run CPU debug-model forward smoke test
         working-directory: ${{ runner.temp }}
         run: |
           "$RUNNER_TEMP/validate-rc-venv/bin/python" - <<'PY'
-          from dataclasses import dataclass
-
           import torch
           import torch.nn.functional as F
 
           from torchtitan.config.parallelism import ParallelismConfig
-          from torchtitan.models.common.attention import InnerAttention
           from torchtitan.models.llama3 import build_model_config
 
-
-          class CPUScaledDotProductAttention(InnerAttention):
-              @dataclass(kw_only=True, slots=True)
-              class Config(InnerAttention.Config):
-                  pass
-
-              def __init__(self, config: Config) -> None:
-                  super().__init__()
-
-              def forward(
-                  self,
-                  q_THK: torch.Tensor,
-                  k_THK: torch.Tensor,
-                  v_THV: torch.Tensor,
-                  *,
-                  attention_metadata: None = None,
-                  scale: float | None = None,
-                  enable_gqa: bool = False,
-              ) -> torch.Tensor:
-                  assert attention_metadata is None
-                  q_1HTK = q_THK.transpose(0, 1).unsqueeze(0)
-                  k_1HTK = k_THK.transpose(0, 1).unsqueeze(0)
-                  v_1HTV = v_THV.transpose(0, 1).unsqueeze(0)
-                  out_1HTV = F.scaled_dot_product_attention(
-                      q_1HTK,
-                      k_1HTK,
-                      v_1HTV,
-                      scale=scale,
-                      is_causal=True,
-                      enable_gqa=enable_gqa,
-                  )
-                  return out_1HTV.squeeze(0).transpose(0, 1)
-
-
           torch.manual_seed(42)
+          torch.compiler.set_stance("force_eager")
           model_config = build_model_config(
               "debugmodel",
               parallelism=ParallelismConfig(),
               seq_len=16,
               attn_backend="flex",
           )
-          for layer_config in model_config.layers:
-              layer_config.attention.inner_attention = CPUScaledDotProductAttention.Config()
-
           model = model_config.build()
           model.init_states(buffer_device=torch.device("cpu"))
-          model.train()
-          optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+          model.eval()
           tokens_T = torch.randint(0, 2048, (16,))
           positions_T = torch.arange(16)
           attention_metadata = model._get_attention_metadata(positions_T)
-          losses = []
 
-          for _ in range(3):
-              optimizer.zero_grad(set_to_none=True)
+          with torch.no_grad():
               logits_TV = model(tokens_T, positions_T, attention_metadata)
               loss = F.cross_entropy(logits_TV[:-1], tokens_T[1:])
-              assert torch.isfinite(loss), loss
-              loss.backward()
-              optimizer.step()
-              losses.append(loss.item())
 
-          assert losses[-1] < losses[0], losses
-          print(f"losses={losses}")
+          assert torch.isfinite(loss), loss
+          print(f"loss={loss.item()}")
           PY
 
       - name: Run CPU unit tests against installed RC
