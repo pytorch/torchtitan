@@ -568,6 +568,8 @@ def _chunked_loss_fsdp(
             if group in state._fsdp_param_groups and (
                 reshard_after_backward or not run_backward
             ):
+                # Reshard releases weights; the autograd leaf retains gradients
+                # until decoder backward or caller finalization reduces them.
                 group.reshard()
 
 
