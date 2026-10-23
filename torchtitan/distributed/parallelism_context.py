@@ -22,7 +22,7 @@ import warnings
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING
 
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -41,15 +41,6 @@ __all__ = [
     "ParallelismContext",
     "unfold_dp_axis",
     "unfold_dp_axes",
-]
-
-
-_RedistributionMeshCacheKey: TypeAlias = tuple[
-    tuple[dist.ProcessGroup, ...],
-    tuple[str, ...],
-    tuple[int, ...],
-    tuple[int, ...],
-    int,
 ]
 
 
@@ -128,10 +119,6 @@ class ParallelismContext:
         default_factory=dict, init=False, repr=False
     )
     _global_meshes: dict[str, DeviceMesh] = field(
-        default_factory=dict, init=False, repr=False
-    )
-    # Buckets and optimizers with the same storage layout and CTA cap share one mesh.
-    _redistribution_meshes: dict[_RedistributionMeshCacheKey, DeviceMesh] = field(
         default_factory=dict, init=False, repr=False
     )
     _world_mesh: DeviceMesh | None = field(default=None, init=False, repr=False)
@@ -504,29 +491,19 @@ class ParallelismContext:
             )
         return mesh
 
-    def get_redistribution_mesh(
+    def build_redistribution_mesh(
         self,
         storage_mesh: DeviceMesh,
         *,
         max_ctas: int,
     ) -> DeviceMesh:
-        """Return a cached storage-shaped mesh with isolated FSDP shard groups."""
+        """Build a storage-shaped mesh with isolated FSDP shard groups."""
         mesh_axis_names = storage_mesh.mesh_dim_names
         if mesh_axis_names is None:
             raise ValueError("Redistribution storage mesh must have named axes")
         storage_groups = tuple(
             storage_mesh.get_group(axis_name) for axis_name in mesh_axis_names
         )
-        key = (
-            storage_groups,
-            mesh_axis_names,
-            tuple(storage_mesh.shape),
-            tuple(storage_mesh.mesh.flatten().tolist()),
-            max_ctas,
-        )
-        if key in self._redistribution_meshes:
-            return self._redistribution_meshes[key]
-
         groups = []
         replaced_group = False
         fsdp_shard_axes = {
@@ -571,7 +548,7 @@ class ParallelismContext:
             groups.append(child_group)
             replaced_group = True
 
-        redistribution_mesh = (
+        return (
             DeviceMesh.from_group(
                 groups,
                 storage_mesh.device_type,
@@ -581,8 +558,6 @@ class ParallelismContext:
             if replaced_group
             else storage_mesh
         )
-        self._redistribution_meshes[key] = redistribution_mesh
-        return redistribution_mesh
 
     @contextlib.contextmanager
     def activate_spmd(self, *, typechecking: bool = False) -> Iterator[None]:
