@@ -59,7 +59,7 @@ from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.distributed.spmd_types import spmd_mesh_group, spmd_mesh_size
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller.controller import Controller
@@ -372,9 +372,13 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
 
 def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
     """Compute per-sequence logprobs using packed variable-length segments."""
-    packed_ids = torch.cat(input_tensors)
+    # MoE with EP needs a token count divisible by TP. Pad with one extra segment,
+    # as the trainer's fixed-size microbatches do.
+    num_pad_tokens = -sum(seq_lens) % spmd_mesh_size("tp")
+    pad_ids = torch.zeros(num_pad_tokens, dtype=torch.long, device=device)
+    packed_ids = torch.cat(input_tensors + [pad_ids])
     positions = torch.cat(
-        [torch.arange(seq_len, device=device) for seq_len in seq_lens]
+        [torch.arange(len(ids), device=device) for ids in input_tensors + [pad_ids]]
     )
 
     # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
