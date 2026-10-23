@@ -113,7 +113,8 @@ if [[ "${VALIDATION_SUITE}" == rl* ]]; then
     vllm_requirement="vllm @ https://download.pytorch.org/whl/nightly/cu132/vllm-1.0.0.dev20261005%2Bcu132-cp38-abi3-manylinux_2_28_x86_64.whl"
   fi
   uv pip install --constraint "${PIP_CONSTRAINT}" \
-    --extra-index-url "${PYTORCH_INDEX_URL}" "${vllm_requirement}"
+    --extra-index-url "${PYTORCH_INDEX_URL}" \
+    --index-strategy unsafe-best-match "${vllm_requirement}"
   python -m pip install --no-deps \
     "git+https://github.com/meta-pytorch/torchstore.git@main" \
     "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
@@ -453,6 +454,7 @@ PY
   # vLLM. Keep the release wheels fixed while resolving the optional extra.
   uv pip install --constraint "${PIP_CONSTRAINT}" \
     --extra-index-url "${PYTORCH_INDEX_URL}" \
+    --index-strategy unsafe-best-match \
     -r "${REPO_ROOT}/torchtitan/rl/examples/verifiers/dapo_math/requirements.txt"
   CUDA_VISIBLE_DEVICES='' python -m pytest \
     tests/rl/unit_tests/cpu/test_verifiers.py \
