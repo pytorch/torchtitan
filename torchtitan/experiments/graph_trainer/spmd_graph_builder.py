@@ -26,11 +26,11 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     compute_parameter_gradients,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
-from torchtitan.experiments.graph_trainer.graph_pp.stage import (
+from graph_trainer.graph_pp.stage import (
     GraphPipelineStage,
     JointStageGraphs,
 )
-from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+from graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
     TracedResult,
@@ -40,15 +40,15 @@ from torchtitan.experiments.graph_trainer.passes import (
     construct_default_graph_passes,
     construct_mandatory_graph_passes,
 )
-from torchtitan.experiments.graph_trainer.precompile import (
+from graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
     compute_config_fingerprint,
     flatten_runtime_inputs,
     get_spmd_precompile_meshes,
     precompile_fx_trace_load,
 )
-from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
-from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from graph_trainer.registry import PASS_PIPELINE_REGISTRY
+from graph_trainer.storage import DiskStorageAdapter
 
 
 if TYPE_CHECKING:

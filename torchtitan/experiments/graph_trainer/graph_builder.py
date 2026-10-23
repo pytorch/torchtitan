@@ -31,13 +31,13 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     GraphTrainerConfigView,
 )
-from torchtitan.experiments.graph_trainer.graph_pp import stage_builder
+from graph_trainer.graph_pp import stage_builder
 from torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder import (
     _build_graph_pp_overlap_graphs,
     _build_stage_graphs,
     _compile_stage_graphs,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.runner import (
+from graph_trainer.graph_pp.runner import (
     _GraphComputationType,
     FORWARD_BACKWARD,
     FORWARD_BACKWARD_FIRST_WITH_UNSHARD,
@@ -45,11 +45,11 @@ from torchtitan.experiments.graph_trainer.graph_pp.runner import (
     FORWARD_BACKWARD_NOGRADACCUM,
     FULL_FORWARD_BACKWARD,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.stage import (
+from graph_trainer.graph_pp.stage import (
     GraphPipelineStage,
     OverlapStageGraphs,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.utils import (
+from graph_trainer.graph_pp.utils import (
     normalize_graph_pp_microbatch_inputs,
 )
 from torchtitan.experiments.graph_trainer.spmd_gradient_accumulation_graph_builder import (

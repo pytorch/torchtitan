@@ -15,10 +15,13 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 
+from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+    maybe_apply_ep_overlap_eager_chunking,
+)
+
 from .common_utils import annotate_graph_trainer_model, apply_simple_fsdp
 from .compile import apply_compile
 from .configs import GraphTrainerCompileConfig
-from .ep_eager_chunk import maybe_apply_ep_overlap_eager_chunking
 from .simple_fsdp import disable_active_parametrization
 
 

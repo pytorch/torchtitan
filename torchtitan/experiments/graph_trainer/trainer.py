@@ -11,6 +11,14 @@ from functools import partial
 from typing import Any
 
 import torch
+from graph_trainer.graph_pp.runner import GraphRuntime
+from graph_trainer.memory_policy import validate_memory_policy_config
+from graph_trainer.paged_stash_memory_policy import (
+    build_paged_stash_runner,
+    OverbudgetProbe,
+    PagedStashManager,
+    PagedStashRunner,
+)
 
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -20,18 +28,13 @@ from torchtitan.distributed.cuda_graph import (
     NUM_CUDA_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_cuda_graph,
 )
+from torchtitan.distributed.deepep.hybridep import (
+    check_hybridep_over_budget,
+    reset_hybridep_over_budget,
+)
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
-)
-from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
-from torchtitan.experiments.graph_trainer.memory_policy import (
-    validate_memory_policy_config,
-)
-from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
-    build_paged_stash_runner,
-    PagedStashManager,
-    PagedStashRunner,
 )
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.linear import Linear
@@ -187,6 +190,12 @@ class GraphTrainingEngine(TrainingEngine):
                 model_parts=self.model_parts,
                 device=self.device,
                 pp_enabled=self.parallelism_context.pp_enabled,
+                overbudget_probes=[
+                    OverbudgetProbe(
+                        check_hybridep_over_budget,
+                        reset_hybridep_over_budget,
+                    )
+                ],
             )
             self._run_forward_backward = partial(
                 self._page_stashed_forward_backward_body,

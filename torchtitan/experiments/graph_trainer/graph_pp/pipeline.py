@@ -11,6 +11,15 @@ from typing import Any, cast, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+from graph_trainer.graph_pp.runner import (
+    BACKWARD,
+    BACKWARD_WEIGHT_WITH_REDUCE_GRAD,
+    BACKWARD_WITH_REDUCE_GRAD,
+    GraphRuntime,
+    register_graph_schedule,
+)
+from graph_trainer.graph_pp.stage import GraphPipelineStage
+from graph_trainer.registry import PASS_PIPELINE_REGISTRY
 from torch.distributed.pipelining.schedules import (
     _Action,
     _PipelineScheduleRuntime,
@@ -46,15 +55,6 @@ from torchtitan.experiments.graph_trainer.graph_builder import (
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     GraphTrainerConfigView,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.runner import (
-    BACKWARD,
-    BACKWARD_WEIGHT_WITH_REDUCE_GRAD,
-    BACKWARD_WITH_REDUCE_GRAD,
-    GraphRuntime,
-    register_graph_schedule,
-)
-from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
-from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
 from torchtitan.models.base.model import BaseModel
 
 

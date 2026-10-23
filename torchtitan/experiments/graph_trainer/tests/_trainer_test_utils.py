@@ -12,6 +12,8 @@ from types import SimpleNamespace
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from graph_trainer.make_fx_tracer import minimal_fx_tracer, run_traced
+from graph_trainer.registry import PASS_PIPELINE_REGISTRY
 
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import DebugConfig, TrainingConfig
@@ -25,16 +27,11 @@ from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
 )
-from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    minimal_fx_tracer,
-    run_traced,
-)
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
     construct_mandatory_graph_passes,
 )
-from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
 from torchtitan.experiments.graph_trainer.spmd_graph_builder import make_fwd_bwd_step
 from torchtitan.experiments.graph_trainer.trainer import (
     GraphTrainer,

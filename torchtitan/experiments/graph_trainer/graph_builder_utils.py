@@ -37,15 +37,15 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     ensure_boxed_graph_module,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
-from torchtitan.experiments.graph_trainer.fsdp_passes import (
+from graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
-from torchtitan.experiments.graph_trainer.graph_pp.utils import (
+from graph_trainer.graph_pp.stage import GraphPipelineStage
+from graph_trainer.graph_pp.utils import (
     example_inputs_from_placeholders,
 )
-from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
-from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+from graph_trainer.make_fx_tracer import TracedResult
+from graph_trainer.paged_stash_memory_policy import (
     PagedStashManager,
 )
 from torchtitan.experiments.graph_trainer.passes import (

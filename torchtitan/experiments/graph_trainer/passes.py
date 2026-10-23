@@ -37,32 +37,16 @@ from collections.abc import Callable
 
 import torch
 
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-from torchtitan.experiments.graph_trainer.configs import (
-    GraphTrainerCompileConfig,
-    MOE_BLOCK_FQN,
-    validate_ep_overlap_config,
-)
-
-from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
-from torchtitan.experiments.graph_trainer.cuda_graph import (
-    insert_kernel_annotations_pass,
-)
-from torchtitan.experiments.graph_trainer.debug_utils import (
+from graph_trainer.cpu_offload import apply_cpu_offload_pass
+from graph_trainer.cuda_graph import insert_kernel_annotations_pass
+from graph_trainer.debug_utils import (
     log_graph_diff,
     snapshot_graph,
     tlparse_log_graph_pass,
 )
-from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
-    populate_eager_chunk_metadata_pass,
-)
-from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
-    ep_overlap_schedule_pass,
-)
-from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
-    isolate_ep_process_group_pass,
-)
-from torchtitan.experiments.graph_trainer.fsdp_passes import (
+from graph_trainer.ep_overlap_pass import ep_overlap_schedule_pass
+from graph_trainer.ep_process_group_pass import isolate_ep_process_group_pass
+from graph_trainer.fsdp_passes import (
     deduplicate_fsdp_unshard_chains_pass,
     get_fsdp_param_module_order,
     get_transformer_block_bucket_counts,
@@ -72,25 +56,29 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     reorder_hsdp_grad_collectives_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
-from torchtitan.experiments.graph_trainer.inductor_passes import (
+from graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
     full_inductor_compilation_pass,
     regional_inductor_pass,
 )
-from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
-from torchtitan.experiments.graph_trainer.memory_policy import (
-    tag_with_memory_policy_pass,
-)
-from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
-    apply_paged_stash_pass,
-)
-from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+from graph_trainer.make_fx_tracer import TracedResult
+from graph_trainer.memory_policy import tag_with_memory_policy_pass
+from graph_trainer.paged_stash_memory_policy import apply_paged_stash_pass
+from graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
     eliminate_dead_code_pass,
     remove_parameter_gradient_markers_pass,
 )
-from torchtitan.experiments.graph_trainer.selective_activation_remat import (
-    selective_activation_remat_pass,
+from graph_trainer.selective_activation_remat import selective_activation_remat_pass
+
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.experiments.graph_trainer.configs import (
+    GraphTrainerCompileConfig,
+    MOE_BLOCK_FQN,
+    validate_ep_overlap_config,
+)
+from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+    populate_eager_chunk_metadata_pass,
 )
 
 from torchtitan.models.common.moe import MoE
@@ -420,7 +408,7 @@ def final_inductor_compile_passes(
             )
         )
         if compile_config.numerics_changing_optim:
-            from torchtitan.experiments.graph_trainer.performance_passes import (
+            from graph_trainer.performance_passes import (
                 annotate_rmsnorm_for_regional_inductor_pass,
             )
 
