@@ -6,8 +6,8 @@
 
 """DeepSeek V4 model configurations used by tests."""
 
-from dataclasses import dataclass, replace
-from typing import Any, cast
+from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch.distributed.tensor import Shard
@@ -35,39 +35,22 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-
 from torchtitan.models.deepseek_v4 import build_model_config, DeepSeekV4Model
 from torchtitan.models.deepseek_v4.mtp import MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.tests.models.dist_muon_expert_layout import (
+    _align_dist_muon_expert_compute_layouts,
+    _per_expert_compute_layout,
+)
+
 _NSCoefficients = tuple[float, float, float]
 _NSCoefficientSchedule = _NSCoefficients | tuple[_NSCoefficients, ...]
 _FAST_NS: _NSCoefficients = (3.4445, -4.7750, 2.0315)
 _STABLE_NS: _NSCoefficients = (2.0, -1.5, 0.5)
 _DEFAULT_NS_COEFFICIENTS = (_FAST_NS,) * 8 + (_STABLE_NS,) * 2
-
-
-def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
-    ep_size = parallelism.expert_parallel_degree
-    if ep_size <= 0:
-        raise ValueError("expert_parallel_degree must be positive")
-    if ep_size == 1:
-        return ComputeLayout(
-            shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
-            compute_dtype=torch.bfloat16,
-        )
-    return ComputeLayout(
-        shardings_by_mesh_axis={
-            MeshAxisName.EDP_SHARD.value: Shard(0),
-            MeshAxisName.EP.value: Shard(0),
-        },
-        shard_order_by_tensor_dim={
-            0: (MeshAxisName.EP.value, MeshAxisName.EDP_SHARD.value),
-        },
-        compute_dtype=torch.bfloat16,
-    )
 
 
 def _dist_muon_optimizer(
@@ -79,19 +62,27 @@ def _dist_muon_optimizer(
     muon_ns_steps: int,
     muon_ns_coefficients: _NSCoefficientSchedule,
 ) -> OptimizersContainer.Config:
+    dp_axis = MeshAxisName.DP_SHARD.value
     owned = ComputeLayout(
-        shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Owned()},
+        shardings_by_mesh_axis={dp_axis: Owned()},
         compute_dtype=torch.bfloat16,
     )
+
+    def blocks(*sizes: int) -> ComputeLayout:
+        return ComputeLayout(
+            shardings_by_mesh_axis={dp_axis: BlockShard(dim=0, block_sizes=sizes)},
+            compute_dtype=torch.bfloat16,
+        )
+
     shared_expert_shardings = {
         "w13": ComputeLayout(
-            shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
+            shardings_by_mesh_axis={dp_axis: Shard(0)},
             compute_dtype=torch.bfloat16,
         ),
         "w2": owned,
     }
-    attention_shardings = {"wq_a": owned, "wkv": owned, "wo_b": owned}
-    attention_per_head_projections = ("wq_b", "wo_a")
+    attention_shardings = {"wq_a": owned, "wo_b": owned}
+    attention_per_head_projections = ("wq_b", "wkv", "wo_a")
     attention_projections = tuple(attention_shardings) + attention_per_head_projections
     expert_projections = ("w13", "w2")
     compressor_projections = ("wkv", "wgate")
@@ -112,37 +103,59 @@ def _dist_muon_optimizer(
         }
         shardings.update(
             {
-                f"{prefix}.moe.shared_experts.{projection}.weight": compute_sharding
+                f"{prefix}.feed_forward.shared_experts.{projection}.weight": compute_sharding
                 for projection, compute_sharding in shared_expert_shardings.items()
             }
         )
-        shardings[f"{prefix}.attention.wq_b.weight"] = ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: BlockShard(
-                    dim=0,
-                    block_sizes=(attention.head_dim,),
-                )
-            },
-            compute_dtype=torch.bfloat16,
+        nope_dim = attention.head_dim - attention.rope_head_dim
+        shardings[f"{prefix}.attention.wq_b.weight"] = blocks(
+            nope_dim, attention.rope_head_dim
         )
-        shardings[f"{prefix}.attention.wo_a.weight"] = ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: BlockShard(
-                    dim=0,
-                    block_sizes=(attention.wo_a.out_features,),
-                )
-            },
-            compute_dtype=torch.bfloat16,
+        shardings[f"{prefix}.attention.wkv.weight"] = blocks(
+            nope_dim, attention.rope_head_dim
         )
+        shardings[f"{prefix}.attention.wo_a.weight"] = blocks(attention.o_lora_rank)
         for projection in expert_projections:
-            shardings[f"{prefix}.moe.routed_experts.{projection}.weight"] = per_expert
-        shardings[f"{prefix}.moe.router.gate.weight"] = owned
+            shardings[
+                f"{prefix}.feed_forward.routed_experts.{projection}.weight"
+            ] = per_expert
+        shardings[f"{prefix}.feed_forward.router.gate.weight"] = owned
         for module in hc_pre_modules:
-            shardings[f"{prefix}.{module}.hc_fn"] = owned
+            hc_mult = getattr(layer_config, module).hc_mult
+            shardings[f"{prefix}.{module}.hc_fn"] = blocks(
+                hc_mult, hc_mult, hc_mult * hc_mult
+            )
         if attention.compressor is not None:
-            for projection in compressor_projections:
-                shardings[f"{prefix}.attention.compressor.{projection}.weight"] = owned
-            shardings[f"{prefix}.attention.compressor.ape"] = owned
+            shardings[f"{prefix}.attention.compressor.wkv.weight"] = blocks(
+                nope_dim,
+                attention.rope_head_dim,
+                nope_dim,
+                attention.rope_head_dim,
+            )
+            shardings[f"{prefix}.attention.compressor.wgate.weight"] = blocks(
+                attention.head_dim
+            )
+        if attention.compressor_128 is not None:
+            shardings[f"{prefix}.attention.compressor_128.wkv.weight"] = blocks(
+                nope_dim, attention.rope_head_dim
+            )
+            shardings[f"{prefix}.attention.compressor_128.wgate.weight"] = owned
+        if attention.indexer is not None:
+            indexer = attention.indexer
+            indexer_nope_dim = indexer.index_head_dim - indexer.rope_head_dim
+            shardings[f"{prefix}.attention.indexer.wq_b.weight"] = blocks(
+                indexer_nope_dim, indexer.rope_head_dim
+            )
+            shardings[f"{prefix}.attention.indexer.weights_proj.weight"] = owned
+            shardings[f"{prefix}.attention.indexer.compressor.wkv.weight"] = blocks(
+                indexer_nope_dim,
+                indexer.rope_head_dim,
+                indexer_nope_dim,
+                indexer.rope_head_dim,
+            )
+            shardings[f"{prefix}.attention.indexer.compressor.wgate.weight"] = blocks(
+                indexer.index_head_dim
+            )
         if include_mtp_projections:
             for projection in mtp_projections:
                 shardings[f"{prefix}.{projection}.weight"] = owned
@@ -173,11 +186,23 @@ def _dist_muon_optimizer(
     }
     compute_sharding_by_fqn["hc_head.hc_fn"] = owned
 
+    # Keep layer 0 separate and pair subsequent layers, matching Kimi.
+    bucket_layer_ids = [(0,)] + [
+        tuple(range(first_layer_id, min(first_layer_id + 2, len(main_layer_shardings))))
+        for first_layer_id in range(1, len(main_layer_shardings), 2)
+    ]
     bucket_configs = []
     for prefix, shardings in (
         *(
-            (f"layers.{layer_id}", shardings)
-            for layer_id, shardings in enumerate(main_layer_shardings)
+            (
+                "layers." + "-".join(map(str, layer_ids)),
+                {
+                    fqn: compute_sharding
+                    for layer_id in layer_ids
+                    for fqn, compute_sharding in main_layer_shardings[layer_id].items()
+                },
+            )
+            for layer_ids in bucket_layer_ids
         ),
         *(
             (f"mtp_layers.{layer_id}", shardings)
@@ -201,15 +226,16 @@ def _dist_muon_optimizer(
             )
     bucket_configs.append(BucketConfig(name="hc_head", patterns=("hc_head.hc_fn",)))
 
+    # Additive gate-logit biases (ape) stay with AdamW.
     muon_pattern = (
         r"(?:"
         rf"attention\.(?:{'|'.join(attention_projections)})\.weight|"
-        r"attention\.compressor\."
+        r"attention\.compressor(?:_128)?\."
         rf"(?:{'|'.join(compressor_projections)})\.weight|"
-        r"attention\.compressor\.ape|"
-        rf"moe\.shared_experts\.(?:{'|'.join(expert_projections)})\.weight|"
-        rf"moe\.routed_experts\.(?:{'|'.join(expert_projections)})\.weight|"
-        r"moe\.router\.gate\.weight|"
+        r"attention\.indexer\.(?:wq_b|weights_proj|compressor\.(?:wkv|wgate))\.weight|"
+        rf"feed_forward\.shared_experts\.(?:{'|'.join(expert_projections)})\.weight|"
+        rf"feed_forward\.routed_experts\.(?:{'|'.join(expert_projections)})\.weight|"
+        r"feed_forward\.router\.gate\.weight|"
         rf"(?:{'|'.join(hc_pre_modules)})\.hc_fn|"
         rf"(?:{'|'.join(mtp_projections)})\.weight|"
         r"hc_head\.hc_fn"
@@ -240,51 +266,6 @@ def _dist_muon_optimizer(
     )
 
 
-def _align_dist_muon_expert_compute_layouts(
-    optimizer_config: OptimizersContainer.Config,
-    *,
-    parallelism: ParallelismConfig,
-) -> OptimizersContainer.Config:
-    dist_muon_index = next(
-        (
-            index
-            for index, config in enumerate(optimizer_config.optimizers)
-            if isinstance(config, DistMuon.Config)
-        ),
-        None,
-    )
-    if dist_muon_index is None:
-        return optimizer_config
-    dist_muon_config = cast(
-        DistMuon.Config,
-        optimizer_config.optimizers[dist_muon_index],
-    )
-    compute_sharding_by_fqn = cast(
-        dict[str, ComputeLayout],
-        dist_muon_config.compute_sharding_by_fqn,
-    )
-    per_expert = _per_expert_compute_layout(parallelism)
-    aligned_shardings = {}
-    changed = False
-    for fqn, compute_layout in compute_sharding_by_fqn.items():
-        if ".moe.routed_experts." in fqn and compute_layout != per_expert:
-            aligned_shardings[fqn] = per_expert
-            changed = True
-        else:
-            aligned_shardings[fqn] = compute_layout
-    if not changed:
-        return optimizer_config
-    optimizers = list(optimizer_config.optimizers)
-    optimizers[dist_muon_index] = replace(
-        dist_muon_config,
-        compute_sharding_by_fqn=aligned_shardings,
-    )
-    return replace(
-        optimizer_config,
-        optimizers=optimizers,
-    )
-
-
 @dataclass(kw_only=True, slots=True)
 class _DeepSeekV4TrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
@@ -293,11 +274,17 @@ class _DeepSeekV4TrainerConfig(Trainer.Config):
             self.optim.optimizer,
             parallelism=self.parallelism,
         )
-        if self.parallelism.tensor_parallel_degree > 1:
+        if (
+            self.parallelism.tensor_parallel_degree > 1
+            or self.parallelism.pipeline_parallel_degree > 1
+        ) and any(
+            isinstance(config, DistMuon.Config)
+            for config in self.optim.optimizer.optimizers
+        ):
             raise ValueError(
-                "DeepSeek V4 DistMuon requires tensor_parallel_degree=1: "
-                "tensor parallelism can produce unsupported _StridedShard "
-                "parameter layouts."
+                "DeepSeek V4 DistMuon requires tensor_parallel_degree=1 and "
+                "pipeline_parallel_degree=1: TP _StridedShard and PP stage-local "
+                "parameter groups are not supported yet."
             )
 
 
