@@ -14,9 +14,12 @@ Activate with::
 
 Scope and limitations
 ---------------------
-This override is specific to TorchTitan's DeepSeek-V3 ``DeepSeekMLAAttention`` module and
+This override is specific to TorchTitan's ``DeepSeekMLAAttention`` module and
 its packed MLA Q/KV projection layout. It is not a generic RoPE fusion and does
 not apply to non-MLA models such as Qwen3, Qwen3.5, or GPT-OSS.
+
+Context parallelism is not supported. Remove this override when using a CP
+attention backend.
 
 The kernels implement TorchTitan ``ComplexRoPE`` and require its complex-valued
 cache. They do not support ``CosSinRoPE`` or ``MRoPE``, whose real cos/sin cache
@@ -55,7 +58,7 @@ The implementation differs from Megatron Core in several important ways:
 * Every Triton launch is exposed as a stable ``torch.library`` custom operator,
   so GraphTrainer's fake-tensor ``make_fx`` trace keeps the fused boundaries.
 
-The override keeps the stock DeepSeekMLAAttention parameters and state-dict layout.  It
+The override keeps the stock attention parameters and state-dict layout. It
 only replaces the Q/KV layout boundary around ComplexRoPE:
 
 * Q RoPE rotates the positional tail of the Q projection into a new tensor.
@@ -78,7 +81,13 @@ import triton.language as tl
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.attention import VarlenAttentionMetadata
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    MLAAttention,
+    VarlenAttentionMetadata,
+    VarlenInnerAttention,
+)
+from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
@@ -827,8 +836,8 @@ class _FusedMLAQ(torch.autograd.Function):
     ) -> torch.Tensor:
         ctx.q_nope_dim = q_nope_dim
         ctx.save_for_backward(rope_cache_real, positions)
-        # Deliberately out of place. DeepSeekMLAAttention.forward hands us a view of the
-        # query projection, so rotating in place would need ctx.mark_dirty and
+        # Deliberately out of place. The attention forward hands us a view of
+        # the query projection, so rotating in place would need ctx.mark_dirty and
         # autograd would then record a CopySlices whose backward materializes
         # the entire projection -- five full-size copies at the 671B shape.
         # See docs/pytorch-performance-pitfalls.md.
@@ -979,6 +988,12 @@ class FusedMLAAttention(DeepSeekMLAAttention):
         pass
 
     def __init__(self, config: Config):
+        # The fused forward bypasses the MLA backend that owns CP communication.
+        if isinstance(config.inner_attention, CPInnerAttention.Config):
+            raise ValueError(
+                "FusedMLAAttention does not support context parallelism. "
+                "Remove the fused_mla override to use the configured CP attention backend."
+            )
         super().__init__(config)
         if not isinstance(self.rope, ComplexRoPE):
             raise TypeError(
@@ -1037,7 +1052,7 @@ class FusedMLAAttention(DeepSeekMLAAttention):
         # kv_norm and the fused kernel read the wkv_a projection output with bare ops.
         remat.recompute_needs_tensor(kv_down)
 
-        kv = self.wkv_b(self.kv_norm(kv_latent))
+        kv = self.inner_attention.wkv_b(self.kv_norm(kv_latent))
         with spmd.local():
             kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
             # The fused kernel reads the wkv_b projection output outside any region.
@@ -1058,8 +1073,14 @@ class FusedMLAAttention(DeepSeekMLAAttention):
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
 
+        inner_attention = self.inner_attention
+        assert isinstance(inner_attention, MLAAttention)
+        # fused_mla_kv already materialized K/V, so bypass the compact MLA
+        # forward and call its underlying Q/K/V backend directly.
+        qkv_attention = inner_attention.inner_attention
+        assert isinstance(qkv_attention, (FlexInnerAttention, VarlenInnerAttention))
         output = remat.region(
-            self.inner_attention,
+            qkv_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(
@@ -1069,7 +1090,7 @@ class FusedMLAAttention(DeepSeekMLAAttention):
             attention_metadata=attention_metadata,
             scale=self.softmax_scale,
         )
-        # The copy below reads the inner_attention output with bare ops.
+        # The copy below reads the MLA attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
         return self.wo(output)

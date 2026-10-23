@@ -482,7 +482,7 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
         assert config.model.local_compile_regions == [
             "loss",
             "fused_binary_activation",
-            "cos_sin_rope",
+            "rope",
             "fp32_to_bf16_split",
         ]
 
@@ -807,11 +807,19 @@ def test_mxfp8_converter_rejects_empty_saved_input_fqn():
         ),
         (
             "deepseek_v3",
-            ("attention.wkv_b", "feed_forward.w2", "shared_experts.w2"),
+            (
+                "attention.inner_attention.wkv_b",
+                "feed_forward.w2",
+                "shared_experts.w2",
+            ),
         ),
         (
             "deepseek_v3_graph",
-            ("attention.wkv_b", "feed_forward.w2", "shared_experts.w2"),
+            (
+                "attention.inner_attention.wkv_b",
+                "feed_forward.w2",
+                "shared_experts.w2",
+            ),
         ),
     ],
 )

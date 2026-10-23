@@ -79,6 +79,38 @@ config = apply_transforms(
 )
 ```
 
+For an MXFP8 RL generator, the fused-SwiGLU Mega kernel needs the inference
+weight format and an inference runtime:
+
+```python
+import dist_moe
+
+from torchtitan.config.transform import apply_transforms
+from torchtitan.config.transform.dist_moe import DistMoeTransform
+from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_30b_a3b_varlen
+
+config = rl_grpo_qwen3_30b_a3b_varlen()
+config.generator.dist_moe_runtime = DistMoeRuntime.Config(
+    inference=True,
+    scratch_capacity_factor=4.0,
+)
+config.generator = apply_transforms(
+    config.generator,
+    [
+        DistMoeTransform(
+            expert_precision="mxfp8",
+            block_scaled_config=dist_moe.BlockScaledConfig(pipeline="mega"),
+            mxfp8_mega_fused_inference=True,
+        )
+    ],
+)
+```
+
+Set `mxfp8_mega_fused_inference` only on the RL generator, since it does not
+support backward. During validation, the trainer runs under `torch.no_grad()`
+instead.
+
 Verified 671B recipes live in `torchtitan_recipes.models.deepseek_v3`, while
 debug and 16B CI recipes live in `torchtitan_recipes.tests.models.deepseek_v3`.
 GraphTrainer follows the corresponding `graph_trainer` and
@@ -108,6 +140,7 @@ Per-layer settings belong to the transform:
 | `inplace_wgrad_accum` | Let annex WGRAD kernels accumulate directly into standard `parameter.grad` storage. This is enabled by default for BF16 and MXFP8 experts. GraphTrainer recipes temporarily disable it because tracing functionalizes parameters into graph inputs; a graph pass must bind those inputs to their leaf `parameter.grad` destinations before enabling accumulation. |
 | `bf16_grouped_gemm_preset` | Optional BF16 FPROP/DGRAD schedule override for expert users. `None` uses the annex's shape-aware production defaults. BF16 WGRAD has its own production schedule. |
 | `block_scaled_config` | MXFP8-only annex policy. `pipeline="staged"` uses separate expert kernels; `pipeline="mega"` uses the fused chunk-pipelined implementation. `fast_math` selects approximate fused-SwiGLU sigmoid math, and `kernel_config` is an expert-only CuTe tuning override. |
+| `mxfp8_mega_fused_inference` | MXFP8 RL generator only; requires `pipeline="mega"`. Prepare weights in the interleaved format so the Mega kernel can fuse SwiGLU into the W13 GEMM, for inference only. Quantized weights and scales match training numerics exactly. |
 
 One `DistMoeRuntime.Config` owns rank-wide resources shared by every local
 Dist-MoE layer:

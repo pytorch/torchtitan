@@ -41,7 +41,7 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import Attention, LinearAttention
+from torchtitan.models.common.attention import Attention, LinearAttention, MLAAttention
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
@@ -72,6 +72,11 @@ def _replace_vllm_layer_configs(model_config):
         if isinstance(attention_cfg, Attention.Config) and not isinstance(
             attention_cfg, LinearAttention.Config
         ):
+            if isinstance(attention_cfg.inner_attention, MLAAttention.Config):
+                raise ValueError(
+                    f"layers[{layer_idx}]: MLA attention is not supported by the "
+                    "TorchTitan vLLM wrapper yet."
+                )
             (
                 num_heads,
                 num_kv_heads,
@@ -88,12 +93,13 @@ def _replace_vllm_layer_configs(model_config):
                 sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
                 sharding_config=attention_cfg.inner_attention.sharding_config,
             )
+            attention_cfg = dataclasses.replace(
+                attention_cfg,
+                inner_attention=vllm_attention_cfg,
+            )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
-                attention=dataclasses.replace(
-                    attention_cfg,
-                    inner_attention=vllm_attention_cfg,
-                ),
+                attention=attention_cfg,
             )
 
         elif isinstance(attention_cfg, GDN.Config):

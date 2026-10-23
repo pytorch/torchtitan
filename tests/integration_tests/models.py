@@ -22,12 +22,14 @@ from torchtitan.distributed.activation_remat import (
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
+    MLAAttention,
     SlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
     AllGatherKVSlidingWindowFlexInnerAttention,
 )
+from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 from torchtitan.models.common.moe import MoE
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests import _set_spmd_typechecking
@@ -119,9 +121,6 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2() -> Trainer.Config:
     )
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
-    config.override.imports = [
-        "torchtitan_recipes.overrides.helion_rope.helion_complex_rope",
-    ]
     config.training.disable_cuda_graphs = True
     return config
 
@@ -141,7 +140,7 @@ def deepseek_v3_debugmodel_mtp_cp2(
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
+                inner_attention_map={MLAAttention: AllGatherKVMLAFlexAttention}
             )
         ],
     )
@@ -183,7 +182,7 @@ def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
+                inner_attention_map={MLAAttention: AllGatherKVMLAFlexAttention}
             )
         ],
     )
@@ -207,7 +206,7 @@ def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
+                inner_attention_map={MLAAttention: AllGatherKVMLAFlexAttention}
             )
         ],
     )
@@ -658,9 +657,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="DeepSeek V3 MTP FSDP+EP",
             test_name="deepseek_v3_mtp_fsdp+ep",
             ngpu=4,
-            # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
-            # H100/GB200; skip on ROCm where they are unvalidated.
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_debugmodel_mtp_tp2_cp2],
