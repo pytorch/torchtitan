@@ -1,0 +1,16 @@
+== TORCHINDUCTOR_ENABLE_PDL=0 TORCHINDUCTOR_FORCE_DISABLE_CACHES=1 python ask04_pdl.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+TORCHINDUCTOR_ENABLE_PDL=0
+T=   1: dispatch  11.8 us  bitwise vs eager True
+T=   8: dispatch  13.3 us  bitwise vs eager True
+T=  34: dispatch  12.2 us  bitwise vs eager True
+T=  64: dispatch  12.9 us  bitwise vs eager True
+T= 256: dispatch  19.7 us  bitwise vs eager True
+== TORCHINDUCTOR_ENABLE_PDL=1 TORCHINDUCTOR_FORCE_DISABLE_CACHES=1 python ask04_pdl.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+TORCHINDUCTOR_ENABLE_PDL=1
+T=   1: dispatch   8.3 us  bitwise vs eager True
+T=   8: dispatch  10.4 us  bitwise vs eager True
+T=  34: dispatch  11.6 us  bitwise vs eager True
+T=  64: dispatch  12.8 us  bitwise vs eager True
+T= 256: dispatch  17.9 us  bitwise vs eager True
