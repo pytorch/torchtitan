@@ -182,8 +182,6 @@ class MonarchActorSystem(ActorSystem):
             RolloutWorkerActor,
             worker_config=config,
             num_threads=num_threads,
-            # None when structured logging is off. Else each worker calls it with its own source and rank,
-            # so it writes its own JSONL next to the controller's.
             structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
         )
 
