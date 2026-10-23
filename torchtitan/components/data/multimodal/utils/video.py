@@ -8,6 +8,8 @@
 
 import logging
 from collections.abc import Callable
+from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -80,6 +82,61 @@ def load_npy_video_frames(path: str | Path) -> torch.Tensor:
     return torch.from_numpy(frames_THWC)
 
 
+def format_video_timestamp(seconds: float) -> str:
+    """Format a time offset in seconds as ``hh:mm:ss.fff``."""
+    # Seconds come from the microsecond-rounded datetime and milliseconds are truncated, as in Kimi's processors.
+    clock = datetime.fromtimestamp(seconds, tz=timezone.utc).strftime("%H:%M:%S")
+    return f"{clock}.{int((seconds % 1) * 1000):03d}"
+
+
+def sample_frame_indices(
+    num_frames: int, video_fps: float, sample_fps: float
+) -> list[int]:
+    """Indices of the frames kept when sampling a ``video_fps`` video at ``sample_fps``."""
+    sample_fps = min(sample_fps, video_fps)
+    count = max(round(num_frames * sample_fps / video_fps), 1)
+    return np.linspace(0, num_frames - 1, count).round().astype(int).tolist()
+
+
+def _decode_sampled_frames(
+    path: str, choose: Callable[[int, float], list[int]]
+) -> tuple[torch.Tensor, list[int], float] | None:
+    """Decode the frames ``choose(num_frames, video_fps)`` picks, with their indices."""
+    import av  # pyrefly: ignore [missing-import]
+
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+
+        video_fps = float(stream.average_rate or stream.guessed_rate or 24)
+        total_frames = stream.frames
+        if total_frames == 0 and stream.duration:
+            total_frames = int(float(stream.duration * stream.time_base) * video_fps)
+        container.seek(0)
+        if total_frames == 0:
+            # No metadata available — decode all frames to count them
+            all_frames = [
+                frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)
+            ]
+            if not all_frames:
+                return None
+            indices = choose(len(all_frames), video_fps)
+            frames = [all_frames[i] for i in indices]
+        else:
+            # Must decode sequentially — inter-frame codecs (H.264/H.265) have
+            # dependencies between frames. Only selected frames are converted to
+            # numpy to avoid the RGB conversion cost.
+            wanted = set(choose(total_frames, video_fps))
+            frames, indices = [], []
+            for i, frame in enumerate(container.decode(video=0)):
+                if i in wanted:
+                    frames.append(frame.to_ndarray(format="rgb24"))
+                    indices.append(i)
+
+    if not frames:
+        return None
+    return torch.from_numpy(np.stack(frames)), indices, video_fps
+
+
 def load_video(
     path: str,
     fps: float = 2.0,
@@ -101,62 +158,36 @@ def load_video(
         Tensor of shape (T, H, W, C) in uint8, channel-last format,
         or None if loading fails.
     """
+
+    def choose(total_frames: int, video_fps: float) -> list[int]:
+        duration = total_frames / video_fps
+        nframes = max(min_frames, min(int(duration * fps), max_frames))
+        nframes = min(nframes, total_frames)
+        return np.linspace(0, total_frames - 1, nframes).astype(int).tolist()
+
     try:
-        import av  # pyrefly: ignore [missing-import]
-
-        with av.open(path) as container:
-            stream = container.streams.video[0]
-
-            video_fps = float(stream.average_rate or stream.guessed_rate or 24)
-            total_frames = stream.frames
-            if total_frames == 0 and stream.duration:
-                total_frames = int(
-                    float(stream.duration * stream.time_base) * video_fps
-                )
-            if total_frames == 0:
-                # No metadata available — decode all frames to count them
-                container.seek(0)
-                all_frames = [
-                    frame.to_ndarray(format="rgb24")
-                    for frame in container.decode(video=0)
-                ]
-                if not all_frames:
-                    return None
-                total_frames = len(all_frames)
-                duration = total_frames / video_fps
-                nframes = max(min_frames, min(int(duration * fps), max_frames))
-                nframes = min(nframes, total_frames)
-                indices = np.linspace(0, total_frames - 1, nframes).astype(int).tolist()
-                selected = [all_frames[i] for i in indices]
-                return torch.from_numpy(np.stack(selected))
-
-            duration = total_frames / video_fps
-            nframes = int(duration * fps)
-            nframes = max(min_frames, min(nframes, max_frames))
-            nframes = min(nframes, total_frames)
-
-            # Compute which frame indices to keep
-            indices = set(
-                np.linspace(0, total_frames - 1, nframes).astype(int).tolist()
-            )
-
-            # Must decode sequentially — inter-frame codecs (H.264/H.265) have
-            # dependencies between frames. Only selected frames are converted to
-            # numpy to avoid the RGB conversion cost.
-            frames = []
-            container.seek(0)
-            for i, frame in enumerate(container.decode(video=0)):
-                if i in indices:
-                    frames.append(frame.to_ndarray(format="rgb24"))
-
-        if not frames:
-            return None
-
-        return torch.from_numpy(np.stack(frames))  # (T, H, W, C)
-
+        decoded = _decode_sampled_frames(path, choose)
     except Exception as e:
         logger.warning(f"Error loading video {path}: {e}")
         return None
+    return None if decoded is None else decoded[0]
+
+
+def load_video_frames(
+    path: str, sample_fps: float
+) -> tuple[torch.Tensor, list[float]] | None:
+    """Load the frames ``sample_frame_indices`` keeps, with each frame's time in seconds."""
+    try:
+        decoded = _decode_sampled_frames(
+            path, partial(sample_frame_indices, sample_fps=sample_fps)
+        )
+    except Exception as e:
+        logger.warning(f"Error loading video {path}: {e}")
+        return None
+    if decoded is None:
+        return None
+    frames, indices, video_fps = decoded
+    return frames, [i / video_fps for i in indices]
 
 
 def process_video(

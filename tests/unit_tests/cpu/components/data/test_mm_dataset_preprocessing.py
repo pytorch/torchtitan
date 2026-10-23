@@ -18,10 +18,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
 import torchvision.transforms.v2.functional as TVF
 from PIL import Image
-from torchtitan.components.data.multimodal.mm_datasets import _process_mm_sample
+from torchtitan.components.data.multimodal.mm_datasets import (
+    _process_chunked_video_text_sample,
+    _process_mm_sample,
+)
 from torchtitan.components.data.multimodal.utils.image import (
     calculate_vision_tokens,
     process_image,
@@ -30,8 +34,12 @@ from torchtitan.components.data.multimodal.utils.image import (
     vision_to_patches,
 )
 from torchtitan.components.data.multimodal.utils.video import (
+    format_video_timestamp,
     load_npy_video_frames,
+    load_video,
+    load_video_frames,
     process_video,
+    sample_frame_indices,
 )
 
 from torchtitan.components.loss import IGNORE_INDEX
@@ -410,6 +418,143 @@ class TestProcessMmSampleTemporalPatchSize(unittest.TestCase):
             mock_calc.assert_called_once()
             self.assertEqual(mock_calc.call_args.kwargs["temporal_patch_size"], tps)
             self.assertEqual(mock_calc.call_args.kwargs["num_frames"], 1)
+
+
+class _FakeSharedMediaTokenizer(_FakeMMTokenizer):
+    video_token = _FakeMMTokenizer.image_token
+    video_id = _FakeMMTokenizer.image_id
+
+
+def _process_chunked_video(
+    tokenizer, *, num_frames, temporal_patch_size=1, frame_times=None
+):
+    if frame_times is None:
+        frame_times = [i / 8.0 for i in range(num_frames)]
+    return _process_chunked_video_text_sample(
+        text="cap",
+        frames=torch.zeros(num_frames, 28, 56, 3, dtype=torch.uint8),
+        tokenizer=tokenizer,
+        patch_size=14,
+        temporal_patch_size=temporal_patch_size,
+        spatial_merge_size=2,
+        min_pixels=1,
+        max_pixels=1_000_000,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        resize_fn=resize_to_navit_patch_grid,
+        max_patches=4096,
+        max_patches_per_side=512,
+        frame_times=frame_times,
+        frames_per_chunk=4,
+        chunk_header="video<|media_content|>",
+    )
+
+
+def _write_test_video(path, *, codec, pix_fmt, num_frames=12, fps=30):
+    av = pytest.importorskip("av")
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream(codec, rate=fps)
+        stream.width, stream.height, stream.pix_fmt = 16, 16, pix_fmt
+        for i in range(num_frames):
+            frame = np.full((16, 16, 3), 10 * i, dtype=np.uint8)
+            for packet in stream.encode(
+                av.VideoFrame.from_ndarray(frame, format="rgb24")
+            ):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+
+
+class TestFormatVideoTimestamp(unittest.TestCase):
+    def test_formats_hours_minutes_seconds_and_millis(self):
+        self.assertEqual(format_video_timestamp(0.0), "00:00:00.000")
+        self.assertEqual(format_video_timestamp(0.5), "00:00:00.500")
+        self.assertEqual(format_video_timestamp(3725.25), "01:02:05.250")
+
+    def test_spells_float_times_as_the_kimi_processor_does(self):
+        self.assertEqual(format_video_timestamp(288 / 30), "00:00:09.599")
+        self.assertEqual(format_video_timestamp(1.9999999), "00:00:02.999")
+
+
+class TestSampleFrameIndices(unittest.TestCase):
+    def test_keeps_the_kimi_processor_frames(self):
+        self.assertEqual(sample_frame_indices(12, 30.0, 8.0), [0, 6, 11])
+        self.assertEqual(sample_frame_indices(10, 5.0, 8.0), list(range(10)))
+        self.assertEqual(sample_frame_indices(1, 30.0, 8.0), [0])
+        self.assertEqual(sample_frame_indices(17, 30000 / 1001, 8.0), [0, 4, 8, 12, 16])
+        indices = sample_frame_indices(300, 30.0, 8.0)
+        self.assertEqual(len(indices), 80)
+        self.assertEqual(indices[:9], [0, 4, 8, 11, 15, 19, 23, 26, 30])
+        self.assertEqual(indices[-3:], [291, 295, 299])
+
+
+class TestLoadVideo(unittest.TestCase):
+    def test_load_video_frames_returns_sampled_frames_and_times(self):
+        for suffix, codec, pix_fmt in (
+            ("mov", "png", "rgb24"),
+            ("mkv", "ffv1", "bgr0"),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"clip.{suffix}"
+                _write_test_video(path, codec=codec, pix_fmt=pix_fmt)
+                loaded = load_video_frames(str(path), sample_fps=8.0)
+            self.assertIsNotNone(loaded)
+            frames, times = loaded
+            self.assertEqual(frames[:, 0, 0, 0].tolist(), [0, 60, 110])
+            self.assertEqual(times, [0.0, 6 / 30, 11 / 30])
+
+    def test_load_video_keeps_its_sampling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clip.mov"
+            _write_test_video(path, codec="png", pix_fmt="rgb24")
+            frames = load_video(str(path), fps=2.0)
+        self.assertEqual(frames[:, 0, 0, 0].tolist(), [0, 30, 70, 110])
+
+
+class TestProcessChunkedVideoTextSample(unittest.TestCase):
+    def test_chunks_follow_their_timestamps_in_order(self):
+        tokenizer = _FakeSharedMediaTokenizer()
+        sample = _process_chunked_video(tokenizer, num_frames=10)
+
+        self.assertIsNotNone(sample)
+        self.assertEqual(
+            [tuple(chunk.shape) for chunk in sample["pixel_values"]],
+            [(4, 28, 56, 3), (4, 28, 56, 3), (2, 28, 56, 3)],
+        )
+        chunk = "Svideo<|media_content|>" + "I" * 2 + "E"
+        expected = tokenizer.encode(
+            f"00:00:00.000{chunk}00:00:00.500{chunk}00:00:01.000{chunk}capX"
+        )
+        self.assertEqual(sample["input_ids"].tolist(), expected[:-1])
+
+    def test_chunk_timestamps_are_their_first_frame_times(self):
+        tokenizer = _FakeSharedMediaTokenizer()
+        sample = _process_chunked_video(
+            tokenizer, num_frames=6, frame_times=[0.0, 0.1, 0.2, 0.3, 9.6, 9.7]
+        )
+
+        self.assertIsNotNone(sample)
+        chunk = "Svideo<|media_content|>" + "I" * 2 + "E"
+        expected = tokenizer.encode(f"00:00:00.000{chunk}00:00:09.599{chunk}capX")
+        self.assertEqual(sample["input_ids"].tolist(), expected[:-1])
+
+    def test_rejects_frame_times_of_another_length(self):
+        with self.assertRaises(ValueError):
+            _process_chunked_video(
+                _FakeSharedMediaTokenizer(), num_frames=4, frame_times=[0.0]
+            )
+
+    def test_rejects_a_separate_video_placeholder(self):
+        tokenizer = _FakeSharedMediaTokenizer()
+        tokenizer.video_token = "V"
+        with self.assertRaises(ValueError):
+            _process_chunked_video(tokenizer, num_frames=4)
+
+    def test_rejects_temporal_patches(self):
+        with self.assertRaises(ValueError):
+            _process_chunked_video(
+                _FakeSharedMediaTokenizer(), num_frames=4, temporal_patch_size=2
+            )
 
 
 if __name__ == "__main__":
