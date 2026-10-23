@@ -35,7 +35,13 @@ case "${VALIDATION_SUITE}" in
     ;;
 esac
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
+  # B200 starts from a bare CUDA container without git, so actions/checkout
+  # downloads an archive instead of creating a git worktree.
+  REPO_ROOT="${GITHUB_WORKSPACE}"
+else
+  REPO_ROOT="$(git rev-parse --show-toplevel)"
+fi
 RC_VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/assets/version.txt")"
 if [[ "${RC_VERSION}" != *rc* ]]; then
   echo "Expected an RC version, got: ${RC_VERSION}"
