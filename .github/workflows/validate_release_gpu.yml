@@ -2,6 +2,12 @@ name: Validate a TestPyPI Release Candidate on GPUs
 
 on:
   workflow_dispatch:
+    inputs:
+      vllm-version:
+        description: 'Exact vLLM version compatible with the pinned torch; leave empty to skip RL'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -18,9 +24,14 @@ permissions:
 #   tests that require H100-class hardware.
 # - validate-b200: 8x B200; Dist-MoE and MXFP8 unit tests, Kimi K3,
 #   quantized linear layers, and Dist-MoE integration tests.
+# - validate-rl: RL CPU/single-GPU/multi-GPU unit tests, A10G loss guard and
+#   integration tests, and H100 KDA tests. Enabled by the vllm-version input.
+# - validate-rl-b200: RL Dist-MoE unit tests and the B200 integration suite.
 jobs:
   validate-version:
     runs-on: ubuntu-latest
+    outputs:
+      vllm-version: ${{ steps.rl-dependency.outputs.version }}
     steps:
       - uses: actions/checkout@v7
 
@@ -31,6 +42,19 @@ jobs:
             *rc*) echo "Validating RC version: $version" ;;
             *) echo "Expected an RC version, got: $version"; exit 1 ;;
           esac
+
+      - name: Select RL dependency
+        id: rl-dependency
+        env:
+          VLLM_VERSION: ${{ inputs.vllm-version }}
+        run: |
+          if [[ -z "$VLLM_VERSION" ]]; then
+            echo "::notice::RL validation is disabled. Set vllm-version to a version compatible with the release torch to enable it."
+          elif [[ ! "$VLLM_VERSION" =~ ^[0-9][0-9A-Za-z.!+_-]*$ ]]; then
+            echo "Expected an exact vLLM version, got: $VLLM_VERSION"
+            exit 1
+          fi
+          echo "version=$VLLM_VERSION" >> "$GITHUB_OUTPUT"
 
   set-standard-matrix:
     needs:
@@ -163,4 +187,82 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: b200-release-outputs
+          path: ${{ runner.temp }}/artifacts-to-be-uploaded
+
+  validate-rl:
+    name: Validate ${{ matrix.validation-suite }} on ${{ matrix.gpu }}
+    needs:
+      - validate-version
+      - set-standard-matrix
+    if: ${{ needs.validate-version.outputs.vllm-version != '' }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - validation-suite: rl-unit
+            gpu: 8x A10G
+            runner: mt-l-x86aavx2-189-704-a10g-8
+          - validation-suite: rl
+            gpu: 8x A10G
+            runner: mt-l-x86aavx2-189-704-a10g-8
+          - validation-suite: rl-h100
+            gpu: 8x H100
+            runner: mt-l-bx86iamx-176-1800-h100-8
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: cuda
+      gpu-arch-version: "13.0"
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:rl-${{ needs.set-standard-matrix.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      upload-artifact: rl-release-outputs
+      timeout: 180
+      script: |
+        VALIDATION_SUITE="${{ matrix.validation-suite }}" \
+        VLLM_VERSION="${{ needs.validate-version.outputs.vllm-version }}" \
+        TORCH_VERSION="2.14.0" \
+        TORCHVISION_VERSION="0.29.0" \
+        TORCHAO_VERSION="0.18.0" \
+        PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
+        bash .github/scripts/validate_release_gpu.sh
+
+  validate-rl-b200:
+    name: Validate RL on 8x B200
+    needs:
+      - validate-version
+    if: ${{ needs.validate-version.outputs.vllm-version != '' }}
+    runs-on: linux.dgx.b200.8
+    timeout-minutes: 180
+    container:
+      image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04
+      # TorchStore's same-host model transfers exceed Docker's default /dev/shm.
+      options: --gpus all --shm-size=16g
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Validate B200 RL release candidate
+        env:
+          VLLM_VERSION: ${{ needs.validate-version.outputs.vllm-version }}
+        run: |
+          bash .ci/docker/common/install_base.sh
+
+          VALIDATION_SUITE="rl-b200" \
+          TORCH_VERSION="2.14.0" \
+          TORCHVISION_VERSION="0.29.0" \
+          TORCHAO_VERSION="0.18.0" \
+          PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
+          bash .github/scripts/validate_release_gpu.sh
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: b200-rl-release-outputs
           path: ${{ runner.temp }}/artifacts-to-be-uploaded
