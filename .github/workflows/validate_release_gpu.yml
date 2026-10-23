@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       vllm-version:
-        description: 'Exact vLLM version compatible with the pinned torch; leave empty to skip RL'
+        description: 'vLLM version to test with Torch 2.15 RC; leave empty to skip RL'
         type: string
         required: false
-        default: ''
+        default: '1.0.0.dev20261005+cu132'
 
 permissions:
   contents: read
@@ -212,7 +212,7 @@ jobs:
     with:
       runner: ${{ matrix.runner }}
       gpu-arch-type: cuda
-      gpu-arch-version: "13.0"
+      gpu-arch-version: "13.2"
       docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:rl-${{ needs.set-standard-matrix.outputs.docker-hash }}
       repository: pytorch/torchtitan
       upload-artifact: rl-release-outputs
@@ -220,10 +220,10 @@ jobs:
       script: |
         VALIDATION_SUITE="${{ matrix.validation-suite }}" \
         VLLM_VERSION="${{ needs.validate-version.outputs.vllm-version }}" \
-        TORCH_VERSION="2.14.0" \
-        TORCHVISION_VERSION="0.29.0" \
+        TORCH_VERSION="2.15.0" \
+        TORCHVISION_VERSION="0.29.2" \
         TORCHAO_VERSION="0.18.0" \
-        PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
+        PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu132" \
         bash .github/scripts/validate_release_gpu.sh
 
   validate-rl-b200:
@@ -254,10 +254,10 @@ jobs:
           bash .ci/docker/common/install_base.sh
 
           VALIDATION_SUITE="rl-b200" \
-          TORCH_VERSION="2.14.0" \
-          TORCHVISION_VERSION="0.29.0" \
+          TORCH_VERSION="2.15.0" \
+          TORCHVISION_VERSION="0.29.2" \
           TORCHAO_VERSION="0.18.0" \
-          PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
+          PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu132" \
           bash .github/scripts/validate_release_gpu.sh
 
       - name: Upload artifacts
