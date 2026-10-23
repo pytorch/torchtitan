@@ -62,31 +62,23 @@ nvidia-smi
 
 python -m pip uninstall -y torch torchvision torchao torchtitan
 
-release_wheels=(
-  "torch==${TORCH_VERSION}"
+PIP_EXTRA_INDEX_URL='' python -m pip install --pre \
+  --index-url "${PYTORCH_INDEX_URL}" \
+  "torch==${TORCH_VERSION}" \
   "torchvision==${TORCHVISION_VERSION}"
-)
 # RL CI does not explicitly install torchao; quantization CI installs it separately.
 if [[ "${VALIDATION_SUITE}" != rl* ]]; then
-  release_wheels+=("torchao==${TORCHAO_VERSION}")
+  USE_CPP=0 PIP_EXTRA_INDEX_URL='' python -m pip install --pre \
+    --index-url "${PYTORCH_INDEX_URL}" "torchao==${TORCHAO_VERSION}"
 fi
-USE_CPP=0 PIP_EXTRA_INDEX_URL='' python -m pip install --pre \
-  --index-url "${PYTORCH_INDEX_URL}" "${release_wheels[@]}"
 
 RC_PACKAGE="torchtitan"
 if [[ "${VALIDATION_SUITE}" == rl* ]]; then
   RC_PACKAGE="torchtitan[rl]"
   # RL dependencies must not replace the release wheels with their own torch.
   export PIP_CONSTRAINT="${RUNNER_TEMP}/release-rl-constraints.txt"
-  python - <<'PY' > "${PIP_CONSTRAINT}"
-import os
-from importlib.metadata import version
-
-for name in ("torch", "torchvision", "triton"):
-    print(f"{name}=={version(name)}")
-print(f"torchtitan=={os.environ['RC_VERSION']}")
-print(f"vllm=={os.environ['VLLM_VERSION']}")
-PY
+  python -m pip list --format=freeze | grep -E '^(torch|torchvision|triton)==' > "${PIP_CONSTRAINT}"
+  printf 'torchtitan==%s\nvllm==%s\n' "${RC_VERSION}" "${VLLM_VERSION}" >> "${PIP_CONSTRAINT}"
 fi
 
 install_release_candidate() {
