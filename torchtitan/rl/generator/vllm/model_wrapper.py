@@ -267,38 +267,6 @@ def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:
             yield sharded_data
 
 
-# Pinned host blocks above this size are allocated at their exact size; see
-# _pin_large_blocks_exactly.
-_PINNED_MAX_ROUND_THRESHOLD_MB = 64
-
-
-def _pin_large_blocks_exactly() -> None:
-    """Make the CUDA caching host allocator pin blocks above 64 MiB at their exact size.
-
-    The allocator rounds every pinned block up to a power of two so freed blocks can be
-    reused; ``pinned_max_round_threshold_mb`` turns that off above a size. The
-    generator's weight-sync buffers are allocated once and kept for the whole run, so
-    the rounding only wastes host memory: a 2.3 GiB expert shard pins 4 GiB, and a
-    reduced Kimi K3 generator's buffers took 1.74x their bytes.
-
-    NOTE: this takes effect for large models, where the rounding decides whether the
-    buffers fit in host memory. Kimi K3's generator at TP 4 needs ~424 GiB of buffers
-    per 4-GPU node, ~740 GiB at 1.74x, on hosts with 855 GiB. Small models waste little.
-
-    The setting is process-wide: other pinned allocations above 64 MiB are exact too.
-    PyTorch resets some unlisted options on every settings call, so this re-applies the
-    current settings with the threshold appended, and keeps a threshold the user
-    already set in ``PYTORCH_CUDA_ALLOC_CONF``.
-    """
-    settings = torch._C._accelerator_getAllocatorSettings()
-    if "pinned_max_round_threshold_mb" in settings:
-        return
-    threshold = f"pinned_max_round_threshold_mb:{_PINNED_MAX_ROUND_THRESHOLD_MB}"
-    torch._C._accelerator_setAllocatorSettings(
-        f"{settings},{threshold}" if settings else threshold
-    )
-
-
 def _restore_sharded_params(module: FSDPModule) -> None:
     """Re-allocate the sharded buffers of `module`'s FSDP group so new weights can be copied in.
 
@@ -452,7 +420,15 @@ class VLLMModelWrapper(Module):
         # is still sharded. Bind first so first-touch places them on the
         # NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
-        _pin_large_blocks_exactly()
+        # NOTE: pin blocks above 64 MiB at their exact size; the caching host allocator
+        # otherwise rounds them up to a power of two. This matters for large models:
+        # Kimi K3's generator at TP 4 needs ~424 GiB of buffers per 4-GPU node, ~740 GiB
+        # rounded, on 855 GiB hosts. The current settings go after ours, so PyTorch keeps
+        # the options a settings call would otherwise reset, and a user's threshold wins.
+        settings = torch._C._accelerator_getAllocatorSettings()
+        torch._C._accelerator_setAllocatorSettings(
+            f"pinned_max_round_threshold_mb:64,{settings}".rstrip(",")
+        )
         with torch.device("cpu"):
             self._prefetched_model_state_dict = _create_cpu_state_dict(
                 self.model.state_dict(), pin_memory=True
