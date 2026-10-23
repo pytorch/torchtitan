@@ -20,6 +20,9 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+from torchtitan.distributed.local_compile import local_compile
 
 from torchtitan.models.base.module import Module
 
@@ -150,9 +153,13 @@ class RMSNorm(nn.RMSNorm, Module):
 
     # ShardingConfig keys use "input" for both RMSNorm and LayerNorm; some
     # PyTorch versions name the RMSNorm argument "x".
-    # pyrefly: ignore[bad-param-name-override]
+    # Opt-in region: eager rms_norm runs ATen's layer-norm kernels (one
+    # forward, separate input- and weight-grad backward kernels); compiling
+    # fuses each direction into one Triton kernel. Limit 16, not the default
+    # 8: every norm shape in a model (residual stream, per-head q/k) shares it.
+    @local_compile("rmsnorm", batch_invariant=False, recompile_limit=16)
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return super().forward(input)
+        return F.rms_norm(input, self.normalized_shape, self.weight, self.eps)
 
 
 __all__ = [
