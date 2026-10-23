@@ -23,6 +23,18 @@ from torchtitan.rl.routing.inter_generator import (
 
 
 class _InterGeneratorRouterActorEndpoints:
+    """Monarch endpoints for `InterGeneratorRouter`'s methods, so the router itself has no Monarch code.
+
+    Monarch only calls methods decorated with `@endpoint` or `@concurrent_endpoint`. Each method here
+    decorates the router method of the same name and calls it through `super()`, because the actor puts
+    this class before the router in its bases:
+
+        class InterGeneratorRouterActor(Actor, _InterGeneratorRouterActorEndpoints, InterGeneratorRouter)
+        router.acquire.call_one(...) -> _InterGeneratorRouterActorEndpoints.acquire -> InterGeneratorRouter.acquire
+
+    The generator, trainer and batcher actors follow the same pattern.
+    """
+
     def __init__(
         self,
         config: InterGeneratorRouter.Config,
