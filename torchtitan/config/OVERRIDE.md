@@ -478,16 +478,9 @@ for the full recipe.
   while retaining the core `DenseFeedForward` parameter layout and checkpoint
   behavior. Because the override targets `SwiGLU.Config`, it also applies to
   grouped experts and dist-GEMM feed-forwards that use that activation.
-- `torchtitan_recipes/overrides/helion_rope.py` — **the custom-kernel example.** Swaps
-  `ComplexRoPE` for a fused Helion kernel (forward + backward) wrapped in a
-  `torch.library.custom_op` (with `register_fake` / `register_autograd`), the
-  recipe from "Custom kernels and `torch.compile`". `helion` is an optional
-  dependency, so the module imports without it and falls back to the PyTorch RoPE
-  when it (or CUDA) is unavailable; it is checkpoint-compatible with stock.
 The `TritonRoPE` snippets above are illustrative — no `triton_rope.py` is
-shipped — but RoPE is a fully valid override target (`helion_rope.py` is a real
-one): each attention module owns a `rope` submodule (`RoPE.Config`), so a custom
-RoPE is an ordinary component override.
+shipped — but RoPE is a fully valid override target: each attention module owns a
+`rope` submodule (`RoPE.Config`), so a custom RoPE is an ordinary component override.
 
 ## Code map
 
@@ -498,7 +491,7 @@ RoPE is an ordinary component override.
 | `torchtitan/models/base/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field and applies recipe-provided overrides before builds. |
 | `torchtitan/rl/controller/controller.py` | Holds the RL `override` field and applies it to the trainer and generator models before spawning actors. |
-| `torchtitan_recipes/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
+| `torchtitan_recipes/overrides/` | In-repo example implementations (`fused_swiglu.py`). |
 | `tests/unit_tests/cpu/config/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
 
 Overriding a component requires no changes to a recipe or model package; that

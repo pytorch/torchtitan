@@ -106,18 +106,28 @@ class DistMoeTransform(ModelConfigTransform):
             FPROP/DGRAD grouped-GEMM schedule. ``None`` uses production defaults.
         block_scaled_config: MXFP8 kernel policy. ``None`` selects the annex
             defaults when ``expert_precision`` is ``"mxfp8"``.
+        mxfp8_mega_fused_inference: Prepare MXFP8 weights in the
+            gate/up interleaved format so the Mega kernel can fuse SwiGLU into
+            the W13 GEMM, for inference only. Quantized weights and scales match
+            training numerics exactly. Requires
+            ``expert_precision="mxfp8"`` and ``block_scaled_config.pipeline="mega"``.
     """
 
     expert_precision: Literal["bf16", "mxfp8"] = "bf16"
     inplace_wgrad_accum: bool = True
     bf16_grouped_gemm_preset: dist_moe.Bf16GroupedGemmPreset | None = None
     block_scaled_config: dist_moe.BlockScaledConfig | None = None
+    mxfp8_mega_fused_inference: bool = False
 
     def __post_init__(self) -> None:
         if self.expert_precision == "bf16":
             if self.block_scaled_config is not None:
                 raise ValueError(
                     "block_scaled_config requires expert_precision='mxfp8'"
+                )
+            if self.mxfp8_mega_fused_inference:
+                raise ValueError(
+                    "mxfp8_mega_fused_inference requires " "expert_precision='mxfp8'"
                 )
         elif self.expert_precision == "mxfp8":
             if self.bf16_grouped_gemm_preset is not None:
@@ -129,6 +139,14 @@ class DistMoeTransform(ModelConfigTransform):
             )
             if block_scaled_config.format is not dist_moe.BlockScaledFormat.MXFP8_E4M3:
                 raise ValueError("Dist-MoE MXFP8 requires the MXFP8_E4M3 format")
+            if (
+                self.mxfp8_mega_fused_inference
+                and block_scaled_config.pipeline != "mega"
+            ):
+                raise ValueError(
+                    "mxfp8_mega_fused_inference requires "
+                    "block_scaled_config.pipeline='mega'"
+                )
         else:
             raise ValueError(
                 f"unsupported Dist-MoE expert precision {self.expert_precision!r}"
@@ -150,4 +168,5 @@ class DistMoeTransform(ModelConfigTransform):
             block_scaled_config=(
                 self.block_scaled_config or dist_moe.BlockScaledConfig()
             ),
+            mega_fused_inference=self.mxfp8_mega_fused_inference,
         )

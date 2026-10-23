@@ -638,6 +638,34 @@ def test_mxfp8_transform_is_independent_and_uses_prepared_weights() -> None:
     assert list(module.state_dict()) == ["w13.weight", "w2.weight"]
 
 
+def test_mxfp8_mega_fused_inference_builds_inference_weights() -> None:
+    """The transform flag builds both MXFP8 weight wrappers for inference."""
+    module = (
+        DistMoeTransform(
+            expert_precision="mxfp8",
+            block_scaled_config=dist_moe.BlockScaledConfig(pipeline="mega"),
+            mxfp8_mega_fused_inference=True,
+        )
+        .transform(_stock_config())
+        .build()
+    )
+
+    assert module.mega_fused_inference
+    assert module.w13.weight.mega_fused_inference
+    assert module.w2.weight.mega_fused_inference
+
+
+def test_mxfp8_mega_fused_inference_requires_mxfp8_mega() -> None:
+    """Mega fused inference needs MXFP8 experts on the Mega pipeline."""
+    with pytest.raises(ValueError, match="expert_precision='mxfp8'"):
+        DistMoeTransform(mxfp8_mega_fused_inference=True)
+    with pytest.raises(
+        ValueError,
+        match="mxfp8_mega_fused_inference requires block_scaled_config",
+    ):
+        DistMoeTransform(expert_precision="mxfp8", mxfp8_mega_fused_inference=True)
+
+
 @pytest.mark.parametrize(
     "other_transform",
     [

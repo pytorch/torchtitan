@@ -60,6 +60,7 @@ def _generic_validator(loader):
     validator.config = SimpleNamespace(steps=1)
     validator._cuda_graph_enabled = False
     validator._run_eval = None
+    validator._cuda_graph_annotation_config = None
     validator.parallelism_context = SimpleNamespace(
         dp_enabled=False,
         pp_enabled=False,
@@ -139,6 +140,7 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch, num_groups):
         "num_warmup_iterations": 1,
         "prepare_for_capture": None,
         "name": "validation",
+        "annotation_config": None,
     }
     cuda_graph_manager.capture_allowed = True
 

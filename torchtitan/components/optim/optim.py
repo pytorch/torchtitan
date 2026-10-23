@@ -6,6 +6,7 @@
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -98,6 +99,7 @@ class Optim(Configurable):
         parallelism_context: ParallelismContext,
         training_steps: int,
         pp_has_last_stage: bool,
+        cuda_graph_annotation_config: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
         self.parallelism_context = parallelism_context
@@ -139,6 +141,7 @@ class Optim(Configurable):
                 self._update,
                 num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
                 name="optimizer",
+                annotation_config=cuda_graph_annotation_config,
             )
 
     def zero_grad(self, *, set_to_none: bool = True) -> None:
