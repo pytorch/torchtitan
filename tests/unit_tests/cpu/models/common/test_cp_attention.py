@@ -51,6 +51,9 @@ from torchtitan.models.common.attention.cp_attention import (
 )
 from torchtitan.models.common.attention.cp_gdn import UlyssesInnerGDN
 from torchtitan.models.common.attention.cp_kda import UlyssesInnerKDA
+from torchtitan.models.common.attention.cp_linear_attention import (
+    UlyssesLinearAttentionMetadata,
+)
 from torchtitan.models.common.attention.cp_mla import (
     AllGatherKVMLAFlexAttention,
     UlyssesMLAAttention,
@@ -953,10 +956,32 @@ class TestUlysses(unittest.TestCase):
                 self.assertIs(
                     backend.prepare_cp_metadata(metadata, permutation=None), metadata
                 )
-                with self.assertRaisesRegex(ValueError, "contiguous token shards"):
-                    backend.prepare_cp_metadata(
-                        metadata, permutation=torch.tensor([[0, 1, 4, 5, 2, 3]])
-                    )
+                permutation = torch.tensor([[0, 4, 5, 1, 2, 3]])
+                local_metadata = backend.prepare_cp_metadata(
+                    metadata, permutation=permutation
+                )
+                self.assertIsInstance(local_metadata, UlyssesLinearAttentionMetadata)
+                self.assertIs(local_metadata.varlen, metadata.varlen)
+                torch.testing.assert_close(
+                    local_metadata.permutation[local_metadata.inverse_permutation],
+                    torch.arange(6),
+                )
+                with mock.patch.object(spmd, "assert_type") as annotate:
+                    local_metadata.annotate_spmd_types()
+                annotated = [call.args[0] for call in annotate.call_args_list]
+                for tensor in (
+                    local_metadata.permutation,
+                    local_metadata.inverse_permutation,
+                ):
+                    self.assertTrue(any(tensor is value for value in annotated))
+
+    def test_linear_attention_rejects_unpacked_permutation(self):
+        metadata = LinearAttentionMetadata(varlen=None, num_conv_history_tokens=3)
+        for backend in (UlyssesInnerKDA, UlyssesInnerGDN):
+            for permutation in (torch.arange(8), torch.arange(8).view(2, 4)):
+                with self.subTest(backend=backend, shape=permutation.shape):
+                    with self.assertRaisesRegex(ValueError, "packed-token permutation"):
+                        backend.prepare_cp_metadata(metadata, permutation=permutation)
 
     def test_linear_attention_config(self):
         for family, backend in (
@@ -970,10 +995,11 @@ class TestUlysses(unittest.TestCase):
                     if isinstance(layer.attention, LinearAttention.Config):
                         self.assertIs(layer.attention.inner_attention._owner, backend)
 
-                parallelism.context_parallel_load_balancer = (
-                    HeadTailCPLoadBalancer.Config()
-                )
-                with self.assertRaisesRegex(ValueError, "must be None"):
+                for load_balancer in (
+                    HeadTailCPLoadBalancer.Config(),
+                    PTRRFlexAttentionCPLoadBalancer.Config(),
+                ):
+                    parallelism.context_parallel_load_balancer = load_balancer
                     validate_context_parallel(model, parallelism)
 
     def test_rejects_gdn_key_heads_indivisible_by_tp_times_cp(self):

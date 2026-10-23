@@ -25,6 +25,8 @@ from .cp_attention import CPInnerAttention, Ulysses
 from .cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
     prepare_linear_attention_cp_metadata,
+    prepare_ulysses_linear_attention_cp_metadata,
+    UlyssesLinearAttentionMetadata,
 )
 from .gdn import InnerGDN
 from .linear_attention import LinearAttentionMetadata
@@ -40,6 +42,17 @@ class UlyssesInnerGDN(Ulysses[LinearAttentionMetadata], InnerGDN):
     @dataclass(kw_only=True, slots=True)
     class Config(Ulysses.Config, InnerGDN.Config):
         pass
+
+    @staticmethod
+    def prepare_cp_metadata(
+        attention_metadata: LinearAttentionMetadata,
+        *,
+        permutation: torch.Tensor | None,
+    ) -> LinearAttentionMetadata:
+        """Prepare Ulysses GDN metadata in original token order."""
+        return prepare_ulysses_linear_attention_cp_metadata(
+            attention_metadata, permutation=permutation
+        )
 
     def forward(
         self,
@@ -73,6 +86,10 @@ class UlyssesInnerGDN(Ulysses[LinearAttentionMetadata], InnerGDN):
         packed_qk_THF = spmd.redistribute(
             packed_qk_THF, cp_group, src=spmd.S(0), dst=spmd.S(1)
         )
+        if isinstance(attention_metadata, UlyssesLinearAttentionMetadata):
+            packed_qk_THF = packed_qk_THF.index_select(
+                0, attention_metadata.inverse_permutation
+            )
         q_THK, k_THK = packed_qk_THF.split([key_head_dim] * 2, dim=-1)
         packed_vab_THF = torch.cat(
             (
@@ -85,6 +102,10 @@ class UlyssesInnerGDN(Ulysses[LinearAttentionMetadata], InnerGDN):
         packed_vab_THF = spmd.redistribute(
             packed_vab_THF, cp_group, src=spmd.S(0), dst=spmd.S(1)
         )
+        if isinstance(attention_metadata, UlyssesLinearAttentionMetadata):
+            packed_vab_THF = packed_vab_THF.index_select(
+                0, attention_metadata.inverse_permutation
+            )
         v_THV, a_TH1, b_TH1 = packed_vab_THF.split([value_head_dim, 1, 1], dim=-1)
         parameters = tuple(
             spmd.shard(parameter, cp_group, src=spmd.R, dst=spmd.S(0))
@@ -107,6 +128,8 @@ class UlyssesInnerGDN(Ulysses[LinearAttentionMetadata], InnerGDN):
             value_head_dim=value_head_dim,
             attention_metadata=attention_metadata,
         )
+        if isinstance(attention_metadata, UlyssesLinearAttentionMetadata):
+            out_THV = out_THV.index_select(0, attention_metadata.permutation)
         return spmd.redistribute(out_THV, cp_group, src=spmd.S(1), dst=spmd.S(0))
 
 

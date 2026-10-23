@@ -199,11 +199,9 @@ def validate_context_parallel(
                     )
 
         load_balancer_config = parallelism.context_parallel_load_balancer
-        # Linear attention routes recurrent states using the shared permutation;
-        # it does not constrain which attention load balancer creates it.
-        if isinstance(attention, LinearAttention.Config) and not issubclass(
-            cp_inner_attention, Ulysses
-        ):
+        # Linear attention either routes states or restores token order using
+        # the shared permutation; the full-attention backend selects the balancer.
+        if isinstance(attention, LinearAttention.Config):
             continue
         if load_balancer_config is None:
             continue
