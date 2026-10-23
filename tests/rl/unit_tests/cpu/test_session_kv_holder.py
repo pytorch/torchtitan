@@ -223,7 +223,7 @@ def test_evict_until_free_releases_the_session_idle_longest_first(manager):
     assert holder.num_sessions == 0
 
 
-def test_evict_until_free_skips_a_session_with_a_running_request(manager):
+def test_evict_until_free_releases_a_session_with_a_running_request_last(manager):
     requests = {}
     busy = _request("busy", list(range(50)))
     holder = _holder(manager, requests, running=[busy])
@@ -231,10 +231,26 @@ def test_evict_until_free_skips_a_session_with_a_running_request(manager):
     holder.track("busy", session_id="busy", group_id=0)
     _prefill(manager, busy)
     holder.after_step()
+    # One decode step: the prompt-end GDN states leave the request; only the hold keeps them.
+    _schedule(manager, busy, 1, sample=8)
+    _finished_turn(manager, holder, requests, "idle", list(range(500, 550)))
 
+    # "busy" is held longer, but its request runs: "idle" goes first.
     holder.free_floor_blocks = manager.block_pool.get_num_free_blocks() + 1
     holder.after_step()
-    assert holder.num_sessions == 1 and holder.num_evicted == 0
+    assert list(holder._held) == ["busy"] and holder.num_evicted == 1
+    # Still short: the running session's hold goes too, freeing the 3 GDN states only it kept.
+    free_before = manager.block_pool.get_num_free_blocks()
+    holder.free_floor_blocks = free_before + 1
+    holder.after_step()
+    assert holder.num_sessions == 0 and holder.num_evicted == 2
+    assert manager.block_pool.get_num_free_blocks() == free_before + 3
+    # The request kept its own references: finishing it returns the whole pool.
+    manager.free(busy)
+    assert (
+        manager.block_pool.get_num_free_blocks()
+        == manager.block_pool.num_gpu_blocks - 1
+    )
 
 
 def test_evict_until_free_releases_a_session_whose_next_request_is_waiting(manager):
