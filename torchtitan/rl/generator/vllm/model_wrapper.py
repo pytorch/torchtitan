@@ -277,8 +277,9 @@ def _create_pinned_cpu_state_dict(
     through CUDA's caching host allocator, which rounds every block up to a power of
     two: a 2.3 GiB expert shard took 4 GiB, 1.74x what Kimi K3's generator buffers
     need, ~240 GiB more per 4-GPU node than the weights. Registering one allocation
-    with ``cudaHostRegister`` pins exactly the bytes needed. DTensors keep their mesh
-    and placements around a CPU local tensor, as ``_create_cpu_state_dict`` builds them.
+    with ``cudaHostRegister`` pins exactly the bytes needed. A DTensor buffer wraps its
+    view in the weight's spec (mesh, placements, global shape) without reading the
+    weight; ``_create_cpu_state_dict`` copies each shard to CPU first and discards it.
     """
     alignment = 64
     offsets: dict[str, int] = {}
@@ -305,9 +306,8 @@ def _create_pinned_cpu_state_dict(
             .view(local.shape)
         )
         if isinstance(value, DTensor):
-            buffer = cast(DTensor, value.to(device="cpu"))
-            buffer._local_tensor = cpu_local
-            buffers[key] = buffer
+            # Not DTensor.from_local: it moves the local tensor to the mesh's device.
+            buffers[key] = DTensor(cpu_local, value._spec, requires_grad=False)
         else:
             buffers[key] = cpu_local
     return buffers, slab
