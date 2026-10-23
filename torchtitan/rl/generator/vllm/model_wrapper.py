@@ -271,50 +271,66 @@ def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:
 def _create_pinned_cpu_state_dict(
     state_dict: Mapping[str, Any],
 ) -> tuple[dict[str, Any], torch.Tensor]:
-    """Pinned CPU tensors shaped like ``state_dict``'s local tensors, as views of one
-    allocation; returns the buffers and that allocation (keep it alive with them).
+    """Allocate pinned CPU receive buffers for ``state_dict``, all inside one allocation.
 
-    Pinning each tensor separately (``_create_cpu_state_dict(pin_memory=True)``) goes
-    through CUDA's caching host allocator, which rounds every block up to a power of
-    two: a 2.3 GiB expert shard took 4 GiB, and a reduced Kimi K3 generator's buffers
-    took 1.74x their bytes. Registering one allocation with ``cudaHostRegister`` pins
-    exactly the bytes needed. A DTensor buffer wraps its
-    view in the weight's spec (mesh, placements, global shape) without reading the
-    weight; ``_create_cpu_state_dict`` copies each shard to CPU first and discards it.
+    Returns ``(buffers, allocation)``. ``buffers`` has ``state_dict``'s keys: each
+    tensor gets an uninitialized pinned CPU tensor with its dtype and local shape, and
+    a DTensor's buffer is a DTensor with the same mesh and placements around one. The
+    weights are not read. Every buffer is a view of ``allocation``, so keep
+    ``allocation`` alive as long as the buffers.
+
+    Example (bf16):
+        {"w": DTensor [64, 1024], Shard(0) over 2 ranks; "norm": tensor [1024]}
+        -> allocation: pinned uint8 [67584]
+           buffers: "w"    DTensor [64, 1024], Shard(0); local = allocation[0:65536]
+                    "norm" tensor [1024] = allocation[65536:67584]
+
+    Why one allocation: pinning each tensor separately, as
+    ``_create_cpu_state_dict(pin_memory=True)`` does, rounds every block up to a power
+    of two (a 2.3 GiB expert shard pins 4 GiB; 1.74x over a reduced Kimi K3
+    generator's buffers). Registering one allocation with ``cudaHostRegister`` pins
+    exactly the bytes needed.
     """
+    local_tensors = {
+        key: value._local_tensor if isinstance(value, DTensor) else value
+        for key, value in state_dict.items()
+        if isinstance(value, torch.Tensor)
+    }
+
+    # 1. Lay the local tensors out back to back, each at a 64-byte boundary.
     alignment = 64
     offsets: dict[str, int] = {}
-    total = 0
-    for key, value in state_dict.items():
-        if isinstance(value, torch.Tensor):
-            local = value._local_tensor if isinstance(value, DTensor) else value
-            offsets[key] = total
-            nbytes = local.numel() * local.element_size()
-            total += (nbytes + alignment - 1) // alignment * alignment
-    slab = torch.empty(total, dtype=torch.uint8, device="cpu")
-    if total:
-        pin_memory_utils.pin_memory(slab.data_ptr(), total)
-        # Unregister when the allocation is freed, as _create_cpu_state_dict does: a
-        # later allocation at the same address cannot be registered while this one is.
-        weakref.finalize(slab, pin_memory_utils.unpin_memory, slab.data_ptr())
+    total_bytes = 0
+    for key, local in local_tensors.items():
+        offsets[key] = total_bytes
+        total_bytes += (local.nbytes + alignment - 1) // alignment * alignment
+
+    # 2. Allocate and pin all of it at once.
+    allocation = torch.empty(total_bytes, dtype=torch.uint8, device="cpu")
+    if total_bytes:
+        pin_memory_utils.pin_memory(allocation.data_ptr(), total_bytes)
+        # Unregister when freed, as _create_cpu_state_dict does: a later allocation at
+        # the same address cannot be registered while this one still is.
+        weakref.finalize(
+            allocation, pin_memory_utils.unpin_memory, allocation.data_ptr()
+        )
+
+    # 3. Give each key its slice of the allocation, viewed as its dtype and shape.
     buffers: dict[str, Any] = {}
     for key, value in state_dict.items():
-        if key not in offsets:
-            buffers[key] = copy.deepcopy(value)
+        if key not in local_tensors:
+            buffers[key] = copy.deepcopy(value)  # non-tensor entries
             continue
-        local = value._local_tensor if isinstance(value, DTensor) else value
-        nbytes = local.numel() * local.element_size()
-        cpu_local = (
-            slab[offsets[key] : offsets[key] + nbytes]
-            .view(local.dtype)
-            .view(local.shape)
+        local = local_tensors[key]
+        start = offsets[key]
+        buffer = (
+            allocation[start : start + local.nbytes].view(local.dtype).view(local.shape)
         )
         if isinstance(value, DTensor):
-            # Not DTensor.from_local: it moves the local tensor to the mesh's device.
-            buffers[key] = DTensor(cpu_local, value._spec, requires_grad=False)
-        else:
-            buffers[key] = cpu_local
-    return buffers, slab
+            # Not DTensor.from_local, which moves the local tensor to the mesh's device.
+            buffer = DTensor(buffer, value._spec, requires_grad=False)
+        buffers[key] = buffer
+    return buffers, allocation
 
 
 def _restore_sharded_params(module: FSDPModule) -> None:
