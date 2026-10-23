@@ -13,6 +13,7 @@ TorchTitan models for vLLM.
 
 import copy
 import dataclasses
+import weakref
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
 from typing import Any, cast
@@ -275,9 +276,9 @@ def _create_pinned_cpu_state_dict(
 
     Pinning each tensor separately (``_create_cpu_state_dict(pin_memory=True)``) goes
     through CUDA's caching host allocator, which rounds every block up to a power of
-    two: a 2.3 GiB expert shard took 4 GiB, 1.74x what Kimi K3's generator buffers
-    need, ~240 GiB more per 4-GPU node than the weights. Registering one allocation
-    with ``cudaHostRegister`` pins exactly the bytes needed. A DTensor buffer wraps its
+    two: a 2.3 GiB expert shard took 4 GiB, and a reduced Kimi K3 generator's buffers
+    took 1.74x their bytes. Registering one allocation with ``cudaHostRegister`` pins
+    exactly the bytes needed. A DTensor buffer wraps its
     view in the weight's spec (mesh, placements, global shape) without reading the
     weight; ``_create_cpu_state_dict`` copies each shard to CPU first and discards it.
     """
@@ -293,6 +294,9 @@ def _create_pinned_cpu_state_dict(
     slab = torch.empty(total, dtype=torch.uint8, device="cpu")
     if total:
         pin_memory_utils.pin_memory(slab.data_ptr(), total)
+        # Unregister when the allocation is freed, as _create_cpu_state_dict does: a
+        # later allocation at the same address cannot be registered while this one is.
+        weakref.finalize(slab, pin_memory_utils.unpin_memory, slab.data_ptr())
     buffers: dict[str, Any] = {}
     for key, value in state_dict.items():
         if key not in offsets:

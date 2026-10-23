@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import tempfile
 
 import pytest
@@ -78,3 +79,14 @@ def test_weight_sync_buffers_do_not_read_the_weights(mesh):
     assert buffer.shape == weight.shape and buffer.placements == (Shard(0),)
     assert buffer._local_tensor.shape == (1025, 1024)
     assert buffer._local_tensor.is_pinned()
+
+
+def test_weight_sync_buffers_unpin_when_freed():
+    # A freed allocation must be unregistered: the next one of the same size usually
+    # gets the same address, and registering that again fails (cudaError 712).
+    state_dict = {"expert": torch.empty(256 << 20, dtype=torch.uint8, device="meta")}
+    for _ in range(2):
+        buffers, storage = _create_pinned_cpu_state_dict(state_dict)
+        assert buffers["expert"].is_pinned()
+        del buffers, storage
+        gc.collect()
