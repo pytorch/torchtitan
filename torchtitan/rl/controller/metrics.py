@@ -315,9 +315,11 @@ _PROCESS_ROLES = ("controller", "trainer", "generator", "env_server_worker", "ot
 
 
 def compute_host_memory_metrics() -> list[m.Metric]:
-    """Anonymous memory (`RssAnon`) per process role on this host, plus the cgroup total.
+    """Anonymous memory per process role on this host, plus the cgroup total.
 
-    `RssAnon` leaves out shared libraries, which summed RSS counts once per process.
+    Anonymous memory leaves out shared libraries, which summed RSS counts once per process.
+    It comes from `smaps_rollup`, a page-table walk (~1.5 ms per process). Before Linux 6.16,
+    `status`'s `RssAnon` misses memory each CPU hasn't reported yet: 2x low on GB300 (Linux 6.14).
     Scans every process in the controller's cgroup: trainer ranks need not be the
     controller's descendants. A process's role is `TORCHTITAN_RL_ROLE` in its spawn env:
 
@@ -339,15 +341,15 @@ def compute_host_memory_metrics() -> list[m.Metric]:
     rss_anon_kib = dict.fromkeys(_PROCESS_ROLES, 0)
     num_processes = dict.fromkeys(_PROCESS_ROLES, 0)
     for pid in (cgroup_dir / "cgroup.procs").read_text().split():
-        # A process may exit after the cgroup listing, or be unreadable (hidepid).
+        # A process may exit after the cgroup listing, or be unreadable (hidepid, another user's).
         try:
-            status = Path(f"/proc/{pid}/status").read_text()
+            rollup = Path(f"/proc/{pid}/smaps_rollup").read_text()
             role = "controller" if int(pid) == os.getpid() else _process_role(pid)
         except OSError:
             continue
-        # "RssAnon:   123456 kB"; a zombie has no such line.
-        for line in status.splitlines():
-            if line.startswith("RssAnon:"):
+        # "Anonymous:   123456 kB"
+        for line in rollup.splitlines():
+            if line.startswith("Anonymous:"):
                 rss_anon_kib[role] += int(line.split()[1])
                 num_processes[role] += 1
                 break
