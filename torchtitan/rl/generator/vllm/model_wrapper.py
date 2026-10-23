@@ -420,6 +420,15 @@ class VLLMModelWrapper(Module):
         # is still sharded. Bind first so first-touch places them on the
         # NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
+        # NOTE: pin blocks above 64 MiB at their exact size; the caching host allocator
+        # otherwise rounds them up to a power of two. This matters for large models:
+        # Kimi K3's generator at TP 4 needs ~424 GiB of buffers per 4-GPU node, ~740 GiB
+        # rounded, on 855 GiB hosts. The current settings go after ours, so PyTorch keeps
+        # the options a settings call would otherwise reset, and a user's threshold wins.
+        settings = torch._C._accelerator_getAllocatorSettings()
+        torch._C._accelerator_setAllocatorSettings(
+            f"pinned_max_round_threshold_mb:64,{settings}".rstrip(",")
+        )
         with torch.device("cpu"):
             self._prefetched_model_state_dict = _create_cpu_state_dict(
                 self.model.state_dict(), pin_memory=True
