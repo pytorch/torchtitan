@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.device_mesh import DeviceMesh
 from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -49,21 +50,16 @@ MomentDType = Literal["parameter", "bfloat16"]
 
 
 class BaseOptimizer(Optimizer, Configurable):
-    """Base class for configurable TorchTitan optimizers."""
+    """Base class for configurable TorchTitan optimizers.
+
+    Constructors accept ``params`` and ``parallelism_context``. Optimizers that
+    do not use runtime meshes may ignore the context.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         pattern: str
         """Regex matched against parameter fully qualified names."""
-
-        def build_optimizer(
-            self,
-            *,
-            params: Iterable[dict[str, Any]] | Iterable[Tensor],
-            parallelism_context: ParallelismContext | None,
-        ) -> Optimizer:
-            """Build with the runtime context required by this optimizer."""
-            return self.build(params=params)
 
 
 def _validate_moment_dtype(
@@ -143,6 +139,7 @@ class Adam(torch.optim.Adam, BaseOptimizer):
         config: Config,
         *,
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
+        parallelism_context: ParallelismContext | None = None,
     ) -> None:
         super().__init__(
             params,
@@ -180,6 +177,7 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
         config: Config,
         *,
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
+        parallelism_context: ParallelismContext | None = None,
     ) -> None:
         super().__init__(
             params,
@@ -227,21 +225,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         Newton-Schulz there and copies the result back. Momentum, parameters,
         gradients and the exchange between ranks stay where they are, so this only
         changes anything when the parameters live on the host."""
-        redistribution_max_ctas: int = -1  # Cap NCCL CTAs to save memory; <0 disables.
-
-        def build_optimizer(
-            self,
-            *,
-            params: Iterable[dict[str, Any]] | Iterable[Tensor],
-            parallelism_context: ParallelismContext | None,
-        ) -> Optimizer:
-            """Build DistMuon with access to runtime device meshes."""
-            if parallelism_context is None:
-                raise ValueError("DistMuon requires a ParallelismContext")
-            return self.build(
-                params=params,
-                parallelism_context=parallelism_context,
-            )
+        max_nccl_ctas_for_comms: int = -1  # Cap NCCL CTAs to save memory; <0 disables.
 
     def __init__(
         self,
@@ -252,7 +236,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
     ) -> None:
         param_groups = tuple(cast(Iterable[dict[str, Any]], params))
         bucket_configs = config.bucket_configs
-        if config.redistribution_max_ctas > 0:
+        if config.max_nccl_ctas_for_comms > 0:
             if len(param_groups) != 1:
                 raise ValueError("DistMuon requires exactly one parameter group")
             param_group = param_groups[0]
@@ -264,6 +248,9 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             )
 
             resolved_bucket_configs = []
+            # OptimizersContainer builds this instance for one local model part;
+            # reuse meshes across its buckets without keeping a run-wide cache.
+            redistribution_mesh_by_storage_mesh: dict[DeviceMesh, DeviceMesh] = {}
             for bucket_config in bucket_configs:
                 matched_parameter = next(
                     (
@@ -279,12 +266,19 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
                 if matched_parameter is None:
                     resolved_bucket_configs.append(bucket_config)
                     continue
-                redistribution_mesh = parallelism_context.get_redistribution_mesh(
-                    cast(Any, matched_parameter).device_mesh,
-                    max_ctas=config.redistribution_max_ctas,
-                )
+                storage_mesh = cast(Any, matched_parameter).device_mesh
+                if storage_mesh not in redistribution_mesh_by_storage_mesh:
+                    redistribution_mesh_by_storage_mesh[
+                        storage_mesh
+                    ] = parallelism_context.build_redistribution_mesh(
+                        storage_mesh,
+                        max_ctas=config.max_nccl_ctas_for_comms,
+                    )
                 resolved_bucket_configs.append(
-                    replace(bucket_config, mesh=redistribution_mesh)
+                    replace(
+                        bucket_config,
+                        mesh=redistribution_mesh_by_storage_mesh[storage_mesh],
+                    )
                 )
             bucket_configs = resolved_bucket_configs
 
@@ -383,7 +377,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                     optimizer_config,
                     claimed,
                 )
-                optimizer = optimizer_config.build_optimizer(
+                optimizer = optimizer_config.build(
                     params=[param_group],
                     parallelism_context=parallelism_context,
                 )
