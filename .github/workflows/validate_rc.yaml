@@ -127,6 +127,16 @@ jobs:
           cp -R tests "$test_root/tests"
           cp -R scripts "$test_root/scripts"
           cp pyproject.toml "$test_root/pyproject.toml"
+          mkdir -p "$test_root/torchtitan/models/flux"
+          cp torchtitan/models/flux/README.md "$test_root/torchtitan/models/flux/README.md"
+
+          # Installed test recipes resolve repository-local assets relative to
+          # site-packages. Link that location to the staged source-test assets.
+          site_packages="$("$RUNNER_TEMP/validate-rc-venv/bin/python" -c \
+            'import sysconfig; print(sysconfig.get_path("purelib"))')"
+          mkdir -p "$site_packages/tests/assets"
+          ln -s "$test_root/tests/assets/synthetic_multimodal" \
+            "$site_packages/tests/assets/synthetic_multimodal"
           cd "$test_root"
           unset PYTHONPATH
           "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pytest \
