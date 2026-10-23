@@ -6,6 +6,7 @@
 
 import unittest
 from dataclasses import dataclass
+from unittest import mock
 
 import spmd_types as spmd
 import torch
@@ -355,6 +356,51 @@ class TestModuleRedistribution(unittest.TestCase):
             super().__init__()
             self.weight = nn.Parameter(torch.empty(shape))
             self._sharding_config = ShardingConfig(state_shardings={"weight": layout})
+
+    def test_tuple_output_redistributes_primary_and_preserves_auxiliary(self):
+        src = SpmdType({MeshAxisName.TP: spmd.R})
+        dst = SpmdType({MeshAxisName.TP: spmd.S(0)})
+        module = Module()
+        module._sharding_config = ShardingConfig(
+            out_src_shardings=src,
+            out_dst_shardings=dst,
+        )
+        primary = torch.randn(2, 3)
+        auxiliary = torch.tensor([1, 2])
+        redistributed = torch.randn(2, 3)
+
+        with (
+            mock.patch(
+                "torchtitan.models.base.module.current_spmd_mesh",
+                return_value=mock.sentinel.mesh,
+            ),
+            mock.patch(
+                "torchtitan.models.base.module.spmd_redistribute_per_axis",
+                return_value=redistributed,
+            ) as redistribute,
+            mock.patch(
+                "torchtitan.models.base.module.remat.recompute_needs_tensor"
+            ) as preserve_for_backward,
+        ):
+            actual = module._redistribute_outputs((primary, auxiliary))
+
+        self.assertIs(actual[0], redistributed)
+        self.assertIs(actual[1], auxiliary)
+        preserve_for_backward.assert_called_once_with(primary)
+        redistribute.assert_called_once_with(
+            primary,
+            mock.sentinel.mesh,
+            src,
+            dst,
+            async_op=True,
+        )
+
+    def test_tuple_output_without_tensor_primary_is_unchanged(self):
+        module = Module()
+        module._sharding_config = ShardingConfig()
+        output = (None, torch.tensor([1]))
+
+        self.assertIs(module._redistribute_outputs(output), output)
 
     def test_rejects_uneven_tp_parameter_sharding(self):
         module = self.WeightModule(

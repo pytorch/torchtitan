@@ -37,6 +37,7 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_mtp,
 )
+from torchtitan_recipes.tests.models.glm5 import glm5_2_debugmodel_mtp, glm5_debugmodel
 from torchtitan_recipes.tests.models.gpt_oss import (
     gpt_oss_debugmodel,
     gpt_oss_debugmodel_flex,
@@ -239,6 +240,34 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
     config.training.disable_cuda_graphs = True
+    return config
+
+
+def glm5_debugmodel_fsdp2_tp2_cp2_ep2() -> Trainer.Config:
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=2,
+        context_parallel_degree=2,
+        expert_parallel_degree=2,
+        enable_sequence_parallel=True,
+    )
+    config = glm5_debugmodel(seq_len=512, parallelism=parallelism)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    return config
+
+
+def glm5_debugmodel_mtp_fsdp2_tp2_cp2_ep2() -> Trainer.Config:
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=2,
+        context_parallel_degree=2,
+        expert_parallel_degree=2,
+        enable_sequence_parallel=True,
+    )
+    config = glm5_2_debugmodel_mtp(seq_len=512, parallelism=parallelism)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
     return config
 
 
@@ -712,6 +741,21 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             # step 1. The same config trains cleanly on a real 4-GPU PG
             # (grad_norm ~3.8), so keep it on a real PG until the Fake PG
             # collective aliasing under spmd_types is fixed.
+            use_real_pg=True,
+        ),
+        # Integration Test Cases for GLM-5
+        IntegrationTestDefinition(
+            configs=[glm5_debugmodel_fsdp2_tp2_cp2_ep2],
+            test_descr="GLM-5 FSDP+TP+CP+EP",
+            test_name="glm5_fsdp+tp+cp+ep",
+            ngpu=8,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[glm5_debugmodel_mtp_fsdp2_tp2_cp2_ep2],
+            test_descr="GLM-5 MTP FSDP+TP+CP+EP",
+            test_name="glm5_mtp_fsdp+tp+cp+ep",
+            ngpu=8,
             use_real_pg=True,
         ),
         # Integration Test Cases for Qwen3 dense and MoE model
