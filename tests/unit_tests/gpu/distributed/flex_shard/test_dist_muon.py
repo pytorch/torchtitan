@@ -55,7 +55,7 @@ class TestDistMuon(DTensorTestBase):
         return "cuda"
 
     @with_comms(eager_init=True)
-    def test_isolated_redistribution_process_group(self):
+    def test_build_redistribution_mesh_creates_capped_nccl_group(self):
         mesh = init_device_mesh(
             self.device_type,
             (1, self.world_size),
@@ -73,7 +73,7 @@ class TestDistMuon(DTensorTestBase):
             world_size=self.world_size,
             enable_sequence_parallel=False,
         )
-        redistribution_mesh = parallelism_context.get_redistribution_mesh(
+        redistribution_mesh = parallelism_context.build_redistribution_mesh(
             mesh,
             max_ctas=8,
         )
@@ -91,10 +91,6 @@ class TestDistMuon(DTensorTestBase):
         self.assertIs(
             redistribution_mesh.get_group("dp_replicate"),
             replicate_group,
-        )
-        self.assertIs(
-            parallelism_context.get_redistribution_mesh(mesh, max_ctas=8),
-            redistribution_mesh,
         )
         self.assertEqual(
             torch.distributed.get_process_group_ranks(redistribution_group),

@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.device_mesh import DeviceMesh
 from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -257,6 +258,9 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             )
 
             resolved_bucket_configs = []
+            # OptimizersContainer builds this instance for one local model part;
+            # reuse meshes across its buckets without keeping a run-wide cache.
+            redistribution_mesh_by_storage_mesh: dict[DeviceMesh, DeviceMesh] = {}
             for bucket_config in bucket_configs:
                 matched_parameter = next(
                     (
@@ -272,12 +276,19 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
                 if matched_parameter is None:
                     resolved_bucket_configs.append(bucket_config)
                     continue
-                redistribution_mesh = parallelism_context.get_redistribution_mesh(
-                    cast(Any, matched_parameter).device_mesh,
-                    max_ctas=config.redistribution_max_ctas,
-                )
+                storage_mesh = cast(Any, matched_parameter).device_mesh
+                if storage_mesh not in redistribution_mesh_by_storage_mesh:
+                    redistribution_mesh_by_storage_mesh[
+                        storage_mesh
+                    ] = parallelism_context.build_redistribution_mesh(
+                        storage_mesh,
+                        max_ctas=config.redistribution_max_ctas,
+                    )
                 resolved_bucket_configs.append(
-                    replace(bucket_config, mesh=redistribution_mesh)
+                    replace(
+                        bucket_config,
+                        mesh=redistribution_mesh_by_storage_mesh[storage_mesh],
+                    )
                 )
             bucket_configs = resolved_bucket_configs
 

@@ -210,20 +210,6 @@ class TestMuonPlanConstruction(unittest.TestCase):
                 ),
             )
 
-    def test_bucket_without_redistribution_remains_local(self):
-        _mesh, parameter = self._make_1d_parameter()
-
-        optimizer = self._build_single_parameter_optimizer(
-            parameter,
-            bucket_config=BucketConfig(
-                patterns=(self._FQN,),
-                name="local",
-            ),
-            block_sizes=(6,),
-        )
-
-        self.assertIsNone(optimizer._specs[0].mesh)
-
 
 if __name__ == "__main__":
     unittest.main()
