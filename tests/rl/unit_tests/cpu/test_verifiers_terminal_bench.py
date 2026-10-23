@@ -192,10 +192,12 @@ def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
         captured["log_setup"] = pickle.dumps(kwargs["log_setup"])
 
     monkeypatch.setattr(env_server, "serve_env", serve_env)
-    # _run_env_server_process replaces __main__ and edits no_proxy; restore both after the test.
+    # _run_env_server_process replaces __main__ and edits no_proxy and the role env var;
+    # restore all three after the test.
     monkeypatch.setitem(sys.modules, "__main__", sys.modules["__main__"])
     monkeypatch.setenv("no_proxy", "")
     monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv(env_server.RL_ROLE_ENV, "")
     config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET).verifiers_env_server
     env_server._run_env_server_process(
         environment=env_config_data(config.environment),
