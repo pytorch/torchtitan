@@ -160,7 +160,8 @@ class RolloutStatus(StrEnum):
     ERROR = "error"
     # The rollout failed outside the policy: its code raised, or Verifiers recorded an infra error
     # (a generator 5xx, a sandbox or env failure). It stays in its group for logs, but gets no
-    # reward or advantage and isn't trained.
+    # reward or advantage and isn't trained. A rollout cut as a straggler (see `gather_rollouts`)
+    # gets it too, with `logs["straggler_cut"]`.
     ERROR_SYSTEM = "error_system"
 
     def is_truncated(self) -> bool:

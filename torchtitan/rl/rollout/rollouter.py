@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 
 # How long shutdown waits for in-flight groups: `Rollouter.close` for its `run_group` calls, and a
 # cancelled dispatch for `cancel_group`. Drains took under 0.3 s once the generators closed; 30 s only
-# covers a group stuck in a slow env step.
+# covers a group stuck in a slow env step. Also bounds a `cut_stragglers` call.
 _RUN_GROUP_DRAIN_TIMEOUT_S = 30.0
 
 
@@ -312,6 +312,8 @@ class Rollouter(Configurable):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
+        cut_stragglers: asyncio.Event | None = None,
+        max_stragglers: int | None = None,
     ) -> RolloutGroup:
         """Roll out and score one prompt group.
 
@@ -327,6 +329,10 @@ class Rollouter(Configurable):
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
             sampling: Sampling config for every generate call in the group.
+            cut_stragglers: Set by the buffer at the group's last batch. It is sent once to the
+                group's worker, which cuts the unfinished rollouts if at most `max_stragglers` are
+                left (see `gather_rollouts`); this call still returns the whole group.
+            max_stragglers: None, or no `cut_stragglers`: never cut.
 
         Returns:
             One scored `RolloutGroup`.
@@ -348,6 +354,24 @@ class Rollouter(Configurable):
         )
         self._inflight_run_group_calls.add(call)
         call.add_done_callback(self._on_run_group_call_done)
+
+        async def forward_cut() -> None:
+            # Sent to every worker, like `cancel_group`: only the one running the group has it.
+            await cut_stragglers.wait()
+            try:
+                async with asyncio.timeout(_RUN_GROUP_DRAIN_TIMEOUT_S):
+                    await self._worker_actors.cut_stragglers.call(
+                        group_id=group_id, max_stragglers=max_stragglers
+                    )
+            except Exception:
+                logger.exception(
+                    "cut_stragglers(%d) failed; its stragglers are not cut", group_id
+                )
+
+        # A task of its own, so the buffer only sets the event and never waits for a worker.
+        cut_forwarder = None
+        if cut_stragglers is not None and max_stragglers is not None:
+            cut_forwarder = asyncio.create_task(forward_cut())
         try:
             # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
             return await asyncio.shield(call)
@@ -362,6 +386,9 @@ class Rollouter(Configurable):
                     "cancel_group(%d) failed; the group may keep running", group_id
                 )
             raise
+        finally:
+            if cut_forwarder is not None:
+                cut_forwarder.cancel()
 
     def _on_run_group_call_done(self, call: asyncio.Future[RolloutGroup]) -> None:
         self._inflight_run_group_calls.discard(call)
@@ -479,6 +506,7 @@ class RolloutWorker(Configurable):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
+        cut_stragglers: asyncio.Future[int] | None = None,
     ) -> RolloutGroup:
         """Roll out and score one prompt group.
 
@@ -496,6 +524,7 @@ class RolloutWorker(Configurable):
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
             sampling: Sampling config for every generate call in the group.
+            cut_stragglers: Resolves at the group's last batch; see `gather_rollouts`.
 
         Returns:
             One scored `RolloutGroup`.
@@ -511,7 +540,7 @@ class RolloutWorker(Configurable):
         try:
             # produce the rollouts. A cancel cancels every sibling, and with return_exceptions the
             # gather still waits for each one's `finally` (session release) before it raises.
-            results, group_metrics = await gather_rollouts(
+            sibling_rollouts = (
                 self._run_single_rollout(
                     generate_fn=generate_fn,
                     release_session_fn=release_session_fn,
@@ -527,6 +556,9 @@ class RolloutWorker(Configurable):
                     rollout_id=sample_idx,
                 )
                 for sample_idx, env in enumerate(envs)
+            )
+            results, group_metrics = await gather_rollouts(
+                sibling_rollouts, group_id=group_id, cut_stragglers=cut_stragglers
             )
         finally:
             # close the envs
@@ -686,14 +718,24 @@ class RolloutWorker(Configurable):
 
 async def gather_rollouts(
     rollouts: Iterable[Awaitable[Rollout]],
+    *,
+    group_id: int,
+    cut_stragglers: asyncio.Future[int] | None = None,
 ) -> tuple[list[Rollout | BaseException], list[m.Metric]]:
     """`asyncio.gather(*rollouts, return_exceptions=True)`, plus how long the group took and how
     long it waited for its slowest rollout: a group trains only once every sibling is done.
 
     Example (16 siblings; the first ends 120 s after the start, the last at 900 s):
 
-        results, metrics = await gather_rollouts(coroutines)
+        results, metrics = await gather_rollouts(coroutines, group_id=7)
         # metrics: rollout/group_wall_s 900, rollout/group_straggler_wait_s 780 (Mean and Max each)
+
+    `cut_stragglers` resolves to k when the group's last batch starts. The unfinished siblings are
+    counted once, then:
+
+        at most k unfinished   -> each is cancelled and returned at once as an ERROR_SYSTEM rollout
+                                  with `logs["straggler_cut"]`; rollout/stragglers_cut counts them
+        more than k            -> nothing changes
     """
     start = time.perf_counter()
     finish_times: list[float] = []
@@ -704,18 +746,53 @@ async def gather_rollouts(
         finally:
             finish_times.append(time.perf_counter())
 
-    results = await asyncio.gather(
-        *(timed(rollout) for rollout in rollouts), return_exceptions=True
-    )
+    tasks = [asyncio.create_task(timed(rollout)) for rollout in rollouts]
+    cut_rollout_ids: list[int] = []
+
+    def cut(request: asyncio.Future[int]) -> None:
+        max_stragglers = request.result()
+        unfinished = [i for i, task in enumerate(tasks) if not task.done()]
+        if len(unfinished) <= max_stragglers:
+            for rollout_id in unfinished:
+                tasks[rollout_id].cancel()
+            cut_rollout_ids.extend(unfinished)
+
+    if cut_stragglers is not None:
+        cut_stragglers.add_done_callback(cut)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     durations = {
         "rollout/group_wall_s": max(finish_times) - start,
         "rollout/group_straggler_wait_s": max(finish_times) - min(finish_times),
     }
-    return results, [
+    metrics = [
         m.Metric(key, metric_type(value))
         for key, value in durations.items()
         for metric_type in (m.Mean, m.Max)
     ]
+
+    # `rollouts_from_gather` re-raises a CancelledError, as the group's own cancel; a cut sibling's
+    # becomes a rollout instead, so the group still returns the others.
+    num_cut = 0
+    for rollout_id in cut_rollout_ids:
+        if isinstance(results[rollout_id], asyncio.CancelledError):
+            logger.info(
+                "rollout group=%d/rollout=%d cut as a straggler; marking ERROR_SYSTEM",
+                group_id,
+                rollout_id,
+            )
+            results[rollout_id] = Rollout(
+                group_id=group_id,
+                rollout_id=rollout_id,
+                status=RolloutStatus.ERROR_SYSTEM,
+                logs={
+                    "error": "cut as a straggler when its group's last batch started",
+                    "straggler_cut": True,
+                },
+            )
+            num_cut += 1
+    if num_cut:
+        metrics.append(m.Metric("rollout/stragglers_cut", m.Sum(float(num_cut))))
+    return results, metrics
 
 
 def rollouts_from_gather(

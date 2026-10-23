@@ -44,6 +44,8 @@ class RolloutWorkerActor(Actor):
         self._loop_lag = m.EventLoopLag("rollout_worker")
         # group id -> the `run_group` call running it here, for `cancel_group`.
         self._group_tasks: dict[int, asyncio.Task] = {}
+        # group id -> the future its `gather_rollouts` watches, for `cut_stragglers`.
+        self._straggler_cuts: dict[int, asyncio.Future[int]] = {}
 
     @concurrent_endpoint
     async def setup_async(
@@ -72,6 +74,8 @@ class RolloutWorkerActor(Actor):
     ) -> RolloutGroup:
         task = asyncio.current_task()
         self._group_tasks[group_id] = task
+        cut_stragglers = asyncio.get_running_loop().create_future()
+        self._straggler_cuts[group_id] = cut_stragglers
         try:
             group = await self._worker.run_group(
                 generate_fn=generate_fn,
@@ -80,6 +84,7 @@ class RolloutWorkerActor(Actor):
                 group_id=group_id,
                 group_size=group_size,
                 sampling=sampling,
+                cut_stragglers=cut_stragglers,
             )
             # This process's GC time and event-loop lag since the last finished training group;
             # summed over a step's groups. Validation (negative group ids) ignores group metrics,
@@ -92,6 +97,8 @@ class RolloutWorkerActor(Actor):
             # don't drop a newer call's entry.
             if self._group_tasks.get(group_id) is task:
                 del self._group_tasks[group_id]
+            if self._straggler_cuts.get(group_id) is cut_stragglers:
+                del self._straggler_cuts[group_id]
 
     @concurrent_endpoint
     async def cancel_group(self, group_id: int) -> None:
@@ -104,6 +111,14 @@ class RolloutWorkerActor(Actor):
         if task is not None:
             task.cancel()
             await asyncio.wait([task])
+
+    @concurrent_endpoint
+    async def cut_stragglers(self, group_id: int, max_stragglers: int) -> None:
+        """Cut this group's unfinished rollouts if this worker runs it and at most `max_stragglers`
+        are left (see `gather_rollouts`). Unlike `cancel_group`, it returns without waiting for them."""
+        cut_stragglers = self._straggler_cuts.get(group_id)
+        if cut_stragglers is not None and not cut_stragglers.done():
+            cut_stragglers.set_result(max_stragglers)
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:

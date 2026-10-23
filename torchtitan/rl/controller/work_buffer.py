@@ -68,6 +68,9 @@ class RolloutGroupWork:
     cancelled: bool = field(default=False, init=False)
     """Set when the buffer cancelled this group's generation (the adaptive buffer, once the group is too old to
     ever train); its slot stays charged until the generation task ends, then the rollout loop releases it."""
+    cut_stragglers: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    """Set by the adaptive buffer when the batch it starts is the last this group can join while still generating;
+    see `AdaptiveRolloutGroupWorkBuffer.Config.max_straggler_fraction`."""
     # TODO(async-rl): emit JSON lifecycle logging per RolloutGroupWork keyed by group_id:
     # admitted/claimed/finalized/batched/trained/dropped timestamps + policy version at admission and
     # at trainer consumption, for faithful end-to-end visibility.
@@ -387,7 +390,9 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
        it can never train; it counts as a dropped group at once, and its slot is released when its generation task
        ends, so a replacement group never overlaps it. The mean age is held under `target_offpolicy_steps` if set,
        else under `max_offpolicy_steps` if set, by the demand ceiling, at the price of stalls when the workload needs
-       more groups than the ceiling allows. With neither, the demand follows the workload alone.
+       more groups than the ceiling allows. With neither, the demand follows the workload alone. With
+       `max_straggler_fraction`, a group still generating when the last batch it can join starts may have its few
+       unfinished rollouts cut, so the rest join that batch.
 
     Example:
         buffer = AdaptiveRolloutGroupWorkBuffer.Config(
@@ -451,6 +456,17 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
             AdaptiveRolloutGroupWorkBuffer.Config(max_offpolicy_steps=10)
         """
 
+        max_straggler_fraction: float | None = None
+        """Share of a group's rollouts that may be cut so the others still train, rounded down but at least 1
+        (see `AsyncLoopConfig.max_stragglers`). Checked once, when the batcher starts the last batch a group can
+        join (`max_offpolicy_steps` versions after its claim) while it is still generating. Cut rollouts become
+        ERROR_SYSTEM and are not trained. None: never cut.
+
+        Example (16 samples per prompt, 0.05 -> at most 1):
+            15 finished, 1 running    -> the 1 is cut; the 15 train
+            14 finished, 2 running    -> nothing is cut; still running at the next batch -> cancelled as too old
+        """
+
         def __post_init__(self) -> None:
             if self.max_offpolicy_steps is not None and self.max_offpolicy_steps < 1:
                 raise ValueError(
@@ -487,6 +503,16 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
                 raise ValueError(
                     f"generation_capacity must be >= 1, got {self.generation_capacity}"
                 )
+            if self.max_straggler_fraction is not None:
+                if not (0 < self.max_straggler_fraction < 1):
+                    raise ValueError(
+                        "max_straggler_fraction must be None or in (0, 1), got "
+                        f"{self.max_straggler_fraction}"
+                    )
+                if self.max_offpolicy_steps is None:
+                    raise ValueError(
+                        "max_straggler_fraction needs max_offpolicy_steps, which sets a group's last batch"
+                    )
 
         def resolve_generation_capacity(
             self,
@@ -548,6 +574,7 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
         )
         self._num_prompts_per_train_step = num_prompts_per_train_step
         self._max_offpolicy_steps = config.max_offpolicy_steps
+        self._max_straggler_fraction = config.max_straggler_fraction
         self._generation_capacity = config.resolve_generation_capacity(
             num_prompts_per_train_step
         )
@@ -563,6 +590,7 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
         self._dropped_since_step_start = 0
         self._dropped_too_old_since_flush = 0
         self._cancelled_too_old_since_flush = 0
+        self._dropped_too_old_after_cut_since_flush = 0
         self._dropped_group_ids: list[int] = []
         # Highest version the batcher assembled a batch for; in-flight groups are checked when it advances.
         self._consuming_policy_version = policy_version
@@ -616,6 +644,10 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
         self._dropped_group_ids.append(work.group_id)
         self._active_rollout_groups -= 1
         self._dropped_too_old_since_flush += 1
+        if any(
+            "straggler_cut" in rollout.logs for rollout in work.rollout_group.rollouts
+        ):
+            self._dropped_too_old_after_cut_since_flush += 1
         self._dropped_since_step_start += 1
         sl.log_trace_scalar({"rollout_buffer/released/too_old": 1.0})
         self._condition.notify_all()
@@ -682,6 +714,15 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
                 self._cancel_too_old_inflight(
                     consuming_policy_version=consuming_policy_version
                 )
+                if self._max_straggler_fraction is not None:
+                    # This batch is the last these groups can join: their workers may cut their stragglers.
+                    for work in self._work_by_group_id.values():
+                        if (
+                            work.state is _RolloutGroupWorkState.INFLIGHT
+                            and consuming_policy_version - work.policy_version_at_claim
+                            == self._max_offpolicy_steps
+                        ):
+                            work.cut_stragglers.set()
             while True:
                 if self._closed:
                     return None
@@ -793,6 +834,11 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
                 "rollout_buffer/cancelled_too_old",
                 m.NoReduce(float(self._cancelled_too_old_since_flush)),
             ),
+            # of dropped_too_old: groups whose stragglers were cut that still missed their last batch
+            m.Metric(
+                "rollout_buffer/dropped_too_old_after_cut",
+                m.NoReduce(float(self._dropped_too_old_after_cut_since_flush)),
+            ),
             # 1 while the mean-age ceiling caps the demand, else 0
             m.Metric(
                 "rollout_buffer/demand_age_limited",
@@ -801,4 +847,5 @@ class AdaptiveRolloutGroupWorkBuffer(RolloutGroupWorkBuffer):
         ]
         self._dropped_too_old_since_flush = 0
         self._cancelled_too_old_since_flush = 0
+        self._dropped_too_old_after_cut_since_flush = 0
         return out

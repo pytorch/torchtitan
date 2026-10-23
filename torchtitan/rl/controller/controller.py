@@ -376,6 +376,27 @@ class AsyncLoopConfig(Configurable.Config):
             self.max_active_rollout_groups + self.window_size - 2
         ) // self.num_prompts_per_train_step
 
+    @property
+    def max_stragglers(self) -> int | None:
+        """Most unfinished rollouts a group may have for them to be cut at its last batch, from the adaptive
+        buffer's `max_straggler_fraction`; None: never cut.
+
+        Example:
+            16 samples per prompt, fraction 0.05     -> 1 (never below 1)
+            64 samples per prompt, fraction 0.05     -> 3
+            100 samples per prompt, fraction 0.29    -> 29
+        """
+        if (
+            not isinstance(self.group_buffer, AdaptiveRolloutGroupWorkBuffer.Config)
+            or self.group_buffer.max_straggler_fraction is None
+        ):
+            return None
+        # Round first: 0.29 * 100 is 28.999... in floats.
+        num_stragglers = round(
+            self.group_buffer.max_straggler_fraction * self.num_samples_per_prompt, 9
+        )
+        return max(1, math.floor(num_stragglers))
+
 
 def _default_actor_system_config() -> ActorSystem.Config:
     # Imported here so the controller depends on Monarch only when it is the configured
@@ -1408,6 +1429,7 @@ class Controller(Configurable):
             waits for:    nothing (admits its own claimed slot)
             unblocked by: n/a
         """
+        max_stragglers = self.config.async_loop.max_stragglers
         while True:
             work = await group_buffer.claim_next()
             if work is None:  # group_buffer closed/shutdown signal
@@ -1423,6 +1445,8 @@ class Controller(Configurable):
                     group_id=work.group_id,
                     group_size=self.config.async_loop.num_samples_per_prompt,
                     sampling=self._sampling,
+                    cut_stragglers=work.cut_stragglers,
+                    max_stragglers=max_stragglers,
                 ),
                 name=f"rollout_group_{work.group_id}",
             )

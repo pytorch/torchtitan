@@ -376,6 +376,7 @@ class VerifiersRolloutWorker(RolloutWorker):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
+        cut_stragglers: asyncio.Future[int] | None = None,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
         # Each rollout releases its own generator sessions; see `_run_single_rollout`.
@@ -389,7 +390,7 @@ class VerifiersRolloutWorker(RolloutWorker):
         generator_sessions: dict[int, tuple[str, str]] = {}
         # A cancel cancels every sibling, and with return_exceptions the gather still waits for each
         # one's lease release before it raises: the caller releases the group next.
-        results, group_metrics = await gather_rollouts(
+        sibling_rollouts = (
             self._run_single_rollout(
                 generator_client=generate_fn,
                 sample=sample,
@@ -403,6 +404,9 @@ class VerifiersRolloutWorker(RolloutWorker):
                 generator_sessions=generator_sessions,
             )
             for rollout_id in range(group_size)
+        )
+        results, group_metrics = await gather_rollouts(
+            sibling_rollouts, group_id=group_id, cut_stragglers=cut_stragglers
         )
         rollouts = rollouts_from_gather(results, group_id=group_id)
 

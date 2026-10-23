@@ -24,6 +24,7 @@ from torchtitan.rl.actors.monarch import (
 )
 from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
+from torchtitan.rl.observability import metrics as m
 
 from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
@@ -115,11 +116,22 @@ class _CancelGroupEndpoint:
             raise self.error
 
 
+class _CutStragglersEndpoint:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.called = asyncio.Event()
+
+    async def call(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+        self.called.set()
+
+
 class _WorkerActorMesh:
     def __init__(self) -> None:
         self.setup_async = _SetupEndpoint()
         self.run_group = _ChooseRunGroupEndpoint()
         self.cancel_group = _CancelGroupEndpoint()
+        self.cut_stragglers = _CutStragglersEndpoint()
         self.stopped = False
 
     async def stop(self) -> None:
@@ -405,6 +417,45 @@ def test_cancelled_dispatch_stops_waiting_for_a_cancel_group_that_hangs(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("signalled", [True, False])
+def test_dispatch_forwards_the_cut_signal_and_still_returns_the_group(
+    monkeypatch, signalled
+) -> None:
+    async def run() -> None:
+        actor_mesh = _WorkerActorMesh()
+        rollouter = _rollouter_without_datasets()
+        await _setup(rollouter, actor_mesh, monkeypatch)
+        cut_stragglers = asyncio.Event()
+
+        dispatch = asyncio.create_task(
+            rollouter.run_group_rollouts(
+                generate_fn="generate_fn",
+                release_session_fn="release_session_fn",
+                sample="sample",
+                group_id=5,
+                group_size=2,
+                sampling="sampling",
+                cut_stragglers=cut_stragglers,
+                max_stragglers=1,
+            )
+        )
+        await actor_mesh.run_group.started.wait()
+        if signalled:
+            cut_stragglers.set()
+            await asyncio.wait_for(actor_mesh.cut_stragglers.called.wait(), timeout=5)
+            assert not dispatch.done()
+        actor_mesh.run_group.release.set()
+        assert (await dispatch).group_id == 5
+        await asyncio.sleep(0)
+        # The signal was sent once if set, and nothing is left waiting for it after the group.
+        expected = [{"group_id": 5, "max_stragglers": 1}] if signalled else []
+        assert actor_mesh.cut_stragglers.calls == expected
+        assert asyncio.all_tasks() == {asyncio.current_task()}
+        await rollouter.close()
+
+    asyncio.run(run())
+
+
 class _BlockingWorker:
     """A rollout worker whose groups run until cancelled; it marks each cancelled group in a file."""
 
@@ -459,6 +510,64 @@ def test_cancel_group_stops_the_group_on_real_worker_processes(tmp_path) -> None
                 await group
             # The worker keeps serving after a cancel.
             await workers.sync_log_step.call(1)
+        finally:
+            cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+            await mesh.stop()
+
+    asyncio.run(run())
+
+
+class _CutReportingWorker:
+    """A rollout worker whose group returns, as a metric, the `max_stragglers` its cut request carried."""
+
+    async def run_group(
+        self, *, group_id: int, cut_stragglers, **kwargs
+    ) -> RolloutGroup:
+        max_stragglers = await cut_stragglers
+        return RolloutGroup(
+            group_id=group_id,
+            rollouts=[],
+            metrics=[m.Metric("max_stragglers", m.NoReduce(float(max_stragglers)))],
+        )
+
+
+class _CutReportingWorkerConfig:
+    def build(self) -> _CutReportingWorker:
+        return _CutReportingWorker()
+
+
+def test_cut_stragglers_reaches_the_group_on_real_worker_processes() -> None:
+    async def run() -> None:
+        mesh = this_host().spawn_procs(per_host={"cpus": 2})
+        # The worker processes can't import this test module, so ship the fakes by value.
+        cloudpickle.register_pickle_by_value(sys.modules[__name__])
+        try:
+            workers = mesh.spawn(
+                "rollout_worker",
+                RolloutWorkerActor,
+                worker_config=_CutReportingWorkerConfig(),
+                num_threads=1,
+                structured_logger_init_fn=None,
+            )
+            group = asyncio.ensure_future(
+                workers.run_group.choose(
+                    generate_fn=None,
+                    release_session_fn=None,
+                    sample=None,
+                    group_id=7,
+                    group_size=1,
+                    sampling=None,
+                )
+            )
+            # Sent to every worker; only the one running group 7 resolves its request. Resent
+            # until it lands, in case it reaches the worker before `run_group` does.
+            while not group.done():
+                await workers.cut_stragglers.call(group_id=7, max_stragglers=3)
+                await asyncio.wait([group], timeout=0.5)
+            metrics = group.result().metrics
+            assert [mt.value.value for mt in metrics if mt.key == "max_stragglers"] == [
+                3.0
+            ]
         finally:
             cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
             await mesh.stop()
