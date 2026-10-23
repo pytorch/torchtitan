@@ -38,32 +38,22 @@ class TrainingMicrobatch(ABC):
     def to_input_dict(
         self, device: torch.device | str, *, non_blocking: bool = False
     ) -> dict[str, Any]:
-        """Return model inputs with top-level tensors moved to ``device``."""
-        return {
-            key: (
-                value.to(device, non_blocking=non_blocking)
-                if isinstance(value, torch.Tensor)
-                else value
-            )
-            for key, value in self.as_input_dict().items()
-        }
+        """Return model inputs with top-level and ``loss_kwargs`` tensors moved to ``device``."""
 
-    def loss_kwargs(self) -> dict[str, Any]:
-        """Return additional keyword arguments for the loss function."""
-        return {}
+        def to_device(value: Any) -> Any:
+            if isinstance(value, torch.Tensor):
+                return value.to(device, non_blocking=non_blocking)
+            return value
 
-    def to_loss_kwargs(
-        self, device: torch.device | str, *, non_blocking: bool = False
-    ) -> dict[str, Any]:
-        """Return loss arguments with top-level tensors moved to ``device``."""
-        return {
-            key: (
-                value.to(device, non_blocking=non_blocking)
-                if isinstance(value, torch.Tensor)
-                else value
-            )
-            for key, value in self.loss_kwargs().items()
+        input_dict = {
+            key: to_device(value) for key, value in self.as_input_dict().items()
         }
+        if "loss_kwargs" in input_dict:
+            input_dict["loss_kwargs"] = {
+                key: to_device(value)
+                for key, value in input_dict["loss_kwargs"].items()
+            }
+        return input_dict
 
 
 @dataclass(kw_only=True, slots=True)

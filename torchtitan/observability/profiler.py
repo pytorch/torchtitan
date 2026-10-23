@@ -4,19 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Kineto profiler + memory-snapshot lifecycle."""
+"""Torch profiler + memory-snapshot lifecycle."""
 
 import inspect
 import logging
 import os
 import pickle
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 import torch
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.cuda_graph import get_cuda_graph_annotations
+from torchtitan.distributed.cuda_graph import (
+    get_cuda_graph_annotations,
+    get_cuspy_cuda_graph_annotation_config,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.utils import device_module, device_type
 
@@ -35,6 +39,8 @@ _EXPORT_SUPPORTS_ANNOTATIONS = (
 PROFILE_DIR = "profiling/traces"  # Profiler.Config.save_traces_folder default
 PROFILE_ITER_DIR = "iteration_{step}"  # PROFILE_DIR/{PROFILE_ITER_DIR}
 PROFILE_FILE = "rank{rank}_trace.json.gz"  # PROFILE_DIR/PROFILE_ITER_DIR/{PROFILE_FILE}
+PFTRACE_PROFILE_FILE = "rank{rank}_trace.pftrace.gz"
+PY_STACKS_FILE = "rank{rank}_cuda_graph_py_stacks.json.gz"
 
 MEMORY_DIR = (
     "profiling/memory_snapshot"  # Profiler.Config.save_memory_snapshot_folder default
@@ -44,6 +50,138 @@ MEMORY_EXIT_DIR = "step_{step:012d}_exit"  # OOM dump variant
 MEMORY_FILE = (
     "{rank:06d}_step_{step}.pickle"  # MEMORY_DIR/MEMORY_STEP_DIR/{MEMORY_FILE}
 )
+
+
+@dataclass(kw_only=True, slots=True)
+class CuspyProfilerConfig:
+    """Configure Cuspy profiling, used instead of Kineto for CUDA activity."""
+
+    trace_format: Literal["json", "pftrace"] = "json"
+    """Trace output format. Perfetto protobuf traces require Cuspy."""
+
+    enable_cuda_sync_events: bool = False
+    """Collect CUDA synchronization activities."""
+
+    enable_environment_counters: bool = False
+    """Collect GPU power, clock, thermal, and cooling counters."""
+
+    enable_graph_dependencies: bool = False
+    """Record CUDA graph dependency edges."""
+
+    enable_event_node_ids: bool = False
+    """Associate CUDA events with CUDA graph event-record nodes."""
+
+    record_py_stacks: bool = False
+    """Record each CUDA graph kernel's Python launch stack at capture and save them
+    beside the trace as ``rank{rank}_cuda_graph_py_stacks.json.gz``, keyed by
+    ``(graph id << 32) | graph node id`` of the trace's kernel events (see
+    ``torch.cuda.graph_annotations.get_kernel_py_stacks``)."""
+
+    performance_metrics: list[str] = field(default_factory=list)
+    """CUPTI PM-sampling metric names to collect, e.g. ``sm__cycles_active.avg``.
+    See "PM sampling configuration" in torchtitan/observability/README.md for how
+    to list the metrics available on the current GPU."""
+
+    pm_sampling_interval_ms: float | None = None
+    """PM-sampling interval; ``None`` uses torch's default."""
+
+    pm_lookback_window_ms: float | None = None
+    """PM sample buffer length. Sampling starts at profiler warmup, so keep warmup
+    plus active steps within this window or the earliest samples are lost. ``None``
+    uses torch's default."""
+
+    def __post_init__(self) -> None:
+        if not self.performance_metrics and (
+            self.pm_sampling_interval_ms is not None
+            or self.pm_lookback_window_ms is not None
+        ):
+            raise ValueError(
+                "pm_sampling_interval_ms and pm_lookback_window_ms require "
+                "performance_metrics."
+            )
+        if (
+            self.pm_sampling_interval_ms is not None
+            and self.pm_sampling_interval_ms <= 0
+        ):
+            raise ValueError(
+                "pm_sampling_interval_ms must be positive, got "
+                f"{self.pm_sampling_interval_ms}."
+            )
+        if (
+            self.pm_sampling_interval_ms is not None
+            and self.pm_lookback_window_ms is not None
+            and self.pm_lookback_window_ms < self.pm_sampling_interval_ms
+        ):
+            raise ValueError(
+                f"pm_lookback_window_ms ({self.pm_lookback_window_ms}) must be at least "
+                f"pm_sampling_interval_ms ({self.pm_sampling_interval_ms})."
+            )
+
+
+def _cuspy_unavailable_reasons(config: CuspyProfilerConfig) -> list[str]:
+    """Return why Cuspy cannot run ``config`` in this environment; empty when it can.
+
+    Probes without taking a CUPTI subscription: holding one makes Kineto's one-shot
+    CUPTI init fail for the rest of the process.
+    """
+    if getattr(torch.profiler, "CuspyConfig", None) is None:
+        return ["this torch build has no torch.profiler.CuspyConfig"]
+    reasons = []
+    if config.trace_format == "pftrace":
+        from torch._C import _profiler
+
+        # torch has no capability flag for the native encoder; builds without it
+        # compile a stub that raises on any input, so encode an empty trace.
+        try:
+            _profiler._cuspy.encode_pftrace(0, [], [], [], [])
+        except RuntimeError as error:
+            reasons.append(f'trace_format="pftrace" is unsupported: {error}')
+    # Private module, and importing it raises without the cupti-python package.
+    try:
+        from torch.profiler._cuspy import cupti_python
+    except ModuleNotFoundError as error:
+        reasons.append(f"{error}; install it with `pip install cupti-python`")
+        return reasons
+    try:
+        version = cupti_python.pylibcupti().get_version()
+    except (AttributeError, OSError, RuntimeError) as error:
+        reasons.append(
+            f"could not load {cupti_python.LIBCUPTI_SONAME} ({error}); this torch "
+            f"is built against CUDA {torch.version.cuda}"
+        )
+        return reasons
+    if version < cupti_python.LIBCUPTI_MIN_VERSION:
+        reasons.append(
+            f"Cuspy needs libcupti >= {cupti_python.LIBCUPTI_MIN_VERSION}, found "
+            f"{version}; install a newer nvidia-cuda-cupti"
+        )
+    return reasons
+
+
+def _get_cuspy_activity_config(config: CuspyProfilerConfig) -> dict[Any, Any]:
+    """Build the ``torch.profiler.profile`` activity that collects CUDA with Cuspy,
+    used in place of ``ProfilerActivity.CUDA``."""
+    profiler_configs: list[Any] = [
+        torch.profiler.CuspyConfig(
+            enable_cuda_sync_events=config.enable_cuda_sync_events,
+            enable_environment_counters=config.enable_environment_counters,
+            enable_graph_dependencies=config.enable_graph_dependencies,
+            enable_event_node_ids=config.enable_event_node_ids,
+        )
+    ]
+    if config.performance_metrics:
+        profiler_configs.append(
+            torch.profiler.PerformanceMetricsConfig(
+                metric_names=config.performance_metrics,
+                sampling_interval_ms=config.pm_sampling_interval_ms,
+                lookback_window_ms=config.pm_lookback_window_ms,
+            )
+        )
+    return {
+        torch.profiler.ProfilerActivity.CUDA: torch.profiler.ProfilerActivityConfig(
+            profiler_configs=profiler_configs
+        )
+    }
 
 
 class MemoryProfiler:
@@ -194,6 +332,9 @@ class Profiler(Configurable):
         are dropped once full. Bounds host memory and snapshot size / dump time.
         """
 
+        cuspy: CuspyProfilerConfig | None = None
+        """Cuspy profiler settings; ``None`` profiles CUDA with Kineto."""
+
         def __post_init__(self) -> None:
             if self.enable_profiling and self.profile_freq < (
                 self.profiler_warmup + self.profiler_active
@@ -202,6 +343,16 @@ class Profiler(Configurable):
                     "profiler.profile_freq must be greater than or equal to "
                     "profiler_warmup + profiler_active."
                 )
+
+        def maybe_cuda_graph_annotation_config(self) -> dict[str, Any] | None:
+            """``torch.cuda.graph`` annotation options for a Cuspy-profiled run, or
+            ``None`` when this config does not profile with Cuspy."""
+            if not self.enable_profiling or self.cuspy is None:
+                return None
+            return get_cuspy_cuda_graph_annotation_config(
+                enable_event_node_ids=self.cuspy.enable_event_node_ids,
+                record_py_stacks=self.cuspy.record_py_stacks,
+            )
 
     def __init__(
         self,
@@ -302,6 +453,7 @@ class Profiler(Configurable):
         cfg = self._config
         if not cfg.enable_profiling:
             return None
+        cuspy = cfg.cuspy
 
         trace_dir = os.path.join(base_folder, cfg.save_traces_folder)
         profile_freq, warmup, active = (
@@ -321,20 +473,42 @@ class Profiler(Configurable):
             logger.info(f"Dumping profiler traces at step {prof.step_num}")
             begin = time.monotonic()
 
-            output_file = os.path.join(curr_trace_dir, PROFILE_FILE.format(rank=rank))
-            # CUDA graph annotations are baked in during the export rather than
-            # joined onto the written file afterwards: re-reading and rewriting a
-            # gzipped trace paid the compression cost twice.
-            annotations = get_cuda_graph_annotations()
-            if annotations and not _EXPORT_SUPPORTS_ANNOTATIONS:
-                logger.warning(
-                    "This torch does not support cuda_graph_annotations on "
-                    "export_chrome_trace; the trace will have no CUDA graph kernel "
-                    "annotations."
-                )
-                annotations = None
-            extra = {"cuda_graph_annotations": annotations} if annotations else {}
-            prof.export_chrome_trace(output_file, **extra)
+            profile_file = (
+                PFTRACE_PROFILE_FILE
+                if cuspy is not None and cuspy.trace_format == "pftrace"
+                else PROFILE_FILE
+            )
+            output_file = os.path.join(curr_trace_dir, profile_file.format(rank=rank))
+            if cuspy is not None:
+                # Cuspy picks its Perfetto encoder from the ".pftrace" in the path.
+                prof.export_chrome_trace(output_file)
+                if cuspy.record_py_stacks:
+                    if torch.cuda.graph_annotations.get_kernel_py_stacks():
+                        torch.cuda.graph_annotations.dump_kernel_py_stacks(
+                            os.path.join(
+                                curr_trace_dir, PY_STACKS_FILE.format(rank=rank)
+                            )
+                        )
+                    else:
+                        logger.warning(
+                            "profiler.cuspy.record_py_stacks is set, but no CUDA graph "
+                            "launch stacks were recorded; stacks are only recorded for "
+                            "CUDA graphs, so check that CUDA graphs are enabled."
+                        )
+            else:
+                # CUDA graph annotations are baked in during the export rather than
+                # joined onto the written file afterwards: re-reading and rewriting a
+                # gzipped trace paid the compression cost twice.
+                annotations = get_cuda_graph_annotations()
+                if annotations and not _EXPORT_SUPPORTS_ANNOTATIONS:
+                    logger.warning(
+                        "This torch does not support cuda_graph_annotations on "
+                        "export_chrome_trace; the trace will have no CUDA graph kernel "
+                        "annotations."
+                    )
+                    annotations = None
+                extra = {"cuda_graph_annotations": annotations} if annotations else {}
+                prof.export_chrome_trace(output_file, **extra)
 
             logger.info(
                 f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
@@ -356,9 +530,27 @@ class Profiler(Configurable):
         }
 
         wait = profile_freq - (active + warmup)
-        activities = [torch.profiler.ProfilerActivity.CPU]
+        activities: list[Any] = [torch.profiler.ProfilerActivity.CPU]
         with_stack = False
-        if torch.cuda.is_available():
+        if cuspy is not None:
+            if not torch.cuda.is_available():
+                raise ValueError(
+                    "profiler.cuspy is set, but no CUDA device is available."
+                )
+            if reasons := _cuspy_unavailable_reasons(cuspy):
+                raise ValueError(
+                    "profiler.cuspy is set, but Cuspy cannot run here:\n  - "
+                    + "\n  - ".join(reasons)
+                )
+            if not torch.cuda.graph_annotations.is_available():
+                logger.warning(
+                    "CUDA graph annotations are unavailable (see "
+                    "torch.cuda.graph_annotations.is_available for requirements); "
+                    "kernels replayed from CUDA graphs will not carry mark_kernels "
+                    "metadata in the Cuspy trace."
+                )
+            activities.append(_get_cuspy_activity_config(cuspy))
+        elif torch.cuda.is_available():
             activities.append(torch.profiler.ProfilerActivity.CUDA)
         elif torch.xpu.is_available():
             activities.append(torch.profiler.ProfilerActivity.XPU)

@@ -17,6 +17,7 @@ from torchtitan.models.common.attn_gym import (
     context_parallel_gdn,
     ContextParallelRouting,
     l2norm,
+    require_attn_gym,
 )
 
 from .cp_attention import CPInnerAttention
@@ -40,6 +41,16 @@ class ContextParallelInnerGDN(
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config, InnerGDN.Config):
         pass
+
+    def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(
+            context_parallel_gdn,
+            context_parallel_conv_history,
+            ContextParallelRouting,
+            l2norm,
+        )
+        super().__init__(config)
 
     @staticmethod
     def prepare_cp_metadata(

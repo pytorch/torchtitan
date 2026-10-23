@@ -259,9 +259,11 @@ class MTPDecoder(Decoder):
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
+        dict[str, Any],
     ]:
         """Prepare aligned pairs before applying CP sharding and annotations."""
         del kwargs
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         tokens = input_dict["input"]
         labels = input_dict["labels"]
         positions = input_dict.get("positions")
@@ -298,6 +300,8 @@ class MTPDecoder(Decoder):
             input_shardings[f"mtp_input_tokens_{depth}"] = input_shardings["input"]
             input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
             input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
 
         if positions is not None:
             attention_metadata = self._get_attention_metadata(
@@ -319,11 +323,12 @@ class MTPDecoder(Decoder):
             parallelism_context, input_dict, input_shardings
         )
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         main_tokens = input_dict.pop("input")
         main_labels = input_dict.pop("labels")
         input_dict["aux_loss_denominators"] = global_routing_token_counts
         if self.mtp_layers is None:
-            return main_tokens, main_labels, input_dict
+            return main_tokens, main_labels, input_dict, loss_kwargs
 
         input_tokens = (
             main_tokens,
@@ -336,7 +341,7 @@ class MTPDecoder(Decoder):
         input_dict["mtp_input_valid_masks"] = tuple(
             input_dict.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
         )
-        return input_tokens, loss_labels, input_dict
+        return input_tokens, loss_labels, input_dict, loss_kwargs
 
     def forward(
         self,
