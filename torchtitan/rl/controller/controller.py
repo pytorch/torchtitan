@@ -1201,8 +1201,9 @@ class Controller(Configurable):
             # rollout related metrics here, or move all of them to the rollouter.
             time_metrics = step_timer.flush()
             with sl.log_trace_span("metrics_log"):
-                # In a thread: ~60 ms of /proc reads per step at 620 processes, and reading a
-                # process's environ blocks while that process changes its memory mappings.
+                # In a thread, but the step waits for it: ~1.5 ms of /proc reads per process (320 ms
+                # at 219 processes), and reading a process's environ blocks while that process changes
+                # its memory mappings.
                 host_memory_metrics = await asyncio.to_thread(
                     compute_host_memory_metrics
                 )
