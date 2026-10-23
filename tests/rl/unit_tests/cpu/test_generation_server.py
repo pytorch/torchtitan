@@ -226,17 +226,18 @@ def test_a_handler_whose_client_left_does_not_fold() -> None:
     asyncio.run(run())
 
 
-def test_metrics_codec_round_trips_the_fold_types_and_rejects_others() -> None:
+def test_metrics_codec_round_trips_every_metric_type() -> None:
     metrics = [
         m.Metric("a", m.Mean(3.0, 2.0)),
         m.Metric("a", m.Max(2.0)),
         m.Metric("b", m.Min(-1.0)),
         m.Metric("c", m.Sum(4.0)),
+        m.Metric("d", m.Std(10.0, count=4, sum_squares=30.0)),
+        m.Metric("e", m.SummaryStats(5.0)),
+        m.Metric("f", m.NoReduce(0.5)),
     ]
     decoded = _decode_metrics(json.loads(json.dumps(_encode_metrics(metrics))))
     assert _metric_fields(decoded) == _metric_fields(metrics)
-    with pytest.raises(TypeError, match="Std"):
-        _encode_metrics([m.Metric("d", m.Std(1.0))])
 
 
 class _Router:
