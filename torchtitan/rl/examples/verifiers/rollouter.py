@@ -57,6 +57,7 @@ from torchtitan.rl.rollout.types import (
     RolloutTurnID,
     split_prompt,
 )
+from torchtitan.rl.routing.inter_generator import GeneratorEndpoint
 
 if TYPE_CHECKING:
     from torchtitan.rl.actors.system import ActorSystem
@@ -293,7 +294,13 @@ class VerifiersRollouter(Rollouter):
         group_id: int,
         rollout_id: int,
     ) -> Rollout:
-        """Send one task to Verifiers, release its sessions, and convert its trace to a rollout."""
+        """Send one task to Verifiers, release its sessions, and convert its trace to a rollout.
+
+        A rollout (one `VerifiersEnvClient.run`) has one trace per agent: the trainable one, plus any
+        sub-agents. Verifiers sends each trace's id as its generator session id (X-Session-ID):
+
+            traces "a1" (trainable), "b7" (sub-agent) -> release_rollout(endpoint, session_ids=["a1", "b7"])
+        """
         if not isinstance(sample, VerifiersTaskSample):
             raise TypeError("Verifiers requires a VerifiersTaskSample")
         if (
@@ -305,13 +312,16 @@ class VerifiersRollouter(Rollouter):
         # One VerifiersEnvClient.run executes a complete rollout. The harness owns the
         # multi-turn model/tool loop and posts every generation to one generator's server,
         # so all of the rollout's traces (sub-agents too) share that generator.
-        endpoint = await generator_client.acquire_rollout(group_id=group_id)
+        endpoint: GeneratorEndpoint = await generator_client.acquire_rollout(
+            group_id=group_id
+        )
         verifiers_episode = None
+        # `finally` gives the lease back even if `run` raises or this task is cancelled.
         try:
             verifiers_episode = await self._verifiers_env_client.run(
                 task_data=sample.verifiers_task_data,
-                # The same JSON for every rollout on a generator, so Verifiers keeps one HTTP
-                # client per generator.
+                # An OpenAI-style base URL, e.g. "http://host-3.example.com:41233/v1". Verifiers keeps
+                # one HTTP client per distinct client config, so the rollouts on a generator share one.
                 client=self._verifiers_train_client_config.model_copy(
                     update={"base_url": f"{endpoint.url}/v1"}
                 ),
@@ -328,8 +338,8 @@ class VerifiersRollouter(Rollouter):
                 ),
             )
         finally:
-            # An attempt Verifiers retried has no trace here; `release_groups` drops its
-            # sessions at group end.
+            # One call releases every trace's session on this generator, then the lease. An attempt
+            # Verifiers retried has no trace here; `release_groups` drops its sessions at group end.
             generation_metadata_by_session = await generator_client.release_rollout(
                 endpoint,
                 group_id=group_id,

@@ -45,10 +45,6 @@ METRICS_PREFIX_SAMPLING_PARAM = "torchtitan_metrics_prefix"
 TORCHTITAN_RESPONSE_FORMAT = "torchtitan"
 """Value of a request's top-level `response_format` that asks for the compact response."""
 
-_METRIC_TYPES = {
-    value_type.__name__: value_type for value_type in (m.Mean, m.Max, m.Min, m.Sum)
-}
-
 
 @dataclass(frozen=True, slots=True)
 class VerifiersGenerationMetadata:
@@ -324,19 +320,23 @@ class GenerationServer:
 
 def _encode_metrics(metrics: list[m.Metric]) -> list[list]:
     """Write metrics as JSON rows, e.g. `Metric("generator/queue_time_ms", Mean(3.0, 2.0))` ->
-    `["generator/queue_time_ms", "Mean", 3.0, 2.0]`. Raises for types other than Mean/Max/Min/Sum."""
-    rows = []
-    for metric in metrics:
-        kind = type(metric.value).__name__
-        if kind not in _METRIC_TYPES:
-            raise TypeError(f"cannot send the {kind} metric {metric.key!r} over HTTP")
-        rows.append([metric.key, kind, *vars(metric.value).values()])
-    return rows
+    `["generator/queue_time_ms", "Mean", {"value": 3.0, "count": 2.0}]`."""
+    return [
+        [metric.key, type(metric.value).__name__, vars(metric.value)]
+        for metric in metrics
+    ]
 
 
 def _decode_metrics(rows: list[list]) -> list[m.Metric]:
-    """Inverse of `_encode_metrics`."""
-    return [m.Metric(key, _METRIC_TYPES[kind](*fields)) for key, kind, *fields in rows]
+    """Inverse of `_encode_metrics`, for every `MetricValue` type. Sets the attributes directly, as
+    pickle does: constructors don't take them all (e.g. `SummaryStats(value)` sets 5)."""
+    value_types = {cls.__name__: cls for cls in m.MetricValue.__subclasses__()}
+    metrics = []
+    for key, kind, fields in rows:
+        value = object.__new__(value_types[kind])
+        vars(value).update(fields)
+        metrics.append(m.Metric(key, value))
+    return metrics
 
 
 def completion_to_response(completion: Completion) -> dict:
