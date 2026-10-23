@@ -155,6 +155,7 @@ cp "${REPO_ROOT}/scripts/loss_compare.py" "${VALIDATION_ROOT}/scripts/loss_compa
 if [[ "${VALIDATION_SUITE}" == rl* ]]; then
   mkdir -p "${VALIDATION_ROOT}/scripts/rl"
   cp "${REPO_ROOT}/scripts/rl/loss_compare.py" "${VALIDATION_ROOT}/scripts/rl/loss_compare.py"
+  cp "${REPO_ROOT}/scripts/_checkpoint_test_config.py" "${VALIDATION_ROOT}/scripts/_checkpoint_test_config.py"
 fi
 cp -R "${REPO_ROOT}/tests" "${VALIDATION_ROOT}/tests"
 cp "${REPO_ROOT}/pyproject.toml" "${VALIDATION_ROOT}/pyproject.toml"
@@ -464,7 +465,7 @@ run_rl_tests() {
   local model_path
   model_path="$(download_rl_model)"
   # Run the A10G golden first, before other RL tests can leave live processes.
-  python scripts/rl/loss_compare.py \
+  python -m scripts.rl.loss_compare \
     --hf-assets-path "${model_path}" \
     --dump-folder "${ARTIFACTS}/rl_loss_guard" \
     --module torchtitan_recipes.rl.alphabet_sort \
