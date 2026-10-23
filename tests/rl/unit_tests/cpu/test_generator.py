@@ -23,7 +23,7 @@ import shutil
 import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -32,6 +32,7 @@ import torch.distributed as dist
 
 import torchtitan.rl.generator.generator as generator_module
 import torchtitan.rl.generator.vllm.engine as vllm_engine_module
+import torchtitan.rl.generator.vllm.worker as worker_module
 from torchstore import RankRole
 from torchtitan.components.optim import AdamW
 from torchtitan.config import CommConfig, DebugConfig
@@ -65,9 +66,17 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import LeastLoadedRoutingStrategy
 from vllm import SamplingParams
+from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 
 class _FakeRenderer:
@@ -815,6 +824,45 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
         TorchTitanGPUModelRunner._pad_for_sequence_parallelism(model_runner, 5)
         == expected_num_tokens
     )
+
+
+@pytest.mark.parametrize(
+    ("data_parallel_size", "expect_decode_graph"), [(1, True), (2, False)]
+)
+def test_full_mode_softmax_attention_decode_dispatch(
+    monkeypatch, data_parallel_size, expect_decode_graph
+):
+    """Under FULL, a model without linear attention replays decode graphs for uniform
+    decode batches at DP = 1, and keeps vLLM's dispatcher at DP > 1."""
+    base_runner_cls = TorchTitanGPUModelRunner.__mro__[1]
+    monkeypatch.setattr(base_runner_cls, "load_model", lambda self, *args: None)
+    monkeypatch.setattr(
+        worker_module, "get_layers_from_vllm_config", lambda config, layer_type: {}
+    )
+    config = VllmConfig()
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_capture_sizes=[1, 2, 4],
+        max_cudagraph_capture_size=4,
+    )
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=16,
+        max_num_seqs=4,
+        max_num_batched_tokens=4,
+        is_encoder_decoder=False,
+    )
+    config.parallel_config.data_parallel_size = data_parallel_size
+    runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
+    runner.vllm_config = config
+    runner.cudagraph_dispatcher = CudagraphDispatcher(config)
+
+    runner.load_model()
+    runner.cudagraph_dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+    mode, descriptor = runner.cudagraph_dispatcher.dispatch(2, uniform_decode=True)
+
+    assert mode == CUDAGraphMode.FULL
+    assert descriptor.uniform == expect_decode_graph
 
 
 def test_only_weights_use_cumem_allocator(monkeypatch):

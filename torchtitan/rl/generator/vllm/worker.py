@@ -24,17 +24,19 @@ from torchtitan.rl.generator.vllm.linear_attention import (
 
 
 class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
-    """Keep native FULL descriptors distinct for packed linear attention and fused decode.
+    """Keep native FULL descriptors distinct for prefill-shaped and decode batches.
 
-    Currently installed only for TorchTitan's Attention Gym linear attention
-    backends (GDN/KDA).
     vLLM at c6fa1f0 erases the uniform-decode discriminator in FULL mode:
-    four one-token decodes collide with one four-token prefill. Attention Gym's
-    different numerical paths need distinct keys. Delegate decode keys to the
-    native FULL_DECODE_ONLY dispatcher until upstream supports FULL decode
-    specialization; native capture, replay and graph ownership stay intact.
-    The single-token key also covers fresh requests: initialization is GPU mask
-    data, not another dispatch key or a reason to switch to packed arithmetic.
+    four one-token decodes collide with one four-token prefill, and the shared
+    graph is captured with ``max_query_len`` equal to its token count. Decode
+    then replays kernel launches sized for prefill (FA4 attention at 256
+    decodes: 2.2x slower per call on GB300), and Attention Gym's linear
+    attention needs a different numerical path. Delegate
+    decode keys to the native FULL_DECODE_ONLY dispatcher until upstream
+    supports FULL decode specialization; native capture, replay and graph
+    ownership stay intact. The single-token key also covers fresh requests:
+    initialization is GPU mask data, not another dispatch key or a reason to
+    switch to packed arithmetic.
 
     This costs one additional graph capture per decode-specialized batch size
     and additional memory for the expanded graph pool.
@@ -80,15 +82,23 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
 
 
 class TorchTitanGPUModelRunner(GPUModelRunner):
-    """V1 runner with sequence-parallel padding and linear attention (GDN/KDA) decode specialization."""
+    """V1 runner with sequence-parallel padding and FULL-mode decode specialization."""
 
     def load_model(self, load_dummy_weights: bool = False) -> None:
         super().load_model(load_dummy_weights)
-        if any(
+        has_linear_attention = any(
             layer.get_attn_backend() is TorchTitanLinearAttentionBackend
             for layer in get_layers_from_vllm_config(
                 self.vllm_config, MambaBase
             ).values()
+        )
+        # At DP > 1 vLLM pads a decoding rank to the busiest rank's token count, which
+        # can exceed the largest decode graph. Linear attention reports uniform-only
+        # graph support there, so vLLM downgrades FULL to FULL_DECODE_ONLY; other
+        # models keep FULL and vLLM's dispatcher.
+        if (
+            has_linear_attention
+            or self.vllm_config.parallel_config.data_parallel_size == 1
         ):
             assert not self.cudagraph_dispatcher.keys_initialized
             self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
