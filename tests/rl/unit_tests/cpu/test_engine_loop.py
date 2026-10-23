@@ -886,6 +886,7 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
     async def run() -> None:
         # The generator's endpoints around the engine loop, without building vLLM.
         generator = object.__new__(Generator)
+        generator.config = SimpleNamespace(fetch_weights_per_module=False)
         generator._engine_loop = engine_thread(engine)
         generator._prefetched_model_state_dict = {}
         await generator.start_engine_loop()
