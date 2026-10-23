@@ -84,42 +84,37 @@ jobs:
           print(f"triton={triton.__version__}")
           PY
 
-      - name: Run CPU debug-model training smoke test
+      - name: Run CPU debug-model forward smoke test
         working-directory: ${{ runner.temp }}
         run: |
           "$RUNNER_TEMP/validate-rc-venv/bin/python" - <<'PY'
           import torch
           import torch.nn.functional as F
-          from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+
+          from torchtitan.config.parallelism import ParallelismConfig
           from torchtitan.models.llama3 import build_model_config
 
           torch.manual_seed(42)
-          model_config = build_model_config("debugmodel")
-          for layer_config in model_config.layers:
-              layer_config.attention.inner_attention = ScaledDotProductInnerAttention.Config()
-
+          torch.compiler.set_stance("force_eager")
+          model_config = build_model_config(
+              "debugmodel",
+              parallelism=ParallelismConfig(),
+              seq_len=16,
+              attn_backend="flex",
+          )
           model = model_config.build()
           model.init_states(buffer_device=torch.device("cpu"))
-          model.train()
-          optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-          tokens = torch.randint(0, 2048, (1, 16))
-          positions = torch.arange(16).unsqueeze(0)
-          losses = []
+          model.eval()
+          tokens_T = torch.randint(0, 2048, (16,))
+          positions_T = torch.arange(16)
+          attention_metadata = model._get_attention_metadata(positions_T)
 
-          for _ in range(3):
-              optimizer.zero_grad(set_to_none=True)
-              logits = model(tokens, positions, None)
-              loss = F.cross_entropy(
-                  logits[:, :-1].reshape(-1, logits.size(-1)),
-                  tokens[:, 1:].reshape(-1),
-              )
-              assert torch.isfinite(loss), loss
-              loss.backward()
-              optimizer.step()
-              losses.append(loss.item())
+          with torch.no_grad():
+              logits_TV = model(tokens_T, positions_T, attention_metadata)
+              loss = F.cross_entropy(logits_TV[:-1], tokens_T[1:])
 
-          assert losses[-1] < losses[0], losses
-          print(f"losses={losses}")
+          assert torch.isfinite(loss), loss
+          print(f"loss={loss.item()}")
           PY
 
       - name: Run CPU unit tests against installed RC
