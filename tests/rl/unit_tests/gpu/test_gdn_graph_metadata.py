@@ -58,7 +58,7 @@ def test_gdn_supports_eager_and_full_decode_only_modes(graph_mode):
 
     TorchTitanLinearAttentionMetadataBuilder(spec, [], config, torch.device("cpu"))
 
-    dispatcher = TorchTitanCudagraphDispatcher(config)
+    dispatcher = TorchTitanCudagraphDispatcher(config, has_linear_attention=True)
     dispatcher.initialize_cudagraph_keys(graph_mode)
     decode_mode, _ = dispatcher.dispatch(1, uniform_decode=True)
     prefill_mode, _ = dispatcher.dispatch(2, uniform_decode=False)
@@ -86,7 +86,7 @@ def test_full_metadata_and_native_dispatch_variants():
         is_encoder_decoder=False,
     )
     config.cache_config.mamba_cache_mode = "align"
-    dispatcher = TorchTitanCudagraphDispatcher(config)
+    dispatcher = TorchTitanCudagraphDispatcher(config, has_linear_attention=True)
     assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
     dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
     decode_mode, decode = dispatcher.dispatch(2, uniform_decode=True)

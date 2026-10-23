@@ -70,6 +70,7 @@ from vllm.config import (
     CompilationConfig,
     CompilationMode,
     CUDAGraphMode,
+    DeviceConfig,
     SchedulerConfig,
     VllmConfig,
 )
@@ -826,33 +827,51 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
     )
 
 
-@pytest.mark.parametrize(
-    ("data_parallel_size", "expect_decode_graph"), [(1, True), (2, False)]
-)
-def test_full_mode_softmax_attention_decode_dispatch(
-    monkeypatch, data_parallel_size, expect_decode_graph
-):
+def _full_mode_vllm_config(
+    *, max_num_seqs: int, data_parallel_size: int = 1
+) -> VllmConfig:
+    """FULL CUDA graphs of 1, 2, 4 and 8 tokens; decode graphs up to ``max_num_seqs``."""
+    # An explicit device: CPU-only runners have no platform for vLLM to infer.
+    config = VllmConfig(device_config=DeviceConfig(device="cuda"))
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_cudagraph_capture_size=8,
+    )
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=16,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=8,
+        is_encoder_decoder=False,
+    )
+    config.parallel_config.data_parallel_size = data_parallel_size
+    return config
+
+
+def _full_mode_dispatcher(
+    *, max_num_seqs: int, has_linear_attention: bool
+) -> worker_module.TorchTitanCudagraphDispatcher:
+    dispatcher = worker_module.TorchTitanCudagraphDispatcher(
+        _full_mode_vllm_config(max_num_seqs=max_num_seqs),
+        has_linear_attention=has_linear_attention,
+    )
+    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+    return dispatcher
+
+
+@pytest.mark.parametrize("data_parallel_size", [1, 2])
+def test_full_mode_softmax_attention_decode_dispatch(monkeypatch, data_parallel_size):
     """Under FULL, a model without linear attention replays decode graphs for uniform
-    decode batches at DP = 1, and keeps vLLM's dispatcher at DP > 1."""
+    decode batches, at any DP size."""
     base_runner_cls = TorchTitanGPUModelRunner.__mro__[1]
     monkeypatch.setattr(base_runner_cls, "load_model", lambda self, *args: None)
     monkeypatch.setattr(
         worker_module, "get_layers_from_vllm_config", lambda config, layer_type: {}
     )
-    config = VllmConfig()
-    config.compilation_config = CompilationConfig(
-        mode=CompilationMode.NONE,
-        cudagraph_mode=CUDAGraphMode.FULL,
-        cudagraph_capture_sizes=[1, 2, 4],
-        max_cudagraph_capture_size=4,
+    config = _full_mode_vllm_config(
+        max_num_seqs=4, data_parallel_size=data_parallel_size
     )
-    config.scheduler_config = SchedulerConfig(
-        max_model_len=16,
-        max_num_seqs=4,
-        max_num_batched_tokens=4,
-        is_encoder_decoder=False,
-    )
-    config.parallel_config.data_parallel_size = data_parallel_size
     runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
     runner.vllm_config = config
     runner.cudagraph_dispatcher = CudagraphDispatcher(config)
@@ -862,7 +881,54 @@ def test_full_mode_softmax_attention_decode_dispatch(
     mode, descriptor = runner.cudagraph_dispatcher.dispatch(2, uniform_decode=True)
 
     assert mode == CUDAGraphMode.FULL
-    assert descriptor.uniform == expect_decode_graph
+    assert descriptor.uniform
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "valid_modes"),
+    [
+        # A DP > 1 rank padded to the busiest rank's 8 tokens; only the synced mode.
+        (8, {CUDAGraphMode.FULL}),
+        # 6 decodes: above the largest decode graph (4), within max_num_seqs (6).
+        (6, None),
+    ],
+)
+def test_full_mode_decode_above_largest_decode_graph_replays_mixed_graph(
+    num_tokens, valid_modes
+):
+    """A uniform decode batch above the largest decode graph replays the mixed graph
+    instead of failing the lookup (DP padding) or running eager (capture-size gap)."""
+    dispatcher = _full_mode_dispatcher(max_num_seqs=6, has_linear_attention=False)
+
+    mode, descriptor = dispatcher.dispatch(
+        num_tokens, uniform_decode=True, valid_modes=valid_modes
+    )
+
+    assert mode == CUDAGraphMode.FULL
+    assert descriptor.num_tokens == 8 and not descriptor.uniform
+    mode, descriptor = dispatcher.dispatch(3, uniform_decode=True)
+    assert mode == CUDAGraphMode.FULL
+    assert descriptor.num_tokens == 4 and descriptor.uniform
+
+
+@pytest.mark.parametrize(
+    ("has_linear_attention", "expected_mode"),
+    [(True, CUDAGraphMode.NONE), (False, CUDAGraphMode.FULL)],
+)
+def test_batch_invariant_linear_attention_keeps_decode_kernels(
+    monkeypatch, has_linear_attention, expected_mode
+):
+    """In batch-invariant mode, linear attention runs a decode batch above the largest
+    decode graph on its decode kernels (eager), not the mixed graph's packed kernels;
+    softmax attention still replays the mixed graph."""
+    monkeypatch.setattr(worker_module, "is_in_batch_invariant_mode", lambda: True)
+    dispatcher = _full_mode_dispatcher(
+        max_num_seqs=6, has_linear_attention=has_linear_attention
+    )
+
+    mode, _ = dispatcher.dispatch(6, uniform_decode=True)
+
+    assert mode == expected_mode
 
 
 def test_only_weights_use_cumem_allocator(monkeypatch):
