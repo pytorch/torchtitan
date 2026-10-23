@@ -11,9 +11,11 @@ required_env_vars=(
   VALIDATION_SUITE
   TORCH_VERSION
   TORCHVISION_VERSION
-  TORCHAO_VERSION
   PYTORCH_INDEX_URL
 )
+if [[ "${VALIDATION_SUITE:-}" != rl* ]]; then
+  required_env_vars+=(TORCHAO_VERSION)
+fi
 for var in "${required_env_vars[@]}"; do
   if [[ -z "${!var:-}" ]]; then
     echo "Missing required environment variable: ${var}"
@@ -60,11 +62,16 @@ nvidia-smi
 
 python -m pip uninstall -y torch torchvision torchao torchtitan
 
+release_wheels=(
+  "torch==${TORCH_VERSION}"
+  "torchvision==${TORCHVISION_VERSION}"
+)
+# RL CI does not explicitly install torchao; quantization CI installs it separately.
+if [[ "${VALIDATION_SUITE}" != rl* ]]; then
+  release_wheels+=("torchao==${TORCHAO_VERSION}")
+fi
 USE_CPP=0 PIP_EXTRA_INDEX_URL='' python -m pip install --pre \
-  --index-url "${PYTORCH_INDEX_URL}" \
-  "torch==${TORCH_VERSION}" \
-  "torchvision==${TORCHVISION_VERSION}" \
-  "torchao==${TORCHAO_VERSION}"
+  --index-url "${PYTORCH_INDEX_URL}" "${release_wheels[@]}"
 
 RC_PACKAGE="torchtitan"
 if [[ "${VALIDATION_SUITE}" == rl* ]]; then
@@ -75,7 +82,7 @@ if [[ "${VALIDATION_SUITE}" == rl* ]]; then
 import os
 from importlib.metadata import version
 
-for name in ("torch", "torchvision", "torchao", "triton"):
+for name in ("torch", "torchvision", "triton"):
     print(f"{name}=={version(name)}")
 print(f"torchtitan=={os.environ['RC_VERSION']}")
 print(f"vllm=={os.environ['VLLM_VERSION']}")
@@ -177,7 +184,6 @@ python - <<'PY'
 import os
 
 import torch
-import torchao
 import torchtitan
 import torchvision
 import triton
@@ -186,7 +192,6 @@ assert torchtitan.__version__ == os.environ["RC_VERSION"]
 assert "site-packages" in torchtitan.__file__
 assert torch.__version__.split("+")[0] == os.environ["TORCH_VERSION"]
 assert torchvision.__version__.split("+")[0] == os.environ["TORCHVISION_VERSION"]
-assert torchao.__version__.split("+")[0] == os.environ["TORCHAO_VERSION"]
 expected_cuda = "13.2" if os.environ["VALIDATION_SUITE"].startswith("rl") else "13.0"
 assert torch.version.cuda == expected_cuda
 assert torch.cuda.is_available()
@@ -214,10 +219,14 @@ if os.environ["VALIDATION_SUITE"].startswith("rl"):
         assert torch.cuda.get_device_capability() == (9, 0)
     for name in ("vllm", "torchmonarch", "torchstore", "batch_invariant_ops"):
         print(f"{name}={version(name)}")
+else:
+    import torchao
+
+    assert torchao.__version__.split("+")[0] == os.environ["TORCHAO_VERSION"]
+    print(f"torchao={torchao.__version__}")
 print(f"torchtitan={torchtitan.__version__} ({torchtitan.__file__})")
 print(f"torch={torch.__version__} ({torch.version.git_version})")
 print(f"torchvision={torchvision.__version__}")
-print(f"torchao={torchao.__version__}")
 print(f"triton={triton.__version__}")
 print(f"num_cuda_devices={torch.cuda.device_count()}")
 PY

@@ -222,7 +222,6 @@ jobs:
         VLLM_VERSION="${{ needs.validate-version.outputs.vllm-version }}" \
         TORCH_VERSION="2.15.0" \
         TORCHVISION_VERSION="0.29.2" \
-        TORCHAO_VERSION="0.18.0" \
         PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu132" \
         bash .github/scripts/validate_release_gpu.sh
 
@@ -256,7 +255,6 @@ jobs:
           VALIDATION_SUITE="rl-b200" \
           TORCH_VERSION="2.15.0" \
           TORCHVISION_VERSION="0.29.2" \
-          TORCHAO_VERSION="0.18.0" \
           PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu132" \
           bash .github/scripts/validate_release_gpu.sh
 
