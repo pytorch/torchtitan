@@ -13,7 +13,7 @@ import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, cast, NoReturn, overload
+from typing import Any, cast, Literal, NoReturn, overload
 
 import torch
 from torch import Tensor
@@ -158,6 +158,14 @@ class DistMuon(Optimizer):
     same mathematical update as ``torch.optim.Muon`` running one matrix at a
     time, but bitwise equality across the two kernel schedules is not part of
     the contract.
+
+    ``ns_device`` selects where Newton-Schulz runs. ``None`` keeps the storage
+    device, where each parameter's local shard lives (the host under FSDP2 CPU
+    offload). ``"accelerator"`` copies each compute view to the current
+    accelerator, of any type, runs Newton-Schulz there and copies the result
+    back.
+    Momentum, parameters, gradients and redistribution buffers stay where they
+    are, so this only changes anything when the parameters live on the host.
     """
 
     _specs: tuple[_BucketSpec, ...]
@@ -180,7 +188,9 @@ class DistMuon(Optimizer):
         eps: float = 1e-7,
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
+        ns_device: Literal["accelerator"] | None = None,
     ) -> None:
+        self._ns_device = self._resolve_ns_device(ns_device)
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -201,6 +211,20 @@ class DistMuon(Optimizer):
             compute_sharding_by_fqn=compute_sharding_by_fqn,
             bucket_configs=bucket_configs,
         )
+
+    @staticmethod
+    def _resolve_ns_device(ns_device: str | None) -> torch.device | None:
+        """Return the Newton-Schulz device, or ``None`` to keep the storage device."""
+        if ns_device is None:
+            return None
+        if ns_device != "accelerator":
+            raise ValueError(
+                f"ns_device must be 'accelerator' or None, got {ns_device!r}"
+            )
+        accelerator = torch.accelerator.current_accelerator(check_available=True)
+        if accelerator is None:
+            raise ValueError("ns_device='accelerator' requires an accelerator")
+        return torch.device(accelerator.type, torch.accelerator.current_device_index())
 
     @overload
     def step(self, closure: None = None) -> None:
@@ -574,9 +598,18 @@ class DistMuon(Optimizer):
     def _compute_update(
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
     ) -> None:
+        if compute.numel() == 0:
+            return
         group = self._group(compute_layout)
+        # Stage onto the Newton-Schulz device only when the compute view lives
+        # elsewhere, e.g. on the host under CPU offload.
+        staged = (
+            compute
+            if self._ns_device is None or compute.device == self._ns_device
+            else compute.to(self._ns_device, non_blocking=False)
+        )
         _compute_muon_direction(
-            compute,
+            staged,
             matrix_views=self._matrix_views_by_fqn[compute_layout.fqn],
             lr_reference_shape=(
                 None
@@ -588,6 +621,8 @@ class DistMuon(Optimizer):
             ns_steps=group["ns_steps"],
             eps=group["eps"],
         )
+        if staged is not compute:
+            compute.copy_(staged, non_blocking=False)
 
     def _apply_update(
         self, compute_layout: _ParameterComputeLayout, direction: Tensor

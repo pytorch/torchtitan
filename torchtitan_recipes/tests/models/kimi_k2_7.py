@@ -479,6 +479,7 @@ def _dist_muon_optimizer(
                 # shape-consistent AdamW-scale updates instead of Muon's
                 # original aspect-ratio scaling.
                 adjust_lr_fn="match_rms_adamw",
+                ns_device="accelerator",
             ),
             # The remaining parameters are embeddings, norms, biases, LM head,
             # and the vision tower.
