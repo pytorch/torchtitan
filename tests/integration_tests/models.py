@@ -486,6 +486,15 @@ def kimi_k2_5_debugmodel_seed_checkpoint() -> Trainer.Config:
     return config
 
 
+def minimax_m3_debugmodel_mm_fsdp4() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.minimax_m3 import minimax_m3_debugmodel
+
+    config = minimax_m3_debugmodel()
+    config.parallelism.data_parallel_shard_degree = 4
+    _set_spmd_typechecking(config, typechecking=True)
+    return config
+
+
 def muse_glimmer_debugmodel_fsdp8() -> Trainer.Config:
     from torchtitan_recipes.tests.models.muse_glimmer import muse_glimmer_debugmodel
 
@@ -802,6 +811,13 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="Kimi K2.5 DistMuon FSDP+EP",
             test_name="kimi_k2_5_muon_fsdp+ep",
             ngpu=8,
+        ),
+        # Integration Test Cases for MiniMax M3
+        IntegrationTestDefinition(
+            configs=[minimax_m3_debugmodel_mm_fsdp4],
+            test_descr="MiniMax M3 multimodal FSDP",
+            test_name="minimax_m3_mm_fsdp",
+            ngpu=4,
         ),
         # Integration Test Cases for Muse Glimmer
         IntegrationTestDefinition(
