@@ -11,6 +11,7 @@ import logging
 import os
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from typing import Any
 
 import torch
@@ -135,6 +136,38 @@ class BaseStateDictAdapter(ABC):
 
         """
         pass
+
+    def fqn_to_index_mapping_for(
+        self, hf_fqns: Collection[str]
+    ) -> dict[Any, int] | None:
+        """Restrict ``fqn_to_index_mapping`` to the tensors an HF save writes.
+
+        ``model.safetensors.index.json`` can list tensors the model does not
+        write, e.g. MTP weights, quantization scales, or the vision tower of a
+        text-only config. Consolidation would give each of them an empty header
+        entry that makes its file unreadable.
+
+        Args:
+            hf_fqns: HF FQNs of all tensors the save writes, across all ranks.
+
+        Returns:
+            The entries of ``fqn_to_index_mapping`` whose names occur in
+            ``hf_fqns``, or None when no index exists.
+        """
+        if self.fqn_to_index_mapping is None:
+            return None
+        skipped = sorted(self.fqn_to_index_mapping.keys() - hf_fqns)
+        if skipped:
+            logger.info(
+                f"Skipping {len(skipped)} tensors listed in "
+                f"model.safetensors.index.json but missing from the HF state "
+                f"dict: {skipped[:20]}"
+            )
+        return {
+            fqn: index
+            for fqn, index in self.fqn_to_index_mapping.items()
+            if fqn in hf_fqns
+        }
 
 
 class StateDictAdapter(BaseStateDictAdapter):
