@@ -152,6 +152,76 @@ class _IdentityW2(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
+    def test_router_precision_rejects_nondifferentiable_dtypes(self):
+        for dtype in (torch.int64, torch.bool):
+            with self.subTest(dtype=dtype):
+                with self.assertRaisesRegex(ValueError, "floating-point dtype"):
+                    Sigmoid.Config(compute_dtype=dtype)
+                with self.assertRaisesRegex(ValueError, "floating-point dtype"):
+                    TokenChoiceTopKRouter.Config(
+                        num_experts=4,
+                        gate=Linear.Config(in_features=4, out_features=4),
+                        score_func=Sigmoid.Config(),
+                        routing_weight_dtype=dtype,
+                    )
+
+    def test_sigmoid_explicit_precision_preserves_bf16_input_gradient(self):
+        logits = torch.tensor(
+            [-3.0, -1.0, 2.0, 4.0], dtype=torch.bfloat16, requires_grad=True
+        )
+        default_scores = Sigmoid.Config().build()(logits)
+        scores = Sigmoid.Config(compute_dtype=torch.float32).build()(logits)
+        self.assertEqual(default_scores.dtype, torch.bfloat16)
+        self.assertEqual(scores.dtype, torch.float32)
+        torch.testing.assert_close(
+            scores, torch.sigmoid(logits.float()), rtol=0, atol=0
+        )
+        gradient = torch.autograd.grad(scores.sum(), logits)[0]
+        torch.testing.assert_close(
+            gradient, (scores * (1 - scores)).bfloat16(), rtol=0, atol=0
+        )
+
+    def test_routing_weight_dtype_preserves_fp32_scoring_and_selection(self):
+        router = (
+            TokenChoiceTopKRouter.Config(
+                num_experts=4,
+                gate=Linear.Config(
+                    in_features=4, out_features=4, inplace_wgrad_accum=False
+                ),
+                score_func=Sigmoid.Config(compute_dtype=torch.float32),
+                top_k=2,
+                route_norm=True,
+                route_scale=2.5,
+                routing_weight_dtype=torch.bfloat16,
+            )
+            .build()
+            .eval()
+        )
+        router.gate.bfloat16()
+        with torch.no_grad():
+            router.gate.weight.copy_(torch.eye(4, dtype=torch.bfloat16))
+        inputs = torch.tensor(
+            [[-3.0, -1.0, 2.0, 4.0]], dtype=torch.bfloat16, requires_grad=True
+        )
+        scores, indices, routing_map = router(inputs)
+        expected_scores = torch.sigmoid(inputs.float())
+        _, expected_indices = expected_scores.topk(2, dim=-1, sorted=False)
+        selected = expected_scores.gather(-1, expected_indices)
+        expected = (
+            selected / (selected.sum(-1, keepdim=True) + 1e-20) * 2.5
+        ).bfloat16()
+        self.assertEqual(scores.dtype, torch.bfloat16)
+        torch.testing.assert_close(indices, expected_indices, rtol=0, atol=0)
+        torch.testing.assert_close(scores, expected, rtol=0, atol=0)
+        self.assertEqual(routing_map.sum().item(), 2)
+        grad_scores = torch.tensor([[0.5, 1.5]], dtype=torch.bfloat16)
+        actual_grad = torch.autograd.grad(
+            scores, inputs, grad_scores, retain_graph=True
+        )[0]
+        expected_grad = torch.autograd.grad(expected, inputs, grad_scores)[0]
+        self.assertGreater(actual_grad.abs().sum().item(), 0)
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
+
     def test_make_router_config_requires_score_func(self):
         with self.assertRaisesRegex(TypeError, "score_func"):
             make_router_config(

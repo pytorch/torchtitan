@@ -1091,3 +1091,130 @@ def test_dist_moe_671b_recipe_topology(factory, dp_degree, num_microbatches) -> 
     (optimizer_config,) = config.optim.optimizer.optimizers
     assert isinstance(optimizer_config, AdamW.Config)
     assert optimizer_config.moment_dtype == "bfloat16"
+
+
+@pytest.mark.parametrize("pp_degree", [2, 4])
+@pytest.mark.parametrize("performance", [False, True])
+def test_dsv3_mtp1_mlperf_recipe_contract(pp_degree, performance, monkeypatch):
+    from torchtitan.components.data import IndexedJsonlSource
+    from torchtitan.components.loss import ChunkedLossWrapper
+    from torchtitan.models.common.moe import MoE, RoundRobinTokenChoiceTopKRouter
+    from torchtitan.quantization.mxfp8.linear import MXFP8Linear
+    from torchtitan_recipes.overrides.dsv3_mlperf import UnbiasedTopKLoadBalanceLoss
+
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    source = IndexedJsonlSource.Config(patterns=("/unused/config-only.jsonl",))
+    name = f"deepseek_v3_671b_mtp1_pp{pp_degree}_mlperf" + (
+        "_perf" if performance else ""
+    )
+    config = getattr(eager_production_recipes, name)(
+        training_source=source,
+        validation_source=source,
+        hf_assets_path="/unused/assets",
+    )
+    parallelism = config.parallelism
+    dp_degree = 256 // pp_degree
+    assert parallelism.num_pp_microbatches == 15360 // dp_degree
+    assert parallelism.data_parallel_shard_degree == dp_degree
+    assert parallelism.expert_parallel_degree == 64
+    assert parallelism.fsdp_reshard_after_forward == "never"
+    assert parallelism.pipeline_parallel_max_outstanding_sends == 16
+    assert parallelism.pp_max_unsharded_active_stages == 16 // pp_degree
+    parts = parallelism.pipeline_parallel_module_fqns_per_model_part
+    assert len(parts) == 16
+    layers = [
+        int(fqn.split(".")[1])
+        for part in parts
+        for fqn in part
+        if fqn.startswith("layers.")
+    ]
+    assert layers == list(range(61))
+    assert parts[0] == [
+        "tok_embeddings",
+        "layers.0",
+        "layers.1",
+        "layers.2",
+        "layers.3",
+    ]
+    assert parts[-1] == [
+        "layers.60",
+        "norm",
+        "lm_head",
+        "mtp_layers.0",
+        "tok_embeddings",
+    ]
+    assert config.training.num_tokens_per_train_step == 15360 * 4096
+    assert config.training.num_tokens_per_microbatch_per_dp_rank == 4096
+    assert config.validator.global_batch_size == 1024
+    assert config.training.dtype == "float32"
+    assert (
+        config.training.mixed_precision_param
+        == config.training.mixed_precision_reduce
+        == "bfloat16"
+    )
+    assert [
+        optimizer.weight_decay for optimizer in config.optim.optimizer.optimizers
+    ] == [0.0, 0.033]
+    for optimizer in config.optim.optimizer.optimizers:
+        assert optimizer.moment_dtype == "bfloat16" and optimizer.fused
+        assert optimizer.lr == 2.3238e-5
+        assert optimizer.betas == (0.9, 0.95) and optimizer.eps == 1e-8
+    assert config.validator.freq == config.validator.steps == 1
+    assert isinstance(config.loss, ChunkedLossWrapper.Config)
+    assert config.loss.validation_only and config.loss.num_chunks == 1
+    assert config.loss.loss_fn.mtp_scale == 0.1
+    assert config.optim.lr_scheduler.warmup_start_factor == 0.0
+    assert config.optim.enable_cuda_graph
+    assert config.training.cuda_graph_warmup_steps == 1
+    assert config.optim.lr_scheduler.total_steps == 11996
+    assert config.dist_moe_runtime.scratch_capacity_factor == (
+        1.0 if performance else 32.0
+    )
+    assert config.dist_moe_runtime.activation_slot_capacity_factor == (
+        1.0 if performance else None
+    )
+    assert config.dist_moe_runtime.vmm_capacity_factor is None
+    moes = list(config.model.traverse(MoE.Config))
+    assert len(moes) == 59
+    for _, moe, _, _ in moes:
+        assert type(moe.router.gate) is Linear.Config
+        assert not moe.router.gate.inplace_wgrad_accum
+        assert moe.router.score_func.compute_dtype == torch.float32
+        assert moe.router.routing_weight_dtype == torch.bfloat16
+        assert moe.router.top_k == 8 and moe.router.route_scale == 2.5
+        assert moe.load_balance_coeff == 0.001 and not moe.freeze_expert_bias
+        assert not moe.center_expert_bias_update
+        if not performance:
+            assert moe.router.num_expert_groups == 8
+            assert moe.router.num_limited_groups == 4
+        assert isinstance(moe.router.aux_loss, UnbiasedTopKLoadBalanceLoss.Config)
+        assert moe.router.aux_loss.coeff == 0.01
+        assert (
+            isinstance(moe.router, RoundRobinTokenChoiceTopKRouter.Config)
+            == performance
+        )
+    linears = list(config.model.traverse(MXFP8Linear.Config))
+    assert linears
+    kv_b_linears = [
+        linear
+        for fqn, linear, _, _ in linears
+        if fqn.endswith("attention.inner_attention.wkv_b")
+    ]
+    assert len(kv_b_linears) == 62
+    assert all(
+        linear.input_activation_format_for_backward == "mxfp8"
+        for linear in kv_b_linears
+    )
+    for fqn, linear, _, _ in linears:
+        assert not hasattr(linear, "activation_quantization_backend"), fqn
+        if fqn.endswith("attention.wkv_a"):
+            assert linear.out_features == 576
+    assert config.dataloader.map_dataset_dp_sharding == "strided"
+    assert not config.dataloader.shuffle
+    from torchtitan.components.data.collators import TextCollator
+    from torchtitan.models.deepseek_v3.pipeline import MTPGradientClipper
+
+    assert type(config.dataloader.collator) is TextCollator.Config
+    assert config.dataloader.max_num_documents == 1
+    assert isinstance(config.optim.gradient_clipper, MTPGradientClipper.Config)
+    assert config.checkpointer.initial_load_in_hf and config.checkpointer.load_only

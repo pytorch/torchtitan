@@ -114,6 +114,13 @@ Training keeps its ordinary logits/loss and FSDP policy. Evaluation temporarily
 skips the model's head and lets the loss project and release each term; a
 multi-output loss must implement its own sequential projection hook.
 
+`config.training.cuda_graph_warmup_steps` counts eager graph-runner calls before
+training and optimizer capture (default `2`). Full-step mode counts optimizer
+updates; per-microbatch-group mode counts groups. Validation retains its own
+one-call warmup, and capture begins only after all participating runners warm up.
+The production MLPerf recipes select `1`; capture still follows the shared
+pool's eval-first readiness gate, not merely this eager-call count.
+
 Keep simple invariants that use one config's fields in its `__post_init__`.
 Keep checks that span config sections in [validation.py](validation.py).
 `Trainer.Config.__post_init__` calls these checks after its local validation.

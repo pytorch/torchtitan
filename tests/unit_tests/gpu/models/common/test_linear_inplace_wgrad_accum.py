@@ -22,6 +22,90 @@ from torchtitan.models.common.linear.linear import _LinearFunction
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 
+@pytest.mark.parametrize("pp_degree", [2, 4])
+@pytest.mark.parametrize("performance", [False, True])
+def test_dsv3_mlperf_router_bf16_forward_backward(pp_degree, performance):
+    """The recipe gate uses BF16 storage and GEMMs at full DSV3 router geometry."""
+    from torchtitan.components.data import IndexedJsonlSource
+    from torchtitan.models.common.moe import MoE
+    from torchtitan_recipes.models import deepseek_v3 as recipes
+
+    source = IndexedJsonlSource.Config(patterns=("/unused/config-only.jsonl",))
+    name = f"deepseek_v3_671b_mtp1_pp{pp_degree}_mlperf" + (
+        "_perf" if performance else ""
+    )
+    config = getattr(recipes, name)(
+        training_source=source,
+        validation_source=source,
+        hf_assets_path="/unused/assets",
+    )
+    _, moe, _, _ = next(config.model.traverse(MoE.Config))
+    assert type(moe.router.gate) is Linear.Config
+    torch.manual_seed(42)
+    router = moe.router.build().cuda().eval()
+    gate = router.gate.bfloat16()
+    input_TD = torch.randn(
+        4096,
+        gate.in_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    grad_TE = torch.randn(
+        4096,
+        gate.out_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    saved_dtypes = []
+
+    def pack(tensor):
+        saved_dtypes.append(tensor.dtype)
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
+        output_TE = gate(input_TD)
+    grad_input_TD, grad_weight_ED = torch.autograd.grad(
+        output_TE, (input_TD, gate.weight), grad_TE
+    )
+    assert (
+        output_TE.dtype == grad_input_TD.dtype == grad_weight_ED.dtype == torch.bfloat16
+    )
+    assert saved_dtypes and all(dtype == torch.bfloat16 for dtype in saved_dtypes)
+    assert torch.equal(output_TE, input_TD.detach().mm(gate.weight.detach().T))
+    assert torch.equal(grad_input_TD, grad_TE.mm(gate.weight.detach()))
+    assert torch.equal(grad_weight_ED, grad_TE.T.mm(input_TD.detach()))
+    assert set(gate.state_dict()) == {"weight"}
+    with torch.no_grad():
+        weights_TK, indices_TK, _ = router(input_TD.detach())
+        scores_TE = torch.sigmoid(output_TE.float())
+        assert router.score_func(output_TE).dtype == torch.float32
+        if performance:
+            expected_indices_TK = (
+                torch.arange(4096 * 8, device="cuda").reshape(4096, 8) % 256
+            )
+        else:
+            grouped_TGE = scores_TE.reshape(4096, 8, 32)
+            group_scores_TG = grouped_TGE.topk(2, dim=-1).values.sum(dim=-1)
+            group_ids_TG = group_scores_TG.topk(4, dim=-1, sorted=False).indices
+            group_mask_TG = torch.zeros_like(
+                group_scores_TG, dtype=torch.bool
+            ).scatter_(-1, group_ids_TG, True)
+            choice_TE = grouped_TGE.masked_fill(
+                ~group_mask_TG.unsqueeze(-1), 0
+            ).flatten(-2)
+            expected_indices_TK = choice_TE.topk(8, dim=-1, sorted=False).indices
+        assert torch.equal(
+            indices_TK.sort(-1).values, expected_indices_TK.sort(-1).values
+        )
+        selected_TK = scores_TE.gather(-1, indices_TK)
+        expected_TK = (
+            selected_TK / (selected_TK.sum(-1, keepdim=True) + 1e-20) * 2.5
+        ).bfloat16()
+        assert weights_TK.dtype == torch.bfloat16
+        assert torch.equal(weights_TK, expected_TK)
+
+
 def _build(*, inplace_wgrad_accum: bool, num_linears: int = 1) -> Linear:
     torch.manual_seed(0)
     module = Linear.Config(

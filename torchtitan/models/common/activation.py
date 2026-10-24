@@ -88,21 +88,32 @@ class UnaryActivationFn(Function[torch.Tensor], ABC):
 
 
 class Sigmoid(UnaryActivationFn):
-    """Sigmoid activation."""
+    """Sigmoid activation with optional compute precision."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(UnaryActivationFn.Config):
-        pass
+        compute_dtype: torch.dtype | None = None
+        """Compute and return scores in this dtype; None preserves input precision."""
+
+        def __post_init__(self) -> None:
+            if (
+                self.compute_dtype is not None
+                and not self.compute_dtype.is_floating_point
+            ):
+                raise ValueError("compute_dtype must be a floating-point dtype")
 
     def __init__(self, config: Config) -> None:
-        pass
+        self.compute_dtype = config.compute_dtype
 
     def __call__(
         self,
         x: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
+        """Apply sigmoid in the configured dtype without detaching its input."""
         del kwargs
+        if self.compute_dtype is not None:
+            x = x.to(self.compute_dtype)
         return torch.sigmoid(x)
 
 

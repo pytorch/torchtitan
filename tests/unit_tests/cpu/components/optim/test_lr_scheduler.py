@@ -16,6 +16,35 @@ from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 
 class TestLRScheduler(unittest.TestCase):
+    def test_zero_start_warmup_matches_mlperf_update_order(self):
+        config = LRSchedulersContainer.Config(
+            warmup_steps=4,
+            warmup_start_factor=0.0,
+            total_steps=11996,
+            decay_type="cosine",
+            min_lr_factor=5e-6 / 2.3238e-5,
+        )
+        schedulers = config.build(
+            optimizers=self.optimizer_container, training_steps=10
+        )
+        for factor in (0.0, 0.25, 0.5, 0.75, 1.0):
+            self.assertAlmostEqual(self.optimizer.param_groups[0]["lr"], 0.1 * factor)
+            schedulers.step()
+        state = schedulers.state_dict()
+        expected_lr = self.optimizer.param_groups[0]["lr"]
+        restored = config.build(optimizers=self.optimizer_container, training_steps=10)
+        restored.load_state_dict(state)
+        self.assertEqual(self.optimizer.param_groups[0]["lr"], expected_lr)
+
+    def test_invalid_warmup_start_factor(self):
+        for factor in (-0.1, 1.1, float("nan")):
+            with self.subTest(factor=factor), self.assertRaisesRegex(
+                ValueError, "warmup_start_factor"
+            ):
+                LRSchedulersContainer.Config(warmup_start_factor=factor)
+        with self.assertRaisesRegex(ValueError, "positive warmup_steps"):
+            LRSchedulersContainer.Config(warmup_steps=0, warmup_start_factor=0.0)
+
     def test_optimizer_package_import_path(self):
         from torchtitan.components.optim import (
             LRSchedulersContainer as PackageLRSchedulersContainer,

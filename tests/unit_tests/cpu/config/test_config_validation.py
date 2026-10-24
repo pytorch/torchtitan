@@ -44,6 +44,12 @@ def test_training_token_counts_are_positive() -> None:
         TrainingConfig(max_context_length=0)
 
 
+@pytest.mark.parametrize("warmup_steps", [0, -1])
+def test_cuda_graph_warmup_must_be_positive(warmup_steps) -> None:
+    with pytest.raises(ValueError, match="cuda_graph_warmup_steps must be positive"):
+        TrainingConfig(cuda_graph_warmup_steps=warmup_steps)
+
+
 def test_per_group_cuda_graph_config_restrictions() -> None:
     with pytest.raises(ValueError, match="require CUDA graphs to be enabled"):
         TrainingEngine.Config(

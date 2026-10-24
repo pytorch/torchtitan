@@ -79,6 +79,12 @@ class LRSchedulersContainer(Stateful, Configurable):
         Steps for lr scheduler warmup, normally 1/5 of training.steps.
         """
 
+        warmup_start_factor: float | None = None
+        """Initial LR multiplier during warmup. ``None`` preserves the first
+        multiplier of ``1 / warmup_steps``; ``0.0`` starts the first update at
+        zero and reaches the peak after ``warmup_steps`` updates.
+        """
+
         total_steps: int | None = None
         """
         Total steps for LR schedule calculation. If None, defaults to training.steps.
@@ -118,6 +124,13 @@ class LRSchedulersContainer(Stateful, Configurable):
                     "lr_scheduler.warmup_steps must be non-negative, "
                     f"got {self.warmup_steps}"
                 )
+            if self.warmup_start_factor is not None:
+                if not 0.0 <= self.warmup_start_factor <= 1.0:
+                    raise ValueError("warmup_start_factor must be in [0, 1]")
+                if self.warmup_steps == 0:
+                    raise ValueError(
+                        "warmup_start_factor requires positive warmup_steps"
+                    )
             if self.total_steps is not None and self.total_steps < 1:
                 raise ValueError(
                     f"lr_scheduler.total_steps must be positive, got {self.total_steps}"
@@ -179,6 +192,7 @@ class LRSchedulersContainer(Stateful, Configurable):
             stable_steps = total_steps + 1 - warmup_steps - decay_steps
             lr_decay_type = self.decay_type
             min_lr_factor = self.min_lr_factor
+            warmup_start_factor = self.warmup_start_factor
 
             def linear_warmup_stable_decay(
                 current_step: int,
@@ -208,13 +222,16 @@ class LRSchedulersContainer(Stateful, Configurable):
                 # Hold the final LR when training.steps exceeds lr_scheduler.total_steps.
                 current_step = min(current_step, warmup_stable_steps + decay_steps - 1)
                 if current_step < warmup_steps:
-                    # linear warmup
-                    # 0-indexed step, hence + 1 adjustments
-                    current_step += 1
                     assert (
                         warmup_steps != 0
                     ), "warmup_steps must not be zero to reach this branch"
-                    curr_adjustment = float(current_step / warmup_steps)
+                    if warmup_start_factor is None:
+                        curr_adjustment = float((current_step + 1) / warmup_steps)
+                    else:
+                        curr_adjustment = (
+                            warmup_start_factor
+                            + (1.0 - warmup_start_factor) * current_step / warmup_steps
+                        )
                 elif current_step < warmup_stable_steps:
                     curr_adjustment = 1.0
                 else:
