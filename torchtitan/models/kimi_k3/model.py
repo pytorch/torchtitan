@@ -58,6 +58,7 @@ from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sh
 from .attention import KimiMLAAttention
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
+from .vision_cp import install_vision_cp
 from .vision_encoder import KimiK3VisionEncoder
 
 # Shape suffixes:
@@ -288,6 +289,10 @@ class KimiK3Model(MultimodalModel):
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
 
+    def _encoder_is_cp_invariant(self, encoder: torch.nn.Module) -> bool:
+        vision = cast(KimiK3Model.Config, self.config).vision_encoder
+        return vision is None or vision.dynamic_cp_min_patches is None
+
     def parallelize(
         self,
         *,
@@ -303,6 +308,11 @@ class KimiK3Model(MultimodalModel):
         with parallelism_context.activate_spmd():
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)
+            install_vision_cp(
+                self.vision_encoder,
+                cast(KimiK3Model.Config, self.config).vision_encoder,
+                parallelism_context,
+            )
             if activation_remat is not None:
                 activation_remat.apply(self)
                 if self.vision_encoder is not None:
