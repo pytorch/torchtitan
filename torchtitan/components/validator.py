@@ -315,6 +315,14 @@ class Validator(BaseValidator):
             if self.parallelism_context.pp_enabled:
                 assert self.pp_schedule is not None
                 losses = [] if self.pp_has_last_stage else None
+                # Custom graph runtimes export scalar losses; structured export
+                # remains runtime-owned work.
+                loss_results = (
+                    []
+                    if self.pp_has_last_stage
+                    and isinstance(self.pp_schedule, _PipelineSchedule)
+                    else None
+                )
                 self.pp_schedule.eval(
                     arg_mbs=[(inputs,) for inputs, _, _ in prepared]
                     if self.pp_has_first_stage
@@ -324,11 +332,26 @@ class Validator(BaseValidator):
                     if self.pp_has_last_stage
                     else None,
                     losses=losses,
+                    loss_results=loss_results,
                     return_outputs=False,
                 )
                 if self.pp_has_last_stage:
                     assert losses is not None
-                    loss_sum = torch.stack(losses).sum().to(utils.device_type)
+                    if loss_results is None:
+                        loss_terms = losses
+                    else:
+                        if len(loss_results) != len(prepared):
+                            raise RuntimeError(
+                                "Expected one loss_results entry per microbatch; use the required PyTorch structured-loss API."
+                            )
+                        loss_terms = [
+                            result["metrics"].get("lm_loss_mean", result["loss"])
+                            for result in loss_results
+                        ]
+                    loss_sum = torch.stack(loss_terms).sum().to(utils.device_type)
+                    losses.clear()
+                    if loss_results is not None:
+                        loss_results.clear()
                 else:
                     loss_sum = torch.full((1,), -1.0, device=utils.device_type)
                 # Eval has no backward pass to release stage outputs.
@@ -342,8 +365,8 @@ class Validator(BaseValidator):
                 loss_terms = []
                 for inputs, labels, kwargs in prepared:
                     predictions = model_parts[0](inputs, **kwargs)
-                    loss, _ = self.loss_fn(predictions, labels)
-                    loss_terms.append(loss)
+                    loss, loss_metrics = self.loss_fn(predictions, labels)
+                    loss_terms.append(loss_metrics.get("lm_loss_mean", loss))
                     del predictions
                 loss_sum = torch.stack(loss_terms).sum()
             post_validate_fsdp_for_cuda_graph(model_parts)

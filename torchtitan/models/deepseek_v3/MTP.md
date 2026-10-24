@@ -301,6 +301,10 @@ embedding synchronization, fake-PG MTP pipeline metadata, and MTP+PP+CP are
 currently unsupported. GraphTrainer must implement its own MTP graph ownership
 and scheduling; it is outside this eager integration.
 
+Structured validation metrics require a native PyTorch pipeline schedule.
+Custom graph runtimes retain their existing scalar validation path; structured
+metric export remains GraphTrainer-owned work, not part of this stack.
+
 ## 4. MTP Loss Handling
 
 ### 4.1 Input Form
@@ -338,6 +342,31 @@ averaging the MTP losses and then scaling by `mtp_scale`:
 ```python
 total_loss = main_loss + mtp_scale * mean(mtp_losses)
 ```
+
+The loss also returns detached `lm_loss_mean`, unweighted `mtp_loss_mean`, and
+`combined_loss_mean` statistics. The `_mean` suffix uses the existing chunked
+loss reducer's additive-contribution contract; the trainer reports the readable
+names `lm_loss`, `mtp_loss`, and `combined_loss`. Their normalization follows the loss call: each term
+is divided by its per-objective global target count when counts are supplied;
+without counts, the terms are sums. The weighted training arithmetic is
+unchanged. The trainer accumulates the normalized metrics across pipeline
+microbatches and gradient accumulation, then sums their DP/CP contributions
+on loss-owning ranks. Scalar pipeline loss APIs remain supported through
+PyTorch's optional `loss_results` interface. Each exported entry is a plain
+dictionary with detached `loss` and named `metrics` tensors; no result class
+or additional loss callback is required.
+
+Upstream already supports generic per-microbatch loss kwargs and metric
+logging. This integration adds MTP's named objective terms and consumes the
+PyTorch pipeline loss-result dictionary API; it does not introduce another
+detached-loss API or change the backward objective. The schedule owns detached
+exports, while TorchTitan owns aggregation and logging on the loss-owning
+stage. Non-loss stages do not contribute local placeholders as global losses.
+
+Validation uses the LM term as its canonical `validation_metrics/loss` and
+normalizes its accumulated sum by the main target count. MTP remains part of
+the training objective; `mtp_scale=0.1` and MTP1 give
+`combined_loss = lm_loss + 0.1 * mtp_loss` for the normalized training metrics.
 
 Preprocessing also produces separate target-token and routed-token count
 vectors ordered as `(main, depth 1, ..., depth N)`. The trainer sums both

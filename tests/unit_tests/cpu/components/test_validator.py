@@ -11,6 +11,7 @@ from unittest import mock
 import pytest
 import torch
 import torch.nn as nn
+from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components import validator as validator_module
 from torchtitan.components.data import GrainDataLoader
@@ -354,6 +355,30 @@ def test_flux_validator_keeps_eager_validation_schedule(cuda_graph_enabled, capl
     assert warned == cuda_graph_enabled
 
 
+def test_generic_validator_reports_lm_term_as_canonical_loss(monkeypatch):
+    microbatch = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 1),
+        labels=torch.ones(1, 1, dtype=torch.long),
+        positions=torch.zeros(1, 1, dtype=torch.long),
+        padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+        loss_token_counts=torch.tensor(1),
+        routing_token_counts=torch.tensor([1]),
+    )
+    validator = _generic_validator(_ClosableLoader([microbatch]))
+    validator.loss_fn = lambda predictions, labels: (
+        torch.tensor(10.0),
+        {"lm_loss_mean": torch.tensor(3.0)},
+    )
+    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
+    try:
+        validator.validate([_EchoModel()], step=1)
+        validator.metrics_processor.log_validation.assert_called_once_with(
+            loss=3.0, step=1
+        )
+    finally:
+        validator.close()
+
+
 @pytest.mark.parametrize("mask_documents,expected_capacity", [(True, 8), (False, 1)])
 def test_validation_uses_data_policy_capacity(
     monkeypatch, mask_documents, expected_capacity
@@ -567,7 +592,8 @@ def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
     assert loader.closed
 
 
-def test_pipeline_validator_does_not_keep_outputs(monkeypatch):
+@pytest.mark.parametrize("exports_results", [False, True])
+def test_pipeline_validator_does_not_keep_outputs(monkeypatch, exports_results):
     # As training's step: otherwise the last stage keeps every microbatch's
     # output (logits) for a merged output the validator never uses.
     def microbatch():
@@ -586,16 +612,27 @@ def test_pipeline_validator_does_not_keep_outputs(monkeypatch):
     validator.pp_has_first_stage = True
     validator.pp_has_last_stage = True
 
-    def schedule_eval(*, target_mbs, losses, **kwargs):
+    def schedule_eval(*, target_mbs, losses, loss_results, **kwargs):
         del kwargs
         losses.extend(torch.tensor(1.0) for _ in target_mbs)
+        if exports_results:
+            loss_results.extend(
+                {"loss": loss.detach(), "metrics": {}} for loss in losses
+            )
 
-    validator.pp_schedule = mock.Mock(eval=mock.Mock(side_effect=schedule_eval))
+    validator.pp_schedule = mock.Mock(
+        spec=_PipelineSchedule, eval=mock.Mock(side_effect=schedule_eval)
+    )
     monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
-    validator.validate([_EchoModel()], step=1)
+    if exports_results:
+        validator.validate([_EchoModel()], step=1)
+    else:
+        with pytest.raises(RuntimeError, match="one loss_results entry per microbatch"):
+            validator.validate([_EchoModel()], step=1)
 
     validator.pp_schedule.eval.assert_called_once()
     assert validator.pp_schedule.eval.call_args.kwargs.get("return_outputs") is False
+    validator.close()
 
 
 def _validator_from_init(
