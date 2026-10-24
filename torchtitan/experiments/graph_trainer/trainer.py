@@ -15,7 +15,11 @@ import torch
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
-from torchtitan.distributed.cuda_graph import cuda_graph_teardown
+from torchtitan.distributed.cuda_graph import (
+    cuda_graphs_supported,
+    NUM_CUDA_GRAPH_WARMUP_STEPS,
+    wrap_fwd_bwd_with_cuda_graph,
+)
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
@@ -170,10 +174,12 @@ class GraphTrainingEngine(TrainingEngine):
             self._pp_loss_sentinel_on_non_last_stage = torch.full(
                 (1,), -1.0, device=self.device
             )
-        self._run_forward_backward = partial(
+
+        eager_forward_backward_fn = partial(
             self._forward_backward_body,
             defer_fsdp_gradient_reduction=False,
         )
+        self._run_forward_backward = eager_forward_backward_fn
         if self.config.compile.memory_policy == "sac_and_paged_stash":
             self._paged_stash_runner = build_paged_stash_runner(
                 self.config.compile.paged_stash,
@@ -185,6 +191,18 @@ class GraphTrainingEngine(TrainingEngine):
             self._run_forward_backward = partial(
                 self._page_stashed_forward_backward_body,
                 defer_fsdp_gradient_reduction=False,
+            )
+
+        if not self.config.training.disable_cuda_graphs and cuda_graphs_supported():
+            self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
+                self._run_forward_backward,
+                parameters=(
+                    parameter
+                    for model_part in self.model_parts
+                    for parameter in model_part.parameters()
+                ),
+                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
             )
 
         maybe_apply_numa_binding(self.device.index, self.device.type)
@@ -202,19 +220,35 @@ class GraphTrainingEngine(TrainingEngine):
     def _preprocess_microbatch_groups(
         self,
         microbatch_groups: list[list[TrainingMicrobatch]],
+        *,
+        global_routing_token_counts: torch.Tensor,
     ) -> list[tuple[Any, ...]]:
         """Prepare GraphRuntime schedule inputs for AOT single-stage execution."""
+        # The traced loss only receives the shared loss arguments, on both the
+        # single-stage and the PP path.
+        if any(
+            microbatch.as_input_dict().get("loss_kwargs")
+            for microbatch_group in microbatch_groups
+            for microbatch in microbatch_group
+        ):
+            raise ValueError(
+                "Per-microbatch loss arguments are not supported with "
+                "GraphRuntime yet."
+            )
         if self.parallelism_context.pp_enabled:
-            return super()._preprocess_microbatch_groups(microbatch_groups)
+            pp_microbatch_groups = super()._preprocess_microbatch_groups(
+                microbatch_groups,
+                global_routing_token_counts=global_routing_token_counts,
+            )
+            # Drop the per-microbatch loss arguments, rejected above, so both
+            # paths return (arg_mbs, kwarg_mbs, target_mbs).
+            return [
+                (arg_mbs, kwarg_mbs, target_mbs)
+                for arg_mbs, kwarg_mbs, target_mbs, _ in pp_microbatch_groups
+            ]
 
         preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
         for microbatch_group in microbatch_groups:
-            if any(microbatch.loss_kwargs() for microbatch in microbatch_group):
-                raise ValueError(
-                    "Per-microbatch loss arguments are not supported with "
-                    "GraphRuntime yet."
-                )
-
             # Calling convention:
             # The runtime receives one positional tuple, keyword dictionary,
             # and target per schedule microbatch.
@@ -227,7 +261,7 @@ class GraphTrainingEngine(TrainingEngine):
                     sl.log_trace_span("preprocess_inputs"),
                     self.parallelism_context.activate_spmd(),
                 ):
-                    inputs_mb, labels_mb, extra_kwargs_mb = self.model_parts[
+                    inputs_mb, labels_mb, extra_kwargs_mb, _ = self.model_parts[
                         0
                     ].preprocess_inputs(
                         input_dict,
@@ -235,6 +269,7 @@ class GraphTrainingEngine(TrainingEngine):
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
+                        global_routing_token_counts=global_routing_token_counts,
                         **self.preprocess_inputs_kwargs,
                     )
                     self.ntokens_seen += (
@@ -258,14 +293,16 @@ class GraphTrainingEngine(TrainingEngine):
         """Run microbatch groups through GraphRuntime."""
         assert not defer_fsdp_gradient_reduction
         accumulated_loss: torch.Tensor | None = None
-        loss_metrics: list[dict[str, torch.Tensor]] = []
+        loss_metrics: list[list[dict[str, torch.Tensor]]] = []
         for inputs, model_kwargs, labels in microbatch_groups:
-            self.loss_metrics = {}
-            loss = self._pp_forward_backward_microbatch_group(
+            loss, group_loss_metrics = self._pp_forward_backward_microbatch_group(
                 inputs=inputs,
                 model_kwargs=model_kwargs,
                 labels=labels,
-                loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
+                loss_kwargs=[
+                    {"global_loss_token_counts": global_loss_token_counts}
+                    for _ in model_kwargs
+                ],
                 finalize_gradients=True,
             )
             detached_loss = loss.detach()
@@ -273,15 +310,48 @@ class GraphTrainingEngine(TrainingEngine):
                 accumulated_loss = detached_loss.clone()
             else:
                 accumulated_loss.add_(detached_loss)
-            loss_metrics.append(
-                {
-                    key: value.detach().clone()
-                    for key, value in self.loss_metrics.items()
-                }
-            )
+            loss_metrics.append(group_loss_metrics)
 
         assert accumulated_loss is not None
         return ForwardBackwardResult(accumulated_loss, loss_metrics)
+
+    def _pp_forward_backward_microbatch_group(
+        self,
+        *,
+        inputs: list[tuple[torch.Tensor, ...]] | None,
+        labels: list[torch.Tensor] | None,
+        model_kwargs: list[dict[str, Any]],
+        loss_kwargs: list[dict[str, Any]],
+        finalize_gradients: bool = True,
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        """Run one microbatch group through the graph runtime.
+
+        The traced loss takes one set of loss arguments shared by every
+        microbatch and reports no loss metrics. Preprocessing rejects
+        per-microbatch loss arguments, so every microbatch carries the same
+        ones.
+        """
+        with self.parallelism_context.activate_spmd(
+            typechecking=self.config.debug.spmd_typechecking,
+        ):
+            losses = [] if self.pp_has_last_stage else None
+            self.pp_schedule.step(
+                arg_mbs=inputs,
+                kwarg_mbs=model_kwargs,
+                target_mbs=labels,
+                losses=losses,
+                loss_kwargs=loss_kwargs[0],
+                return_outputs=False,
+                finalize_gradients=finalize_gradients,
+            )
+
+        loss_metrics: list[dict[str, torch.Tensor]] = [{} for _ in loss_kwargs]
+        if self.pp_has_last_stage:
+            assert losses is not None
+            detached_losses = [loss.detach() for loss in losses]
+            losses.clear()
+            return torch.sum(torch.stack(detached_losses)).to(self.device), loss_metrics
+        return self._pp_loss_sentinel_on_non_last_stage, loss_metrics
 
     def _page_stashed_forward_backward_body(
         self,
@@ -326,8 +396,6 @@ class GraphTrainingEngine(TrainingEngine):
 
         super().close()
 
-        cuda_graph_teardown()
-
         # Free the stash buffers, now that no CUDA graph points into them, and
         # leave any later trainer in this process a fresh manager.
         if self._paged_stash_runner is not None:
@@ -345,9 +413,14 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
-            if self.training.cuda_graph_per_accumulation_group:
+            if self.training.cuda_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."
+                )
+            if self.training.preprocess_microbatch_groups_lazily:
+                raise ValueError(
+                    "training.preprocess_microbatch_groups_lazily is not supported "
+                    "with GraphTrainer."
                 )
             # to_graph_trainer_config and the flavor builders turn these off;
             # this catches a transform applied afterwards that builds them with
@@ -369,6 +442,8 @@ class GraphTrainer(Trainer):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
+        if config.validator is not None and not config.training.disable_cuda_graphs:
+            logger.warning("GraphTrainer validation runs without CUDA graphs.")
         if (
             not self.engine.parallelism_context.pp_enabled
             and self.engine.pp_schedule.num_microbatches > 1

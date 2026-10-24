@@ -34,7 +34,7 @@ from torchtitan.distributed.context_parallel import (
 )
 from torchtitan.experiments.transformers_modeling_backend import build_model_config
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
+    AllGatherKVFlexInnerAttention,
 )
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
@@ -148,7 +148,7 @@ def main():
         parallelism_context=parallelism_context,
         training=cfg.training,
         parallelism=cfg.parallelism,
-        ac_config=None,
+        activation_remat=None,
         dump_folder="/tmp/flex_cp_spike",
     )
     cp_model.eval()
@@ -183,9 +183,7 @@ def main():
         permutation = (
             load_balancer.generate_permutation() if load_balancer is not None else None
         )
-        batch[
-            "attention_metadata"
-        ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+        batch["attention_metadata"] = AllGatherKVFlexInnerAttention.prepare_cp_metadata(
             batch["attention_metadata"],
             permutation=permutation,
         )

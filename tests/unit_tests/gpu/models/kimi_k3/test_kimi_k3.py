@@ -5,21 +5,30 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import replace
 
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.optim import DistMuon
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import LinearAttentionMetadata
-from torchtitan.models.common.attention.kda import KDAKernel
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    LinearAttentionMetadata,
+    MLAAttention,
+    VarlenInnerAttention,
+)
+from torchtitan.models.common.attention.kda import KDA, KDAKernel
+from torchtitan.models.common.feed_forward import DenseFeedForward
+from torchtitan.models.kimi_k3.attention import KimiMLAAttention
 from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan_recipes.tests.models.kimi_k3 import _dist_muon_optimizer
 
 
-def _small_model_config() -> KimiK3Model.Config:
+def _small_model_config(*, attn_backend: str = "flex") -> KimiK3Model.Config:
     """Build a reduced KDA+MLA, dense+MoE, multimodal Kimi K3 config."""
     dim = 64
     return _kimi_k3_config(
@@ -57,7 +66,7 @@ def _small_model_config() -> KimiK3Model.Config:
             init_pos_emb_width=2,
             max_num_frames=1,
         ),
-        attn_backend="flex",
+        attn_backend=attn_backend,
     )
 
 
@@ -112,10 +121,50 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    def test_mla_attention_rejects_standard_backend_config(self):
+        model_config = _small_model_config()
+        attention_config = next(
+            layer.attention
+            for layer in model_config.layers
+            if isinstance(layer.attention, KimiMLAAttention.Config)
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires an MLAAttention"):
+            replace(
+                attention_config,
+                inner_attention=FlexInnerAttention.Config(),
+            )
+
+    def test_varlen_config_uses_mla_backend(self):
+        model_config = _small_model_config(attn_backend="varlen")
+        for layer in model_config.layers:
+            if isinstance(layer.attention, KimiMLAAttention.Config):
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    MLAAttention.Config,
+                )
+                self.assertIsInstance(
+                    layer.attention.inner_attention.inner_attention,
+                    VarlenInnerAttention.Config,
+                )
+
+        flex_model_config = _small_model_config()
+        for layer in flex_model_config.layers:
+            if isinstance(layer.attention, KimiMLAAttention.Config):
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    MLAAttention.Config,
+                )
+                self.assertIsInstance(
+                    layer.attention.inner_attention.inner_attention,
+                    FlexInnerAttention.Config,
+                )
+
     def test_dist_muon_config_uses_native_grouped_linear_fqns(self):
         """DistMuon buckets reference the native routed W13 and W2 parameters."""
+        model_config = _small_model_config()
         optimizer = _dist_muon_optimizer(
-            _small_model_config(),
+            model_config,
             muon_lr=1e-3,
             adamw_lr=1e-3,
             parallelism=ParallelismConfig(),
@@ -126,18 +175,37 @@ class TestKimiK3(unittest.TestCase):
             if isinstance(config, DistMuon.Config)
         )
         compute_layouts = muon_config.compute_sharding_by_fqn
+        with torch.device("meta"):
+            model = model_config.build()
+        parameter_names = dict(model.named_parameters()).keys()
+        self.assertTrue(compute_layouts.keys() <= parameter_names)
+        for fqn in compute_layouts:
+            self.assertRegex(fqn, muon_config.pattern)
+        for fqn in (
+            "layers.0.attention.q_proj.weight",
+            "layers.1.attention.wq_a.weight",
+        ):
+            self.assertIn(fqn, compute_layouts)
 
         self.assertTrue(
             any(
-                fqn.endswith("moe.routed_experts.w13.weight") for fqn in compute_layouts
+                fqn.endswith("feed_forward.routed_experts.w13.weight")
+                for fqn in compute_layouts
             )
         )
         self.assertTrue(
-            any(fqn.endswith("moe.routed_experts.w2.weight") for fqn in compute_layouts)
+            any(
+                fqn.endswith("feed_forward.routed_experts.w2.weight")
+                for fqn in compute_layouts
+            )
         )
         self.assertFalse(any("inner_experts" in fqn for fqn in compute_layouts))
-        self.assertRegex("layers.1.moe.routed_experts.w13.weight", muon_config.pattern)
-        self.assertRegex("layers.1.moe.routed_experts.w2.weight", muon_config.pattern)
+        self.assertRegex(
+            "layers.1.feed_forward.routed_experts.w13.weight", muon_config.pattern
+        )
+        self.assertRegex(
+            "layers.1.feed_forward.routed_experts.w2.weight", muon_config.pattern
+        )
 
     def test_flex_attention_mask(self):
         config = _small_model_config()
@@ -145,14 +213,14 @@ class TestKimiK3(unittest.TestCase):
         positions = torch.arange(4, dtype=torch.int32)
         attention_metadata = model._get_attention_metadata(positions)
         full_attention_backend = next(
-            layer.attention_metadata_key
+            type(layer.attention.inner_attention)
             for layer in model.layers.values()
-            if layer.attention is not None
+            if isinstance(layer.attention, KimiMLAAttention)
         )
         kda_backend = next(
-            layer.attention_metadata_key
+            type(layer.attention.inner_attention)
             for layer in model.layers.values()
-            if layer.delta_attention is not None
+            if isinstance(layer.attention, KDA)
         )
         # MLA layers read the BlockMask; KDA layers read document offsets.
         self.assertIsInstance(attention_metadata[full_attention_backend], BlockMask)
@@ -173,9 +241,9 @@ class TestKimiK3(unittest.TestCase):
         padding_mask[7:] = True
         masks = model._get_attention_metadata(positions, padding_mask=padding_mask)
         kda_backend = next(
-            layer.attention_metadata_key
+            type(layer.attention.inner_attention)
             for layer in model.layers.values()
-            if layer.delta_attention is not None
+            if isinstance(layer.attention, KDA)
         )
         assert isinstance(masks[kda_backend], LinearAttentionMetadata)
         assert masks[kda_backend].varlen is not None
@@ -266,11 +334,29 @@ class TestKimiK3(unittest.TestCase):
         model = config.build()
         model.init_states()
 
+        self.assertIsInstance(model.layers["0"].attention, KDA)
+        self.assertIsInstance(model.layers["1"].attention, KimiMLAAttention)
+        self.assertIsInstance(model.layers["0"].feed_forward, DenseFeedForward)
+        self.assertIsInstance(model.layers["1"].feed_forward, KimiLatentMoE)
+        self.assertIs(config.first_feed_forward, config.layers[0].feed_forward)
+        self.assertIs(config.first_moe, config.layers[1].feed_forward)
+        self.assertTrue(all(not hasattr(layer, "moe") for layer in config.layers))
+        self.assertTrue(
+            all(not hasattr(layer, "moe") for layer in model.layers.values())
+        )
+        self.assertTrue(
+            all(not hasattr(layer, "moe_enabled") for layer in model.layers.values())
+        )
+        self.assertTrue(
+            all(
+                not hasattr(layer, "delta_attention") for layer in model.layers.values()
+            )
+        )
         state_dict = model.state_dict()
         adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
         hf_state_dict = adapter.to_hf(state_dict)
         self.assertIn(
-            "layers.1.moe.routed_experts.w13.weight",
+            "layers.1.feed_forward.routed_experts.w13.weight",
             state_dict,
         )
         self.assertIn(

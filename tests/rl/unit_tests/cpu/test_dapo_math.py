@@ -208,3 +208,46 @@ def test_reward_handles_equivalent_latex_and_units() -> None:
     sample = DapoMathSample(prompt="problem", ground_truth=r"336^\circ")
     assert asyncio.run(reward(_rollout(r"work\nAnswer: \boxed{336}"), sample)) == 1.0
     assert asyncio.run(reward(_rollout(r"work\nAnswer: \boxed{335}"), sample)) == 0.0
+
+
+def test_muse_spark_gb300_recipe_shards_sequences_in_the_trainer_only() -> None:
+    from torchtitan.models.common.attention import (
+        SlidingWindowVarlenInnerAttention,
+        VarlenInnerAttention,
+    )
+    from torchtitan.models.common.attention.cp_attention import (
+        UlyssesSlidingWindowVarlenInnerAttention,
+        UlyssesVarlenInnerAttention,
+    )
+    from torchtitan_recipes.rl.dapo_math import (
+        muse_spark_816b_a42b_dapo_math_gb300_config,
+    )
+
+    config = muse_spark_816b_a42b_dapo_math_gb300_config(
+        hf_assets_path="assets", dapo_math_repo_id="dapo", aime2025_repo_id="aime"
+    )
+
+    def attention_windows(model, full_type, sliding_type):
+        windows = []
+        for layer in model.layers:
+            inner = layer.attention.inner_attention
+            assert type(inner) in (full_type, sliding_type)
+            windows.append(
+                inner.sliding_window_size if type(inner) is sliding_type else None
+            )
+        return windows
+
+    # Every layer, sliding-window ones included, runs Ulysses CP in the trainer
+    # and plain varlen attention in the generator, with the same windows.
+    trainer_windows = attention_windows(
+        config.trainer.model,
+        UlyssesVarlenInnerAttention.Config,
+        UlyssesSlidingWindowVarlenInnerAttention.Config,
+    )
+    generator_windows = attention_windows(
+        config.generator.model,
+        VarlenInnerAttention.Config,
+        SlidingWindowVarlenInnerAttention.Config,
+    )
+    assert trainer_windows == generator_windows
+    assert len(set(trainer_windows)) == 2

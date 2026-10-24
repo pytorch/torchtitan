@@ -21,9 +21,7 @@ from .module import Module
 
 if TYPE_CHECKING:
     from torchtitan.components.optim import OptimizersContainer
-    from torchtitan.distributed.activation_checkpoint import (
-        ActivationCheckpointingConfig,
-    )
+    from torchtitan.distributed.activation_remat import ActivationRematConfig
 
     from .state_dict_adapter import BaseStateDictAdapter
 
@@ -57,25 +55,35 @@ class BaseModel(Module, ABC):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
+        dict[str, Any],
     ]:
-        """Prepare the forward inputs from a dataloader batch.
+        """Prepare the forward and loss inputs from a dataloader batch.
 
         Models driven by the standard trainer/validator forward path implement
         this to build any attention masks, apply context-parallel sharding and
         SPMD annotation as needed, and split ``input``/``labels`` out of the
         batch. ``input_dict`` is the batch with ``labels`` folded in; return
-        ``(inputs, labels, extra_kwargs)``. Models with aligned multi-output
-        objectives may return tuples of input and label tensors.
+        ``(inputs, labels, model_kwargs, loss_kwargs)``. Models with aligned
+        multi-output objectives may return tuples of input and label tensors.
+
+        ``input_dict["loss_kwargs"]``, if present, holds per-microbatch loss
+        arguments, e.g. RL advantages. Its tensors share the ``labels`` token
+        dimension and are CP-sharded and SPMD-annotated like ``labels``;
+        non-tensor values pass through. They are returned as ``loss_kwargs``.
 
         Additional keyword arguments may provide model-specific preprocessing
         dependencies that are owned outside the trainable model. The trainer
         calls this through the ``BaseModel`` interface. There is no meaningful default;
         every model used by the training engine must implement it.
+
+        ``global_routing_token_counts``: per-depth routing-token counts over the global batch;
+        models with an aux loss return it as the ``aux_loss_denominators`` kwarg.
         """
         raise NotImplementedError(
             f"{type(self).__name__} must implement preprocess_inputs()."
@@ -135,7 +143,7 @@ class BaseModel(Module, ABC):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         local_compile_regions: list[str],
-        ac_config: ActivationCheckpointingConfig | None,
+        activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> Self:
         """Apply the ordered model-level parallelization lifecycle."""
@@ -143,8 +151,8 @@ class BaseModel(Module, ABC):
         apply_local_compile(local_compile_regions)
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
-            if ac_config is not None:
-                ac_config.build(dump_folder=dump_folder).apply(self)
+            if activation_remat is not None:
+                activation_remat.apply(self)
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
                 training=training,

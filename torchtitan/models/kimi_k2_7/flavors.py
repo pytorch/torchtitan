@@ -255,7 +255,9 @@ def _vision_encoder_config(
     )
 
 
-def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexInnerAttention.Config:
+def _qk_clip_attention_config(
+    attn_backend: str,
+) -> QKClipFlexInnerAttention.Config:
     if attn_backend != "flex":
         raise ValueError("Kimi QK clipping requires the FlexInnerAttention backend.")
     return QKClipFlexInnerAttention.Config()
@@ -265,6 +267,9 @@ def _build_kimi_layers(**kwargs) -> list[TransformerBlock.Config]:
     """Build MLA/MoE layers with the Kimi-family parameter initializers."""
     return build_mla_moe_layers(
         **kwargs,
+        # Moonlight, Kimi-VL, and Kimi-K2.5 set rms_norm_eps=1e-5 (DeepSeek V3
+        # uses 1e-6) for the decoder-layer norms.
+        norm_eps=1e-5,
         linear_init=_LINEAR_INIT,
         norm_init=_NORM_INIT,
         depth_init=_depth_init,

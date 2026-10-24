@@ -7,27 +7,42 @@
 import math
 from dataclasses import dataclass
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+from spmd_types.checker import typecheck
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    parametrize,
+)
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import LoRATransform, transform_model_config_
+from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import make_ffn_config
-from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.decoder_sharding import (
+    dense_param_placement,
+    residual_activation_placement,
+)
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
     RowParallelLinear,
 )
-from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
+from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.models.llama3 import build_model_config
@@ -53,12 +68,12 @@ def test_qwen35_moe_lora_model_config():
     }
 
     assert set(dense_lora) == {
-        f"layers.{layer}.moe.shared_experts.{projection}"
+        f"layers.{layer}.feed_forward.shared_experts.{projection}"
         for layer in range(num_layers)
         for projection in ("w13", "w2")
     }
     assert set(grouped_lora) == {
-        f"layers.{layer}.moe.routed_experts.{projection}"
+        f"layers.{layer}.feed_forward.routed_experts.{projection}"
         for layer in range(num_layers)
         for projection in ("w13", "w2")
     }
@@ -117,7 +132,9 @@ def test_lora_model_builds():
 
 def test_lora_forward():
     """LoRA model forward produces correct output shape."""
-    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+    model_config = build_model_config(
+        "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+    )
     model_config = transform_model_config_(
         model_config,
         [
@@ -137,8 +154,7 @@ def test_lora_forward():
     tokens = torch.randint(0, vocab_size, (num_tokens,))
     positions = torch.arange(seq_len).repeat(num_documents)
     attention_metadata = model._get_attention_metadata(positions)
-    # The default attention backend is FlexInnerAttention, which does not support
-    # backward on CPU; this is a forward-only shape check, so run under no_grad.
+    # Flex supports the CPU forward used by this shape check, but not backward.
     with torch.no_grad():
         output = model(
             tokens, attention_metadata=attention_metadata, positions=positions
@@ -149,7 +165,7 @@ def test_lora_forward():
 def test_lora_targets_fused_feed_forward_projection():
     """The physical w13 projection uses one LoRA adapter."""
     init = {"weight": torch.nn.init.ones_}
-    config = FeedForward.Config(
+    config = DenseFeedForward.Config(
         w13=Linear.Config(
             in_features=4, out_features=8, num_linears=2, param_init=init
         ),
@@ -383,7 +399,7 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
         alpha=4,
         target_modules=["w13"],
     ).transform(config)
-    assert isinstance(config, FeedForward.Config)
+    assert isinstance(config, DenseFeedForward.Config)
 
     feed_forward = config.build()
     assert feed_forward.w13._sharding_config is not None
@@ -702,3 +718,62 @@ def test_lora_preserves_frozen_config_type_checks():
     assert not model.proj.weight.requires_grad
     assert model.proj.lora_a.weight.requires_grad
     assert model.proj.lora_b.weight.requires_grad
+
+
+class TestLoRATensorParallelTypecheck(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @parametrize("enable_sp", [True, False])
+    @with_comms
+    def test_row_parallel_adapters_typecheck(self, enable_sp: bool):
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=self.world_size,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+            enable_sequence_parallel=enable_sp,
+        )
+        with patch(
+            "torchtitan.distributed.parallelism_context.device_type", self.device_type
+        ):
+            parallelism_context.build_mesh()
+        init = {"weight": torch.nn.init.normal_}
+        ffn_config = make_ffn_config(
+            dim=16,
+            hidden_dim=32,
+            w13_param_init=init,
+            w2_param_init=init,
+            enable_sp=enable_sp,
+        )
+        feed_forward = (
+            LoRATransform(rank=2, alpha=4.0)
+            .transform(ffn_config)
+            .build()
+            .to(self.device_type)
+        )
+        feed_forward._parallelize(parallelism_context)
+
+        x_local = torch.randn(8, 16, device=self.device_type)
+        mesh = parallelism_context.spmd_dense_mesh()
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=None,
+            dense_sp_enabled=parallelism_context.sp_enabled,
+        )
+        residual = residual_activation_placement(enable_sp=enable_sp)
+        with set_current_spmd_mesh(mesh), typecheck(local=False):
+            spmd.assert_type(x_local, residual)
+            output = feed_forward(x_local)
+            spmd.assert_type(output, residual)
+            output.sum().backward()
+
+        self.assertEqual(output.shape, x_local.shape)
+        self.assertIsNotNone(feed_forward.w2.lora_b.weight.grad)
+
+
+instantiate_parametrized_tests(TestLoRATensorParallelTypecheck)

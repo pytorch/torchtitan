@@ -23,7 +23,7 @@ from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
 )
@@ -46,7 +46,7 @@ def graph_trainer_deepseek_v3_debugmodel(
     *, parallelism: ParallelismConfig | None = None
 ) -> GraphTrainer.Config:
     config = to_graph_trainer_config(
-        deepseek_v3_debugmodel(parallelism=parallelism),
+        deepseek_v3_debugmodel(attn_backend="flex", parallelism=parallelism),
         GraphTrainerDeepSeekV3Model.Config,
     )
     config.compile = GraphTrainerCompileConfig()
@@ -74,10 +74,11 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     base = deepseek_v3_debugmodel(
-        parallelism=ParallelismConfig(expert_parallel_degree=2)
+        attn_backend="flex", parallelism=ParallelismConfig(expert_parallel_degree=2)
     )
     base.model = build_model_config(
         "debugmodel",
+        attn_backend="flex",
         seq_len=base.training.max_context_length,
         parallelism=base.parallelism,
     )

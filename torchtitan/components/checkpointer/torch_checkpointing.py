@@ -25,7 +25,7 @@ from torch_checkpointing.checkpoint_layout import LayoutInfo, SafetensorsSeriali
 from torch_checkpointing.checkpoint_manager import (
     CheckpointManager as BackendCheckpointManager,
 )
-from torch_checkpointing.checkpoint_writer import CheckpointWriterConfig
+from torch_checkpointing.checkpoint_writer import CallbackArgs, CheckpointWriterConfig
 from torch_checkpointing.config import (
     AsyncCheckpointSaverConfig,
     CheckpointSaverConfig,
@@ -37,7 +37,7 @@ from torch_checkpointing.hf.metadata import (
     HF_SAFETENSORS_INDEX_FILE_TEMPLATE,
     HuggingFaceSafetensorsDistributedMetadataFormat,
 )
-from torch_checkpointing.logging_utils import checkpoint_logging_context, EventLogger
+from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.metadata_serialization import (
     METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
 )
@@ -193,7 +193,7 @@ def _default_backend_config(
     default: ItemSpec | None = _DEFAULT_ITEM_SPEC,
     subprocess_init_fn: Callable[..., None] | None = None,
     subprocess_init_args: tuple[Any, ...] = (),
-    pre_finalize_callback: Callable[[str, EventLogger], None] | None = None,
+    pre_finalize_callback: Callable[[CallbackArgs], None] | None = None,
 ) -> BackendCheckpointManager.Config:
     if isinstance(save_config, AsyncCheckpointSaverConfig):
         structured_logger_init_fn = sl.get_structured_logger_subprocess_init_fn()
@@ -550,7 +550,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         storage_config = self._manager_config.storage_config
         input_checkpoint_id = checkpoint_id
         item_specs: dict[str, ItemSpec] | None = None
-        pre_finalize_callback: Callable[[str, EventLogger], None] | None = None
+        pre_finalize_callback: Callable[[CallbackArgs], None] | None = None
         if self.last_save_in_hf:
             assert self.sd_adapter is not None
             states = {MODEL: self.sd_adapter.to_hf(states[MODEL])}
@@ -579,12 +579,12 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             # temp dir to its final path, passing the directory the shards
             # were actually written to. Consolidation repacks the per-rank
             # shards into HF-layout files in the checkpoint directory.
-            def pre_finalize_callback(staged: str, _event_logger) -> None:  # noqa: F811
+            def pre_finalize_callback(args: CallbackArgs) -> None:  # noqa: F811
                 # Need all ranks to finish writing before any rank starts consolidating
                 if dist.is_initialized():
                     dist.barrier()
                 consolidate_hf_safetensors_checkpoint(
-                    staged,
+                    args.path,
                     output_dir=checkpoint_id,
                     item_key=MODEL,
                     fqn_to_index_mapping=fqn_to_index_mapping,

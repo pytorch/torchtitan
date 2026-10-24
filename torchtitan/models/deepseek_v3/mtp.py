@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -33,6 +33,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 
 
@@ -128,13 +129,7 @@ class MTPTransformerBlock(TransformerBlock):
         self.eh_proj = config.eh_proj.build()
         self.mtp_norm = config.mtp_norm.build()
 
-        self.moe_enabled = config.moe is not None
-        if self.moe_enabled:
-            assert config.moe is not None
-            self.moe = config.moe.build()
-        else:
-            assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build()
+        self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -164,8 +159,8 @@ class MTPTransformerBlock(TransformerBlock):
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
         h = h + self.attention(self.attention_norm(h), attention_metadata, positions)
-        if self.moe_enabled:
-            h = h + self.moe(
+        if isinstance(self.feed_forward, MoE):
+            h = h + self.feed_forward(
                 self.ffn_norm(h),
                 padding_mask_T=mtp_padding_mask_T,
                 aux_loss_denominator=aux_loss_denominator,
@@ -199,6 +194,8 @@ class MTPDecoder(Decoder):
     sequence, and each MTP layer predicts one extra depth from preprocessed
     shifted token embeddings.
     """
+
+    mtp_layers: ModuleList[MTPTransformerBlock] | None
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
@@ -256,14 +253,17 @@ class MTPDecoder(Decoder):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
+        dict[str, Any],
     ]:
         """Prepare aligned pairs before applying CP sharding and annotations."""
         del kwargs
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         tokens = input_dict["input"]
         labels = input_dict["labels"]
         positions = input_dict.get("positions")
@@ -300,6 +300,8 @@ class MTPDecoder(Decoder):
             input_shardings[f"mtp_input_tokens_{depth}"] = input_shardings["input"]
             input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
             input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
 
         if positions is not None:
             attention_metadata = self._get_attention_metadata(
@@ -321,11 +323,12 @@ class MTPDecoder(Decoder):
             parallelism_context, input_dict, input_shardings
         )
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         main_tokens = input_dict.pop("input")
         main_labels = input_dict.pop("labels")
-        input_dict["aux_loss_denominators"] = None
+        input_dict["aux_loss_denominators"] = global_routing_token_counts
         if self.mtp_layers is None:
-            return main_tokens, main_labels, input_dict
+            return main_tokens, main_labels, input_dict, loss_kwargs
 
         input_tokens = (
             main_tokens,
@@ -338,7 +341,7 @@ class MTPDecoder(Decoder):
         input_dict["mtp_input_valid_masks"] = tuple(
             input_dict.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
         )
-        return input_tokens, loss_labels, input_dict
+        return input_tokens, loss_labels, input_dict, loss_kwargs
 
     def forward(
         self,
@@ -390,9 +393,7 @@ class MTPDecoder(Decoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             h = layer(
                 h,
@@ -419,9 +420,7 @@ class MTPDecoder(Decoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             with spmd.no_typecheck():
                 aux_loss_denominator = (

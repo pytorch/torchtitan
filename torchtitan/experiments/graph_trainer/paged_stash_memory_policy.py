@@ -38,6 +38,7 @@ in a recipe derived from one that builds such a model::
     import dataclasses
 
     from torchtitan.models.common.moe import (
+        MoE,
         RoundRobinTokenChoiceTopKRouter,
         TokenChoiceTopKRouter,
     )
@@ -49,17 +50,16 @@ in a recipe derived from one that builds such a model::
     def paged_stash_debugmodel():
         config = graph_trainer_deepseek_v3_debugmodel_hybridep()
         config.compile.memory_policy = "sac_and_paged_stash"
-        # GraphTrainer applies its own CUDA graph pass when the trainer-level
-        # CUDA graph wrapper is off.
+        # Paged stash may release and reallocate buffers after an overflow.
         config.training.disable_cuda_graphs = True
         config.parallelism.data_parallel_shard_degree = 4
         config.parallelism.expert_parallel_degree = 2
         # Route round-robin, with exact balance (see below).
         router_fields = dataclasses.fields(TokenChoiceTopKRouter.Config)
         for layer in config.model.layers:
-            if getattr(layer, "moe", None) is not None:
-                router = layer.moe.router
-                layer.moe.router = RoundRobinTokenChoiceTopKRouter.Config(
+            if isinstance(layer.feed_forward, MoE.Config):
+                router = layer.feed_forward.router
+                layer.feed_forward.router = RoundRobinTokenChoiceTopKRouter.Config(
                     **{f.name: getattr(router, f.name) for f in router_fields}
                 )
         return config
@@ -101,7 +101,7 @@ Options
     Megatron's). 0 reloads an activation when backward first reads it.
 ``compile.paged_stash.module_fqn``
     Module-FQN pattern of the modules annotated as the paged-stash region
-    (default ``layers.*.moe.routed_experts``).
+    (default ``layers.*.feed_forward.routed_experts``).
 ``compile.paged_stash.skip_immediate_backward``
     Keep the last paged layer resident instead of stashing it when the schedule
     runs that microbatch's backward next (default on). Matches Megatron's
@@ -256,6 +256,9 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     _default_memory_policy_pass,
 )
 from torchtitan.experiments.graph_trainer.registry import register_memory_policy
+
+from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.moe import MoE
 
 if TYPE_CHECKING:
     from torchtitan.components.optim.optimizer import OptimizersContainer
@@ -868,7 +871,7 @@ class PagedStashManager:
         self.paging_disabled = False
         self.device: torch.device | None = None
 
-        self._stream: torch.cuda.Stream | None = None
+        self._stream: torch.Stream | None = None
 
         self.page_size = 64
         self.buffer_size_factor_cuda = 1.10
@@ -956,14 +959,14 @@ class PagedStashManager:
         self.step = 0
 
     @property
-    def stream(self) -> torch.cuda.Stream:
+    def stream(self) -> torch.Stream:
         """Side stream for both the stash and the reload copies.
 
         One stream, as in Megatron: the freelists are unsynchronized mutable
         state, so packing and unpacking must never run concurrently.
         """
         if self._stream is None:
-            self._stream = torch.cuda.Stream()
+            self._stream = torch.Stream()
         return self._stream
 
     # ------------------------------------------------------------------
@@ -1173,7 +1176,7 @@ class PagedStashManager:
         # The copies run in launch order on one stream, so the last one's
         # event covers them all.
         last_event = self._stashes_in_flight[-1][0]
-        torch.cuda.current_stream(self.device).wait_event(last_event)
+        torch.accelerator.current_stream(self.device).wait_event(last_event)
         self._stashes_in_flight.clear()
 
     def prefetch_after(self, entry: ScheduleEntry, count: int) -> None:
@@ -1324,8 +1327,8 @@ class PagedStashManager:
         ``PagedStashManager.release_stash_buffers``, and by ``reset_instance``;
         both after the CUDA graphs that reference these pointers are torn down.
         """
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        if torch.accelerator.is_available():
+            torch.accelerator.synchronize()
         self.stash_buffers = None
         logger.info("Paged stash: released stash page buffers.")
 
@@ -1537,7 +1540,7 @@ def _wait_for_copy(tensor: torch.Tensor) -> None:
     if registered is None:
         return
     completion_event, device, _retained = registered
-    torch.cuda.current_stream(device).wait_event(completion_event)
+    torch.accelerator.current_stream(device).wait_event(completion_event)
 
 
 def _slot(slot_id: int) -> StashSlot:
@@ -1618,7 +1621,7 @@ def _launch_stash(
     manager = PagedStashManager.get_instance()
     device = activation.device
     buffer = manager.get_buffer(slot.dtype, slot.hidden_size)
-    current_stream = torch.cuda.current_stream(device)
+    current_stream = torch.accelerator.current_stream(device)
     page_record, spilled = _handle_views(handle, handle.numel() - 1)
 
     # Derive the token count *before* the stream join. For a scale slot
@@ -1632,7 +1635,7 @@ def _launch_stash(
     stream = manager.stream
     stream.wait_stream(current_stream)
     completion_event = torch.Event()
-    with torch.cuda.stream(stream):
+    with stream:
         # Freelist scratch never leaves the side stream, so it must be
         # allocated here: allocating on the compute stream and then freeing it
         # at op exit would let the allocator hand the block to another
@@ -1671,7 +1674,7 @@ def _launch_reload(
     manager = PagedStashManager.get_instance()
     device = handle.device
     buffer = manager.get_buffer(slot.dtype, slot.hidden_size)
-    current_stream = torch.cuda.current_stream(device)
+    current_stream = torch.accelerator.current_stream(device)
     page_record, spilled = _handle_views(handle, handle.numel() - 1)
 
     result = torch.empty(size, dtype=dtype, device=device)
@@ -1688,7 +1691,7 @@ def _launch_reload(
         result, device, retain=(handle, page_record, spilled, num_tokens, tokens)
     )
 
-    with torch.cuda.stream(stream):
+    with stream:
         # Side-stream-local scratch; see the note in ``_launch_stash``.
         new_free_list_tail = torch.empty(2, dtype=torch.int64, device=device)
         buffer.launch_pop(
@@ -1944,7 +1947,7 @@ def warmup_paged_stash_kernels() -> None:
     # The warmup launches are no-ops, but reset anyway so the step starts from
     # a pristine freelist regardless of kernel-side bookkeeping.
     manager.reset_buffers()
-    torch.cuda.synchronize(device)
+    torch.accelerator.synchronize(device)
     manager.needs_kernel_warmup = False
     logger.info(
         "Paged stash: compiled Triton kernels for %d buffer configuration(s).",
@@ -1989,7 +1992,7 @@ PAGED_STASH_REGION = "paged_stash_region"
 # Default module-FQN pattern of the paged-stash region: the routed experts, so
 # the region holds the dispatcher's output and everything inside
 # ``inner_experts``.
-DEFAULT_MODULE_FQN = "layers.*.moe.routed_experts"
+DEFAULT_MODULE_FQN = "layers.*.feed_forward.routed_experts"
 
 # Paging a tensor costs one full round trip through the stash, so tiny tensors
 # are never worth it. Same rationale as cpu_offload's ``_MIN_OFFLOAD_BYTES``.
@@ -3095,9 +3098,12 @@ def moe_expert_biases(model_parts: Sequence[nn.Module]) -> list[torch.Tensor]:
             layer_containers.append(mtp_layers)
         for layers in layer_containers:
             for block in layers.children():
-                if not getattr(block, "moe_enabled", False):
+                if not isinstance(block, TransformerBlock):
                     continue
-                bias = block.moe.expert_bias_E
+                moe = block.feed_forward
+                if not isinstance(moe, MoE):
+                    continue
+                bias = moe.expert_bias_E
                 if bias is not None:
                     # A buffer, so no gradient flows through ``to_local``.
                     biases.append(
@@ -3167,7 +3173,7 @@ class PagedStashRunner:
         self._flags_host = torch.zeros(
             3, dtype=torch.int32, device="cpu", pin_memory=True
         )
-        self._flags_event = torch.cuda.Event()
+        self._flags_event = torch.Event()
         # Device-side scratch for the all-reduced flags, bound on first use and
         # then reused. A fresh allocation of a size the caching allocator has
         # not seen calls ``cudaMalloc``, which synchronizes the device -- so

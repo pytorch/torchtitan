@@ -29,11 +29,13 @@ from torch.autograd.function import once_differentiable
 
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
-from torchtitan.models.common.inplace_wgrad_accum import reject_inplace_wgrad_accum
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
+)
+from torchtitan.models.common.linear.inplace_wgrad_accum import (
+    reject_inplace_wgrad_accum,
 )
 
 from .._fsdp_tensor import _UnshardedFSDPTensor

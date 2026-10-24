@@ -19,6 +19,7 @@ import torch
 import torch.distributed as dist
 
 from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.distributed.context_parallel import cp_all_gather_tensors
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
@@ -28,19 +29,22 @@ from .attention import (
     FlexInnerAttention,
     InnerAttention,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
 
 __all__ = [
     "CPInnerAttention",
-    "canonicalize_cp_inner_attention",
-    "KVAllGatherCPFlexInnerAttention",
-    "KVAllGatherCPSlidingWindowFlexInnerAttention",
-    "UlyssesCPInnerAttention",
-    "UlyssesCPFlexInnerAttention",
-    "UlyssesCPSlidingWindowFlexInnerAttention",
-    "UlyssesCPVarlenInnerAttention",
+    "AllGatherKVFlex",
+    "AllGatherKVFlexInnerAttention",
+    "AllGatherKVSlidingWindowFlexInnerAttention",
+    "Ulysses",
+    "UlyssesInnerAttention",
+    "UlyssesFlexInnerAttention",
+    "UlyssesSlidingWindowFlexInnerAttention",
+    "UlyssesSlidingWindowVarlenInnerAttention",
+    "UlyssesVarlenInnerAttention",
 ]
 
 _TOKEN_DIM = 0
@@ -76,17 +80,8 @@ class CPInnerAttention(
         raise NotImplementedError
 
 
-class _KVAllGatherCPFlexBase(
-    CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata]
-):
-    """Share K/V all-gather CP logic across the FlexAttention variants.
-
-    This private base handles BlockMask sharding and K/V redistribution for
-    the full and sliding-window FlexAttention backends. It is not a standalone
-    attention backend.
-    """
-
-    reduce_dtype: torch.dtype
+class AllGatherKVFlex(CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata]):
+    """Base for K/V all-gather CP attention using FlexAttention masks."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config):
@@ -199,41 +194,16 @@ class _KVAllGatherCPFlexBase(
             separate_full_blocks=block_mask.full_kv_num_blocks is not None,
         )
 
-    def forward(
-        self,
-        q_THK: torch.Tensor,
-        k_THK: torch.Tensor,
-        v_THV: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        cp_group = spmd_mesh_group(MeshAxisName.CP)
-        if cp_group is None:
-            raise RuntimeError(
-                "CP attention requires an active multi-rank CP mesh axis."
-            )
-        k_THK, v_THV = (
-            spmd.redistribute(
-                x,
-                cp_group,
-                src=spmd.S(_TOKEN_DIM),
-                dst=spmd.R,
-                backward_options={"op_dtype": self.reduce_dtype},
-            )
-            for x in (k_THK, v_THV)
-        )
-        assert isinstance(self, FlexInnerAttention)
-        return FlexInnerAttention.forward(self, q_THK, k_THK, v_THV, **kwargs)
 
-
-class KVAllGatherCPFlexInnerAttention(
-    _KVAllGatherCPFlexBase,
+class AllGatherKVFlexInnerAttention(
+    AllGatherKVFlex,
     FlexInnerAttention,
 ):
     """FlexInnerAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(
-        _KVAllGatherCPFlexBase.Config,
+        AllGatherKVFlex.Config,
         FlexInnerAttention.Config,
     ):
         reduce_dtype: Literal["float32", "bfloat16"] = "float32"
@@ -243,15 +213,27 @@ class KVAllGatherCPFlexInnerAttention(
         super().__init__(config)
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        k_THK, v_THV = cp_all_gather_tensors(
+            (k_THK, v_THV), reduce_dtype=self.reduce_dtype
+        )
+        return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
-class KVAllGatherCPSlidingWindowFlexInnerAttention(
-    _KVAllGatherCPFlexBase, SlidingWindowFlexInnerAttention
+
+class AllGatherKVSlidingWindowFlexInnerAttention(
+    AllGatherKVFlex, SlidingWindowFlexInnerAttention
 ):
     """SlidingWindowFlexInnerAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(
-        _KVAllGatherCPFlexBase.Config,
+        AllGatherKVFlex.Config,
         SlidingWindowFlexInnerAttention.Config,
     ):
         reduce_dtype: Literal["float32", "bfloat16"] = "float32"
@@ -261,11 +243,21 @@ class KVAllGatherCPSlidingWindowFlexInnerAttention(
         super().__init__(config)
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        k_THK, v_THV = cp_all_gather_tensors(
+            (k_THK, v_THV), reduce_dtype=self.reduce_dtype
+        )
+        return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
-class UlyssesCPInnerAttention(
-    CPInnerAttention[_GlobalAttentionMetadataT, _GlobalAttentionMetadataT]
-):
-    """Move CP sharding from tokens to heads while keeping metadata global."""
+
+class Ulysses(CPInnerAttention[_GlobalAttentionMetadataT, _GlobalAttentionMetadataT]):
+    """Base for Ulysses CP attention with global attention metadata."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config):
@@ -279,6 +271,14 @@ class UlyssesCPInnerAttention(
     ) -> _GlobalAttentionMetadataT:
         del permutation
         return attention_metadata
+
+
+class UlyssesInnerAttention(Ulysses[_GlobalAttentionMetadataT]):
+    """Move CP sharding from tokens to heads while keeping metadata global."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Ulysses.Config):
+        pass
 
     def forward(
         self,
@@ -313,47 +313,48 @@ class UlyssesCPInnerAttention(
         )
 
 
-class UlyssesCPFlexInnerAttention(
-    UlyssesCPInnerAttention[FlexAttentionMetadata], FlexInnerAttention
+class UlyssesFlexInnerAttention(
+    UlyssesInnerAttention[FlexAttentionMetadata], FlexInnerAttention
 ):
     """FlexInnerAttention under Ulysses CP."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(UlyssesCPInnerAttention.Config, FlexInnerAttention.Config):
+    class Config(UlyssesInnerAttention.Config, FlexInnerAttention.Config):
         pass
 
 
-class UlyssesCPSlidingWindowFlexInnerAttention(
-    UlyssesCPInnerAttention[FlexAttentionMetadata], SlidingWindowFlexInnerAttention
+class UlyssesSlidingWindowFlexInnerAttention(
+    UlyssesInnerAttention[FlexAttentionMetadata], SlidingWindowFlexInnerAttention
 ):
     """SlidingWindowFlexInnerAttention under Ulysses CP."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(
-        UlyssesCPInnerAttention.Config,
+        UlyssesInnerAttention.Config,
         SlidingWindowFlexInnerAttention.Config,
     ):
         pass
 
 
-class UlyssesCPVarlenInnerAttention(
-    UlyssesCPInnerAttention[VarlenAttentionMetadata], VarlenInnerAttention
+class UlyssesVarlenInnerAttention(
+    UlyssesInnerAttention[VarlenAttentionMetadata], VarlenInnerAttention
 ):
     """VarlenInnerAttention under Ulysses CP."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(UlyssesCPInnerAttention.Config, VarlenInnerAttention.Config):
+    class Config(UlyssesInnerAttention.Config, VarlenInnerAttention.Config):
         pass
 
 
-def canonicalize_cp_inner_attention(
-    cp_inner_attention: type[InnerAttention],
-) -> type[InnerAttention]:
-    """Return the full inner attention used to select load-balancer metadata.
+class UlyssesSlidingWindowVarlenInnerAttention(
+    UlyssesInnerAttention[VarlenAttentionMetadata],
+    SlidingWindowVarlenInnerAttention,
+):
+    """Sliding-window varlen attention under Ulysses CP."""
 
-    A single token permutation is shared across layers, so models containing
-    both full and sliding-window attention balance using the full-attention mask.
-    """
-    if cp_inner_attention is KVAllGatherCPSlidingWindowFlexInnerAttention:
-        return KVAllGatherCPFlexInnerAttention
-    return cp_inner_attention
+    @dataclass(kw_only=True, slots=True)
+    class Config(
+        UlyssesInnerAttention.Config,
+        SlidingWindowVarlenInnerAttention.Config,
+    ):
+        pass

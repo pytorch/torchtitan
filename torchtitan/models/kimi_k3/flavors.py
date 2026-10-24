@@ -22,8 +22,8 @@ from torchtitan.config.transform import (
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     Conv1d,
+    DenseFeedForward,
     Embedding,
-    FeedForward,
     GatedRMSNorm,
     HiMidLoLinear,
     Linear,
@@ -31,8 +31,9 @@ from torchtitan.models.common import (
     Sigmoid,
     SiTUGLU,
 )
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, InnerAttention
 from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
+from torchtitan.models.common.attention.mla import MLAAttention
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -40,8 +41,9 @@ from torchtitan.models.common.config_utils import (
     make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.decoder_sharding import (
-    inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
+    mla_attention_local_spmd_sharding_config,
+    mla_kv_projection_sharding_config,
     norm_sharding_config,
     pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
@@ -51,7 +53,7 @@ from torchtitan.models.common.decoder_sharding import (
     token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe import QuantileBalancedTopKRouter
-from torchtitan.models.common.moe_sharding import (
+from torchtitan.models.common.moe.sharding import (
     moe_sharding_config,
     router_gate_sharding_config,
     router_sharding_config,
@@ -78,12 +80,8 @@ from torchtitan.models.kimi_k2_7.sharding import (
     moonvit_rotary_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from .model import (
-    AttentionResidual,
-    KimiK3Model,
-    KimiK3TransformerBlock,
-    KimiMLAAttention,
-)
+from .attention import KimiMLAAttention
+from .model import AttentionResidual, KimiK3Model, KimiK3TransformerBlock
 from .moe import KimiLatentMoE
 from .sharding import (
     inner_kda_sharding_config,
@@ -203,7 +201,7 @@ def _feed_forward_config(
     dim: int,
     hidden_dim: int,
     enable_sp: bool,
-) -> FeedForward.Config:
+) -> DenseFeedForward.Config:
     return replace(
         make_ffn_config(
             dim=dim,
@@ -230,9 +228,18 @@ def _mla_config(
 ) -> KimiMLAAttention.Config:
     """Low-rank projections and norms stay replicated; up-projections and the
     gate are column-parallel; ``wo`` is row-parallel to the residual layout."""
-    inner_attention = replace(
-        get_attention_config(attn_backend),
-        sharding_config=inner_attention_local_spmd_sharding_config(),
+    wkv_b = _linear(
+        kv_lora_rank,
+        num_heads * (qk_nope_head_dim + v_head_dim),
+        sharding_config=mla_kv_projection_sharding_config(cp=spmd.S(0)),
+    )
+    qkv_attention = get_attention_config(attn_backend)
+    assert isinstance(qkv_attention, InnerAttention.Config)
+    inner_attention = MLAAttention.Config(
+        wkv_b=wkv_b,
+        packed_kv_head_dim=qk_nope_head_dim + v_head_dim,
+        inner_attention=qkv_attention,
+        sharding_config=mla_attention_local_spmd_sharding_config(),
     )
 
     q_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -261,11 +268,6 @@ def _mla_config(
         ),
         kv_norm=_norm(
             kv_lora_rank, sharding_config=replicated_state_sharding_config("weight")
-        ),
-        wkv_b=_linear(
-            kv_lora_rank,
-            num_heads * (qk_nope_head_dim + v_head_dim),
-            sharding_config=replicated_input_colwise_sharding_config(),
         ),
         gate=_linear(
             dim,
@@ -314,7 +316,7 @@ def _kda_config(
         )
 
     return KDA.Config(
-        num_heads=num_heads,
+        n_heads=num_heads,
         head_dim=head_dim,
         conv_kernel_size=conv_kernel_size,
         q_proj=colwise_linear(dim, projection_dim),
@@ -329,7 +331,7 @@ def _kda_config(
         forget_b=colwise_linear(head_dim, projection_dim),
         beta=colwise_linear(dim, num_heads),
         output_gate=colwise_linear(dim, projection_dim),
-        inner_kda=InnerKDA.Config(
+        inner_attention=InnerKDA.Config(
             head_dim=head_dim,
             conv_kernel_size=conv_kernel_size,
             kernel=KDAKernel.Config(),
@@ -616,11 +618,6 @@ def _kimi_k3_config(
                         enable_sp=enable_sp,
                     )
                     if is_full_attention
-                    else None
-                ),
-                delta_attention=(
-                    None
-                    if is_full_attention
                     else _kda_config(
                         dim=dim,
                         num_heads=num_heads,
@@ -633,11 +630,6 @@ def _kimi_k3_config(
                     _feed_forward_config(
                         dim=dim, hidden_dim=dense_hidden_dim, enable_sp=enable_sp
                     )
-                    if layer_idx == 0
-                    else None
-                ),
-                moe=(
-                    None
                     if layer_idx == 0
                     else _latent_moe_config(
                         dim=dim,
@@ -790,7 +782,7 @@ MODEL_FLAVORS = {
 
 def build_model_config(
     flavor: str,
-    attn_backend: str = "flex",
+    attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
     *,
     parallelism: ParallelismConfig,

@@ -27,7 +27,7 @@ including:
 
 - lint and CPU/GPU unit tests;
 - 8-GPU Real-PG feature and model integration tests;
-- H100 integration tests; and
+- H100 and B200 integration tests; and
 - integration tests for projects under `torchtitan/experiments/`, including
   GraphTrainer, the Transformers modeling backend, RL, and TorchFT.
 
@@ -201,8 +201,9 @@ To run it:
 3. Select the release branch, for example `release/0.3`.
 4. Start the workflow and wait for every validation job to finish.
 
-The workflow runs six GPU jobs: four on 8x A10G runners and two on 8x H100
-runners. All integration suites use real process groups:
+The workflow runs seven GPU jobs: four on 8x A10G runners, two on 8x H100
+runners, and one on an 8x B200 runner. All integration suites use real process
+groups:
 
 - `validate-standard-gpu` with the `core` suite checks the installed RC and
   dependency versions, all enabled single-GPU and multi-GPU unit tests, the
@@ -217,14 +218,23 @@ runners. All integration suites use real process groups:
 - `validate-standard-gpu` with the `transformers-modeling-backend` suite
   installs `transformers==5.9.0` and runs the MoE FSDP+TP+EP+CP, dense
   FSDP+TP+PP, dense CP+PP, and SFT integration tests;
-- `validate-h100` runs the base H100 suite, Qwen3 with DeepEP v2, and DeepSeek
-  V3 with HybridEP as separate tests; and
+- `validate-h100` runs the base H100 suite, DeepEP activation-checkpoint
+  gradient checks, Qwen3 with DeepEP v2, and DeepSeek V3 with HybridEP. Each
+  DeepEP variant is tested after installing its matching dependency;
 - `validate-graph-trainer-h100` runs the H100 GraphTrainer integrations, MoE
-  numerics, DeepSeek V3 precompile, and bitwise-determinism tests.
+  numerics, DeepSeek V3 precompile, and bitwise-determinism tests;
+- `validate-b200` runs the Dist-MoE CPU/GPU and MXFP8 FSDP unit tests.
+  It runs the full B200 integration suite:
+  Kimi K3 multimodal, DistMuon numerics, pipeline parallelism, MXFP8/NVFP4
+  linear layers, and BF16/MXFP8 Dist-MoE with VMM and pipeline parallelism.
+  The public CUDA container uses a clean uv environment with FlashAttention 4
+  and Dist-MoE installed before the pinned package versions are verified.
 
 Every GPU test job installs and imports the exact TestPyPI RC from
 `site-packages` and checks the expected `torch`, `torchvision`, and `torchao`
 versions. RL and GraphTrainer AutoParallel are intentionally not included.
+ROCm and the separate Fake-PG execution mode are not covered by this GPU
+workflow.
 
 ### 4C - Release acceptance criteria
 
@@ -235,8 +245,8 @@ Before finalizing the version, confirm that:
 - the Step 4B **Validate a TestPyPI Release Candidate on GPUs** workflow is
   green, including `Validate core on 8x A10G`, `Validate graph-trainer on 8x
   A10G`, `Validate torchft on 8x A10G`, `Validate
-  transformers-modeling-backend on 8x A10G`, `Validate core H100 tests`, and
-  `Validate GraphTrainer H100 tests`;
+  transformers-modeling-backend on 8x A10G`, `Validate core H100 tests`,
+  `Validate GraphTrainer H100 tests`, and `Validate core B200 tests`;
 - searching the GPU job logs for `SKIPPED` and `Skipping test` finds only expected
   exclusions.
 
@@ -376,7 +386,7 @@ Then:
 ### Current validation layers
 
 1. **Pre-branch CI on `main`:** lint, CPU/GPU unit tests, Real-PG integration
-   tests, H100 tests, and the latest available CI for projects under
+   tests, H100/B200 tests, and the latest available CI for projects under
    `torchtitan/experiments/`.
 2. **Release-specific source validation:** local unit and smoke tests plus the
    Real-PG feature/model suite and its integrated numerical checks against the
@@ -385,12 +395,14 @@ Then:
    publication; clean Python 3.11 and 3.12 environments then install the staged
    RC, verify package versions and import location, run a short training step,
    and run the complete enabled CPU unit-test suite.
-4. **TestPyPI GPU validation:** six GPU jobs, four on 8x A10G runners and two on
-   8x H100 runners, install the staged RC and pinned GPU packages. All
+4. **TestPyPI GPU validation:** seven GPU jobs, four on 8x A10G runners, two
+   on 8x H100 runners, and one on an 8x B200 runner, install the staged RC
+   and pinned GPU packages. All
    integration suites use real process groups and cover GPU unit tests,
    feature/model integration tests, loss and gradient-norm goldens, Flux,
-   GraphTrainer, TorchFT, the Transformers modeling backend, and the dedicated
-   H100 suites.
+   GraphTrainer, TorchFT, the Transformers modeling backend, and the H100/B200
+   suites, including DeepEP activation-checkpoint gradients, Dist-MoE, and
+   SM100 quantization checks.
 5. **Release scaling validation:** run a representative full-scale Llama 3
    405B FSDP workload with the staged RC and pinned PyTorch packages. Confirm
    the run completes, loss remains finite and converges, and throughput and
@@ -405,3 +417,6 @@ Then:
   include them because we don’t want to depend on the auto parallel main branch.
 - **Experimental projects:** RL.
 - **Additional platforms:** ROCm.
+- **Additional execution modes:** Fake-PG; the staged RC uses Real-PG.
+- **TorchFT CPU unit tests:** the GPU workflow runs its integration suite;
+  the core CPU validation does not collect the separate TorchFT test directory.
