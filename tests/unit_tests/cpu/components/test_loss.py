@@ -953,7 +953,6 @@ class TestChunkedLossWrapper(unittest.TestCase):
         )
         model = model_config.build()
         model.init_states()
-        model._skip_lm_head = True
         # A nonzero B matrix exercises gradients for both adapter matrices.
         with torch.no_grad():
             model.lm_head.lora_b.weight.normal_(std=0.02)
@@ -974,12 +973,8 @@ class TestChunkedLossWrapper(unittest.TestCase):
                 )
                 chunked_loss.set_lm_head(model.lm_head)
                 for _ in range(2):
-                    tokens = torch.randint(0, model_config.vocab_size, (8,))
-                    positions = torch.arange(8)
-                    hidden_TD = model(
-                        tokens,
-                        positions=positions,
-                        attention_metadata=model._get_attention_metadata(positions),
+                    hidden_TD = torch.linspace(-1.0, 1.0, 8 * model_config.dim).reshape(
+                        8, model_config.dim
                     )
                     self.assertFalse(hidden_TD.requires_grad)
                     labels = torch.randint(0, model_config.vocab_size, (8,))
