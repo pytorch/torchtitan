@@ -26,6 +26,7 @@ from torchtitan.models.common import (  # noqa: F401
     Embedding,
     GatedRMSNorm,
     Linear,
+    OffsetRMSNorm,
     RowParallelLinear,
     SiLU,
     Softmax,
@@ -70,7 +71,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_invariant_linear_sharding_config,
     vision_rowwise_sharding_config,
 )
-from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
+from .model import Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
 from .moe import SigmoidGatedFeedForward
 from .rope import MRoPE
 from .sharding import (

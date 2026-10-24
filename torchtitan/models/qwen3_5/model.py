@@ -24,7 +24,6 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
-from torchtitan.models.base.module import Module
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     Attention,
@@ -57,6 +56,7 @@ from torchtitan.models.common.multimodal import (
     MultimodalModel,
     scatter_vision_embeds,
 )
+from torchtitan.models.common.norm import OffsetRMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 
 from .rope import MRoPE
@@ -68,32 +68,6 @@ from .vision_encoder import Qwen35VisionEncoder
 # H = attention heads,
 # K = query/key head dimension, V = value head dimension,
 # R = rotary dimension, P = non-rotary dimension.
-
-
-class OffsetRMSNorm(Module):
-    """RMSNorm with offset: ``(1 + weight) * norm(x)``.
-
-    Weight is zero-initialized so the norm starts as identity-scaled.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        eps: float = 1e-6
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.eps = config.eps
-        self.weight = nn.Parameter(torch.empty(config.dim))
-
-    @local_compile("offset_rmsnorm", batch_invariant=False, recompile_limit=16)
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # Upcast to float32 for numerical stability in pow/rsqrt
-        input_dtype = input.dtype
-        input = input.float()
-        variance = input.pow(2).mean(-1, keepdim=True)
-        input = input * torch.rsqrt(variance + self.eps)
-        return ((1.0 + self.weight.float()) * input).to(input_dtype)
 
 
 class Qwen35Attention(Attention):

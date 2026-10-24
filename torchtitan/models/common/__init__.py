@@ -44,7 +44,7 @@ from .linear.hi_mid_lo_linear import HiMidLoLinear
 from .moe import BatchWiseLoadBalanceLoss, MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
 from .nn_modules import Conv1d, Conv2d, GELU, GroupNorm, Identity, LayerNorm, RMSNorm
-from .norm import GatedRMSNorm
+from .norm import GatedRMSNorm, OffsetRMSNorm
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
@@ -85,6 +85,7 @@ __all__ = [
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
     "MultimodalModel",
+    "OffsetRMSNorm",
     "RMSNorm",
     "RoPE",
     "RowParallelLinear",
