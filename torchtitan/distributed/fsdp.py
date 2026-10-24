@@ -80,6 +80,11 @@ def linear_param_shard_placements(
     for stacked weights. FSDP's default ``Shard(0)`` would split a logical
     projection or group dimension, so shard the matrix rows instead.
 
+    A ``GroupedLinear`` reports the dimension through ``fsdp_shard_dim``, so a
+    subclass that stores its weight in a kernel-native order shards its own
+    output-feature axis. The default returns the same dimension this function
+    used before, so stock placements are unchanged.
+
     Args:
         module: Module tree whose linear parameters should be inspected.
         include_unstacked_grouped: Also return ordinary ``[E, F, D]`` grouped
@@ -94,9 +99,16 @@ def linear_param_shard_placements(
         elif not isinstance(child, nn.Linear) or getattr(child, "num_linears", 1) == 1:
             continue
         weight = cast(nn.Parameter, child.weight)
-        placements[weight] = Shard(weight.ndim - 2)
-        if (bias := getattr(child, "bias", None)) is not None:
-            placements[bias] = Shard(bias.ndim - 1)
+        bias = getattr(child, "bias", None)
+        if isinstance(child, GroupedLinear):
+            weight_dim = child.fsdp_shard_dim("weight")
+            bias_dim = child.fsdp_shard_dim("bias") if bias is not None else None
+        else:
+            weight_dim = weight.ndim - 2
+            bias_dim = bias.ndim - 1 if bias is not None else None
+        placements[weight] = Shard(weight_dim)
+        if bias is not None:
+            placements[bias] = Shard(cast(int, bias_dim))
     return placements
 
 
