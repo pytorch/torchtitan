@@ -8,6 +8,7 @@
 
 import json
 from dataclasses import dataclass, replace
+from itertools import islice
 from typing import Any
 from unittest import mock
 
@@ -990,6 +991,194 @@ def test_concat_shards_after_one_global_index_space():
 
     assert [row["value"] for row in rank_0] == [0, 1, 2, 3]
     assert [row["value"] for row in rank_1] == [4, 5, 6, 7]
+
+
+@pytest.mark.parametrize("dp_world_size", [1, 2, 4])
+@pytest.mark.parametrize("shuffle", [False, True])
+@pytest.mark.parametrize("repeat", [False, True])
+@pytest.mark.parametrize("concat", [False, True])
+def test_strided_sharding_preserves_global_index_order(
+    dp_world_size, shuffle, repeat, concat
+):
+    rows = tuple({"value": index} for index in range(11))
+    if concat:
+        config = DatasetConcatConfig(
+            datasets=tuple(
+                SingleDatasetConfig(source=RowsSourceConfig(rows=part))
+                for part in (rows[:5], rows[5:])
+            )
+        )
+    else:
+        config = SingleDatasetConfig(source=RowsSourceConfig(rows=rows))
+
+    policy = dataset_iteration_policy(
+        shuffle=shuffle, repeat=repeat, map_dataset_dp_sharding="strided"
+    )
+    num_rows = 2 * len(rows) if repeat else len(rows)
+    global_rows = list(
+        islice(config.build(context=CONTEXT, dataset_iteration_policy=policy), num_rows)
+    )
+    ranks = [
+        iter(
+            config.build(
+                context=CONTEXT,
+                dataset_iteration_policy=replace(
+                    policy, dp_rank=rank, dp_world_size=dp_world_size
+                ),
+            )
+        )
+        for rank in range(dp_world_size)
+    ]
+    reconstructed = [next(ranks[index % dp_world_size]) for index in range(num_rows)]
+
+    assert reconstructed == global_rows
+
+
+def test_strided_sharding_rejects_streaming_source():
+    config = SingleDatasetConfig(source=StreamingRowsSourceConfig(rows=()))
+    with pytest.raises(ValueError, match="requires an indexed source"):
+        config.build(
+            context=CONTEXT,
+            dataset_iteration_policy=dataset_iteration_policy(
+                map_dataset_dp_sharding="strided"
+            ),
+        )
+
+
+@pytest.fixture
+def indexed_rows_loader_config():
+    """Fixed global rows with an uneven DP epoch and one row per microbatch."""
+    return GrainDataLoader.Config(
+        dataset=SingleDatasetConfig(
+            source=RowsSourceConfig(
+                rows=tuple(
+                    TextSequence(
+                        input_ids=np.full(9, index, dtype=np.int64),
+                        labels=np.full(9, index + 1, dtype=np.int64),
+                        positions=np.arange(9, dtype=np.int64),
+                    )
+                    for index in range(11)
+                )
+            )
+        ),
+        shuffle=False,
+        repeat=True,
+        read_options=CONTEXT.read_options,
+        num_prefetch_microbatches=1,
+    )
+
+
+@pytest.mark.parametrize(
+    "checkpoint_mode,legacy",
+    [("contiguous", False), ("strided", False), ("contiguous", True)],
+)
+def test_loader_rejects_changed_map_sharding(
+    indexed_rows_loader_config, checkpoint_mode, legacy
+):
+    loaders = [
+        replace(indexed_rows_loader_config, map_dataset_dp_sharding=mode).build(
+            dp_world_size=2,
+            dp_rank=1,
+            tokenizer=FakeTokenizer(),
+            max_context_length=9,
+            num_tokens_per_microbatch=9,
+        )
+        for mode in (
+            checkpoint_mode,
+            "strided" if checkpoint_mode == "contiguous" else "contiguous",
+        )
+    ]
+    try:
+        next(iter(loaders[0]))
+        state = loaders[0].state_dict()
+        if legacy:
+            del state["map_dataset_dp_sharding"]
+        with mock.patch.object(loaders[1]._iterator, "set_state") as set_state:
+            with pytest.raises(ValueError, match="map-dataset sharding"):
+                loaders[1].load_state_dict(state)
+            set_state.assert_not_called()
+    finally:
+        for loader in loaders:
+            loader.close()
+
+
+@pytest.mark.parametrize(
+    "mode,legacy", [("contiguous", False), ("strided", False), ("contiguous", True)]
+)
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_loader_map_sharding_checkpoint_across_epoch(
+    indexed_rows_loader_config, mode, legacy, shuffle
+):
+    config = replace(
+        indexed_rows_loader_config, map_dataset_dp_sharding=mode, shuffle=shuffle
+    )
+    loaders = [
+        config.build(
+            dp_world_size=2,
+            dp_rank=1,
+            tokenizer=FakeTokenizer(),
+            max_context_length=9,
+            num_tokens_per_microbatch=9,
+        )
+        for _ in range(2)
+    ]
+    try:
+        iterator = iter(loaders[0])
+        first = next(iterator)
+        if not shuffle:
+            # Prove Config -> Policy -> real global row ownership, not only serialization.
+            expected_id = 1 if mode == "strided" else 6
+            assert first.input.flatten().tolist() == [expected_id] * 9
+        for _ in range(5):
+            next(iterator)
+        state = loaders[0].state_dict()
+        assert state["map_dataset_dp_sharding"] == mode
+        if legacy:
+            del state["map_dataset_dp_sharding"]
+        expected = [next(iterator).input.clone() for _ in range(4)]
+        loaders[1].load_state_dict(state)
+        actual = [next(iter(loaders[1])).input for _ in range(4)]
+        for left, right in zip(expected, actual, strict=True):
+            assert torch.equal(left, right)
+    finally:
+        for loader in loaders:
+            loader.close()
+
+
+def test_map_sharding_validation_at_config_and_policy(indexed_rows_loader_config):
+    for build in (
+        lambda: replace(indexed_rows_loader_config, map_dataset_dp_sharding="invalid"),
+        lambda: dataset_iteration_policy(map_dataset_dp_sharding="invalid"),
+    ):
+        with pytest.raises(ValueError, match="map_dataset_dp_sharding.*invalid"):
+            build()
+    with pytest.raises(ValueError, match="num_mtp_layers"):
+        replace(indexed_rows_loader_config, num_mtp_layers=-1)
+    with pytest.raises(ValueError, match="dp_rank=2.*dp_world_size=2"):
+        dataset_iteration_policy(dp_rank=2, dp_world_size=2)
+
+
+@pytest.mark.parametrize("compose", ["concat", "mix"])
+def test_strided_map_composition_rejects_streaming_child(compose):
+    indexed = SingleDatasetConfig(source=RowsSourceConfig(rows=({"value": 1},)))
+    streaming = SingleDatasetConfig(source=StreamingRowsSourceConfig(rows=()))
+    config = (
+        DatasetConcatConfig(datasets=(indexed, streaming))
+        if compose == "concat"
+        else DatasetMixConfig(
+            datasets=(
+                WeightedDataset(dataset=indexed),
+                WeightedDataset(dataset=streaming),
+            )
+        )
+    )
+    with pytest.raises(ValueError, match="requires an indexed source"):
+        config.build(
+            context=CONTEXT,
+            dataset_iteration_policy=dataset_iteration_policy(
+                map_dataset_dp_sharding="strided"
+            ),
+        )
 
 
 @pytest.mark.parametrize(
@@ -2187,6 +2376,7 @@ def test_loader_microbatches_exact_rows_and_preserves_finite_tail(
 def mock_grain_loader():
     loader = object.__new__(GrainDataLoader)
     loader._dp_world_size = 1
+    loader._map_dataset_dp_sharding = "contiguous"
     loader._rank_id = "dp_rank_0"
     loader._iterator = mock.Mock()
     return loader
