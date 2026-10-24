@@ -99,28 +99,26 @@ def test_get_cuda_flash_attention_impl_on_rocm(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("capability", "module"),
-    [((9, 0), "flash_attn_interface"), ((10, 0), "flash_attn.cute")],
+    ("capability", "impl", "module"),
+    [((9, 0), "FA3", "flash_attn_interface"), ((10, 0), "FA4", "flash_attn.cute")],
 )
 @pytest.mark.parametrize("missing_parent", [False, True])
-def test_missing_flash_attention_warns_once(
-    monkeypatch, caplog, capability, module, missing_parent
+def test_missing_flash_attention_raises(
+    monkeypatch, capability, impl, module, missing_parent
 ):
     monkeypatch.setattr(
         "torchtitan.tools.utils.has_cuda_capability",
         lambda major, minor: capability >= (major, minor),
     )
     monkeypatch.setattr(torch.version, "hip", None)
-    monkeypatch.setattr("torchtitan.observability.logging._logged", set())
     find_spec = Mock(
         return_value=None,
         side_effect=ModuleNotFoundError if missing_parent else None,
     )
     monkeypatch.setattr("importlib.util.find_spec", find_spec)
 
-    for _ in range(2):
-        assert get_cuda_flash_attention_impl() is None
-    find_spec.assert_called_with(module)
-    assert len(caplog.records) == 1
-    assert module in caplog.text
-    assert "falling back to FA2" in caplog.text
+    with pytest.raises(ValueError, match=f"{impl} is required") as exc:
+        get_cuda_flash_attention_impl()
+    find_spec.assert_called_once_with(module)
+    assert module in str(exc.value)
+    assert f"Install a compatible {impl} wheel" in str(exc.value)

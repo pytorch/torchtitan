@@ -15,8 +15,6 @@ from types import ModuleType
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
 
-from torchtitan.observability.logging import warn_once
-
 logger = logging.getLogger(__name__)
 
 
@@ -58,8 +56,10 @@ def get_cuda_flash_attention_impl() -> str | None:
     except ModuleNotFoundError:  # Parent package `flash_attn` missing.
         found = False
     if not found:
-        warn_once(logger, f"{impl} not installed ('{module}'); falling back to FA2.")
-        return None
+        raise ValueError(
+            f"{impl} is required for Varlen attention, but '{module}' is not installed. "
+            f"Install a compatible {impl} wheel or explicitly select another attention backend."
+        )
     return impl
 
 
