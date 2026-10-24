@@ -6,6 +6,9 @@
 
 from importlib.metadata import version
 
+# Load device extensions before submodules import spmd_types.
+import torch  # noqa: F401
+
 try:
     __version__ = version("torchtitan")
 except Exception:
