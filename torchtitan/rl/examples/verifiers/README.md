@@ -28,7 +28,7 @@ package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
    a separate local process on the TitanRL controller host. The configured
    Verifiers runtime is independent: for example, `SubprocessConfig` or
    `DockerConfig` for the agent.
-3. [`generation_server.py`](./generation_server.py) exposes TitanRL's `GenerateFn` through the
+3. [`generation_server.py`](../../generator/generation_server.py) exposes TitanRL's `GenerateFn` through the
    HTTP token-generation protocol expected by Verifiers. It also retains the
    policy-version span and metrics that are absent from Verifiers traces.
 4. `rollouter.py` sends samples to Verifiers and converts the
@@ -53,7 +53,6 @@ Create one package per task, with its own dependency list:
 verifiers/
   data.py
   env_server.py
-  generation_server.py
   rollouter.py
   my_task/
     __init__.py
