@@ -39,6 +39,10 @@ def _run_env_server_process(
 ) -> None:
     """Run a Verifiers EnvServer from config data in a spawned process."""
 
+    # Pool workers do not construct pipeline schedules. Disable the release-only
+    # PyTorch compatibility shim so importing a local taskset stays torch-free.
+    os.environ["TORCHTITAN_DISABLE_TORCH_COMPAT"] = "1"
+
     no_proxy = os.environ.get("no_proxy", "")
     no_proxy = ",".join(filter(None, (no_proxy, "127.0.0.1", "localhost")))
     os.environ["no_proxy"] = no_proxy
