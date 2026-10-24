@@ -6,11 +6,13 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import torch
 import torch_remat as remat
 from torch import nn
 
+from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
@@ -135,6 +137,24 @@ class DeepSeekV3Model(MTPDecoder):
 
     def __init__(self, config: Config):
         super().__init__(config)
+
+    def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
+        """Use the model-owned MTP partition when MTP is enabled."""
+        if not self.num_mtp_layers:
+            return super().pipeline(**kwargs)
+        from .pipeline import pipeline_dsv3
+
+        return pipeline_dsv3(self, **kwargs)
+
+    @classmethod
+    def _synchronize_shared_parameters(
+        cls, model_parts: list[BaseModel], parallelism_context
+    ) -> None:
+        """Synchronize MTP embedding shards on their PP owners."""
+        del parallelism_context
+        from .pipeline import _synchronize_mtp_embeddings
+
+        _synchronize_mtp_embeddings(cast(list[DeepSeekV3Model], model_parts))
 
     @classmethod
     def _register_optimizer_hooks(

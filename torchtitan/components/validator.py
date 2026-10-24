@@ -8,7 +8,7 @@ import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.distributed.pipelining import PipelineStage
@@ -21,6 +21,7 @@ from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLo
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable
 from torchtitan.config.parallelism import ParallelismConfig
@@ -358,9 +359,17 @@ class Validator(BaseValidator):
         modes = [
             (module, module.training) for m in model_parts for module in m.modules()
         ]
+        validation_only = (
+            isinstance(self.loss_fn, ChunkedLossWrapper)
+            and self.loss_fn.validation_only
+        )
+        head_model = cast(Any, model_parts[-1])
+        head_was_skipped = head_model._skip_lm_head if validation_only else None
         try:
             for model in model_parts:
                 model.eval()
+            if validation_only:
+                head_model._skip_lm_head = True
             sl.add_step_tag("eval")
             self.metrics_processor.reset()
 
@@ -479,6 +488,8 @@ class Validator(BaseValidator):
             self.close()
             raise
         finally:
+            if validation_only:
+                head_model._skip_lm_head = head_was_skipped
             for module, training in modes:
                 module.training = training
 
