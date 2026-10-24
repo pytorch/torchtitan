@@ -90,7 +90,6 @@ def _qwen3_8_2_4t_a95b(
             n_heads=64,
             n_kv_heads=4,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             moe_hidden_dim=2048,
             num_experts=512,
             top_k=10,

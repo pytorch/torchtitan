@@ -175,6 +175,32 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
             self.rope(xq, xk, positions)
 
 
+class TestPartialRoPE(unittest.TestCase):
+    """Inputs wider than ``dim`` rotate their first ``dim`` channels only."""
+
+    def _check(self, rope_config: RoPE.Config) -> None:
+        torch.manual_seed(0)
+        rope = rope_config.build()
+        dim = rope_config.dim
+        xq = torch.randn(8, 2, 48)
+        xk = torch.randn(8, 2, 48)
+        positions = torch.arange(8)
+
+        xq_out, xk_out = rope(xq, xk, positions)
+        expected_q, expected_k = rope(xq[..., :dim], xk[..., :dim], positions)
+        torch.testing.assert_close(xq_out[..., :dim], expected_q, rtol=0, atol=0)
+        torch.testing.assert_close(xk_out[..., :dim], expected_k, rtol=0, atol=0)
+        torch.testing.assert_close(xq_out[..., dim:], xq[..., dim:], rtol=0, atol=0)
+        torch.testing.assert_close(xk_out[..., dim:], xk[..., dim:], rtol=0, atol=0)
+        torch.testing.assert_close(rope(xq, None, positions), xq_out, rtol=0, atol=0)
+
+    def test_cos_sin(self):
+        self._check(CosSinRoPE.Config(dim=16, max_context_length=8))
+
+    def test_complex(self):
+        self._check(ComplexRoPE.Config(dim=16, max_context_length=8))
+
+
 class TestMRoPECache(unittest.TestCase):
     def test_rejects_invalid_sections(self):
         for sections, error in (

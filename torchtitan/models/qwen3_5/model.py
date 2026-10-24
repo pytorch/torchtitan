@@ -18,7 +18,6 @@ from torch import nn
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -66,8 +65,7 @@ from .vision_encoder import Qwen35VisionEncoder
 # Shape suffixes:
 # T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads,
-# K = query/key head dimension, V = value head dimension,
-# R = rotary dimension, P = non-rotary dimension.
+# K = query/key head dimension, V = value head dimension.
 
 
 class Qwen35Attention(Attention):
@@ -75,7 +73,8 @@ class Qwen35Attention(Attention):
 
     Differences from GQAttention:
     - wq is 2x wider: produces both query and sigmoid gate
-    - Partial RoPE: only first ``rotary_dim`` elements get RoPE
+    - Partial RoPE: ``rope.dim`` is narrower than ``head_dim``, so only the
+      leading channels of each head rotate
     - Output gating: ``attn_output * sigmoid(gate)`` before ``wo``
     - QK norm uses OffsetRMSNorm
 
@@ -88,7 +87,6 @@ class Qwen35Attention(Attention):
     class Config(Attention.Config):
         n_kv_heads: int
         head_dim: int
-        rotary_dim: int
         rope: MRoPE.Config
         wq: Linear.Config
         wk: Linear.Config
@@ -102,7 +100,6 @@ class Qwen35Attention(Attention):
         self.n_heads = config.n_heads
         self.n_kv_heads = config.n_kv_heads
         self.head_dim = config.head_dim
-        self.rotary_dim = config.rotary_dim
         self.enable_gqa = self.n_heads > self.n_kv_heads
 
         self.wq = config.wq.build()
@@ -143,7 +140,7 @@ class Qwen35Attention(Attention):
         xq_THK = self.q_norm(xq_THK)
         xk_THK = self.k_norm(xk_THK)
 
-        xq_THK, xk_THK = self._partial_rope(xq_THK, xk_THK, positions)
+        xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
 
         out_THV = remat.region(
             self.inner_attention,
@@ -166,29 +163,6 @@ class Qwen35Attention(Attention):
         out_THV = out_THV * torch.sigmoid(gate_THV)
         out_TD = out_THV.view(num_tokens, -1)
         return self.wo(out_TD)
-
-    # TODO: consider moving this to rope directly.
-    @local_compile("partial_rope", batch_invariant=True)
-    def _partial_rope(
-        self,
-        xq_THK: torch.Tensor,
-        xk_THK: torch.Tensor,
-        positions: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Apply RoPE to the first ``rotary_dim`` channels of each head; keep the rest."""
-        assert self.rotary_dim <= self.head_dim
-        xq_THR, xq_THP = (
-            xq_THK[..., : self.rotary_dim],
-            xq_THK[..., self.rotary_dim :],
-        )
-        xk_THR, xk_THP = (
-            xk_THK[..., : self.rotary_dim],
-            xk_THK[..., self.rotary_dim :],
-        )
-        xq_THR, xk_THR = self.rope(xq_THR, xk_THR, positions)
-        xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
-        xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
-        return xq_THK, xk_THK
 
 
 class Qwen35TransformerBlock(TransformerBlock):
@@ -272,7 +246,8 @@ class Qwen35Model(MultimodalModel):
     Key architectural features:
     - Hybrid attention: 75% GatedDeltaNet (linear) + 25% full attention
     - Output gating on full attention: ``attn_out * sigmoid(gate)``
-    - Partial RoPE: only first ``rotary_dim`` elements get positional encoding
+    - Partial RoPE: only the leading ``rope.dim`` channels of each head get
+      positional encoding
     - OffsetRMSNorm: ``(1 + weight) * norm(x)`` with zero-init weight
     - MRoPE: 3D (temporal/height/width) position IDs for multimodal batches;
       text batches use the plain 1D positions
