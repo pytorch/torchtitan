@@ -150,10 +150,10 @@ mkdir -p \
 # subprocesses must import the installed TestPyPI RC rather than the checkout.
 cp "${REPO_ROOT}/run_train.sh" "${VALIDATION_ROOT}/run_train.sh"
 cp "${REPO_ROOT}/scripts/loss_compare.py" "${VALIDATION_ROOT}/scripts/loss_compare.py"
+cp "${REPO_ROOT}/scripts/_checkpoint_test_config.py" "${VALIDATION_ROOT}/scripts/_checkpoint_test_config.py"
 if [[ "${VALIDATION_SUITE}" == rl* ]]; then
   mkdir -p "${VALIDATION_ROOT}/scripts/rl"
   cp "${REPO_ROOT}/scripts/rl/loss_compare.py" "${VALIDATION_ROOT}/scripts/rl/loss_compare.py"
-  cp "${REPO_ROOT}/scripts/_checkpoint_test_config.py" "${VALIDATION_ROOT}/scripts/_checkpoint_test_config.py"
 fi
 cp -R "${REPO_ROOT}/tests" "${VALIDATION_ROOT}/tests"
 cp "${REPO_ROOT}/pyproject.toml" "${VALIDATION_ROOT}/pyproject.toml"
