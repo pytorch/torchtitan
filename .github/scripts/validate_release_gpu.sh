@@ -434,13 +434,16 @@ PY
     -m "not multi_gpu" --strict-markers --durations=20 -vv
 
   model_path="$(download_rl_model)"
-  export HF_ASSETS_PATH="${model_path}"
   export RL_TEST_DUMP_FOLDER="${ARTIFACTS}/rl_unit"
   local test_class
-  for test_class in TestBitwiseParityVarlen TestBitwiseParityFlex TestBitwiseParityQwen35DebugVarlen; do
-    python -m torch.distributed.run --standalone --nproc-per-node=2 -m pytest \
+  for test_class in TestBitwiseParityVarlen TestBitwiseParityFlex; do
+    HF_ASSETS_PATH="${model_path}" python -m torch.distributed.run \
+      --standalone --nproc-per-node=2 -m pytest \
       "tests/rl/unit_tests/gpu/test_bitwise_parity.py::${test_class}" -v
   done
+  python -m torch.distributed.run --standalone --nproc-per-node=2 -m pytest \
+    tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen \
+    -v
   python -m torch.distributed.run --standalone --nproc-per-node=4 -m pytest \
     tests/rl/unit_tests/gpu/test_generator_uneven_decode.py -v
 
