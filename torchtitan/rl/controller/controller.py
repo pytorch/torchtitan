@@ -117,12 +117,13 @@ from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWorkBuffer,
 )
 from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.http_client import GeneratorClient
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
+from torchtitan.rl.rollout.types import GenerateFn, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.trainer.controller_state import DATALOADER_STATE_KEY
@@ -516,47 +517,6 @@ class Controller(Configurable):
         """
         return result.get(0)
 
-    def _make_generate_fn(self, metrics_prefix: str) -> GenerateFn:
-        """Build the rollouter's `GenerateFn`: route a completion via the generator router, namespacing
-        generation metrics with `metrics_prefix` and pinning sticky routing on `routing_session_id` (a sample's
-        turns reuse one generator's prefix KV)."""
-        # TODO: make this a pluggable config (a GenerateFn factory) so non-router generate backends can be swapped in.
-        # Bind the router handle to a local so the closure captures it instead of
-        # `self`. A GenerateFn may be shipped to another process, where an actor
-        # handle serializes cheaply and the whole controller does not.
-        generator_router = self.generator_router
-
-        @sl.log_trace_span("generate")
-        async def generate(
-            prompt_token_ids: list[int],
-            *,
-            request_id: str,
-            group_id: int,
-            routing_session_id: str | None = None,
-            sampling_config: SamplingConfig | None = None,
-        ) -> Completion | None:
-            return await generator_router.generate.call_one(
-                prompt_token_ids,
-                request_id=request_id,
-                group_id=group_id,
-                routing_session_id=routing_session_id,
-                sampling_config=sampling_config,
-                metrics_prefix=metrics_prefix,
-            )
-
-        return generate
-
-    def _make_release_session_fn(self) -> ReleaseSessionFn:
-        """Build the rollouter's `ReleaseSessionFn`: tell the generator router a rollout ended."""
-        generator_router = self.generator_router
-
-        async def release_session(*, routing_session_id: str) -> None:
-            await generator_router.release_session.call_one(
-                routing_session_id=routing_session_id
-            )
-
-        return release_session
-
     @sl.log_trace_span("setup_async")
     async def setup_async(self, *, actor_system: ActorSystem | None = None):
         """Spawn the services through the actor system and initialize weights.
@@ -705,14 +665,15 @@ class Controller(Configurable):
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
-        generate = self._make_generate_fn(metrics_prefix="validation_generator")
-        release_session_fn = self._make_release_session_fn()
+        client = GeneratorClient(
+            router=self.generator_router, metrics_prefix="validation_generator"
+        )
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         group_results = await asyncio.gather(
             *(
                 self._rollouter.run_group_rollouts(
-                    generate_fn=generate,
-                    release_session_fn=release_session_fn,
+                    generate_fn=client,
+                    release_session_fn=client.release_session,
                     sample=sample,
                     # Negative ids keep validation disjoint from training group ids, so their
                     # request_ids can't collide in the shared engine (e.g. post-validation).
@@ -838,8 +799,7 @@ class Controller(Configurable):
         )
 
         # rollout_loop
-        generate_fn = self._make_generate_fn(metrics_prefix="generator")
-        release_session_fn = self._make_release_session_fn()
+        client = GeneratorClient(router=self.generator_router)
 
         # One rollout worker per active buffer slot: lets generation fill every active slot,
         # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
@@ -848,8 +808,8 @@ class Controller(Configurable):
             asyncio.create_task(
                 self._rollout_loop(
                     group_buffer=self._group_buffer,
-                    generate_fn=generate_fn,
-                    release_session_fn=release_session_fn,
+                    generate_fn=client,
+                    release_session_fn=client.release_session,
                 ),
                 name=f"rollout_worker_{group_worker_id}",
             )

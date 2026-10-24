@@ -4,24 +4,29 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""HTTP generation server connecting Verifiers to TitanRL."""
+"""A generator's HTTP endpoint: token ids in, token ids out, in vLLM's token-in format."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import itertools
 import json
 import logging
+import resource
+import socket
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+import numpy as np
 from aiohttp import web
 
-from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import GenerateFn
+from torchtitan.rl.rollout.types import Completion
 
 logger = logging.getLogger(__name__)
 
-_SESSION_ID_HEADER = "X-Session-ID"
+SESSION_ID_HEADER = "X-Session-ID"
 
 # Stands in for the logprobs content list; the handler splices the real list in.
 _LOGPROBS_CONTENT_PLACEHOLDER = "<logprobs content>"
@@ -29,9 +34,16 @@ _LOGPROBS_CONTENT_PLACEHOLDER = "<logprobs content>"
 GROUP_ID_SAMPLING_PARAM = "torchtitan_group_id"
 """Sampling parameter carrying a request's rollout group id.
 
-Verifiers forwards extra sampling fields verbatim in ``sampling_params``, so the
+Verifiers forwards extra sampling fields verbatim in `sampling_params`, so the
 rollouter tags every request of a group with its id.
 """
+
+METRICS_PREFIX_SAMPLING_PARAM = "torchtitan_metrics_prefix"
+"""Optional sampling parameter naming the prefix of the generator metrics, e.g.
+`"validation_generator"`; `"generator"` when absent."""
+
+TORCHTITAN_RESPONSE_FORMAT = "torchtitan"
+"""Value of a request's top-level `response_format` that asks for the compact response."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,50 +65,41 @@ class VerifiersGenerationMetadata:
     """Metrics from every generation in the rollout, merged with `m.fold`."""
 
 
-class GenerationServer(Configurable):
-    """Expose a TorchTitan ``GenerateFn`` through Verifiers' model API.
+class GenerationServer:
+    """Serve a generator's `generate` over HTTP, so every caller reaches the generator directly.
 
-    A Verifiers environment calls a named HTTP model endpoint, while TitanRL
-    supplies an in-process ``GenerateFn`` backed by its generator router. This
-    server exposes Verifiers' token-generation endpoint, forwards each request
-    to that function, and retains TorchTitan policy-version and metric metadata
-    that the resulting Verifiers trace does not carry.
+    One request shape (vLLM's token-in `POST /inference/v1/generate`), two response formats:
+
+        default                    vLLM's token-in response, which Verifiers' client reads. Verifiers
+                                   drops other fields, so the server folds each session's policy
+                                   versions and metrics for `pop_generation_metadata`.
+        "response_format":         token ids and logprobs as raw arrays, versions and metrics in one
+          "torchtitan"             `torchtitan` block; 200 whenever the engine produced a completion.
+
+    The server mints every request id, so no client can send an id the engine already runs.
+    It listens on every interface and is unauthenticated.
+
+    Args:
+        generate: The generator's `generate`, called once per request on this event loop.
+        max_context_length: The engine's context length; prompts of this many tokens or more get a 400.
     """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        host: str = "127.0.0.1"
-        """Interface on which the local HTTP server listens."""
-
-        port: int = 0
-        """Listening port; zero requests an ephemeral port."""
-
-        max_rollout_tokens: int
-        """Context length; set it to the generator's ``max_model_len``.
-        Prompts of this many tokens or more get a 400.
-
-        The server advertises this value as ``max_model_len`` through
-        ``GET /v1/models`` so Verifiers can reject longer prompts before
-        forwarding them to the generator.
-        """
-
-        def __post_init__(self) -> None:
-            if not 0 <= self.port <= 65535:
-                raise ValueError("port must be between 0 and 65535")
-            if self.max_rollout_tokens <= 0:
-                raise ValueError("max_rollout_tokens must be positive")
 
     model_id = "torchtitan"
 
-    def __init__(self, config: Config) -> None:
-        self.host = config.host
-        self.requested_port = config.port
-        self.max_rollout_tokens = config.max_rollout_tokens
-        self.generate_fn: GenerateFn | None = None
+    def __init__(
+        self,
+        *,
+        generate: Callable[..., Awaitable[Completion]],
+        max_context_length: int,
+    ) -> None:
+        self.generate = generate
+        self.max_context_length = max_context_length
         self.runner: web.AppRunner | None = None
         self.bound_port: int | None = None
-        self.request_counts: dict[str, int] = {}
+        self._request_counter = itertools.count()
         self.generation_metadata: dict[str, VerifiersGenerationMetadata] = {}
+        # Group id -> the sessions with folded metadata, so `drop_generation_metadata` can free them.
+        self._group_sessions: dict[int, set[str]] = {}
 
     @property
     def port(self) -> int:
@@ -105,36 +108,34 @@ class GenerationServer(Configurable):
         return self.bound_port
 
     @property
-    def base_url(self) -> str:
-        """OpenAI-compatible base URL used by the local Verifiers client."""
-        return f"http://{self.host}:{self.port}/v1"
-
-    def set_generate_fn(self, generate_fn: GenerateFn) -> None:
-        self.generate_fn = generate_fn
+    def url(self) -> str:
+        """Base URL other hosts can reach, e.g. `"http://host-3.example.com:41233"`."""
+        return f"http://{socket.getfqdn()}:{self.port}"
 
     async def start(self) -> None:
         if self.runner is not None:
             return
-        app = web.Application()
+        # The default 1 MiB cap is ~130k prompt tokens as JSON; long-context recipes go past it.
+        app = web.Application(client_max_size=64 * 1024**2)
         app.router.add_get("/healthz", self._handle_health_request)
         app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
-        # aiohttp logs one INFO line per request: most of the controller's log lines. The rollouts
-        # still carry each call's prompt and completion.
-        runner = web.AppRunner(app, access_log=None)
+        # A handler whose client hung up is cancelled, so a request still on the engine loop's queue
+        # never runs. No access log: one line per request would run in the engine's process, and the
+        # rollouts carry each call's prompt and completion.
+        runner = web.AppRunner(app, handler_cancellation=True, access_log=None)
         await runner.setup()
-        site = web.TCPSite(runner, self.host, self.requested_port)
-        await site.start()
-        sockets = getattr(site._server, "sockets", None)
-        if not sockets:
-            await runner.cleanup()
-            raise RuntimeError("generation server did not bind a listening socket")
+        sock = _listening_socket()
+        # A burst of new calls (one connection each) can pass aiohttp's default of 128 pending
+        # connects. The site calls listen() on `sock` again, so the backlog is set here.
+        await web.SockSite(runner, sock, backlog=4096).start()
         self.runner = runner
-        self.bound_port = int(sockets[0].getsockname()[1])
+        self.bound_port = int(sock.getsockname()[1])
+        # Every in-flight call holds a connection, so a low open-file limit caps concurrency.
         logger.info(
-            "Verifiers generation server listening on http://%s:%d",
-            self.host,
-            self.bound_port,
+            "Generation server listening on %s (open-file limit %d)",
+            self.url,
+            resource.getrlimit(resource.RLIMIT_NOFILE)[0],
         )
 
     async def close(self) -> None:
@@ -143,15 +144,25 @@ class GenerationServer(Configurable):
             await runner.cleanup()
         self.runner = None
         self.bound_port = None
-        self.request_counts.clear()
         self.generation_metadata.clear()
+        self._group_sessions.clear()
 
     def pop_generation_metadata(
-        self, session_id: str
-    ) -> VerifiersGenerationMetadata | None:
-        """Detach the generation metadata accumulated for one rollout."""
-        self.request_counts.pop(session_id, None)
-        return self.generation_metadata.pop(session_id, None)
+        self, session_ids: list[str]
+    ) -> dict[str, VerifiersGenerationMetadata]:
+        """Detach the generation metadata folded for these sessions; a session without any is left out."""
+        return {
+            session_id: self.generation_metadata.pop(session_id)
+            for session_id in session_ids
+            if session_id in self.generation_metadata
+        }
+
+    def drop_generation_metadata(self, group_ids: list[int]) -> None:
+        """Drop the folded metadata of every session of these groups, including sessions nobody
+        popped (e.g. a retried Verifiers trace)."""
+        for group_id in group_ids:
+            for session_id in self._group_sessions.pop(group_id, ()):
+                self.generation_metadata.pop(session_id, None)
 
     async def _handle_health_request(self, request: web.Request) -> web.Response:
         del request
@@ -165,19 +176,15 @@ class GenerationServer(Configurable):
             "object": "model",
             "created": 0,
             "owned_by": "torchtitan",
-            "max_model_len": self.max_rollout_tokens,
+            "max_model_len": self.max_context_length,
         }
         return web.json_response({"object": "list", "data": [model]})
 
     async def _handle_generate_request(self, request: web.Request) -> web.Response:
-        if self.generate_fn is None:
-            return web.json_response(
-                {"error": "TorchTitan GenerateFn is not ready"}, status=503
-            )
-        session_id = request.headers.get(_SESSION_ID_HEADER)
+        session_id = request.headers.get(SESSION_ID_HEADER)
         if not session_id:
             return web.json_response(
-                {"error": f"missing {_SESSION_ID_HEADER} header"}, status=400
+                {"error": f"missing {SESSION_ID_HEADER} header"}, status=400
             )
 
         try:
@@ -187,9 +194,9 @@ class GenerationServer(Configurable):
             )
             # vLLM needs room for one output token. Keep vLLM's wording: Verifiers'
             # harnesses match it as a context overflow.
-            if len(prompt_token_ids) >= self.max_rollout_tokens:
+            if len(prompt_token_ids) >= self.max_context_length:
                 raise ValueError(
-                    f"This model's maximum context length is {self.max_rollout_tokens} "
+                    f"This model's maximum context length is {self.max_context_length} "
                     f"tokens, and the prompt has {len(prompt_token_ids)} tokens, "
                     "leaving no room for an output token"
                 )
@@ -202,22 +209,35 @@ class GenerationServer(Configurable):
                 raise ValueError(
                     f"sampling_params.{GROUP_ID_SAMPLING_PARAM} must be an integer"
                 )
+            metrics_prefix = sampling_params.pop(
+                METRICS_PREFIX_SAMPLING_PARAM, "generator"
+            )
+            if not isinstance(metrics_prefix, str):
+                raise ValueError(
+                    f"sampling_params.{METRICS_PREFIX_SAMPLING_PARAM} must be a string"
+                )
             sampling = _parse_sampling_config(sampling_params)
             if body.get("features") is not None:
                 raise ValueError("multimodal features are not supported")
+            client_request_id = body.get("request_id")
+            response_format = body.get("response_format")
         except (TypeError, ValueError) as error:
             return web.json_response({"error": str(error)}, status=400)
+        # Keep only the prompt alive while the engine generates, not the whole parsed body.
+        del body
 
-        request_index = self.request_counts.get(session_id, 0)
-        self.request_counts[session_id] = request_index + 1
-        request_id = f"{session_id}/request={request_index}"
+        # The counter keeps every id unique, even when a client sends the same id twice.
+        request_id = (
+            f"{client_request_id or session_id}/http={next(self._request_counter)}"
+        )
         try:
-            completion = await self.generate_fn(
+            completion = await self.generate(
                 prompt_token_ids,
                 request_id=request_id,
                 group_id=group_id,
                 routing_session_id=session_id,
                 sampling_config=sampling,
+                metrics_prefix=metrics_prefix,
             )
         except asyncio.CancelledError:
             raise
@@ -235,6 +255,8 @@ class GenerationServer(Configurable):
                 {"error": "completion token IDs and logprobs have different lengths"},
                 status=500,
             )
+        if response_format == TORCHTITAN_RESPONSE_FORMAT:
+            return web.json_response(completion_to_response(completion))
         if completion.finish_reason not in ("stop", "length"):
             return web.json_response(
                 {
@@ -264,6 +286,7 @@ class GenerationServer(Configurable):
                 else [*previous.metrics, *completion.metrics]
             ),
         )
+        self._group_sessions.setdefault(group_id, set()).add(session_id)
         # Text, not one dict per token: 1.4x faster, and no GC pass every ~700 tokens.
         # A finite Python float's repr is valid JSON; vLLM's logprobs are Python floats.
         logprobs_content = ",".join(
@@ -293,6 +316,77 @@ class GenerationServer(Configurable):
         return web.Response(
             text=f"{head}[{logprobs_content}]{tail}", content_type="application/json"
         )
+
+
+def _encode_metrics(metrics: list[m.Metric]) -> list[list]:
+    """Write metrics as JSON rows, e.g. `Metric("generator/queue_time_ms", Mean(3.0, 2.0))` ->
+    `["generator/queue_time_ms", "Mean", {"value": 3.0, "count": 2.0}]`."""
+    return [
+        [metric.key, type(metric.value).__name__, vars(metric.value)]
+        for metric in metrics
+    ]
+
+
+def _decode_metrics(rows: list[list]) -> list[m.Metric]:
+    """Inverse of `_encode_metrics`, for every `MetricValue` type. Sets the attributes directly, as
+    pickle does: constructors don't take them all (e.g. `SummaryStats(value)` sets 5)."""
+    value_types = {cls.__name__: cls for cls in m.MetricValue.__subclasses__()}
+    metrics = []
+    for key, kind, fields in rows:
+        value = object.__new__(value_types[kind])
+        vars(value).update(fields)
+        metrics.append(m.Metric(key, value))
+    return metrics
+
+
+def completion_to_response(completion: Completion) -> dict:
+    """The `"response_format": "torchtitan"` response. Raw float64 logprobs round-trip every
+    value exactly, -inf and NaN included."""
+    return {
+        "request_id": completion.request_id,
+        "torchtitan": {
+            "token_ids": _base64(np.asarray(completion.token_ids, dtype=np.int32)),
+            "logprobs": _base64(
+                np.asarray(completion.token_logprobs, dtype=np.float64)
+            ),
+            "finish_reason": completion.finish_reason,
+            "min_policy_version": completion.min_policy_version,
+            "max_policy_version": completion.max_policy_version,
+            "metrics": _encode_metrics(completion.metrics),
+        },
+    }
+
+
+def response_to_completion(payload: dict) -> Completion:
+    """Inverse of `completion_to_response`."""
+    block = payload["torchtitan"]
+    return Completion(
+        min_policy_version=block["min_policy_version"],
+        max_policy_version=block["max_policy_version"],
+        request_id=payload["request_id"],
+        token_ids=np.frombuffer(
+            base64.b64decode(block["token_ids"]), dtype=np.int32
+        ).tolist(),
+        token_logprobs=np.frombuffer(
+            base64.b64decode(block["logprobs"]), dtype=np.float64
+        ).tolist(),
+        finish_reason=block["finish_reason"],
+        metrics=_decode_metrics(block["metrics"]),
+    )
+
+
+def _base64(array: np.ndarray) -> str:
+    return base64.b64encode(array.tobytes()).decode("ascii")
+
+
+def _listening_socket() -> socket.socket:
+    """One socket on a free port for IPv4 and IPv6, so the one advertised port works for either
+    family."""
+    if socket.has_dualstack_ipv6():
+        return socket.create_server(
+            ("::", 0), family=socket.AF_INET6, dualstack_ipv6=True
+        )
+    return socket.create_server(("0.0.0.0", 0))  # IPv6 is disabled on this host
 
 
 def _validate_token_ids(value: object, *, field_name: str) -> list[int]:

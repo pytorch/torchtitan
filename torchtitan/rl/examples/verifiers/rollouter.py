@@ -31,8 +31,10 @@ from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.generator.generation_server import (
     GenerationServer,
     GROUP_ID_SAMPLING_PARAM,
+    METRICS_PREFIX_SAMPLING_PARAM,
     VerifiersGenerationMetadata,
 )
+from torchtitan.rl.generator.http_client import GeneratorClient
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
@@ -47,6 +49,7 @@ from torchtitan.rl.rollout.types import (
     RolloutTurnID,
     split_prompt,
 )
+from torchtitan.rl.routing.inter_generator import GeneratorEndpoint
 
 if TYPE_CHECKING:
     from torchtitan.rl.actors.system import ActorSystem
@@ -79,8 +82,8 @@ class VerifiersRollouter(Rollouter):
     Verifiers owns environment execution, including its process pool and the
     message/tool loop, so this path bypasses TitanRL's ``RolloutWorkerActor``,
     ``RolloutWorker``, ``MessageEnv``, and ``TokenEnv``. Token-in/token-out is
-    preserved through ``GenerationServer``, which forwards Verifiers model
-    requests to TitanRL's controller-provided ``GenerateFn``.
+    preserved because Verifiers' agents post every model call straight to one
+    generator's `GenerationServer`, which the router picks for each rollout.
 
     TitanRL still owns dataset and group scheduling, generator routing, policy
     metadata, conversion to ``RolloutTurn``, reward and advantage assignment,
@@ -114,9 +117,6 @@ class VerifiersRollouter(Rollouter):
             default_factory=AdvantageEstimator.Config
         )
         """TitanRL estimator applied after Verifiers returns rollout rewards."""
-
-        generation_server: GenerationServer.Config
-        """Local HTTP bridge from Verifiers to TitanRL generation."""
 
         renderer_multiplex: int = 256
         """Maximum concurrent rollouts sharing one Verifiers renderer instance.
@@ -162,7 +162,6 @@ class VerifiersRollouter(Rollouter):
         self._rubric: Rubric = config.rubric.build()
         self._advantage_estimator: AdvantageEstimator = config.advantage.build()
         self._verifiers_env_server = config.verifiers_env_server.build()
-        self._generation_server: GenerationServer | None = None
         self._verifiers_env_client: VerifiersEnvClient | None = None
         self._verifiers_train_client_config: VerifiersTrainClientConfig | None = None
 
@@ -174,7 +173,7 @@ class VerifiersRollouter(Rollouter):
         renderer_config: RendererConfig,
         hf_assets_path: str,
     ) -> None:
-        """Start the EnvServer and connect it to TorchTitan generation.
+        """Start the EnvServer and connect to it.
 
         Rollouts run in the EnvServer, so no rollout worker pool is spawned through
         ``actor_system``.
@@ -189,22 +188,17 @@ class VerifiersRollouter(Rollouter):
                 "environment-server process"
             )
 
-        # Verifiers generates through an HTTP endpoint, while TorchTitan exposes
-        # an in-process GenerateFn. This server bridges those interfaces.
-        # TODO: remove this bridge when the controller can provide a generator
-        # HTTP endpoint directly.
-        generation_server = self._verifiers_config.generation_server.build()
         verifiers_server_address = await self._verifiers_env_server.start()
         verifiers_env_client = None
         try:
-            await generation_server.start()
             verifiers_env_client = VerifiersEnvClient(verifiers_server_address)
             await verifiers_env_client.wait_for_server_startup(
                 timeout=self._verifiers_config.connection_timeout_sec
             )
             verifiers_train_client_config = VerifiersTrainClientConfig(
-                base_url=generation_server.base_url,
-                # The local endpoint does not authenticate. An empty environment
+                # Each rollout sets its generator's URL; see `_run_single_rollout`.
+                base_url="",
+                # The generator endpoint does not authenticate. An empty environment
                 # variable name makes Verifiers send its required "EMPTY" value.
                 api_key_var="",
                 renderer=renderer_config.get_renderers_config(),
@@ -214,29 +208,20 @@ class VerifiersRollouter(Rollouter):
         except BaseException:
             if verifiers_env_client is not None:
                 await verifiers_env_client.close()
-            try:
-                await generation_server.close()
-            finally:
-                await self._verifiers_env_server.close()
+            await self._verifiers_env_server.close()
             raise
-        self._generation_server = generation_server
         self._verifiers_env_client = verifiers_env_client
         self._verifiers_train_client_config = verifiers_train_client_config
 
     async def close(self) -> None:
-        """Close the Verifiers client, generation server, and environment server."""
+        """Close the Verifiers client and environment server."""
         try:
             if self._verifiers_env_client is not None:
                 await self._verifiers_env_client.close()
         finally:
             self._verifiers_env_client = None
             self._verifiers_train_client_config = None
-            try:
-                if self._generation_server is not None:
-                    await self._generation_server.close()
-            finally:
-                self._generation_server = None
-                await self._verifiers_env_server.close()
+            await self._verifiers_env_server.close()
 
     async def run_group_rollouts(
         self,
@@ -249,13 +234,17 @@ class VerifiersRollouter(Rollouter):
         sampling: SamplingConfig,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
-        if self._generation_server is None:
-            raise RuntimeError("Verifiers rollouter is not initialized")
-        self._generation_server.set_generate_fn(generate_fn)
+        # Each rollout releases its own generator sessions; see `_run_single_rollout`.
+        del release_session_fn
+        if not isinstance(generate_fn, GeneratorClient):
+            raise TypeError(
+                "Verifiers' agents call a generator over HTTP, so generate_fn must be a "
+                f"GeneratorClient, got {type(generate_fn).__name__}"
+            )
         results = await asyncio.gather(
             *(
                 self._run_single_rollout(
-                    release_session_fn=release_session_fn,
+                    generator_client=generate_fn,
                     sample=sample,
                     sampling=(
                         sampling
@@ -290,48 +279,67 @@ class VerifiersRollouter(Rollouter):
     async def _run_single_rollout(
         self,
         *,
-        release_session_fn: ReleaseSessionFn,
+        generator_client: GeneratorClient,
         sample: object,
         sampling: SamplingConfig,
         group_id: int,
         rollout_id: int,
     ) -> Rollout:
-        """Send one task to Verifiers, release its sessions, and convert its trace to a rollout."""
+        """Send one task to Verifiers, release its sessions, and convert its trace to a rollout.
+
+        A rollout (one `VerifiersEnvClient.run`) has one trace per agent: the trainable one, plus any
+        sub-agents. Verifiers sends each trace's id as its generator session id (X-Session-ID):
+
+            traces "a1" (trainable), "b7" (sub-agent) -> release_rollout(endpoint, session_ids=["a1", "b7"])
+        """
         if not isinstance(sample, VerifiersTaskSample):
             raise TypeError("Verifiers requires a VerifiersTaskSample")
         if (
-            self._generation_server is None
-            or self._verifiers_env_client is None
+            self._verifiers_env_client is None
             or self._verifiers_train_client_config is None
         ):
             raise RuntimeError("Verifiers rollouter is not initialized")
 
-        # One VerifiersEnvClient.run executes a complete rollout. The harness
-        # owns the multi-turn model/tool loop and calls the generation server once per
-        # generation; run returns only after the rollout stops.
-        verifiers_episode = await self._verifiers_env_client.run(
-            task_data=sample.verifiers_task_data,
-            client=self._verifiers_train_client_config,
-            model=self._generation_server.model_id,
-            sampling=VerifiersSamplingConfig(
-                temperature=sampling.temperature,
-                top_p=sampling.top_p,
-                max_tokens=sampling.max_tokens,
-                seed=sampling.seed,
-                **{GROUP_ID_SAMPLING_PARAM: group_id},
-            ),
+        # One VerifiersEnvClient.run executes a complete rollout. The harness owns the
+        # multi-turn model/tool loop and posts every generation to one generator's server,
+        # so all of the rollout's traces (sub-agents too) share that generator.
+        endpoint: GeneratorEndpoint = await generator_client.acquire_rollout(
+            group_id=group_id
         )
-        # `run` returned, so this rollout starts no new calls. Release each trace's routing
-        # session: Verifiers sends the trace id as X-Session-ID.
-        # TODO: an attempt Verifiers retried has no trace here, so its held KV waits for the
-        # group's release and its routing pin for the router's `max_sessions` LRU. The generation
-        # server could record each rollout's session ids and release those too.
-        for trace in verifiers_episode.traces:
-            try:
-                await release_session_fn(routing_session_id=trace.id)
-            except Exception:
-                # Not fatal: `max_sessions` evicts an unreleased session.
-                logger.exception("releasing routing session %s failed", trace.id)
+        verifiers_episode = None
+        # `finally` gives the lease back even if `run` raises or this task is cancelled.
+        try:
+            verifiers_episode = await self._verifiers_env_client.run(
+                task_data=sample.verifiers_task_data,
+                # An OpenAI-style base URL, e.g. "http://host-3.example.com:41233/v1". Verifiers keeps
+                # one HTTP client per distinct client config, so the rollouts on a generator share one.
+                client=self._verifiers_train_client_config.model_copy(
+                    update={"base_url": f"{endpoint.url}/v1"}
+                ),
+                model=GenerationServer.model_id,
+                sampling=VerifiersSamplingConfig(
+                    temperature=sampling.temperature,
+                    top_p=sampling.top_p,
+                    max_tokens=sampling.max_tokens,
+                    seed=sampling.seed,
+                    **{
+                        GROUP_ID_SAMPLING_PARAM: group_id,
+                        METRICS_PREFIX_SAMPLING_PARAM: generator_client.metrics_prefix,
+                    },
+                ),
+            )
+        finally:
+            # One call releases every trace's session on this generator, then the lease. An attempt
+            # Verifiers retried has no trace here; `release_groups` drops its sessions at group end.
+            generation_metadata_by_session = await generator_client.release_rollout(
+                endpoint,
+                group_id=group_id,
+                session_ids=(
+                    [trace.id for trace in verifiers_episode.traces]
+                    if verifiers_episode is not None
+                    else []
+                ),
+            )
         traces = [trace for trace in verifiers_episode.traces if trace.agent.trainable]
         if len(traces) != 1:
             raise ValueError(
@@ -341,7 +349,7 @@ class VerifiersRollouter(Rollouter):
 
         # Convert Verifiers' graph trace to TitanRL's linear rollout turns.
         trace = traces[0]
-        generation_metadata = self._generation_server.pop_generation_metadata(trace.id)
+        generation_metadata = generation_metadata_by_session.get(trace.id)
         turns = self.trace_to_rollout_turns(
             trace=trace,
             generation_metadata=generation_metadata,
