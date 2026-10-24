@@ -23,9 +23,11 @@ from torchtitan.distributed.batch_invariant import (
     set_batch_invariance,
 )
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.model import gdn, vllm_registry as registry
-from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
-from torchtitan.rl.model.linear_attention import (
+from torchtitan.rl.generator.vllm import gdn, registry
+from torchtitan.rl.generator.vllm.batch_invariance import (
+    force_logprobs_fn_for_batch_invariance,
+)
+from torchtitan.rl.generator.vllm.linear_attention import (
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionMetadata,
 )
@@ -173,7 +175,7 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
     context = ForwardContext(
         no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
     )
-    layer = gdn.VLLMInnerGatedDeltaNet.__new__(gdn.VLLMInnerGatedDeltaNet)
+    layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
     layer.prefix = "gdn"
     layer.local_num_k_heads = layer.local_num_v_heads = 16
@@ -351,7 +353,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         layers = {
             name: layer
             for name, layer in runner.compilation_config.static_forward_context.items()
-            if isinstance(layer, gdn.VLLMInnerGatedDeltaNet)
+            if isinstance(layer, gdn.VLLMInnerGDN)
         }
         assert layers
         with torch.inference_mode():

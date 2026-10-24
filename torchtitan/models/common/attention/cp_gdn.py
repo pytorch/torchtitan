@@ -17,9 +17,10 @@ from torchtitan.models.common.attn_gym import (
     context_parallel_gdn,
     ContextParallelRouting,
     l2norm,
+    require_attn_gym,
 )
 
-from .cp_attention import ContextParallelInnerAttention
+from .cp_attention import CPInnerAttention
 from .cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
     prepare_linear_attention_cp_metadata,
@@ -29,7 +30,7 @@ from .linear_attention import LinearAttentionMetadata
 
 
 class ContextParallelInnerGDN(
-    ContextParallelInnerAttention[
+    CPInnerAttention[
         LinearAttentionMetadata,
         ContextParallelLinearAttentionMetadata,
     ],
@@ -38,8 +39,18 @@ class ContextParallelInnerGDN(
     """Gated DeltaNet with distributed convolution and recurrent-state routing."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ContextParallelInnerAttention.Config, InnerGDN.Config):
+    class Config(CPInnerAttention.Config, InnerGDN.Config):
         pass
+
+    def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(
+            context_parallel_gdn,
+            context_parallel_conv_history,
+            ContextParallelRouting,
+            l2norm,
+        )
+        super().__init__(config)
 
     @staticmethod
     def prepare_cp_metadata(

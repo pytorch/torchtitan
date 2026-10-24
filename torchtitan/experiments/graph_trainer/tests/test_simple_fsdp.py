@@ -11,12 +11,22 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
 
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
+from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.moe import MoE
+from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
+
+
+class _InspectionSensitiveShardedTensor(_ShardedFSDPTensor):
+    def _build_operands(self, logical_tensor, out=None):
+        del logical_tensor, out
+        raise AssertionError("parameter inspection built unsharded operands")
 
 
 class _RoutedExperts(nn.Module):
@@ -31,11 +41,12 @@ def _transformer_block(*, with_moe: bool) -> TransformerBlock:
     block = TransformerBlock.__new__(TransformerBlock)
     nn.Module.__init__(block)
     if with_moe:
-        moe = nn.Module()
+        moe = MoE.__new__(MoE)
+        nn.Module.__init__(moe)
         moe.routed_experts = _RoutedExperts()
-        block.moe = moe
+        block.feed_forward = moe
     else:
-        block.moe = None
+        block.feed_forward = nn.Linear(8, 8)
     return block
 
 
@@ -103,7 +114,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         )
 
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
-    def test_preserves_inner_attention_metadata_key(self):
+    def test_preserves_parameterless_inner_attention_type(self):
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
@@ -126,7 +137,18 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             training=training,
         )
 
-        self.assertIs(model.attention_metadata_key, VarlenInnerAttention)
+        self.assertIs(type(model), VarlenInnerAttention)
+
+    def test_reapplying_data_parallel_does_not_materialize_parameters(self):
+        linear = nn.Linear(8, 8, bias=False)
+        linear.num_linears = 2
+        linear.weight = nn.Parameter(
+            _InspectionSensitiveShardedTensor(linear.weight.detach())
+        )
+        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("fsdp",))
+
+        data_parallel(linear, mesh, mode="fully_shard")
+        data_parallel(linear, mesh, mode="fully_shard")
 
 
 class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
@@ -161,9 +183,9 @@ class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
         for with_auxiliary_moe, num_expert_calls in ((False, 1), (True, 2)):
             with self.subTest(with_auxiliary_moe=with_auxiliary_moe):
                 model = _decoder(with_auxiliary_moe=with_auxiliary_moe)
-                main_routed_experts = model.layers["0"].moe.routed_experts
+                main_routed_experts = model.layers["0"].feed_forward.routed_experts
                 auxiliary_routed_experts = (
-                    model.auxiliary_blocks[0].moe.routed_experts
+                    model.auxiliary_blocks[0].feed_forward.routed_experts
                     if with_auxiliary_moe
                     else None
                 )

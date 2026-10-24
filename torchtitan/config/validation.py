@@ -8,16 +8,14 @@
 
 from __future__ import annotations
 
-from typing import cast, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
-from torchtitan.models.common.attention import BaseAttention
+from torchtitan.models.common.attention import Attention, LinearAttention
 
 if TYPE_CHECKING:
     from torchtitan.config import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
-    from torchtitan.distributed.activation_checkpoint import (
-        ActivationCheckpointingConfig,
-    )
+    from torchtitan.distributed.activation_remat import ActivationRematConfig
     from torchtitan.models.base.model import BaseModel
     from torchtitan.models.base.module import Module
 
@@ -33,7 +31,7 @@ def validate_model_training_config(
     parallelism: ParallelismConfig,
     training: TrainingConfig,
     debug: DebugConfig,
-    activation_checkpoint: ActivationCheckpointingConfig,
+    activation_remat: ActivationRematConfig | None,
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
@@ -41,7 +39,7 @@ def validate_model_training_config(
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE
-    from torchtitan.models.common.token_dispatcher import (
+    from torchtitan.models.common.moe.token_dispatcher import (
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,
@@ -66,7 +64,7 @@ def validate_model_training_config(
             )
 
         tp = parallelism.tensor_parallel_degree
-        attention = model.first_base_attention
+        attention = model.first_full_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -153,37 +151,32 @@ def validate_context_parallel(
     model: "Module.Config", parallelism: "ParallelismConfig"
 ) -> None:
     """Validate CP inner attentions, load balancers, and Ulysses head sharding."""
-    from torchtitan.distributed.context_parallel import supports_cp_inner_attention
-    from torchtitan.models.common.attention import VarlenInnerAttention
-    from torchtitan.models.common.attention.cp_attention import (
-        ContextParallelInnerAttention,
-        KVAllGatherSlidingWindowVarlenInnerAttention,
-        KVAllGatherVarlenInnerAttention,
-        UlyssesInnerAttention,
+    from torchtitan.distributed.context_parallel import (
+        HeadTailCPLoadBalancer,
+        supports_cp_inner_attention,
     )
+    from torchtitan.models.common.attention.cp_attention import (
+        AllGatherKVVarlen,
+        CPInnerAttention,
+        Ulysses,
+    )
+    from torchtitan.models.common.decoder import Decoder
 
     cp = parallelism.context_parallel_degree
-    varlen_cp_inner_attentions = (
-        KVAllGatherVarlenInnerAttention,
-        KVAllGatherSlidingWindowVarlenInnerAttention,
-    )
-
-    for fqn, traversed, _, _ in model.traverse(BaseAttention.Config):
+    for fqn, traversed, _, _ in model.traverse(Attention.Config):
         attention = traversed
         inner_attention = attention.inner_attention
-        is_cp_attention = isinstance(
-            inner_attention, ContextParallelInnerAttention.Config
-        )
+        is_cp_attention = isinstance(inner_attention, CPInnerAttention.Config)
         if cp > 1 and not is_cp_attention:
             raise ValueError(
-                f"{fqn}.inner_attention must use ContextParallelInnerAttention, such as "
-                "KVAllGatherFlexInnerAttention, when the context parallel degree is "
+                f"{fqn}.inner_attention must use CPInnerAttention, such as "
+                "AllGatherKVFlexInnerAttention, when the context parallel degree is "
                 "larger than 1. Apply ContextParallelTransform; see an example in "
                 "torchtitan_recipes/models/muse_glimmer.py."
             )
         if cp == 1 and is_cp_attention:
             raise ValueError(
-                f"{fqn}.inner_attention is ContextParallelInnerAttention but the "
+                f"{fqn}.inner_attention is CPInnerAttention but the "
                 "context parallel degree is 1. Select a non-CP kernel."
             )
         if not is_cp_attention:
@@ -191,9 +184,9 @@ def validate_context_parallel(
 
         cp_inner_attention = inner_attention._owner
         assert cp_inner_attention is not None and issubclass(
-            cp_inner_attention, ContextParallelInnerAttention
+            cp_inner_attention, CPInnerAttention
         )
-        if issubclass(cp_inner_attention, UlyssesInnerAttention):
+        if issubclass(cp_inner_attention, Ulysses):
             head_shard_degree = parallelism.tensor_parallel_degree * cp
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
@@ -205,28 +198,23 @@ def validate_context_parallel(
                         f"({head_shard_degree})."
                     )
 
-        if issubclass(cp_inner_attention, varlen_cp_inner_attentions):
-            varlen_config = cast(VarlenInnerAttention.Config, inner_attention)
-            left, right = varlen_config.window_size
-            if right != 0 or left < -1:
-                raise ValueError(
-                    f"{fqn}.inner_attention uses "
-                    f"{cp_inner_attention.__qualname__}, which only supports "
-                    "causal or sliding-window causal masking under context "
-                    f"parallel; got window_size={varlen_config.window_size}."
-                )
-
         load_balancer_config = parallelism.context_parallel_load_balancer
-        if load_balancer_config is None:
-            if issubclass(cp_inner_attention, varlen_cp_inner_attentions):
-                raise ValueError(
-                    f"{fqn}.inner_attention uses "
-                    f"{cp_inner_attention.__qualname__}, so "
-                    "context_parallel_load_balancer must use "
-                    "HeadTailCPLoadBalancer.Config."
-                )
+        # Linear attention routes recurrent states using the shared permutation;
+        # it does not constrain which attention load balancer creates it.
+        if isinstance(attention, LinearAttention.Config):
             continue
-        if issubclass(cp_inner_attention, UlyssesInnerAttention):
+        if load_balancer_config is None:
+            continue
+        # Decoder ignores non-head-tail balancers without full attention.
+        # And Varlen rejects PTRR.
+        if (
+            isinstance(model, Decoder.Config)
+            and model.first_full_attention is None
+            and not isinstance(load_balancer_config, HeadTailCPLoadBalancer.Config)
+            and not issubclass(cp_inner_attention, AllGatherKVVarlen)
+        ):
+            continue
+        if issubclass(cp_inner_attention, Ulysses):
             raise ValueError(
                 f"{fqn}.inner_attention uses {cp_inner_attention.__qualname__}, so "
                 "context_parallel_load_balancer must be None."

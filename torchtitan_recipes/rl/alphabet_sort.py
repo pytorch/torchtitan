@@ -28,28 +28,34 @@ from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     BatchInvariantFlexConverter,
-    LMHeadFP32OutputConverter,
     ModelConfigConverter,
     MXFP8LinearConverter,
 )
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
-from torchtitan.rl.components.data import IterableRLDataLoader
-from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
-from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.rl.controller.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
 from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortDataset
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
-from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
-from torchtitan.rl.losses import GRPOLoss
+from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
+from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import Rubric
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.trainer.losses import GRPOLoss
+from torchtitan.rl.trainer.trainer import Trainer
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -81,11 +87,7 @@ def _qwen3_rl_model_configs(
     generator_parallelism: InferenceParallelismConfig,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> tuple[Decoder.Config, Decoder.Config]:
-    """Qwen3 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits.
-
-    RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadFP32OutputConverter`` on top of whatever converters it passes.
-    """
+    """Qwen3 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
     return build_rl_model_configs(
         build_model_config,
         flavor,
@@ -93,7 +95,7 @@ def _qwen3_rl_model_configs(
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=[*(converters or []), LMHeadFP32OutputConverter.Config()],
+        converters=converters,
     )
 
 
@@ -155,7 +157,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -235,7 +237,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -284,7 +286,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_weight_sync=True,
+        reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _qwen3_rl_model_configs(
         "0.6B",
@@ -308,8 +310,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     """GRPO training config for GPT-OSS-20B with varlen attention.
 
     GPT-OSS uses alternating attention: even layers apply a sliding window, odd
-    layers use full causal attention; the per-layer window is baked into each
-    ``VarlenInnerAttention.window_size``.
+    layers use full causal attention. Metadata carries the per-layer window.
     """
     num_samples_per_prompt = 8
     seq_len = 2048
@@ -328,7 +329,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         "20b",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -372,13 +372,13 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
             # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
             # distributed MoE token dispatcher is enabled for GPT-OSS.
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -447,7 +447,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -520,7 +520,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -558,7 +558,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         "30B-A3B",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -603,10 +602,10 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -716,7 +715,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -727,7 +726,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
                 max_tokens=700,
             ),
             debug=batch_invariant_config,
-            reset_kv_cache_on_weight_sync=True,
+            reset_kv_cache_on_model_state_dict_load=True,
         ),
     )
 
@@ -741,11 +740,7 @@ def _qwen3_5_rl_model_configs(
     generator_parallelism: InferenceParallelismConfig,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> tuple[Decoder.Config, Decoder.Config]:
-    """Qwen3.5 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits.
-
-    RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadFP32OutputConverter`` on top of whatever converters it passes.
-    """
+    """Qwen3.5 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
     return build_rl_model_configs(
         build_qwen3_5_model_config,
         flavor,
@@ -753,7 +748,7 @@ def _qwen3_5_rl_model_configs(
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=[*(converters or []), LMHeadFP32OutputConverter.Config()],
+        converters=converters,
     )
 
 
@@ -818,10 +813,10 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -849,7 +844,7 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_weight_sync=True,
+        reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
         "9B",
@@ -914,7 +909,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
                 ],
             ),
         ),
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
         parallelism=trainer_parallelism,
     )
     config.generator = dataclasses.replace(

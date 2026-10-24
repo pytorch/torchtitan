@@ -13,7 +13,7 @@ import torch_remat as remat
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
-    BaseAttention,
+    Attention,
     create_varlen_metadata_for_document,
     InnerAttention,
     VarlenAttentionMetadata,
@@ -261,7 +261,7 @@ class CompressedSparseAttention(DSV4InnerAttention):
         )
 
 
-class Attention(BaseAttention):
+class DeepSeekV4Attention(Attention):
     """DeepSeek V4 attention wrapper around sparse inner attention.
 
     The module projects Q/KV, applies pre- and post-phase RoPE, prepares
@@ -270,9 +270,8 @@ class Attention(BaseAttention):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
+    class Config(Attention.Config):
         dim: int
-        n_heads: int
         inner_attention: DSV4InnerAttention.Config  # pyrefly: ignore [bad-override]
         rope: RoPE.Config
         head_dim: int = 512

@@ -9,7 +9,9 @@
 import copy
 import inspect
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+import spmd_types as spmd
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import (
@@ -23,33 +25,39 @@ from torchtitan.config.transform import (
     transform_model_config_,
     TransformRelations,
 )
-from torchtitan.models.common.async_linear import (
-    AsyncColumnParallelLinear,
-    AsyncRowParallelLinear,
-)
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
+    Attention,
     FlexInnerAttention,
+    MLAAttention,
     SlidingWindowFlexInnerAttention,
     SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherFlexInnerAttention,
-    KVAllGatherSlidingWindowFlexInnerAttention,
-    KVAllGatherSlidingWindowVarlenInnerAttention,
-    KVAllGatherVarlenInnerAttention,
+    AllGatherKVFlexInnerAttention,
+    AllGatherKVSlidingWindowFlexInnerAttention,
+    AllGatherKVSlidingWindowVarlenInnerAttention,
+    AllGatherKVVarlenInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesSlidingWindowFlexInnerAttention,
-    UlyssesSlidingWindowVarlenInnerAttention,
-    UlyssesVarlenInnerAttention,
 )
+from torchtitan.models.common.attention.cp_mla import (
+    AllGatherKVMLAFlexAttention,
+    UlyssesMLAAttention,
+)
+from torchtitan.models.common.decoder_sharding import mla_kv_projection_sharding_config
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
 )
+from torchtitan.models.common.linear.async_linear import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import (
+from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
 )
@@ -163,15 +171,15 @@ class TestConvertConfigType(unittest.TestCase):
         existing.block_size = (256, 128)
         existing.kernel_options = {"BACKEND": "FLASH"}
 
-        swapped = convert_config_type(existing, KVAllGatherFlexInnerAttention)
+        swapped = convert_config_type(existing, AllGatherKVFlexInnerAttention)
 
-        self.assertIsInstance(swapped, KVAllGatherFlexInnerAttention.Config)
+        self.assertIsInstance(swapped, AllGatherKVFlexInnerAttention.Config)
         self.assertEqual(swapped.block_size, (256, 128))
         self.assertEqual(swapped.kernel_options, {"BACKEND": "FLASH"})
 
     def test_rejects_a_replacement_that_does_not_inherit_the_current_type(self):
         # A non-subclass would drop fields added by an earlier transform.
-        existing = KVAllGatherFlexInnerAttention.Config()
+        existing = AllGatherKVFlexInnerAttention.Config()
         with self.assertRaisesRegex(ValueError, "must inherit"):
             convert_config_type(existing, FlexInnerAttention)
 
@@ -292,14 +300,14 @@ class TestAtomicApplication(unittest.TestCase):
             [
                 ContextParallelTransform(
                     inner_attention_map={
-                        FlexInnerAttention: KVAllGatherFlexInnerAttention
+                        FlexInnerAttention: AllGatherKVFlexInnerAttention
                     }
                 )
             ],
         )
         self.assertIsNot(result, config)
         original = config.model.layers[0].attention.inner_attention
-        self.assertNotIsInstance(original, KVAllGatherFlexInnerAttention.Config)
+        self.assertNotIsInstance(original, AllGatherKVFlexInnerAttention.Config)
 
 
 class TestTransformModel(unittest.TestCase):
@@ -320,13 +328,13 @@ class TestTransformModel(unittest.TestCase):
             [
                 ContextParallelTransform(
                     inner_attention_map={
-                        FlexInnerAttention: KVAllGatherFlexInnerAttention
+                        FlexInnerAttention: AllGatherKVFlexInnerAttention
                     }
                 )
             ],
         )
         inner = model_config.layers[0].attention.inner_attention
-        self.assertIsInstance(inner, KVAllGatherFlexInnerAttention.Config)
+        self.assertIsInstance(inner, AllGatherKVFlexInnerAttention.Config)
 
     def test_does_not_validate(self):
         """A CP kernel without a CP degree passes here and fails in the trainer.
@@ -340,7 +348,7 @@ class TestTransformModel(unittest.TestCase):
             [
                 ContextParallelTransform(
                     inner_attention_map={
-                        FlexInnerAttention: KVAllGatherFlexInnerAttention
+                        FlexInnerAttention: AllGatherKVFlexInnerAttention
                     }
                 )
             ],
@@ -401,21 +409,19 @@ class TestTransformModel(unittest.TestCase):
             [
                 ContextParallelTransform(
                     inner_attention_map={
-                        FlexInnerAttention: KVAllGatherFlexInnerAttention
+                        FlexInnerAttention: AllGatherKVFlexInnerAttention
                     }
                 )
             ],
         )
 
         swapped = result.model.layers[0].attention.inner_attention
-        self.assertIsInstance(swapped, KVAllGatherFlexInnerAttention.Config)
+        self.assertIsInstance(swapped, AllGatherKVFlexInnerAttention.Config)
         self.assertEqual(swapped.block_size, (256, 128))
         self.assertEqual(swapped.kernel_options, {"BACKEND": "FLASH"})
 
     def test_rejects_a_kernel_that_is_not_context_parallel(self):
-        with self.assertRaisesRegex(
-            ValueError, "must inherit ContextParallelInnerAttention"
-        ):
+        with self.assertRaisesRegex(ValueError, "must inherit CPInnerAttention"):
             ContextParallelTransform(
                 inner_attention_map={FlexInnerAttention: FlexInnerAttention}
             )
@@ -440,20 +446,20 @@ class TestTransformModel(unittest.TestCase):
 
         ContextParallelTransform(
             inner_attention_map={
-                FlexInnerAttention: KVAllGatherFlexInnerAttention,
+                FlexInnerAttention: AllGatherKVFlexInnerAttention,
                 SlidingWindowFlexInnerAttention: (
-                    KVAllGatherSlidingWindowFlexInnerAttention
+                    AllGatherKVSlidingWindowFlexInnerAttention
                 ),
             }
         ).transform(model)
 
         self.assertIsInstance(
             model.layers[0].attention.inner_attention,
-            KVAllGatherSlidingWindowFlexInnerAttention.Config,
+            AllGatherKVSlidingWindowFlexInnerAttention.Config,
         )
         self.assertIsInstance(
             model.layers[1].attention.inner_attention,
-            KVAllGatherFlexInnerAttention.Config,
+            AllGatherKVFlexInnerAttention.Config,
         )
 
     def test_rejects_missing_attention_backend_override(self):
@@ -466,7 +472,7 @@ class TestTransformModel(unittest.TestCase):
             parallelism=ParallelismConfig(),
         )
         transform = ContextParallelTransform(
-            inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
+            inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
         )
 
         with self.assertRaisesRegex(
@@ -478,22 +484,24 @@ class TestTransformModel(unittest.TestCase):
     def test_preserves_muse_glimmer_sliding_window_backend(self):
         from torchtitan.models.muse_glimmer import build_model_config
 
-        for transform, expected_backends in (
+        for attn_backend, transform, expected_backends in (
             (
+                "flex",
                 ContextParallelTransform(
                     inner_attention_map={
-                        FlexInnerAttention: KVAllGatherFlexInnerAttention,
+                        FlexInnerAttention: AllGatherKVFlexInnerAttention,
                         SlidingWindowFlexInnerAttention: (
-                            KVAllGatherSlidingWindowFlexInnerAttention
+                            AllGatherKVSlidingWindowFlexInnerAttention
                         ),
                     }
                 ),
                 {
-                    KVAllGatherFlexInnerAttention.Config,
-                    KVAllGatherSlidingWindowFlexInnerAttention.Config,
+                    AllGatherKVFlexInnerAttention.Config,
+                    AllGatherKVSlidingWindowFlexInnerAttention.Config,
                 },
             ),
             (
+                "flex",
                 ContextParallelTransform(
                     inner_attention_map={
                         FlexInnerAttention: UlyssesFlexInnerAttention,
@@ -507,16 +515,38 @@ class TestTransformModel(unittest.TestCase):
                     UlyssesSlidingWindowFlexInnerAttention.Config,
                 },
             ),
+            (
+                "varlen",
+                ContextParallelTransform(
+                    inner_attention_map={
+                        VarlenInnerAttention: AllGatherKVVarlenInnerAttention,
+                        SlidingWindowVarlenInnerAttention: (
+                            AllGatherKVSlidingWindowVarlenInnerAttention
+                        ),
+                    }
+                ),
+                {
+                    AllGatherKVVarlenInnerAttention.Config,
+                    AllGatherKVSlidingWindowVarlenInnerAttention.Config,
+                },
+            ),
         ):
             model = build_model_config(
                 "debugmodel",
-                attn_backend="flex",
+                attn_backend=attn_backend,
                 seq_len=128,
                 parallelism=ParallelismConfig(),
             )
             self.assertEqual(
                 {type(layer.attention.inner_attention) for layer in model.layers},
-                {FlexInnerAttention.Config, SlidingWindowFlexInnerAttention.Config},
+                (
+                    {FlexInnerAttention.Config, SlidingWindowFlexInnerAttention.Config}
+                    if attn_backend == "flex"
+                    else {
+                        VarlenInnerAttention.Config,
+                        SlidingWindowVarlenInnerAttention.Config,
+                    }
+                ),
             )
 
             transform.transform(model)
@@ -526,77 +556,9 @@ class TestTransformModel(unittest.TestCase):
                 expected_backends,
             )
 
-    def test_preserves_sliding_window_varlen_backend(self):
-        from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss
-        from torchtitan.models.muse_glimmer import (
-            build_model_config as build_muse_glimmer,
-        )
-
-        for name, build_model in (
-            ("gpt_oss", build_gpt_oss),
-            ("muse_glimmer", build_muse_glimmer),
-        ):
-            with self.subTest(model=name):
-                model = build_model(
-                    "debugmodel",
-                    attn_backend="varlen",
-                    seq_len=128,
-                    parallelism=ParallelismConfig(),
-                )
-                self.assertEqual(
-                    {type(layer.attention.inner_attention) for layer in model.layers},
-                    {
-                        VarlenInnerAttention.Config,
-                        SlidingWindowVarlenInnerAttention.Config,
-                    },
-                )
-
-                ContextParallelTransform(
-                    inner_attention_map={
-                        VarlenInnerAttention: KVAllGatherVarlenInnerAttention,
-                        SlidingWindowVarlenInnerAttention: (
-                            KVAllGatherSlidingWindowVarlenInnerAttention
-                        ),
-                    }
-                ).transform(model)
-
-                self.assertEqual(
-                    {type(layer.attention.inner_attention) for layer in model.layers},
-                    {
-                        KVAllGatherVarlenInnerAttention.Config,
-                        KVAllGatherSlidingWindowVarlenInnerAttention.Config,
-                    },
-                )
-
-    def test_ulysses_preserves_sliding_window_varlen_backend(self):
-        from torchtitan.models.muse_glimmer import build_model_config
-
-        model = build_model_config(
-            "debugmodel",
-            attn_backend="varlen",
-            seq_len=128,
-            parallelism=ParallelismConfig(),
-        )
-        ContextParallelTransform(
-            inner_attention_map={
-                VarlenInnerAttention: UlyssesVarlenInnerAttention,
-                SlidingWindowVarlenInnerAttention: (
-                    UlyssesSlidingWindowVarlenInnerAttention
-                ),
-            }
-        ).transform(model)
-
-        self.assertEqual(
-            {type(layer.attention.inner_attention) for layer in model.layers},
-            {
-                UlyssesVarlenInnerAttention.Config,
-                UlyssesSlidingWindowVarlenInnerAttention.Config,
-            },
-        )
-
     def test_transforms_nested_kda_backend(self):
         from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
-        from torchtitan.models.common.attention.kda import InnerKDA
+        from torchtitan.models.common.attention.kda import InnerKDA, KDA
         from torchtitan.models.kimi_k3 import build_model_config
 
         model = build_model_config(
@@ -608,7 +570,7 @@ class TestTransformModel(unittest.TestCase):
 
         ContextParallelTransform(
             inner_attention_map={
-                FlexInnerAttention: KVAllGatherFlexInnerAttention,
+                MLAAttention: AllGatherKVMLAFlexAttention,
                 InnerKDA: ContextParallelInnerKDA,
             }
         ).transform(model)
@@ -619,16 +581,66 @@ class TestTransformModel(unittest.TestCase):
             FlexInnerAttention.Config,
         )
         for layer in model.layers:
-            if layer.attention is not None:
+            if not isinstance(layer.attention, KDA.Config):
                 self.assertIsInstance(
                     layer.attention.inner_attention,
-                    KVAllGatherFlexInnerAttention.Config,
+                    AllGatherKVMLAFlexAttention.Config,
                 )
             else:
-                assert layer.delta_attention is not None
                 self.assertIsInstance(
-                    layer.delta_attention.inner_kda,
+                    layer.attention.inner_attention,
                     ContextParallelInnerKDA.Config,
+                )
+
+    def test_mla_projection_sharding_matches_cp_backend(self):
+        @dataclass(kw_only=True, slots=True)
+        class ModelConfig(Module.Config):
+            layers: list[Attention.Config]
+            mtp_layers: list[Attention.Config]
+
+        for backend, cp in (
+            (AllGatherKVMLAFlexAttention, spmd.R),
+            (UlyssesMLAAttention, spmd.S(0)),
+        ):
+            with self.subTest(backend=backend.__name__):
+                original_sharding = mla_kv_projection_sharding_config(cp=spmd.S(0))
+                original_projection = Linear.Config(
+                    in_features=32,
+                    out_features=128,
+                    sharding_config=original_sharding,
+                )
+                original_attention = MLAAttention.Config(
+                    wkv_b=original_projection,
+                    packed_kv_head_dim=32,
+                    inner_attention=FlexInnerAttention.Config(),
+                )
+                model = ModelConfig(
+                    layers=[
+                        Attention.Config(n_heads=4, inner_attention=original_attention)
+                    ],
+                    mtp_layers=[
+                        Attention.Config(n_heads=4, inner_attention=original_attention)
+                    ],
+                )
+                ContextParallelTransform(
+                    inner_attention_map={MLAAttention: backend}
+                ).transform(model)
+
+                for attention in model.layers + model.mtp_layers:
+                    converted = attention.inner_attention
+                    self.assertIsInstance(converted, backend.Config)
+                    self.assertIsNot(converted.wkv_b, original_projection)
+                    self.assertEqual(
+                        converted.wkv_b,
+                        replace(
+                            original_projection,
+                            sharding_config=mla_kv_projection_sharding_config(cp=cp),
+                        ),
+                    )
+                self.assertIs(original_attention.wkv_b, original_projection)
+                self.assertEqual(
+                    original_projection.sharding_config,
+                    mla_kv_projection_sharding_config(cp=spmd.S(0)),
                 )
 
     def test_transforms_mtp_layers(self):
@@ -637,12 +649,12 @@ class TestTransformModel(unittest.TestCase):
             deepseek_v3_debugmodel_mtp,
         )
 
-        model = deepseek_v3_debugmodel_mtp().model
+        model = deepseek_v3_debugmodel_mtp(attn_backend="flex").model
         assert isinstance(model, MTPDecoder.Config)
 
         ContextParallelTransform(
             inner_attention_map={
-                FlexInnerAttention: KVAllGatherFlexInnerAttention,
+                MLAAttention: AllGatherKVMLAFlexAttention,
             }
         ).transform(model)
 
@@ -651,7 +663,7 @@ class TestTransformModel(unittest.TestCase):
             for layer in layers:
                 self.assertIsInstance(
                     layer.attention.inner_attention,
-                    KVAllGatherFlexInnerAttention.Config,
+                    AllGatherKVMLAFlexAttention.Config,
                 )
 
     def test_lora_runs_after_context_parallelism(self):
@@ -667,14 +679,14 @@ class TestTransformModel(unittest.TestCase):
                 ),
                 ContextParallelTransform(
                     inner_attention_map={
-                        FlexInnerAttention: KVAllGatherFlexInnerAttention
+                        FlexInnerAttention: AllGatherKVFlexInnerAttention
                     }
                 ),
             ],
         )
 
         inner = result.model.layers[0].attention.inner_attention
-        self.assertIsInstance(inner, KVAllGatherFlexInnerAttention.Config)
+        self.assertIsInstance(inner, AllGatherKVFlexInnerAttention.Config)
 
         model = result.model.build()
         trainable = {
@@ -735,13 +747,13 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         from torchtitan.models.deepseek_v3 import build_model_config
 
         model = build_model_config("debugmodel", parallelism=ParallelismConfig())
-        moe = model.layers[1].moe
+        moe = model.layers[1].feed_forward
         assert moe is not None and moe.shared_experts is not None
 
         transformed = AsyncTensorParallelTransform(
             enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
         ).transform(model)
-        transformed_moe = transformed.layers[1].moe
+        transformed_moe = transformed.layers[1].feed_forward
         assert transformed_moe is not None
         config = transformed_moe.shared_experts
         assert config is not None

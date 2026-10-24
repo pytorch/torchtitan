@@ -6,8 +6,8 @@
 
 """Tests for K/V all-gather varlen context parallelism."""
 
-from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import NamedTuple
 from unittest import mock
 
 import spmd_types as spmd
@@ -22,116 +22,86 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.distributed.cuda_graph import CUDAGraphInputSpec
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.attention import (
-    SlidingWindowVarlenInnerAttention,
+    cp_attention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
-    HeadTailCPVarlenMetadata,
-    KVAllGatherSlidingWindowVarlenInnerAttention,
-    KVAllGatherVarlenInnerAttention,
+    AllGatherKVSlidingWindowVarlenInnerAttention,
+    AllGatherKVVarlen,
+    AllGatherKVVarlenInnerAttention,
+    AllGatherKVVarlenMetadata,
 )
 
 
-def _metadata(offsets: list[int], seq_len: int) -> VarlenAttentionMetadata:
-    if offsets[0] != 0 or offsets[-1] != seq_len:
-        raise ValueError("Offsets must start at 0 and end at seq_len.")
+def _metadata(offsets: list[int]) -> VarlenAttentionMetadata:
     cu_seq = torch.tensor(offsets, dtype=torch.int32)
     max_seq = int(torch.diff(cu_seq).max().item())
     return VarlenAttentionMetadata(cu_seq, cu_seq, max_seq, max_seq)
 
 
-class TestHeadTailCPVarlenMetadata(TestCase):
-    @staticmethod
-    def _from_global(
-        metadata: VarlenAttentionMetadata,
-        *,
-        permutation: torch.Tensor | None,
-    ) -> HeadTailCPVarlenMetadata:
-        return HeadTailCPVarlenMetadata.from_global(
-            metadata,
-            permutation=permutation,
-        )
-
+class TestAllGatherKVVarlenPreparation(TestCase):
     def test_restores_head_tail_order(self) -> None:
-        global_metadata = _metadata([0, 3, 7, 8], 8)
         permutation = _HeadTailLoadBalancer(
             8, 2, torch.device("cpu")
         )._generate_indices()
-
-        metadata = self._from_global(
-            global_metadata,
-            permutation=permutation,
+        metadata = AllGatherKVVarlen.prepare_cp_metadata(
+            _metadata([0, 3, 7, 8]), permutation=permutation
         )
-
         reordered = torch.arange(8).index_select(0, permutation[0])
         self.assertEqual(
-            reordered.index_select(0, metadata.kv_restore_indices),
-            torch.arange(8),
+            reordered.index_select(0, metadata.kv_restore_indices), torch.arange(8)
         )
 
-    def test_builds_fixed_chunk_metadata(self) -> None:
-        metadata = self._from_global(
-            _metadata([0, 3, 7, 8], 8),
-            permutation=_HeadTailLoadBalancer(
-                8, 2, torch.device("cpu")
-            )._generate_indices(),
+    def test_builds_chunk_metadata(self) -> None:
+        metadata = AllGatherKVVarlen.prepare_cp_metadata(
+            _metadata([0, 3, 7, 8]), permutation=None
         )
-
-        chunk = metadata.chunk_metadata(start=2, end=6, kv_start=0)
-
-        self.assertEqual(chunk.cu_seq_q, torch.tensor([0, 1, 4, 4], dtype=torch.int32))
-        self.assertEqual(chunk.cu_seq_k, torch.tensor([0, 3, 6, 6], dtype=torch.int32))
-        self.assertEqual(chunk.max_q, 4)
-        self.assertEqual(chunk.max_k, 4)
-
-    def test_builds_sliding_window_metadata(self) -> None:
-        metadata = self._from_global(
-            _metadata([0, 3, 7, 8], 8),
-            permutation=_HeadTailLoadBalancer(
-                8, 2, torch.device("cpu")
-            )._generate_indices(),
-        )
-
-        chunk = metadata.chunk_metadata(start=4, end=6, kv_start=2)
-
-        self.assertEqual(chunk.cu_seq_q, torch.tensor([0, 0, 2, 2], dtype=torch.int32))
-        self.assertEqual(chunk.cu_seq_k, torch.tensor([0, 1, 4, 4], dtype=torch.int32))
+        self.assertIsNone(metadata.kv_restore_indices)
+        for kv_start, expected_k in ((0, [0, 3, 6, 6]), (2, [0, 1, 4, 4])):
+            with self.subTest(kv_start=kv_start):
+                chunk = AllGatherKVVarlen._chunk_metadata(
+                    metadata.varlen_metadata, q_start=4, end=6, kv_start=kv_start
+                )
+                self.assertEqual(
+                    chunk.cu_seq_q, torch.tensor([0, 0, 2, 2], dtype=torch.int32)
+                )
+                self.assertEqual(
+                    chunk.cu_seq_k, torch.tensor(expected_k, dtype=torch.int32)
+                )
+                self.assertEqual(chunk.max_q, 2)
+                self.assertEqual(chunk.max_k, 4)
 
     def test_chunk_metadata_spmd_types(self) -> None:
         dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=8)
         self.addCleanup(dist.destroy_process_group)
         mesh = init_device_mesh("cpu", (2, 2, 2), mesh_dim_names=("dp", "cp", "tp"))
-        global_metadata = _metadata([0, 3, 7, 8], 8)
-        metadata = self._from_global(
-            global_metadata,
-            permutation=_HeadTailLoadBalancer(
-                8, 2, torch.device("cpu")
-            )._generate_indices(),
+        global_metadata = _metadata([0, 3, 7, 8])
+        metadata = AllGatherKVVarlen.prepare_cp_metadata(
+            global_metadata, permutation=None
         )
         with set_current_spmd_mesh(mesh), typecheck():
-            for kv_start in (0, 2):
-                chunk = metadata.chunk_metadata(start=4, end=6, kv_start=kv_start)
-                spmd.assert_type(
-                    global_metadata.cu_seq_q,
-                    {"dp": spmd.V, "cp": spmd.R, "tp": spmd.R},
-                    partition_spec=spmd.PartitionSpec("dp"),
-                )
-                spmd.assert_type(
-                    (chunk.cu_seq_q, chunk.cu_seq_k),
-                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
-                    partition_spec=spmd.PartitionSpec("dp"),
-                )
-
-    def test_rejects_missing_or_invalid_permutation(self) -> None:
-        global_metadata = _metadata([0, 8], 8)
-        with self.assertRaisesRegex(ValueError, "requires a permutation"):
-            self._from_global(global_metadata, permutation=None)
-        with self.assertRaisesRegex(ValueError, "requires a permutation"):
-            self._from_global(
-                global_metadata,
-                permutation=torch.arange(8, dtype=torch.int32),
+            chunk = AllGatherKVVarlen._chunk_metadata(
+                metadata.varlen_metadata, q_start=4, end=6, kv_start=2
             )
+            spmd.assert_type(
+                global_metadata.cu_seq_q,
+                {"dp": spmd.V, "cp": spmd.R, "tp": spmd.R},
+                partition_spec=spmd.PartitionSpec("dp"),
+            )
+            spmd.assert_type(
+                (chunk.cu_seq_q, chunk.cu_seq_k),
+                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
+                partition_spec=spmd.PartitionSpec("dp"),
+            )
+
+    def test_rejects_invalid_permutation(self) -> None:
+        for permutation in (torch.arange(8), torch.arange(8).repeat(2, 1)):
+            with self.subTest(shape=permutation.shape):
+                with self.assertRaisesRegex(ValueError, "requires a permutation"):
+                    AllGatherKVVarlen.prepare_cp_metadata(
+                        _metadata([0, 8]), permutation=permutation
+                    )
 
     def test_rejects_cross_attention(self) -> None:
         metadata = VarlenAttentionMetadata(
@@ -140,138 +110,150 @@ class TestHeadTailCPVarlenMetadata(TestCase):
             max_q=4,
             max_k=5,
         )
-        permutation = _HeadTailLoadBalancer(
-            8, 2, torch.device("cpu")
-        )._generate_indices()
         with self.assertRaisesRegex(ValueError, "self-attention"):
-            self._from_global(metadata, permutation=permutation)
+            AllGatherKVVarlen.prepare_cp_metadata(metadata, permutation=None)
+
+    def test_rejects_noncausal_windows(self) -> None:
+        for window_size in ((-1, -1), (2, 1), (-2, 0)):
+            with self.subTest(window_size=window_size):
+                metadata = _metadata([0, 8])._replace(window_size=window_size)
+                with self.assertRaisesRegex(ValueError, "requires a causal window"):
+                    AllGatherKVVarlen.prepare_cp_metadata(metadata, permutation=None)
 
 
 class TestVarlenMetadataCudaGraphInputs(TestCase):
-    @staticmethod
-    def _cp_metadata() -> HeadTailCPVarlenMetadata:
-        return HeadTailCPVarlenMetadata(
-            varlen_metadata=_metadata([0, 4], 4),
-            kv_restore_indices=torch.arange(4, dtype=torch.int32),
-        )
+    def test_metadata_inputs_are_stable(self) -> None:
+        for restore_indices in (None, torch.arange(4, dtype=torch.int32)):
+            with self.subTest(head_tail=restore_indices is not None):
+                captured_metadata = AllGatherKVVarlenMetadata(
+                    varlen_metadata=_metadata([0, 4]),
+                    kv_restore_indices=restore_indices,
+                )
+                rebuilt_metadata = AllGatherKVVarlenMetadata(
+                    varlen_metadata=_metadata([0, 4]),
+                    kv_restore_indices=restore_indices,
+                )
+                spec = CUDAGraphInputSpec({"metadata": captured_metadata})
+                captured = spec.flatten({"metadata": captured_metadata})
+                rebuilt = spec.flatten({"metadata": rebuilt_metadata})
+                tensors = [leaf for leaf in captured if isinstance(leaf, torch.Tensor)]
+                self.assertEqual(len(tensors), 2 if restore_indices is None else 3)
+                for first, second in zip(captured, rebuilt, strict=True):
+                    if not isinstance(first, torch.Tensor):
+                        self.assertEqual(first, second)
 
-    def test_metadata_tensors_are_graph_inputs(self) -> None:
-        leaves = CUDAGraphInputSpec({"metadata": self._cp_metadata()}).flatten(
-            {"metadata": self._cp_metadata()}
-        )
-        tensors = [leaf for leaf in leaves if isinstance(leaf, torch.Tensor)]
-        self.assertEqual(3, len(tensors))
 
-    def test_rebuilt_metadata_has_stable_non_tensor_leaves(self) -> None:
-        spec = CUDAGraphInputSpec({"metadata": self._cp_metadata()})
-        captured = spec.flatten({"metadata": self._cp_metadata()})
-        rebuilt = spec.flatten({"metadata": self._cp_metadata()})
-        for first, second in zip(captured, rebuilt, strict=True):
-            if not isinstance(first, torch.Tensor):
-                self.assertEqual(first, second)
+class _ForwardCase(NamedTuple):
+    head_tail: bool
+    window: tuple[int, int]
+    kv_ranges: tuple[tuple[int, int], ...]
+    rank: int = 0
 
 
 class TestKVAllGatherVarlenInnerAttention(TestCase):
-    @staticmethod
-    def _cp_metadata() -> HeadTailCPVarlenMetadata:
-        permutation = _HeadTailLoadBalancer(
-            8, 2, torch.device("cpu")
-        )._generate_indices()
-        restore_indices = torch.empty_like(permutation[0])
-        restore_indices[permutation[0]] = torch.arange(8, dtype=torch.int32)
-        return HeadTailCPVarlenMetadata(
-            varlen_metadata=_metadata([0, 3, 7, 8], 8),
-            kv_restore_indices=restore_indices,
-        )
-
-    def _run_forward(self, window_size: tuple[int, int], *, check_spmd: bool = False):
-        if window_size == (-1, 0):
-            attention = KVAllGatherVarlenInnerAttention(
-                KVAllGatherVarlenInnerAttention.Config(window_size=window_size)
-            )
-        else:
-            attention = KVAllGatherSlidingWindowVarlenInnerAttention(
-                KVAllGatherSlidingWindowVarlenInnerAttention.Config(
-                    window_size=window_size
-                )
-            )
-        q_THK = torch.randn(4, 1, 4)
-        gathered_k_THK = torch.arange(32).view(8, 1, 4).float()
-        gathered_v_THV = gathered_k_THK + 100
-        permutation = _HeadTailLoadBalancer(
-            8, 2, torch.device("cpu")
-        )._generate_indices()[0]
-        permuted_k_THK = gathered_k_THK.index_select(0, permutation)
-        permuted_v_THV = gathered_v_THV.index_select(0, permutation)
-        outputs = [torch.randn(2, 1, 4), torch.randn(2, 1, 4)]
-        group = SimpleNamespace(size=lambda: 2)
-        cp_metadata = self._cp_metadata()
-        if check_spmd:
-            spmd.assert_type(
-                (q_THK, *outputs),
-                spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                spmd.V,
-            )
-            spmd.assert_type(
-                (permuted_k_THK, permuted_v_THV),
-                spmd.R,
-                {"dp": spmd.V, "tp": spmd.V},
-                partition_spec=spmd.PartitionSpec("dp", "tp", None),
-            )
-
-        with typecheck() if check_spmd else nullcontext(), mock.patch(
-            "torchtitan.models.common.attention.cp_attention._all_gather_kv",
-            return_value=(permuted_k_THK, permuted_v_THV),
-        ), mock.patch.object(
-            VarlenInnerAttention,
-            "forward",
-            autospec=True,
-            side_effect=outputs,
-        ) as inner_forward, mock.patch(
-            "torchtitan.models.common.attention.cp_attention.spmd_mesh_group",
-            return_value=group,
-        ), mock.patch(
-            "torchtitan.models.common.attention.cp_attention.dist.get_rank",
-            return_value=0,
-        ):
-            actual = attention(
-                q_THK,
-                torch.empty(0),
-                torch.empty(0),
-                attention_metadata=cp_metadata,
-            )
-
-        self.assertEqual(actual, torch.cat(outputs))
-        return inner_forward.call_args_list, gathered_k_THK, gathered_v_THV
-
-    def test_forward_preserves_spmd_types(self) -> None:
+    def test_forward_uses_bounded_shared_kv_views(self) -> None:
         dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=8)
         self.addCleanup(dist.destroy_process_group)
         mesh = init_device_mesh("cpu", (2, 2, 2), mesh_dim_names=("dp", "cp", "tp"))
+        seq_len = 8
+        cases = (
+            _ForwardCase(head_tail=True, window=(-1, 0), kv_ranges=((0, 2), (2, 8))),
+            _ForwardCase(head_tail=True, window=(10, 0), kv_ranges=((0, 2), (2, 8))),
+            _ForwardCase(head_tail=True, window=(2, 0), kv_ranges=((0, 2), (4, 8))),
+            _ForwardCase(head_tail=False, window=(-1, 0), kv_ranges=((0, 8),), rank=1),
+            _ForwardCase(head_tail=False, window=(2, 0), kv_ranges=((2, 8),), rank=1),
+        )
         with set_current_spmd_mesh(mesh):
-            for window_size in ((-1, 0), (2, 0)):
-                self._run_forward(window_size, check_spmd=True)
-
-    def test_full_causal_uses_two_views_of_shared_kv(self) -> None:
-        calls, gathered_k_THK, gathered_v_THV = self._run_forward((-1, 0))
-
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0].args[2], gathered_k_THK[:2])
-        self.assertEqual(calls[0].args[3], gathered_v_THV[:2])
-        self.assertEqual(calls[1].args[2], gathered_k_THK[:8])
-        self.assertEqual(calls[1].args[3], gathered_v_THV[:8])
-
-    def test_sliding_window_uses_bounded_kv_views(self) -> None:
-        calls, gathered_k_THK, gathered_v_THV = self._run_forward((2, 0))
-
-        self.assertEqual(calls[0].args[2], gathered_k_THK[:2])
-        self.assertEqual(calls[0].args[3], gathered_v_THV[:2])
-        self.assertEqual(calls[1].args[2], gathered_k_THK[4:8])
-        self.assertEqual(calls[1].args[3], gathered_v_THV[4:8])
-
-    def test_sliding_config_preserves_semantic_type(self) -> None:
-        config = KVAllGatherSlidingWindowVarlenInnerAttention.Config(window_size=(2, 0))
-        self.assertIsInstance(config, SlidingWindowVarlenInnerAttention.Config)
+            for case in cases:
+                with self.subTest(case=case):
+                    config = (
+                        AllGatherKVVarlenInnerAttention.Config()
+                        if case.window == (-1, 0)
+                        else AllGatherKVSlidingWindowVarlenInnerAttention.Config(
+                            sliding_window_size=case.window[0] + 1
+                        )
+                    )
+                    attention = config.build()
+                    permutation = (
+                        _HeadTailLoadBalancer(
+                            seq_len, 2, torch.device("cpu")
+                        )._generate_indices()
+                        if case.head_tail
+                        else None
+                    )
+                    metadata = AllGatherKVVarlen.prepare_cp_metadata(
+                        _metadata([0, 3, 7, 8])._replace(window_size=case.window),
+                        permutation=permutation,
+                    )
+                    q_THK = torch.randn(seq_len // 2, 1, 4)
+                    k_THK = torch.arange(seq_len * 4).view(seq_len, 1, 4).float()
+                    v_THV = k_THK + 100
+                    gathered_k_THK, gathered_v_THV = k_THK, v_THV
+                    if permutation is not None:
+                        gathered_k_THK = k_THK.index_select(0, permutation[0])
+                        gathered_v_THV = v_THV.index_select(0, permutation[0])
+                    chunk_len = q_THK.shape[0] // len(case.kv_ranges)
+                    outputs = [torch.randn(chunk_len, 1, 4) for _ in case.kv_ranges]
+                    spmd.assert_type(
+                        (q_THK, *outputs),
+                        spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                        spmd.V,
+                    )
+                    spmd.assert_type(
+                        (gathered_k_THK, gathered_v_THV),
+                        spmd.R,
+                        {"dp": spmd.V, "tp": spmd.V},
+                        partition_spec=spmd.PartitionSpec("dp", "tp", None),
+                    )
+                    with typecheck(), mock.patch.object(
+                        cp_attention,
+                        "cp_all_gather_tensors",
+                        return_value=(gathered_k_THK, gathered_v_THV),
+                    ), mock.patch.object(
+                        VarlenInnerAttention,
+                        "forward",
+                        autospec=True,
+                        side_effect=outputs,
+                    ) as inner_forward, mock.patch.object(
+                        cp_attention,
+                        "spmd_mesh_group",
+                        return_value=SimpleNamespace(size=lambda: 2),
+                    ), mock.patch.object(
+                        cp_attention.dist,
+                        "get_rank",
+                        return_value=case.rank,
+                    ):
+                        actual = attention(
+                            q_THK,
+                            torch.empty(0),
+                            torch.empty(0),
+                            attention_metadata=metadata,
+                        )
+                    self.assertEqual(actual, torch.cat(outputs))
+                    calls = inner_forward.call_args_list
+                    self.assertEqual(len(calls), len(case.kv_ranges))
+                    for index, (call, (start, end)) in enumerate(
+                        zip(calls, case.kv_ranges)
+                    ):
+                        self.assertEqual(
+                            call.args[1],
+                            q_THK[index * chunk_len : (index + 1) * chunk_len],
+                        )
+                        self.assertEqual(call.args[2], k_THK[start:end])
+                        self.assertEqual(call.args[3], v_THV[start:end])
+                        self.assertEqual(
+                            call.kwargs["attention_metadata"].window_size, case.window
+                        )
+                        for arg_index in (2, 3):
+                            self.assertEqual(
+                                call.args[arg_index].untyped_storage().data_ptr(),
+                                calls[0].args[arg_index].untyped_storage().data_ptr(),
+                            )
+                    if not case.head_tail:
+                        self.assertEqual(
+                            calls[0].args[2].untyped_storage().data_ptr(),
+                            k_THK.untyped_storage().data_ptr(),
+                        )
 
 
 if __name__ == "__main__":

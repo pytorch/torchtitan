@@ -6,6 +6,7 @@
 
 import copy
 import unittest
+from types import SimpleNamespace
 from typing import cast
 
 import torch
@@ -18,15 +19,24 @@ from torch.testing._internal.common_utils import (
 )
 
 from torchtitan.config import apply_overrides, OverrideConfig
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.config.transform import ContextParallelTransform
+from torchtitan.models.common.attention import FlexInnerAttention, MLAAttention
+from torchtitan.models.common.attention.cp_mla import (
+    AllGatherKVMLAFlexAttention,
+    UlyssesMLAAttention,
+)
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import ComplexRoPE
-from torchtitan.models.deepseek_v3.model import Attention, DeepSeekV3Model
+from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
+from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 from torchtitan_recipes.overrides.fused_mla import (
     _fused_k_rope_kernel,
     _fused_kv_backward_kernel,
     _fused_q_rope_kernel,
     _restore_q_if_in_place,
     _save_q_if_in_place,
+    fused_mla,
     fused_mla_kv,
     fused_mla_q,
     FusedMLAAttention,
@@ -35,6 +45,55 @@ from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 
 
 class TestFusedMLAOverrideConfig(unittest.TestCase):
+    @staticmethod
+    def _attention_config():
+        return DeepSeekMLAAttention.Config(
+            dim=64,
+            n_heads=4,
+            kv_lora_rank=32,
+            qk_nope_head_dim=16,
+            qk_rope_head_dim=16,
+            v_head_dim=16,
+            wq=Linear.Config(in_features=64, out_features=128),
+            wkv_a=Linear.Config(in_features=64, out_features=48),
+            wo=Linear.Config(in_features=64, out_features=64),
+            q_norm=RMSNorm.Config(normalized_shape=1),
+            kv_norm=RMSNorm.Config(normalized_shape=32),
+            rope=ComplexRoPE.Config(dim=16, max_context_length=128),
+            inner_attention=MLAAttention.Config(
+                wkv_b=Linear.Config(in_features=32, out_features=128),
+                packed_kv_head_dim=32,
+                inner_attention=FlexInnerAttention.Config(),
+            ),
+        )
+
+    def test_rejects_cp_backends_for_either_transform_order(self):
+        for backend in (AllGatherKVMLAFlexAttention, UlyssesMLAAttention):
+            for override_first in (False, True):
+                with self.subTest(
+                    backend=backend.__name__, override_first=override_first
+                ):
+                    config = self._attention_config()
+                    if override_first:
+                        config = fused_mla(config)
+                    model = SimpleNamespace(layers=[config])
+                    ContextParallelTransform(
+                        inner_attention_map={MLAAttention: backend}
+                    ).transform(model)
+                    config = model.layers[0]
+                    if not override_first:
+                        config = fused_mla(config)
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "does not support context parallelism.*Remove the fused_mla override",
+                    ):
+                        config.build()
+
+    def test_non_cp_backend_still_builds(self):
+        config = fused_mla(self._attention_config())
+        self.assertIsInstance(config.build(), FusedMLAAttention)
+
     def test_all_kernels_are_autotuned_over_head_geometry(self):
         """Launch configuration is tuned per shape, not hard-coded."""
         for kernel in (
@@ -490,12 +549,12 @@ class TestFusedMLANumerics(unittest.TestCase):
 
     @parametrize("dtype", [torch.bfloat16, torch.float32])
     def test_attention_module_forward_backward_matches_eager(self, dtype: torch.dtype):
-        """The override is numerically a drop-in replacement for Attention."""
+        """The override is numerically a drop-in replacement for DeepSeek MLA."""
         self._check_attention_module_forward_backward(dtype)
 
     def _check_attention_module_forward_backward(self, dtype: torch.dtype) -> None:
         torch.manual_seed(42)
-        config = deepseek_v3_debugmodel(seq_len=2048)
+        config = deepseek_v3_debugmodel(seq_len=2048, attn_backend="flex")
         model_config = cast(DeepSeekV3Model.Config, config.model)
         stock_config = copy.deepcopy(model_config.layers[0].attention)
 
@@ -510,7 +569,7 @@ class TestFusedMLANumerics(unittest.TestCase):
 
         stock = stock_config.build().to(self.positions.device)
         fused = fused_config.build().to(self.positions.device)
-        self.assertIsInstance(stock, Attention)
+        self.assertIsInstance(stock, DeepSeekMLAAttention)
         self.assertIsInstance(fused, FusedMLAAttention)
 
         # Convert parameters without casting the non-persistent complex RoPE
@@ -527,7 +586,7 @@ class TestFusedMLANumerics(unittest.TestCase):
                     parameter.normal_(mean=0.0, std=0.02)
         fused.load_state_dict(stock.state_dict(), strict=True)
 
-        hidden_dim = cast(Attention.Config, stock_config).dim
+        hidden_dim = cast(DeepSeekMLAAttention.Config, stock_config).dim
         x = torch.randn(
             self.num_tokens,
             hidden_dim,

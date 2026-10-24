@@ -19,18 +19,26 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attn_gym import (
     _ConfiguredShortConv,
     _L2Norm,
-    _MissingKernel,
     _ShortConv,
+    is_missing_kernel,
     KernelOptions,
 )
 
-from .attention import create_varlen_metadata_for_document, VarlenAttentionMetadata
+from .attention import Attention, VarlenAttentionMetadata
 
 # The shared Attention Gym kernels run on rank-local heads inside each family's
 # local SPMD region. Family modules register their family-specific kernels.
 for _kernel_function in (_ShortConv, _ConfiguredShortConv, _L2Norm):
-    if _kernel_function is not _MissingKernel:
+    if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
+
+
+class LinearAttention(Attention):
+    """Base class for recurrent linear attention layers."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Attention.Config):
+        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,26 +52,6 @@ class LinearAttentionMetadata:
         """Annotate sequence offsets."""
         if self.varlen is not None:
             self.varlen.annotate_spmd_types()
-
-
-def build_linear_attention_metadata(
-    positions: torch.Tensor,
-    *,
-    conv_kernel_size: int,
-    padding_mask: torch.Tensor | None = None,
-    max_num_documents: int | None = None,
-    max_context_length: int | None = None,
-) -> LinearAttentionMetadata:
-    """Build packed-sequence metadata for a causal-convolution linear attention."""
-    return LinearAttentionMetadata(
-        varlen=create_varlen_metadata_for_document(
-            positions,
-            padding_mask=padding_mask,
-            max_num_documents=max_num_documents,
-            max_context_length=max_context_length,
-        ),
-        num_conv_history_tokens=conv_kernel_size - 1,
-    )
 
 
 def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:

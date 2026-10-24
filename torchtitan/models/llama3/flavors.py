@@ -223,6 +223,8 @@ def _1b(
                 max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
+                # Llama 3.2 extends context with a 32x factor (Llama 3.1 uses 8x).
+                scaling_factor=32.0,
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -280,6 +282,8 @@ def _3b(
                 max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
+                # Llama 3.2 extends context with a 32x factor (Llama 3.1 uses 8x).
+                scaling_factor=32.0,
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -473,7 +477,7 @@ def build_model_config(
     *,
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
-    attn_backend: str = "flex",
+    attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Llama3Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]

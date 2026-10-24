@@ -16,7 +16,7 @@ import grain.python as grain
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.utils.loaders import load_taskset
 
-from torchtitan.rl.components.data import RLDataset
+from torchtitan.rl.rollout.data import RLDataset
 
 
 def register_local_taskset_alias(taskset_id: str) -> str:
@@ -85,7 +85,7 @@ class VerifiersTaskDataset(RLDataset):
         verifiers_taskset = (
             verifiers_taskset
             if config.num_tasks is None
-            else verifiers_taskset.head(config.num_tasks)
+            else verifiers_taskset.take(config.num_tasks)
         )
         if config.shuffle:
             verifiers_taskset = verifiers_taskset.shuffle(config.seed)

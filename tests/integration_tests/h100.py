@@ -59,16 +59,14 @@ def qwen35_debugmodel_moe_lora() -> Trainer.Config:
 def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
     from torchtitan.config.transform import apply_transforms, ContextParallelTransform
     from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
-    from torchtitan.models.common.attention import FlexInnerAttention
-    from torchtitan.models.common.attention.cp_attention import (
-        KVAllGatherFlexInnerAttention,
-    )
+    from torchtitan.models.common.attention import MLAAttention
     from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
+    from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
     from torchtitan.models.common.attention.kda import InnerKDA
 
     from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
 
-    config = kimi_k3_debugmodel()
+    config = kimi_k3_debugmodel(attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.context_parallel_degree = 2
@@ -78,7 +76,7 @@ def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherFlexInnerAttention,
+                    MLAAttention: AllGatherKVMLAFlexAttention,
                     InnerKDA: ContextParallelInnerKDA,
                 }
             ),
@@ -88,16 +86,14 @@ def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
 
 def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
     from torchtitan.config.transform import apply_transforms, ContextParallelTransform
-    from torchtitan.models.common.attention import FlexInnerAttention
-    from torchtitan.models.common.attention.cp_attention import (
-        UlyssesFlexInnerAttention,
-    )
+    from torchtitan.models.common.attention import MLAAttention
     from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
+    from torchtitan.models.common.attention.cp_mla import UlyssesMLAAttention
     from torchtitan.models.common.attention.kda import InnerKDA
 
     from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
 
-    config = kimi_k3_debugmodel()
+    config = kimi_k3_debugmodel(attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.context_parallel_degree = 2
@@ -107,7 +103,7 @@ def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: UlyssesFlexInnerAttention,
+                    MLAAttention: UlyssesMLAAttention,
                     InnerKDA: ContextParallelInnerKDA,
                 }
             ),
@@ -120,14 +116,14 @@ def qwen35_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
     from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
     from torchtitan.models.common.attention import FlexInnerAttention
     from torchtitan.models.common.attention.cp_attention import (
-        KVAllGatherFlexInnerAttention,
+        AllGatherKVFlexInnerAttention,
     )
     from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
     from torchtitan.models.common.attention.gdn import InnerGDN
 
     from torchtitan_recipes.tests.models.qwen3_5 import qwen35_debugmodel
 
-    config = qwen35_debugmodel()
+    config = qwen35_debugmodel(attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.context_parallel_degree = 2
@@ -138,7 +134,7 @@ def qwen35_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherFlexInnerAttention,
+                    FlexInnerAttention: AllGatherKVFlexInnerAttention,
                     InnerGDN: ContextParallelInnerGDN,
                 }
             ),
@@ -157,7 +153,7 @@ def qwen35_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
 
     from torchtitan_recipes.tests.models.qwen3_5 import qwen35_debugmodel
 
-    config = qwen35_debugmodel()
+    config = qwen35_debugmodel(attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.context_parallel_degree = 2

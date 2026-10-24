@@ -51,15 +51,15 @@ from torchtitan.models.common.decoder_sharding import (
     token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
-from torchtitan.models.common.moe_sharding import (
+from torchtitan.models.common.moe.sharding import (
     moe_sharding_config,
     routed_experts_sharding_config,
     router_gate_sharding_config,
     router_sharding_config,
 )
+from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
-from .model import Attention, GptOssModel, GptOssTransformerBlock
+from .model import GptOssAttention, GptOssModel, GptOssTransformerBlock
 from .moe import GptOssGroupedLinear
 from .sharding import attention_sharding_config, routed_expert_linear_sharding_config
 
@@ -100,8 +100,8 @@ def _make_gptoss_attn_config(
     sliding_window_size: int | None = None,
     rope: RoPE.Config,
     enable_sp: bool,
-) -> Attention.Config:
-    """Build a fully-specified, sharded GPT-OSS Attention.Config for a layer.
+) -> GptOssAttention.Config:
+    """Build a fully-specified, sharded GptOssAttention.Config for a layer.
 
     All linear sub-configs have their in_features/out_features set.
     All linear params use depth-scaled init (including wq/wkv/wo).
@@ -114,9 +114,11 @@ def _make_gptoss_attn_config(
         inner_attention, VarlenInnerAttention.Config
     ):
         inner_attention = SlidingWindowVarlenInnerAttention.Config(
-            param_init=inner_attention.param_init,
-            sharding_config=inner_attention.sharding_config,
-            window_size=(sliding_window_size - 1, 0),
+            **{
+                f.name: getattr(inner_attention, f.name)
+                for f in dataclasses.fields(inner_attention)
+            },
+            sliding_window_size=sliding_window_size,
         )
     elif sliding_window_size is not None and isinstance(
         inner_attention, FlexInnerAttention.Config
@@ -124,7 +126,7 @@ def _make_gptoss_attn_config(
         inner_attention = SlidingWindowFlexInnerAttention.Config(
             block_size=inner_attention.block_size,
             kernel_options=inner_attention.kernel_options,
-            window_size=sliding_window_size,
+            sliding_window_size=sliding_window_size,
         )
     inner_attention = dataclasses.replace(
         inner_attention, sharding_config=inner_attention_local_spmd_sharding_config()
@@ -148,7 +150,7 @@ def _make_gptoss_attn_config(
         ),
     )
 
-    return Attention.Config(
+    return GptOssAttention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
@@ -283,7 +285,7 @@ def _build_gptoss_layers(
                 param_init=_NORM_INIT,
                 sharding_config=norm_sharding,
             ),
-            moe=moe_cfg,
+            feed_forward=moe_cfg,
         )
         layers.append(layer_cfg)
     return layers

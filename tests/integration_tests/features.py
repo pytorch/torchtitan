@@ -33,7 +33,10 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validator import Validator
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_remat import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.attention import (
@@ -42,11 +45,10 @@ from torchtitan.models.common.attention import (
     VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherFlexInnerAttention,
-    KVAllGatherSlidingWindowVarlenInnerAttention,
-    KVAllGatherVarlenInnerAttention,
+    AllGatherKVFlexInnerAttention,
+    AllGatherKVSlidingWindowVarlenInnerAttention,
+    AllGatherKVVarlenInnerAttention,
     UlyssesFlexInnerAttention,
-    UlyssesSlidingWindowVarlenInnerAttention,
     UlyssesVarlenInnerAttention,
 )
 from torchtitan.models.muse_glimmer import build_model_config
@@ -155,6 +157,7 @@ class SDCReplayMismatchTrainer(Trainer):
 def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
     base_config = deepseek_v3_debugmodel(
         seq_len=2048,
+        attn_backend="flex",
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=2, expert_parallel_degree=2
         ),
@@ -325,7 +328,7 @@ def _muse_glimmer_debugmodel_pp2_max_outstanding_sends(
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = schedule
     config.parallelism.pipeline_parallel_max_outstanding_sends = 2
-    config.activation_checkpoint = None
+    config.activation_remat = None
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     return config
@@ -423,7 +426,7 @@ def llama3_debugmodel_pp4_zero_bubble() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "InterleavedZeroBubble"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.activation_checkpoint = FullAC.Config()
+    config.activation_remat = FullActivationRematConfig()
     config.debug.deterministic = True
     config.debug.seed = 42
     return config
@@ -435,7 +438,7 @@ def llama3_debugmodel_pp2_zbv() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "ZBVZeroBubble"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.activation_checkpoint = FullAC.Config()
+    config.activation_remat = FullActivationRematConfig()
     config.debug.deterministic = True
     config.debug.seed = 42
     return config
@@ -449,7 +452,7 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule_csv = (
         "./tests/assets/custom_schedule.csv"
     )
-    config.activation_checkpoint = FullAC.Config()
+    config.activation_remat = FullActivationRematConfig()
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.debug.deterministic = True
     config.debug.seed = 42
@@ -483,14 +486,14 @@ def llama3_debugmodel_hsdp2x2() -> Trainer.Config:
 
 
 def llama3_debugmodel_cp4() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+    config = llama3_debugmodel(seq_len=2048, attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.context_parallel_degree = 4
     return apply_transforms(
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -498,7 +501,7 @@ def llama3_debugmodel_cp4() -> Trainer.Config:
 
 def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     """Attention reshards the CP axis onto the head dimension."""
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.context_parallel_degree = 2
     # Head-sharded attention has no per-rank sequence imbalance to balance.
@@ -515,7 +518,7 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
 
 def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
     """Llama 3 with varlen Ulysses CP."""
-    config = llama3_debugmodel_varlen_attn()
+    config = llama3_debugmodel()
     # Packed varlen metadata lacks SPMD annotations.
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.context_parallel_degree = 2
@@ -525,15 +528,23 @@ def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    VarlenInnerAttention: UlyssesVarlenInnerAttention,
-                    SlidingWindowVarlenInnerAttention: (
-                        UlyssesSlidingWindowVarlenInnerAttention
-                    ),
-                }
+                inner_attention_map={VarlenInnerAttention: UlyssesVarlenInnerAttention}
             )
         ],
     )
+
+
+def llama3_debugmodel_fsdp2_ulysses_cp2_varlen() -> Trainer.Config:
+    config = llama3_debugmodel_ulysses_cp2_varlen()
+    config.parallelism.data_parallel_shard_degree = 2
+    return config
+
+
+def llama3_debugmodel_fsdp2_tp2_ulysses_cp2_varlen() -> Trainer.Config:
+    config = llama3_debugmodel_ulysses_cp2_varlen()
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    return config
 
 
 def llama3_debugmodel_hsdp2x2_tp2() -> Trainer.Config:
@@ -543,7 +554,7 @@ def llama3_debugmodel_hsdp2x2_tp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+    config = llama3_debugmodel(seq_len=2048, attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -551,14 +562,14 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
 
 
 def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+    config = llama3_debugmodel(seq_len=2048, attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.data_parallel_replicate_degree = 2
@@ -567,21 +578,23 @@ def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
 
 
 def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
-    config = llama3_debugmodel_hsdp2x2()
-    config.debug.spmd_typechecking = False
+    config = llama3_debugmodel(seq_len=2048, attn_backend="flex")
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -645,7 +658,7 @@ def muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph() -> Trainer.Config:
     config = muse_glimmer_debugmodel(seq_len=2048)
     config.debug.deterministic = True
     config.debug.seed = 42
-    config.training.cuda_graph_per_accumulation_group = True
+    config.training.cuda_graph_per_microbatch_group = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.training.num_tokens_per_train_step = 98304
     config.parallelism.data_parallel_shard_degree = 2
@@ -661,8 +674,23 @@ def muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction() -> Trainer.Confi
     return config
 
 
+def muse_glimmer_debugmodel_shared_eval_cuda_graph() -> Trainer.Config:
+    """Train and validate with shared graph workspace on two FSDP ranks."""
+    config = muse_glimmer_debugmodel(seq_len=128)
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.parallelism.data_parallel_shard_degree = 2
+    config.optim.enable_cuda_graph = True
+    config.validator = Validator.Config(
+        freq=2,
+        steps=1,
+        dataloader=replace(config.dataloader),
+    )
+    return config
+
+
 def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+    config = llama3_debugmodel(seq_len=2048, attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=False)
     assert isinstance(config.dataloader, GrainDataLoader.Config)
     config.validator = Validator.Config(
@@ -680,7 +708,7 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
             )
         ],
     )
@@ -697,6 +725,7 @@ def llama3_debugmodel_fused_swiglu_tp2() -> Trainer.Config:
 def deepseek_v3_debugmodel_fused_swiglu_tp2_ep4() -> Trainer.Config:
     config = deepseek_v3_debugmodel(
         seq_len=2048,
+        attn_backend="flex",
         parallelism=ParallelismConfig(
             tensor_parallel_degree=2, expert_parallel_degree=4
         ),
@@ -711,7 +740,7 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     config = llama3_debugmodel_varlen_attn(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
-    config.activation_checkpoint = SelectiveAC.Config()
+    config.activation_remat = DefaultActivationRematConfig()
     return config
 
 
@@ -736,9 +765,9 @@ def muse_glimmer_debugmodel_fsdp2_cp2_varlen() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    VarlenInnerAttention: KVAllGatherVarlenInnerAttention,
+                    VarlenInnerAttention: AllGatherKVVarlenInnerAttention,
                     SlidingWindowVarlenInnerAttention: (
-                        KVAllGatherSlidingWindowVarlenInnerAttention
+                        AllGatherKVSlidingWindowVarlenInnerAttention
                     ),
                 }
             )
@@ -987,7 +1016,7 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_cp4],
-            test_descr="CP",
+            test_descr="KV-all-gather CP with Flex attention",
             test_name="cp",
             ngpu=4,
         ),
@@ -1005,7 +1034,7 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_ulysses_cp2],
-            test_descr="Ulysses CP",
+            test_descr="Ulysses CP with Flex attention",
             test_name="cp_ulysses",
             ngpu=2,
         ),
@@ -1014,6 +1043,22 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_descr="Ulysses CP with varlen attention",
             test_name="cp_ulysses_varlen",
             ngpu=2,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[llama3_debugmodel_fsdp2_ulysses_cp2_varlen],
+            test_descr="FSDP + Ulysses CP with varlen attention",
+            test_name="fsdp+cp_ulysses_varlen",
+            ngpu=4,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[llama3_debugmodel_fsdp2_tp2_ulysses_cp2_varlen],
+            test_descr="FSDP + TP + Ulysses CP with varlen attention",
+            test_name="fsdp+tp+cp_ulysses_varlen",
+            ngpu=8,
+            use_real_pg=True,
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
@@ -1066,6 +1111,13 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             configs=[muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph],
             test_descr="Per-group CUDA graph replay with FSDP accumulation",
             test_name="fsdp_per_group_cuda_graph",
+            ngpu=2,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[muse_glimmer_debugmodel_shared_eval_cuda_graph],
+            test_descr="Shared train and eval CUDA graphs with FSDP",
+            test_name="shared_eval_cuda_graph",
             ngpu=2,
             skip_rocm_test=True,
         ),
