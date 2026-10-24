@@ -306,6 +306,7 @@ class VarlenAttentionMetadata(NamedTuple):
     _OFFSETS_SPMD_TYPE = spmd.SpmdType(
         {
             MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.R,
             MeshAxisName.TP: spmd.R,
         },
         partition_spec=spmd.PartitionSpec(MeshAxisName.DP),

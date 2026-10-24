@@ -267,7 +267,10 @@ class Ulysses(CPInnerAttention[_GlobalAttentionMetadataT, _GlobalAttentionMetada
         *,
         permutation: torch.Tensor | None,
     ) -> _GlobalAttentionMetadataT:
-        del permutation
+        if permutation is not None:
+            raise ValueError(
+                "Ulysses CP requires contiguous token shards without a permutation."
+            )
         return attention_metadata
 
 

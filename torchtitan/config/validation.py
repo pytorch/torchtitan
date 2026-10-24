@@ -156,6 +156,7 @@ def validate_context_parallel(
         CPInnerAttention,
         Ulysses,
     )
+    from torchtitan.models.common.attention.gdn import GDN
     from torchtitan.models.common.decoder import Decoder
 
     cp = parallelism.context_parallel_degree
@@ -187,6 +188,8 @@ def validate_context_parallel(
             head_shard_degree = parallelism.tensor_parallel_degree * cp
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
+            if isinstance(attention, GDN.Config):
+                n_kv_heads = attention.in_proj_q.out_features // attention.key_head_dim
             for name, count in (("n_heads", n_heads), ("n_kv_heads", n_kv_heads)):
                 if count % head_shard_degree != 0:
                     raise ValueError(
@@ -196,8 +199,8 @@ def validate_context_parallel(
                     )
 
         load_balancer_config = parallelism.context_parallel_load_balancer
-        # Linear attention routes recurrent states using the shared permutation;
-        # it does not constrain which attention load balancer creates it.
+        # Linear attention either routes states or restores token order using
+        # the shared permutation; the full-attention backend selects the balancer.
         if isinstance(attention, LinearAttention.Config):
             continue
         if load_balancer_config is None:
