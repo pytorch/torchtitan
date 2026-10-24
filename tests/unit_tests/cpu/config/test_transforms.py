@@ -31,10 +31,14 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     MLAAttention,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
     AllGatherKVSlidingWindowFlexInnerAttention,
+    AllGatherKVSlidingWindowVarlenInnerAttention,
+    AllGatherKVVarlenInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesSlidingWindowFlexInnerAttention,
 )
@@ -480,8 +484,9 @@ class TestTransformModel(unittest.TestCase):
     def test_preserves_muse_glimmer_sliding_window_backend(self):
         from torchtitan.models.muse_glimmer import build_model_config
 
-        for transform, expected_backends in (
+        for attn_backend, transform, expected_backends in (
             (
+                "flex",
                 ContextParallelTransform(
                     inner_attention_map={
                         FlexInnerAttention: AllGatherKVFlexInnerAttention,
@@ -496,6 +501,7 @@ class TestTransformModel(unittest.TestCase):
                 },
             ),
             (
+                "flex",
                 ContextParallelTransform(
                     inner_attention_map={
                         FlexInnerAttention: UlyssesFlexInnerAttention,
@@ -509,16 +515,38 @@ class TestTransformModel(unittest.TestCase):
                     UlyssesSlidingWindowFlexInnerAttention.Config,
                 },
             ),
+            (
+                "varlen",
+                ContextParallelTransform(
+                    inner_attention_map={
+                        VarlenInnerAttention: AllGatherKVVarlenInnerAttention,
+                        SlidingWindowVarlenInnerAttention: (
+                            AllGatherKVSlidingWindowVarlenInnerAttention
+                        ),
+                    }
+                ),
+                {
+                    AllGatherKVVarlenInnerAttention.Config,
+                    AllGatherKVSlidingWindowVarlenInnerAttention.Config,
+                },
+            ),
         ):
             model = build_model_config(
                 "debugmodel",
-                attn_backend="flex",
+                attn_backend=attn_backend,
                 seq_len=128,
                 parallelism=ParallelismConfig(),
             )
             self.assertEqual(
                 {type(layer.attention.inner_attention) for layer in model.layers},
-                {FlexInnerAttention.Config, SlidingWindowFlexInnerAttention.Config},
+                (
+                    {FlexInnerAttention.Config, SlidingWindowFlexInnerAttention.Config}
+                    if attn_backend == "flex"
+                    else {
+                        VarlenInnerAttention.Config,
+                        SlidingWindowVarlenInnerAttention.Config,
+                    }
+                ),
             )
 
             transform.transform(model)

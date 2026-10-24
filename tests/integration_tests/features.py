@@ -37,13 +37,21 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
     FullActivationRematConfig,
 )
+from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.models.base import BaseModel
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
+    AllGatherKVSlidingWindowVarlenInnerAttention,
+    AllGatherKVVarlenInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesVarlenInnerAttention,
 )
+from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -736,6 +744,37 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     return config
 
 
+def muse_glimmer_debugmodel_fsdp2_cp2_varlen() -> Trainer.Config:
+    """Muse Glimmer varlen attention under FSDP and context parallelism."""
+    seq_len = 2048
+    config = muse_glimmer_debugmodel(seq_len=seq_len)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
+    config.model = build_model_config(
+        "debugmodel",
+        seq_len=seq_len,
+        parallelism=config.parallelism,
+        attn_backend="varlen",
+    )
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = 64
+    _set_spmd_typechecking(config, typechecking=True)
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    VarlenInnerAttention: AllGatherKVVarlenInnerAttention,
+                    SlidingWindowVarlenInnerAttention: (
+                        AllGatherKVSlidingWindowVarlenInnerAttention
+                    ),
+                }
+            )
+        ],
+    )
+
+
 def llama3_debugmodel_lora_tp2_pp2() -> Trainer.Config:
     config = llama3_debugmodel_lora(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
@@ -1020,6 +1059,13 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_name="fsdp+tp+cp_ulysses_varlen",
             ngpu=8,
             use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[muse_glimmer_debugmodel_fsdp2_cp2_varlen],
+            test_descr="Muse Glimmer FSDP+CP with varlen attention",
+            test_name="fsdp+cp+varlen_attn",
+            ngpu=4,
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(

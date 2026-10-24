@@ -339,7 +339,9 @@ class Decoder(BaseModel):
         if load_balancer_config is not None:
             # All PP stages retain the full model config and share one permutation.
             attention = self.config.first_full_attention
-            if attention is None:
+            if attention is None and not isinstance(
+                load_balancer_config, context_parallel.HeadTailCPLoadBalancer.Config
+            ):
                 warn_once(
                     logger,
                     "Ignoring context_parallel_load_balancer because the model "
@@ -347,7 +349,7 @@ class Decoder(BaseModel):
                 )
             else:
                 selected_attention_metadata = None
-                if attention_metadata is not None:
+                if attention is not None and attention_metadata is not None:
                     cp_inner_attention = attention.inner_attention._owner
                     assert cp_inner_attention is not None and issubclass(
                         cp_inner_attention, CPInnerAttention
