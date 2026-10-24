@@ -164,6 +164,19 @@ cp \
   "${REPO_ROOT}/torchtitan/experiments/graph_trainer/run_train_precompile.sh" \
   "${VALIDATION_ROOT}/torchtitan/experiments/graph_trainer/run_train_precompile.sh"
 
+# Installed test recipes resolve repository-local assets relative to
+# site-packages. Link that location to the staged source-test assets.
+SITE_PACKAGES="$(python - <<'PY'
+import sysconfig
+
+print(sysconfig.get_path("purelib"))
+PY
+)"
+mkdir -p "${SITE_PACKAGES}/tests/assets"
+ln -s \
+  "${VALIDATION_ROOT}/tests/assets/synthetic_multimodal" \
+  "${SITE_PACKAGES}/tests/assets/synthetic_multimodal"
+
 cd "${VALIDATION_ROOT}"
 unset PYTHONPATH
 
