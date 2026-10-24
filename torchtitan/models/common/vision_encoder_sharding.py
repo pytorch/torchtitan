@@ -95,6 +95,17 @@ def transformer_block_sharding_config(
     )
 
 
+def vision_projector_sharding_config() -> ShardingConfig:
+    """Vision projector boundary: the TP-invariant output becomes Replicate.
+
+    The encoder owns the CP boundary, so CP is reduced first in backward.
+    """
+    return ShardingConfig(
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
+        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
+    )
+
+
 def invariant_norm_sharding_config() -> ShardingConfig:
     """Norm whose state and activations are invariant across TP and CP ranks."""
     return ShardingConfig(

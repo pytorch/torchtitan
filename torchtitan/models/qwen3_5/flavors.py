@@ -70,6 +70,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_projector_sharding_config,
     vision_rowwise_sharding_config,
 )
 from .model import Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
@@ -85,7 +86,6 @@ from .sharding import (
     sigmoid_gate_sharding_config,
     sigmoid_gated_w13_sharding_config,
     vision_encoder_sharding_config,
-    vision_merger_sharding_config,
     vision_rotary_embedding_sharding_config,
 )
 
@@ -300,7 +300,7 @@ def _qwen35_vision_encoder_config(
                 sharding_config=vision_colwise_sharding_config(),
             ),
             fc2=_vision_row_parallel_linear(merged_hidden_size, out_hidden_size),
-            sharding_config=vision_merger_sharding_config(),
+            sharding_config=vision_projector_sharding_config(),
         ),
         param_init=_POS_EMBED_INIT,
         sharding_config=vision_encoder_sharding_config(),

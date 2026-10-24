@@ -156,14 +156,6 @@ def vision_encoder_sharding_config() -> ShardingConfig:
     )
 
 
-def vision_merger_sharding_config() -> ShardingConfig:
-    """The merger owns the TP boundary; the encoder output owns the CP boundary."""
-    return ShardingConfig(
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
-    )
-
-
 def vision_rotary_embedding_sharding_config() -> ShardingConfig:
     """Vision rotary embedding with a TP-invariant ``inv_freq``."""
     state_placement = SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})
