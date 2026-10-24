@@ -1230,3 +1230,12 @@ def test_dsv3_mtp1_mlperf_recipe_contract(pp_degree, performance, monkeypatch):
     assert config.dataloader.max_num_documents == 1
     assert isinstance(config.optim.gradient_clipper, MTPGradientClipper.Config)
     assert config.checkpointer.initial_load_in_hf and config.checkpointer.load_only
+    from torchtitan.config import apply_overrides
+    from torchtitan_recipes.overrides.fused_dsv3_router import FusedDSv3Router
+
+    apply_overrides(config.override, config)
+    for _, moe, _, _ in config.model.traverse(MoE.Config):
+        assert isinstance(moe.router, FusedDSv3Router.Config)
+        assert moe.router.require_fusion
+        assert moe.router.force_load_balancing == performance
+        assert isinstance(moe.router.aux_loss, UnbiasedTopKLoadBalanceLoss.Config)
