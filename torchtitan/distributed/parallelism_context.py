@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import socket
+import warnings
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -489,6 +490,74 @@ class ParallelismContext:
                 f"Ensure the corresponding parallelism axes are {enabled_str}."
             )
         return mesh
+
+    def build_redistribution_mesh(
+        self,
+        storage_mesh: DeviceMesh,
+        *,
+        max_ctas: int,
+    ) -> DeviceMesh:
+        """Build a storage-shaped mesh with isolated FSDP shard groups."""
+        mesh_axis_names = storage_mesh.mesh_dim_names
+        if mesh_axis_names is None:
+            raise ValueError("Redistribution storage mesh must have named axes")
+        storage_groups = tuple(
+            storage_mesh.get_group(axis_name) for axis_name in mesh_axis_names
+        )
+        groups = []
+        replaced_group = False
+        fsdp_shard_axes = {
+            MeshAxisName.DP_SHARD.value,
+            MeshAxisName.EDP_SHARD.value,
+        }
+        for axis_name, parent_group in zip(
+            mesh_axis_names, storage_groups, strict=True
+        ):
+            if axis_name not in fsdp_shard_axes:
+                groups.append(parent_group)
+                continue
+
+            backend = dist.get_backend(parent_group)
+            if backend == "fake":
+                warnings.warn(
+                    "Redistribution max_ctas is not modeled by the fake process "
+                    "group; using the storage-mesh process group",
+                    stacklevel=2,
+                )
+                groups.append(parent_group)
+                continue
+            if backend != dist.Backend.NCCL:
+                raise ValueError(
+                    "Redistribution max_ctas requires an NCCL process group, "
+                    f"got {backend!r} for mesh axis {axis_name!r}"
+                )
+
+            options = dist.ProcessGroupNCCL.Options()
+            options.config.max_ctas = max_ctas
+            # Keep redistribution channels independent from the FSDP parent.
+            options.config.split_share = 0  # pyrefly: ignore [missing-attribute]
+            num_ranks = dist.get_world_size(parent_group)
+            child_group = dist.split_group(
+                parent_pg=parent_group,
+                split_ranks=[list(range(num_ranks))],
+                pg_options=options,
+                group_desc=f"optimizer_redistribution_{axis_name}",
+                backend="nccl",
+            )
+            assert isinstance(child_group, dist.ProcessGroup)
+            groups.append(child_group)
+            replaced_group = True
+
+        return (
+            DeviceMesh.from_group(
+                groups,
+                storage_mesh.device_type,
+                mesh=storage_mesh.mesh,
+                mesh_dim_names=mesh_axis_names,
+            )
+            if replaced_group
+            else storage_mesh
+        )
 
     @contextlib.contextmanager
     def activate_spmd(self, *, typechecking: bool = False) -> Iterator[None]:
