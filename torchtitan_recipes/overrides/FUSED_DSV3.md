@@ -1,4 +1,4 @@
-# Fused DeepSeek-V3 router override
+# Fused DeepSeek-V3 overrides
 
 The router override preserves native checkpoint parameters and distributed
 ownership while specializing routing pointwise work and its backward. The
@@ -84,3 +84,69 @@ other supported shapes remain fused. Standalone overrides allow native fallback
 for unsupported contracts, such as CPU execution or non-sigmoid score functions.
 GraphTrainer integration is out of scope. Kernel/unit checks do not establish
 full-model convergence or distributed throughput.
+
+## Unbiased sequence-wise balancing
+
+Original loss implementation/tests: Yidi Wu (@ydwu4),
+[#5259](https://github.com/pytorch/torchtitan/pull/5259), source revision
+`25dafa9a6db1e7d5327377a0e28913485e704a1f`. The adaptation retains native
+objective injection, coefficient/token denominator and detached metric state,
+while computing unbiased assignments inside the fused raw-loss kernel.
+General-shape CUDA kernels and native-order column/CTA reductions are additional
+integration work; the tuned CuTe implementation remains credited and preserved.
+
+```text
+FP32 scores -----------------------+     dispatch map
+       |                          |          |
+ normalize across all experts     |     not used for
+       |                          |   unbiased objective
+ plain top-k -> valid frequencies  |          X
+       |                          |
+       +-------- dot -------- valid normalized-score sums
+                    |
+                 raw loss
+                    |
+        existing coefficient / token denominator
+                    |
+       existing gradient injection and metric state
+```
+
+Unbiased mode consumes nonnegative sigmoid scores and uses
+`sum(scores)+1e-20`, independently of group limits, bias and forced dispatch.
+Padding contributes neither counts nor score sums/gradients. Generic
+provided-map/L1 normalization remains a distinct mode. All supported positive
+T/E shapes and configured top-k values stay fused, including unaligned score
+storage. Unsupported precision/mesh/device contracts use native behavior only
+when fusion is not required. The production router's aligned scores retain
+the tuned specialization.
+
+The general implementation derives native reduction partitions from T/E and
+device resources; no shape-dependent module counter controls those launches:
+
+```text
+scores[T,E] + provided map / unbiased top-k
+                    |
+        fused row norm, selection, padding
+                    |
+      temporary normalized scores / selected map
+                    |
+       fused column partial sums[partitions,E]
+                    |
+    fused native-order finish -> frequencies[E], raw loss
+
+saved original scores + frequencies + upstream scalar
+                    |
+           one fused row backward
+```
+
+Normalized scores/maps and column scratch are temporary forward buffers,
+not autograd saved state. Backward retains the original scores, frequencies
+and optional padding mask. Row norms account for the actual storage offset;
+native scalar clamp-min's strict boundary derivative is preserved. The tuned
+path retains its existing single-forward/single-backward launch and counter.
+
+Training's DP objective stays local; distributed collection of detached
+metrics is separate. Router and loss counters have independent ownership.
+The composed factory reuses the existing router and loss factories within
+one override claim, avoiding nested-claim conflicts without merging their
+implementations. MTP cross-entropy remains native at this boundary.

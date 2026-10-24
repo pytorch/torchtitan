@@ -255,8 +255,12 @@ def _deepseek_v3_671b_mtp1_mlperf(
         "torchtitan_recipes.overrides.dense_causal_sdpa.unmasked_text_rows",
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
         (
-            "torchtitan_recipes.overrides.fused_dsv3_router."
-            + ("fused_dsv3_round_robin_router" if performance else "fused_dsv3_router"),
+            "torchtitan_recipes.overrides.fused_dsv3_seqwise_loss."
+            + (
+                "fused_dsv3_round_robin_router_and_seqwise_loss"
+                if performance
+                else "fused_dsv3_router_and_seqwise_loss"
+            ),
             {"require_fusion": True},
         ),
     ]
