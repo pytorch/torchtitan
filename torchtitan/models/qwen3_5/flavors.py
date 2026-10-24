@@ -636,7 +636,6 @@ def _debugmodel(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -707,7 +706,6 @@ def _debugmodel_moe(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -782,7 +780,6 @@ def _0_8b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -854,7 +851,6 @@ def _2b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -926,7 +922,6 @@ def _4b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -994,7 +989,6 @@ def _9b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -1061,7 +1055,6 @@ def _27b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -1131,7 +1124,6 @@ def _35b_a3b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -1205,7 +1197,6 @@ def _122b_a10b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -1279,7 +1270,6 @@ def _397b_a17b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(

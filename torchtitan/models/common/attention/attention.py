@@ -45,6 +45,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.norm import OffsetRMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.tools.utils import round_up
 
@@ -204,7 +205,7 @@ class GQAttention(Attention):
         dim: int
         qkv_linear: QKVLinear.Config
         wo: Linear.Config
-        qk_norm: RMSNorm.Config | None = None
+        qk_norm: RMSNorm.Config | OffsetRMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
         rope: RoPE.Config | None
@@ -244,8 +245,8 @@ class GQAttention(Attention):
         self.inner_attention = config.inner_attention.build()
 
         # Optional QK normalization (Qwen3-style)
-        self.q_norm: RMSNorm | None = None
-        self.k_norm: RMSNorm | None = None
+        self.q_norm: RMSNorm | OffsetRMSNorm | None = None
+        self.k_norm: RMSNorm | OffsetRMSNorm | None = None
         if config.qk_norm is not None:
             self.q_norm = config.qk_norm.build()
             self.k_norm = config.qk_norm.build()

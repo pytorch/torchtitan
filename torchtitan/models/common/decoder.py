@@ -33,6 +33,7 @@ from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.norm import OffsetRMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.observability.logging import warn_once
 
@@ -84,7 +85,7 @@ class Decoder(BaseModel):
         vocab_size: int
         lm_head: Linear.Config
         tok_embeddings: Embedding.Config
-        norm: RMSNorm.Config
+        norm: RMSNorm.Config | OffsetRMSNorm.Config
         # TODO(fegin): revisit
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here

@@ -56,7 +56,6 @@ def _qwen3_8_2_4t_a95b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
