@@ -29,7 +29,11 @@ logger = logging.getLogger(__name__)
 
 
 class GradientClipper(Configurable):
-    """Default optimizer-owned gradient clipping implementation."""
+    """Default optimizer-owned gradient clipping implementation.
+
+    Subclasses may bind runtime ``model_parts`` to model-owned replica state.
+    The default accepts that binding without changing its clipping arithmetic.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -37,6 +41,16 @@ class GradientClipper(Configurable):
 
     def __init__(self, config: Config) -> None:
         self.config = config
+
+    def bind_model_parts(self, model_parts: list[nn.Module]) -> None:
+        """Bind runtime model state once before updates; the default is a no-op.
+
+        This keeps existing config-only custom clipper constructors compatible.
+
+        Args:
+            model_parts: Initialized, sharded model parts owned by the optimizer.
+        """
+        del model_parts
 
     def clip_grad_norm_(
         self,
@@ -134,6 +148,7 @@ class Optim(Configurable):
             else None
         )
         self.gradient_clipper = config.gradient_clipper.build()
+        self.gradient_clipper.bind_model_parts(model_parts)
 
         self._run_update = self._update
         if enable_cuda_graph:
