@@ -231,9 +231,51 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
     config = deepseek_v4_debugmodel(
         seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=2)
     )
+    config.optim.optimizer = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", lr=8e-4, fused=False)]
+    )
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.context_parallel_degree = 1
+    config.parallelism.pipeline_parallel_degree = 1
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def deepseek_v4_debugmodel_seed_checkpoint() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
+
+    config = deepseek_v4_debugmodel(seq_len=512)
+    config.optim.optimizer = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", fused=False)]
+    )
+    return config
+
+
+def deepseek_v4_debugmodel_fsdp4() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
+
+    config = deepseek_v4_debugmodel(seq_len=512)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def deepseek_v4_debugmodel_fsdp4_ep4() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
+
+    config = deepseek_v4_debugmodel(
+        seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=4)
+    )
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.tensor_parallel_degree = 1
     config.parallelism.context_parallel_degree = 1
     config.parallelism.pipeline_parallel_degree = 1
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
@@ -700,18 +742,21 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v4_debugmodel_fsdp2_tp2_ep2],
-            test_descr="DeepSeek V4 FSDP+TP+EP",
+            test_descr="DeepSeek V4 AdamW FSDP+TP+EP",
             test_name="deepseek_v4_fsdp+tp+ep",
+            ngpu=4,
+            skip_rocm_test=True,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v4_debugmodel_fsdp4_ep4],
+            test_descr="DeepSeek V4 DistMuon FSDP+EP",
+            test_name="deepseek_v4_dist_muon_fsdp+ep",
             ngpu=4,
             # Sparse attention / indexer kernels are CUDA-only and unvalidated
             # on ROCm.
             skip_rocm_test=True,
-            # Runs on a real PG. Under Fake PG this config's sequence-parallel
-            # collectives return activations that alias their inputs, which
-            # corrupts a saved-for-backward tensor and blows up grad_norm at
-            # step 1. The same config trains cleanly on a real 4-GPU PG
-            # (grad_norm ~3.8), so keep it on a real PG until the Fake PG
-            # collective aliasing under spmd_types is fixed.
+            # DistMuon optimizer-state redistribution requires real collectives.
             use_real_pg=True,
         ),
         # Integration Test Cases for Qwen3 dense and MoE model
