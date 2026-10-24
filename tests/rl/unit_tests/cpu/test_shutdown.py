@@ -137,8 +137,8 @@ def _make_stub_rl_trainer():
         renderer = SimpleNamespace(
             build=lambda *, tokenizer: SimpleNamespace(get_stop_token_ids=lambda: [])
         )
-        # __init__ copies each role's model, reads generator.sampling (a dataclass,
-        # for replace) + generator.debug.seed, and applies the (empty) override.
+        # __init__ reads generator.sampling (a dataclass, for replace) and
+        # generator.debug.seed; resolve_overrides is stubbed below.
         trainer = SimpleNamespace(model=None)
         generator = SimpleNamespace(
             model=None, sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
@@ -148,6 +148,9 @@ def _make_stub_rl_trainer():
 
         def to_dict(self):
             return {}
+
+        def resolve_overrides(self) -> None:
+            pass
 
         def maybe_log(self) -> None:
             pass
