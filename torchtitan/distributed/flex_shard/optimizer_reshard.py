@@ -83,6 +83,21 @@ class BlockShard:
         num_periods, offset = divmod(block_index, len(self.block_sizes))
         return num_periods * sum(self.block_sizes) + sum(self.block_sizes[:offset])
 
+    def block_index(self, dim_offset: int) -> int:
+        """Return the block index at a dimension offset on a block boundary."""
+        if dim_offset < 0:
+            raise ValueError("BlockShard dimension offsets must be non-negative")
+        period = sum(self.block_sizes)
+        num_periods, period_offset = divmod(dim_offset, period)
+        block_offset = 0
+        for block_index, block_size in enumerate(self.block_sizes):
+            if period_offset == block_offset:
+                return num_periods * len(self.block_sizes) + block_index
+            block_offset += block_size
+        raise ValueError(
+            f"BlockShard dimension offset {dim_offset} must be a block boundary"
+        )
+
 
 _ComputeSharding = Owned | Replicate | Shard | BlockShard
 
@@ -156,8 +171,9 @@ class ComputeLayout:
     shard it, outermost first: the leading axis partitions the whole dimension
     and every following axis partitions its predecessor's shard. Declaring an
     order is only necessary when it differs from the default, which applies the
-    axes in storage-mesh order. Each named axis must declare ``Shard`` on that
-    same tensor dimension, written as a non-negative index.
+    axes in storage-mesh order. Every axis in one order must use the same
+    sharding type: either ``Shard`` on that tensor dimension or ``BlockShard``
+    with the same tensor dimension and block size.
 
     ``compute_dtype`` is the dtype the optimizer computes in for parameters
     that are redistributed; ``None`` keeps the storage dtype.
@@ -173,6 +189,16 @@ class ComputeLayout:
                     "ep": Shard(0),
                 },
                 shard_order_by_tensor_dim={0: ("ep", "edp_shard")},
+            )
+
+        Preserve TP head ownership, then distribute complete heads over DP::
+
+            ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": BlockShard(dim=0, block_sizes=(head_dim,)),
+                    "tp": BlockShard(dim=0, block_sizes=(head_dim,)),
+                },
+                shard_order_by_tensor_dim={0: ("tp", "dp_shard")},
             )
 
         Assign the complete subgroup-local logical tensor to one owner rank
@@ -262,6 +288,7 @@ class ComputeLayout:
                     f"mesh axis; tensor dimension {tensor_dim} lists "
                     f"{list(ordered_axis_names)}"
                 )
+            ordered_shardings = []
             for axis_name in ordered_axis_names:
                 sharding = shardings_by_mesh_axis.get(axis_name)
                 if sharding is None:
@@ -270,12 +297,38 @@ class ComputeLayout:
                         f"{axis_name!r}, which shardings_by_mesh_axis does not "
                         "declare"
                     )
-                if type(sharding) is not Shard or sharding.dim != tensor_dim:
+                if not isinstance(sharding, (Shard, BlockShard)) or (
+                    sharding.dim != tensor_dim
+                ):
                     raise ValueError(
                         "ComputeLayout.shard_order_by_tensor_dim requires "
-                        f"Shard({tensor_dim}) on mesh axis {axis_name!r}; got "
-                        f"{sharding!r}"
+                        f"Shard({tensor_dim}) or BlockShard({tensor_dim}, ...) "
+                        f"on mesh axis {axis_name!r}; got {sharding!r}"
                     )
+                ordered_shardings.append(sharding)
+            sharding_type = type(ordered_shardings[0])
+            if any(
+                type(sharding) is not sharding_type for sharding in ordered_shardings
+            ):
+                raise ValueError(
+                    "ComputeLayout.shard_order_by_tensor_dim cannot mix Shard "
+                    "and BlockShard"
+                )
+            if (
+                sharding_type is BlockShard
+                and len(
+                    {
+                        sharding.block_sizes
+                        for sharding in ordered_shardings
+                        if isinstance(sharding, BlockShard)
+                    }
+                )
+                != 1
+            ):
+                raise ValueError(
+                    "ComputeLayout.shard_order_by_tensor_dim requires equal "
+                    "BlockShard block-size sequences"
+                )
             validated_shard_order[tensor_dim] = ordered_axis_names
         return dict(sorted(validated_shard_order.items()))
 
@@ -289,10 +342,10 @@ class BucketConfig:
     """Ordered optimizer-work bucket selected by canonical FQN patterns.
 
     ``mesh`` may override the process groups used for redistribution. It must
-    have a named axis matching the storage-mesh axis that the bucket
-    redistributes along, with the same ranks in the same order. It may be a 1D
-    mesh or a storage-shaped mesh. DistMuon communicates on
-    ``mesh[axis].get_group()``. ``None`` uses the parameter storage mesh.
+    have named axes matching the storage-mesh axes that the bucket
+    redistributes along, with the same ranks in the same order. DistMuon
+    selects those axes and flattens them into one communication mesh when
+    needed. ``None`` uses the parameter storage mesh.
     """
 
     patterns: tuple[str, ...]
