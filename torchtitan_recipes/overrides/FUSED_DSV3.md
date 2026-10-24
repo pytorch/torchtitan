@@ -1,8 +1,9 @@
 # Fused DeepSeek-V3 overrides
 
-The router override preserves native checkpoint parameters and distributed
-ownership while specializing routing pointwise work and its backward. The
-gate stays an ordinary BF16 linear; sequence auxiliary loss remains external.
+These independent overrides preserve native checkpoint parameters, objective
+composition and distributed ownership while specializing routing, sequence
+balancing and MTP cross entropy. The gate stays an ordinary BF16 linear;
+auxiliary scaling/injection and MTP composition retain their native owners.
 
 ## Authorship
 
@@ -149,4 +150,46 @@ Training's DP objective stays local; distributed collection of detached
 metrics is separate. Router and loss counters have independent ownership.
 The composed factory reuses the existing router and loss factories within
 one override claim, avoiding nested-claim conflicts without merging their
-implementations. MTP cross-entropy remains native at this boundary.
+implementations. Router/sequence factories do not change MTP cross entropy.
+
+## MTP cross entropy
+
+Original implementation/tests: Yidi Wu (@ydwu4),
+[#5261](https://github.com/pytorch/torchtitan/pull/5261), source revision
+`1acef597590c0a4933ddcf50e7a6769d99aabdfa`. The integration enables the
+shape/dtype/device-checked callback on the selected runtime and adds native
+valid-label rejection in the existing row-statistics kernel. Generalization
+matches native warp/register/global row reduction regimes without a fixed
+vocabulary/token-count allowlist; original kernel attribution is retained.
+
+```text
+BF16 logits [T,V] + int64 labels [T]
+                    |
+       FP32 row max / log-sum-exp / NLL sum
+                    |
+       scalar CE + saved FP32 stats [2,T]
+                    |
+        native main/MTP normalization and weighting
+                    |
+     reconstruct FP32 log-probability derivative
+                    |
+            BF16 logits gradient
+```
+
+Only the raw callback changes: native MTP retains independent valid-token
+denominators, weighted composition, detached LM/MTP/combined metrics and
+sequential validation projection/release. Statistics use32KiB at4096 tokens;
+BF16 logits remain the backward input. Labels must be vocabulary IDs or the
+configured ignore index. An in-kernel assertion rejects invalid labels and
+the selected-value load is bounds-masked, without a separate guard kernel.
+
+The fused API accepts positive T/V with contiguous BF16 CUDA logits and a
+full local vocabulary. Small rows use native-order warp accumulation, moderate
+rows use native register-strided order, and large rows retain the tuned
+float4/global path. Index offsets are64-bit; class comparisons stay32-bit.
+Blackwell uses the packed-exp implementation; other supported CUDA instruction
+targets use scalar libdevice exp. Untested hardware is not claimed validated.
+Tensor-parallel vocabulary or
+unsupported layouts retain native behavior unless fusion is required. All
+four MLPerf leaves now require router, unbiased sequence-loss and MTP CE
+fusion. No kernel/unit result is a full-cluster convergence or TPS claim.
