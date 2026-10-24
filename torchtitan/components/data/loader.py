@@ -58,6 +58,13 @@ class BaseDataLoader(Stateful, ABC, Configurable):
             if self.max_num_documents is not None and self.max_num_documents <= 0:
                 raise ValueError("max_num_documents must be positive")
 
+        def _get_attention_document_capacity(
+            self, *, max_context_length: int, num_tokens_per_microbatch: int
+        ) -> int | None:
+            """Return the attention metadata capacity for this data policy."""
+            del max_context_length, num_tokens_per_microbatch
+            return self.max_num_documents
+
     @abstractmethod
     def __iter__(self) -> Iterator[TrainingMicrobatch]:
         ...
@@ -123,7 +130,10 @@ class GrainDataLoader(BaseDataLoader):
         self._dp_world_size = dp_world_size
         self._map_dataset_dp_sharding = config.map_dataset_dp_sharding
         self._rank_id = f"dp_rank_{dp_rank}"
-        self.max_num_documents = config.max_num_documents
+        self.max_num_documents = config._get_attention_document_capacity(
+            max_context_length=max_context_length,
+            num_tokens_per_microbatch=num_tokens_per_microbatch,
+        )
 
         # Build the dataset graph and collator.
         read_options = config.read_options

@@ -62,7 +62,10 @@ def _validator(*, schedule=None, first=True, last=True):
         dp_cp_enabled=False,
         activate_spmd=lambda: nullcontext(),
     )
-    validator.dl_config = SimpleNamespace(max_num_documents=None)
+    validator.dl_config = SimpleNamespace(
+        max_num_documents=None,
+        _get_attention_document_capacity=lambda **kwargs: validator.dl_config.max_num_documents,
+    )
     validator.dp_world_size = 1
     validator.dp_rank = 0
     validator.tokenizer = None
@@ -309,7 +312,7 @@ def test_varlen_eval_replays_different_document_counts():
         world_size=1,
         enable_sequence_parallel=False,
     )
-    validator.dl_config = SimpleNamespace(max_num_documents=4)
+    validator.dl_config.max_num_documents = 4
     validator.seq_len = 8
     validator.loss_fn = lambda output, labels: (
         torch.nn.functional.cross_entropy(output, labels, reduction="sum"),

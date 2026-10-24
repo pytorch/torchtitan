@@ -390,6 +390,10 @@ class Validator(BaseValidator):
                 if parallelism_context.pp_enabled
                 else 1
             )
+            max_num_documents = self.dl_config._get_attention_document_capacity(
+                max_context_length=self.seq_len,
+                num_tokens_per_microbatch=self.num_tokens_per_microbatch,
+            )
 
             if self._validation_dataloader is None:
                 self._validation_dataloader = self.dl_config.build(
@@ -443,7 +447,7 @@ class Validator(BaseValidator):
                             input_dict,
                             parallelism_context=parallelism_context,
                             parallelism=self.parallelism,
-                            max_num_documents=self.dl_config.max_num_documents,
+                            max_num_documents=max_num_documents,
                             max_context_length=self.seq_len,
                         )
                     prepared.append((inputs, labels, kwargs))

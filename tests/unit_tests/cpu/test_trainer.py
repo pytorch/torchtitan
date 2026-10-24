@@ -20,15 +20,58 @@ from torchtitan.components.data.types import (
     TrainingMicrobatch,
 )
 from torchtitan.components.optim import GradientClipper, Optim
+from torchtitan.components.validator import Validator
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import AuxLoss
+from torchtitan.models.deepseek_v3 import build_model_config as build_dsv3_config
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.profiler import CuspyProfilerConfig, Profiler
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
+from torchtitan_recipes.tests.models.deepseek_v3 import (
+    deepseek_v3_debugmodel_mtp_pp2_dp2_ep2,
+)
+
+
+def _pipeline_cuda_graph_config():
+    """Build a real MTP config with PP graphs, validation and fixed metadata."""
+    config = deepseek_v3_debugmodel_mtp_pp2_dp2_ep2()
+    config.parallelism.expert_parallel_degree = 1
+    config.model = build_dsv3_config(
+        "debugmodel",
+        seq_len=128,
+        num_mtp_layers=1,
+        attn_backend="varlen",
+        parallelism=config.parallelism,
+    )
+    config.training.disable_cuda_graphs = False
+    config.dataloader.max_num_documents = 128
+    validator = Validator.Config(dataloader=config.dataloader, steps=1)
+    config.validator = validator
+    return config
+
+
+def test_unmasked_pipeline_graph_config_derives_metadata_capacity():
+    from torchtitan_recipes.overrides.dense_causal_sdpa import (
+        ContinuousTextCollator,
+        unmasked_text_rows,
+    )
+
+    config = _pipeline_cuda_graph_config()
+    config.validator = None
+    config.dataloader.max_num_documents = None
+    config.dataloader = unmasked_text_rows(config.dataloader)
+    with patch(
+        "torchtitan.distributed.cuda_graph.cuda_graphs_supported", return_value=True
+    ):
+        config.__post_init__()
+    assert config.dataloader.max_num_documents is None
+    assert isinstance(config.dataloader.collator, ContinuousTextCollator.Config)
+    assert config.validator is None
+    assert not config.training.disable_cuda_graphs
 
 
 def test_common_imports_do_not_require_dist_moe() -> None:
