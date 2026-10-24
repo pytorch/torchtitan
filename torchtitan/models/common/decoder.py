@@ -23,6 +23,8 @@ from torchtitan.models.common.attention import (
     AttentionMetadata,
     AttentionMetadataMap,
     InnerAttention,
+    SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -389,11 +391,27 @@ class Decoder(BaseModel):
         max_context_length: int | None = None,
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
+        sliding_window_sizes: dict[type[InnerAttention], int] = {}
         for layer_config in self.config.layers:
             for _, attention, _, _ in layer_config.traverse(Attention.Config):
                 config = attention.inner_attention
                 backend = config._owner
                 assert backend is not None and issubclass(backend, InnerAttention)
+                if isinstance(
+                    config,
+                    (
+                        SlidingWindowFlexInnerAttention.Config,
+                        SlidingWindowVarlenInnerAttention.Config,
+                    ),
+                ):
+                    window_size = sliding_window_sizes.setdefault(
+                        backend, config.sliding_window_size
+                    )
+                    if window_size != config.sliding_window_size:
+                        raise ValueError(
+                            f"{backend.__name__} layers must use the same "
+                            "sliding_window_size because they share attention metadata."
+                        )
                 if backend in attention_metadata:
                     continue
                 metadata = config.build_attention_metadata(

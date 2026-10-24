@@ -174,8 +174,7 @@ class GptOssTransformerBlock(TransformerBlock):
 
         Args:
             x (torch.Tensor): Input tensor of shape (num_tokens, dim).
-            attention_metadata: Flex metadata selected for this layer's inner
-                attention, or the shared ``VarlenAttentionMetadata``.
+            attention_metadata: Metadata selected for this layer's inner attention.
             positions: Optional position indices.
 
         Returns:

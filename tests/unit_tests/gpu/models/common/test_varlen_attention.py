@@ -17,6 +17,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torch.utils._pytree import tree_map
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
@@ -25,6 +26,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 )
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
+    SlidingWindowVarlenInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
@@ -41,12 +43,11 @@ def _metadata():
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("upcast_qk", [False, True])
-@pytest.mark.parametrize("causal", [False, True])
-def test_forward_backward_precision(dtype, upcast_qk, causal):
+@pytest.mark.parametrize("window_size", [(-1, -1), (-1, 0), (7, 0)])
+def test_forward_backward_precision(dtype, upcast_qk, window_size):
     torch.manual_seed(42)
-    attention = VarlenInnerAttention.Config(
-        window_size=(-1, 0) if causal else (-1, -1)
-    ).build()
+    left, right = window_size
+    attention = VarlenInnerAttention.Config().build()
     inputs = [
         torch.randn(
             64,
@@ -59,17 +60,25 @@ def test_forward_backward_precision(dtype, upcast_qk, causal):
         for index in range(3)
     ]
     reference_inputs = [x.detach().double().requires_grad_() for x in inputs]
-    actual = attention(*inputs, attention_metadata=_metadata())
+    metadata = _metadata()._replace(window_size=window_size)
+    actual = attention(*inputs, attention_metadata=metadata)
     reference_q, reference_k, reference_v = (
         x.reshape(2, 32, 4, 64).transpose(1, 2) for x in reference_inputs
     )
     with sdpa_kernel(SDPBackend.MATH):
+        indices = torch.arange(32, device="cuda")
+        mask = None
+        if left >= 0:
+            mask = (indices[:, None] >= indices[None, :]) & (
+                indices[:, None] - indices[None, :] <= left
+            )
         expected = (
             F.scaled_dot_product_attention(
                 reference_q,
                 reference_k,
                 reference_v,
-                is_causal=causal,
+                is_causal=left == -1 and right == 0,
+                attn_mask=mask,
             )
             .transpose(1, 2)
             .reshape(64, 4, 64)
@@ -108,22 +117,34 @@ def test_fp32_fallback_matches_legacy_forward_backward():
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("mode", ["compile", "trace"])
-def test_compiled_and_traced_steps_match_eager(dtype, mode):
+@pytest.mark.parametrize("mode", ["compile", "trace", "graph"])
+@pytest.mark.parametrize("sliding_window_size", [None, 8])
+def test_execution_modes_match_eager(dtype, mode, sliding_window_size):
     torch.manual_seed(42)
-    attention = VarlenInnerAttention.Config().build()
+    config = (
+        VarlenInnerAttention.Config()
+        if sliding_window_size is None
+        else SlidingWindowVarlenInnerAttention.Config(
+            sliding_window_size=sliding_window_size
+        )
+    )
+    attention = config.build()
     inputs = [
         torch.randn(64, 4, 64, device="cuda", dtype=dtype, requires_grad=True)
         for _ in range(3)
     ]
-    metadata = _metadata()
+    metadata = config.build_attention_metadata(
+        torch.arange(32, device="cuda").repeat(2),
+        max_num_documents=2,
+        max_context_length=32,
+    )
 
     def step(q, k, v, *, attention_metadata):
         output = attention(q, k, v, attention_metadata=attention_metadata)
         loss = output.float().square().mean()
         return output, loss, torch.autograd.grad(loss, (q, k, v))
 
-    expected = step(*inputs, attention_metadata=metadata)
+    expected = tree_map(torch.Tensor.detach, step(*inputs, attention_metadata=metadata))
     if mode == "trace":
         traced = minimal_fx_tracer(step, module=attention)(
             *inputs, attention_metadata=metadata
@@ -131,11 +152,31 @@ def test_compiled_and_traced_steps_match_eager(dtype, mode):
         actual = run_traced(traced, module=attention)(
             *inputs, attention_metadata=metadata
         )
-    else:
+    elif mode == "compile":
         compiled = torch.compile(attention, fullgraph=True)
         output = compiled(*inputs, attention_metadata=metadata)
         loss = output.float().square().mean()
         actual = output, loss, torch.autograd.grad(loss, inputs)
+    else:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                step(*inputs, attention_metadata=metadata)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            actual = step(*inputs, attention_metadata=metadata)
+        with torch.no_grad():
+            for tensor in inputs:
+                tensor.normal_()
+        reference_inputs = [
+            tensor.detach().clone().requires_grad_() for tensor in inputs
+        ]
+        expected = tree_map(
+            torch.Tensor.detach, step(*reference_inputs, attention_metadata=metadata)
+        )
+        graph.replay()
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
