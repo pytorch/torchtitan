@@ -226,7 +226,7 @@ class SelfAttention(Module):
         num_heads: int = 8
         qkv_bias: bool = False
         inner_attention: VarlenInnerAttention.Config = field(
-            default_factory=lambda: VarlenInnerAttention.Config(window_size=(-1, -1))
+            default_factory=VarlenInnerAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -298,7 +298,7 @@ class DoubleStreamBlock(Module):
         mlp_ratio: float = 4.0
         qkv_bias: bool = False
         inner_attention: VarlenInnerAttention.Config = field(
-            default_factory=lambda: VarlenInnerAttention.Config(window_size=(-1, -1))
+            default_factory=VarlenInnerAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -426,7 +426,7 @@ class SingleStreamBlock(Module):
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
         inner_attention: VarlenInnerAttention.Config = field(
-            default_factory=lambda: VarlenInnerAttention.Config(window_size=(-1, -1))
+            default_factory=VarlenInnerAttention.Config
         )
 
     def __init__(self, config: Config):

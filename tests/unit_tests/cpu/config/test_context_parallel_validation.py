@@ -202,7 +202,7 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         assert isinstance(model, Decoder.Config)
         for layer in model.layers:
             layer.attention.inner_attention = (
-                UlyssesSlidingWindowFlexInnerAttention.Config(window_size=128)
+                UlyssesSlidingWindowFlexInnerAttention.Config(sliding_window_size=128)
             )
         self.assertIsNone(model.first_full_attention)
         config.__post_init__()
