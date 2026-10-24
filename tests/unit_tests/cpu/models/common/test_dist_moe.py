@@ -42,7 +42,7 @@ from torchtitan.models.common.dist_moe import (
 )
 from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.moe import MoE, RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -316,6 +316,18 @@ def test_bf16_transform_preserves_parameter_layout() -> None:
     assert not hasattr(module, "activation_fn")
     for key, value in module.state_dict().items():
         torch.testing.assert_close(value, stock.state_dict()[key], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("expert_precision", ["bf16", "mxfp8"])
+def test_transform_enables_generic_shared_expert_overlap(expert_precision):
+    """The selected Dist-MoE backend opts into the common stream contract."""
+    model = deepseek_v3_debugmodel().model
+    assert all(
+        not moe.overlap_shared_experts for _, moe, _, _ in model.traverse(MoE.Config)
+    )
+    converted = DistMoeTransform(expert_precision=expert_precision).transform(model)
+    moes = list(converted.traverse(MoE.Config))
+    assert moes and all(moe.overlap_shared_experts for _, moe, _, _ in moes)
 
 
 @pytest.mark.parametrize("expert_precision", ["bf16", "mxfp8"])

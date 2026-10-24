@@ -348,3 +348,44 @@ representations. See the annex
 [pipeline slots](https://github.com/meta-pytorch/dist_moe/blob/main/docs/pipeline_activation_slots.md),
 and [VMM](https://github.com/meta-pytorch/dist_moe/blob/main/docs/vmm.md)
 documentation for byte-level layouts and planner behavior.
+
+## Shared-expert stream overlap
+
+Dist-MoE's transform enables the common MoE shared-expert stream policy for
+BF16 and MXFP8. MoEs without shared experts are unaffected. Other backends
+retain the default disabled policy; shared-expert overlap requires CUDA.
+
+This is separate from Dist-MoE's routed communication/GEMM overlap. That
+backend overlap schedules work inside the routed branch; it cannot enqueue
+the model's independent shared-expert FFN. Enqueuing the shared branch first
+allows its compute to overlap routed metadata, EP barriers and routed work.
+Actual overlap depends on resource availability and must be measured from a
+trace, not inferred from the configured streams.
+
+```text
+caller input / FSDP readiness
+          |
+          +------> shared stream (priority0): shared FFN --------+
+          |                                                   |
+          +------> routed stream (priority-1): router            |
+                    -> dispatch metadata / EP                 |
+                    -> routed experts ------------------------+
+                                                              |
+                    caller joins both -> shared add / TP output
+```
+
+The shared branch is enqueued first. Explicit stream waits and record_stream
+retain input/output allocator ownership, including no-grad validation.
+Backward runs branches on their forward streams. A storage-free input fork
+then combines shared, routed and router input gradients in their original
+order, preserving BF16 rounding without changing gradient precision or adding
+a parameter-gradient cache. Kimi's latent routed projection reuses the same
+branch boundary rather than duplicating the common stream/combination logic.
+
+The caller may already use the lowest-priority stream, so routed work receives
+a separate higher-priority stream instead of changing global stream policy.
+Streams are shared per indexed CUDA device and prepared before graph capture.
+GraphTrainer parallel-branch lowering remains downstream work; this feature
+does not provide GraphTrainer integration. Related DeepEP-specific overlap
+work is [#5263](https://github.com/pytorch/torchtitan/pull/5263); this path is
+generic MoE/Dist-MoE integration, not a copy of that dispatch callback.

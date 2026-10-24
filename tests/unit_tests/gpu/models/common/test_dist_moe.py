@@ -6,6 +6,7 @@
 
 """Numerical parity between stock and Dist-MoE routed experts."""
 
+import copy
 import unittest
 from typing import Any, cast
 
@@ -23,22 +24,26 @@ dist_moe = pytest.importorskip(
     reason="Dist-MoE parity requires the optional dist_moe package",
 )
 
+from torchtitan.config.parallelism import ParallelismConfig  # noqa: E402
 from torchtitan.distributed.spmd_types import (  # noqa: E402
     set_current_spmd_mesh,
     set_spmd_meshes,
 )
 from torchtitan.models.base.module import Module  # noqa: E402
+from torchtitan.models.common.activation import Sigmoid  # noqa: E402
 from torchtitan.models.common.dist_moe import (  # noqa: E402
     DistMoeRoutedExperts,
     DistMoeRuntime,
     MXFP8DistMoeRoutedExperts,
 )
 from torchtitan.models.common.dist_moe.mxfp8 import _prepare_mxfp8_weight  # noqa: E402
-from torchtitan.models.common.linear import GroupedLinear  # noqa: E402
+from torchtitan.models.common.linear import GroupedLinear, Linear  # noqa: E402
 from torchtitan.models.common.moe import RoutedExperts  # noqa: E402
+from torchtitan.models.common.moe.moe import _expert_compute_streams  # noqa: E402
 from torchtitan.models.common.moe.token_dispatcher import (  # noqa: E402
     AllToAllTokenDispatcher,
 )
+from torchtitan.models.deepseek_v3 import build_model_config  # noqa: E402
 from torchtitan_recipes.overrides.fused_swiglu import FusedSwiGLU  # noqa: E402
 
 
@@ -56,6 +61,120 @@ _TOL = 1e-4
 # measures about 0.07 at these shapes, while swapped gate/up rows measure about
 # 0.9, so this bound separates quantization error from layout errors.
 _MXFP8_REL_TOL = 0.12
+
+
+def _shared_moe_config(overlap: bool):
+    """Build the ordinary BF16 MoE with the same router precision as MLPerf."""
+    model = build_model_config(
+        "debugmodel",
+        seq_len=128,
+        parallelism=ParallelismConfig(),
+        attn_backend="varlen",
+    )
+    config = copy.deepcopy(model.layers[1].feed_forward)
+    gate = config.router.gate
+    config.router.gate = Linear.Config(
+        in_features=gate.in_features, out_features=gate.out_features, bias=False
+    )
+    config.router.score_func = Sigmoid.Config(compute_dtype=torch.float32)
+    config.router.routing_weight_dtype = torch.bfloat16
+    config.overlap_shared_experts = overlap
+    module = config.build().to(device="cuda", dtype=torch.bfloat16)
+    module.init_states(buffer_device=torch.device("cuda"))
+    return module
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestSharedExpertStreams(unittest.TestCase):
+    """Real generic branch numerics, stream priority, backward and graph checks."""
+
+    def test_forward_backward_preserves_sequential_numerics(self):
+        """All input/parameter gradients retain the sequential BF16 fan-in order."""
+        torch.manual_seed(42)
+        serial, parallel = _shared_moe_config(False), _shared_moe_config(True)
+        streams_before_forward = _expert_compute_streams.cache_info().misses
+        parallel.load_state_dict(serial.state_dict())
+        data = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
+        denominator = torch.tensor(128.0, device="cuda")
+        observed = {}
+
+        def shared_forward(module, args, output):
+            observed["forward"] = torch.cuda.current_stream().cuda_stream
+            observed["shared_priority"] = torch.cuda.current_stream().priority
+
+        def shared_backward(module, grad_inputs, grad_outputs):
+            observed["backward"] = torch.cuda.current_stream().cuda_stream
+
+        def routed_forward(module, args):
+            observed["routed_priority"] = torch.cuda.current_stream().priority
+
+        hooks = [
+            parallel.shared_experts.register_forward_hook(shared_forward),
+            parallel.shared_experts.register_full_backward_hook(shared_backward),
+            parallel.routed_experts.register_forward_pre_hook(routed_forward),
+        ]
+        try:
+            reference_x, parallel_x = (
+                data.clone().requires_grad_(),
+                data.clone().requires_grad_(),
+            )
+            reference = serial(reference_x, aux_loss_denominator=denominator)
+            actual = parallel(parallel_x, aux_loss_denominator=denominator)
+            reference.float().square().sum().backward()
+            actual.float().square().sum().backward()
+            torch.cuda.synchronize()
+            self.assertEqual(
+                _expert_compute_streams.cache_info().misses,
+                streams_before_forward,
+                "Unindexed initialization must prime the exact forward stream pair",
+            )
+            torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+            torch.testing.assert_close(
+                parallel_x.grad, reference_x.grad, rtol=0, atol=0
+            )
+            for a, b in zip(parallel.parameters(), serial.parameters(), strict=True):
+                torch.testing.assert_close(a.grad, b.grad, rtol=0, atol=0)
+            self.assertEqual(observed["forward"], observed["backward"])
+            self.assertLess(observed["routed_priority"], observed["shared_priority"])
+            self.assertNotEqual(
+                observed["forward"], torch.cuda.current_stream().cuda_stream
+            )
+        finally:
+            for hook in hooks:
+                hook.remove()
+
+    def test_capture_replay_preserves_outputs_and_gradients(self):
+        """Capturing the cross-stream graph preserves every returned gradient."""
+        torch.manual_seed(42)
+        module = _shared_moe_config(True)
+        x = torch.randn(
+            128, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        denominator = torch.tensor(128.0, device="cuda")
+        parameters = tuple(module.parameters())
+
+        def forward_backward():
+            out = module(x, aux_loss_denominator=denominator)
+            gradients = torch.autograd.grad(
+                out.float().square().sum(), (x, *parameters)
+            )
+            return out, *gradients
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                expected = forward_backward()
+            expected = tuple(value.detach().clone() for value in expected)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            actual = forward_backward()
+        for _ in range(5):
+            graph.replay()
+            torch.cuda.synchronize()
+            for a, b in zip(actual, expected, strict=True):
+                torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
 def _stock_routed_experts(

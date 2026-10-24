@@ -41,6 +41,7 @@ from torchtitan.models.common.moe import (
     sharding as moe_sharding,
     TokenChoiceTopKRouter,
 )
+from torchtitan.models.common.moe.moe import _ExpertInputs
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 
@@ -92,8 +93,11 @@ def _forward_with_routed_mask(
         routed_up=lambda x: x,
         _maybe_zero_fill_routed_output_to_tp_partial=lambda out: out,
         shared_experts=None,
+        overlap_shared_experts=False,
         _maybe_all_reduce_moe_output_across_tp=lambda out: out,
     )
+    moe._shared_expert_streams = MoE._shared_expert_streams.__get__(moe)
+    moe._forward_routed_experts = moe_cls._forward_routed_experts.__get__(moe)
     moe_cls.forward(cast(Any, moe), torch.zeros(4, 3), padding_mask_T=padding_mask_T)
     return routed_mask_T
 
@@ -152,6 +156,39 @@ class _IdentityW2(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
+    def test_parallel_inputs_preserve_bf16_fanin_order(self):
+        """Distinguish ordered fan-in from the changed branch-readiness order."""
+        x = torch.ones(1, dtype=torch.bfloat16, requires_grad=True)
+        shared = torch.tensor([-1.0], dtype=torch.bfloat16)
+        routed = torch.tensor([1.0], dtype=torch.bfloat16)
+        router = torch.tensor([0.001], dtype=torch.bfloat16)
+        outputs = _ExpertInputs.apply(x, x)
+        self.assertTrue(all(output.data_ptr() == x.data_ptr() for output in outputs))
+        torch.autograd.backward(outputs, (shared, routed, router))
+        torch.testing.assert_close(x.grad, (shared + routed) + router, rtol=0, atol=0)
+        self.assertFalse(torch.equal(x.grad, (routed + router) + shared))
+
+    def test_parallel_inputs_preserve_distinct_and_unused_edges(self):
+        """TP-sharded inputs retain their own edge; absent gradients stay absent."""
+        shared = torch.ones(4, dtype=torch.bfloat16, requires_grad=True)
+        routed = torch.ones(2, dtype=torch.bfloat16, requires_grad=True)
+        outputs = _ExpertInputs.apply(shared, routed)
+        torch.autograd.backward(
+            outputs,
+            (
+                torch.ones_like(shared),
+                2 * torch.ones_like(routed),
+                3 * torch.ones_like(routed),
+            ),
+        )
+        torch.testing.assert_close(shared.grad, torch.ones_like(shared), rtol=0, atol=0)
+        torch.testing.assert_close(
+            routed.grad, 5 * torch.ones_like(routed), rtol=0, atol=0
+        )
+        shared.grad = routed.grad = None
+        _ExpertInputs.apply(shared, routed)[0].sum().backward()
+        self.assertIsNone(routed.grad)
+
     def test_router_precision_rejects_nondifferentiable_dtypes(self):
         for dtype in (torch.int64, torch.bool):
             with self.subTest(dtype=dtype):
