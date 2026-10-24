@@ -22,6 +22,14 @@ import torchtitan.config.transform.quantization as quantization_transform
 import torchtitan_recipes.models.deepseek_v3 as eager_production_recipes
 import torchtitan_recipes.tests.models.deepseek_v3 as eager_test_recipes
 from torch.distributed.pipelining import PipelineStageInfo
+from torch.distributed.pipelining.schedules import (
+    _Action,
+    BACKWARD_INPUT,
+    BACKWARD_WEIGHT,
+    FORWARD,
+    FULL_BACKWARD,
+    PipelineScheduleMulti,
+)
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW
 from torchtitan.config.configs import TrainingConfig
@@ -134,7 +142,7 @@ def _runtime() -> DistMoeRuntime:
         active_stage_indices=frozenset({0}),
         activation_slot_id_by_stage_and_microbatch={},
         activation_slot_ids_S=torch.arange(1),
-        max_moe_layers_per_activation_slot=1,
+        num_moe_layers_in_slot_by_stage={0: 1},
     )
     return runtime
 
@@ -211,7 +219,7 @@ def test_runtime_selects_pp_activation_slot_from_forward_context() -> None:
         active_stage_indices=frozenset({3}),
         activation_slot_id_by_stage_and_microbatch={(3, 7): 2},
         activation_slot_ids_S=torch.arange(3),
-        max_moe_layers_per_activation_slot=5,
+        num_moe_layers_in_slot_by_stage={3: 5},
     )
 
     with runtime.forward_context(PipelineStageInfo(stage_index=3, microbatch_index=7)):
@@ -222,6 +230,172 @@ def test_runtime_selects_pp_activation_slot_from_forward_context() -> None:
         ).item()
         == 2
     )
+
+
+def _activation_plan(
+    order: list[_Action],
+    stage_depths: dict[int, int],
+    num_microbatches: int,
+    *,
+    graph_runtime: bool = False,
+    **config_kwargs,
+):
+    """Plan explicit native schedule actions using real expert configs and Annex sizing."""
+    runtime = _runtime()
+    if graph_runtime:
+        runtime._set_forward_context = Mock()
+    runtime.config = DistMoeRuntime.Config(**config_kwargs)
+    parts = [
+        torch.nn.Sequential(
+            *[
+                DistMoeTransform().transform(_stock_config(dim=64)).build()
+                for _ in range(depth)
+            ]
+        )
+        for depth in stage_depths.values()
+    ]
+    runtime._modules = tuple(
+        module
+        for part in parts
+        for module in part.modules()
+        if isinstance(module, DistMoeRoutedExperts)
+    )
+    schedule = object.__new__(PipelineScheduleMulti)
+    schedule._stages = [SimpleNamespace(stage_index=stage) for stage in stage_depths]
+    schedule._n_microbatches = num_microbatches
+    schedule.pipeline_order = {0: order}
+    return runtime._plan_pp_activation_slots(
+        schedule,
+        pp_rank=0,
+        model_parts=parts,
+        max_num_local_input_tokens=128,
+        ep_size=1,
+    )
+
+
+@pytest.mark.parametrize("capacity_factor", [None, 0.0, 1.0, 1.5])
+def test_heterogeneous_slots_can_use_more_slots_and_less_memory(capacity_factor):
+    """Depth classes can reduce saved bytes even when their slot count is higher."""
+    # Stage 2's backward releases its state before stage 0's next forward.
+    # The shallow owners peak at two slots; deep owners peak at one, separately.
+    order = [
+        _Action(0, FORWARD, 0),
+        _Action(2, FORWARD, 0),
+        _Action(2, FULL_BACKWARD, 0),
+        _Action(0, FORWARD, 1),
+        _Action(0, FULL_BACKWARD, 0),
+        _Action(2, FORWARD, 1),
+        _Action(2, FULL_BACKWARD, 1),
+        _Action(0, FULL_BACKWARD, 1),
+    ]
+    plan = _activation_plan(
+        order,
+        {0: 1, 1: 0, 2: 4},
+        2,
+        activation_slot_capacity_factor=capacity_factor,
+    )
+    assert plan.max_live_activation_slots == 3
+    assert plan.max_moe_layers_per_activation_slot == (1, 1, 4)
+    assert plan.num_moe_layers_in_slot_by_stage == {0: 1, 2: 4}
+    assert set(plan.activation_slot_id_by_stage_and_microbatch) == {
+        (0, 0),
+        (0, 1),
+        (2, 0),
+        (2, 1),
+    }
+    assert plan.activation_slot_id_by_stage_and_microbatch[(2, 0)] == 2
+    assert plan.activation_slot_id_by_stage_and_microbatch[(2, 1)] == 2
+
+
+@pytest.mark.parametrize("same_depth", [False, True])
+def test_uniform_layout_wins_exact_budget_ties(same_depth):
+    """Uniform sizing preserves scalar reports and wins equal byte costs."""
+    order = [
+        _Action(0, FORWARD, 0),
+        _Action(2, FORWARD, 0),
+        _Action(2, FULL_BACKWARD, 0),
+        _Action(0, FULL_BACKWARD, 0),
+    ]
+    plan = _activation_plan(
+        order,
+        {0: 4 if same_depth else 1, 2: 4},
+        1,
+        activation_slot_bytes=2**20,
+    )
+    assert plan.max_live_activation_slots == 2
+    assert plan.max_moe_layers_per_activation_slot == 4
+
+
+def test_forward_context_uses_owner_depth_not_shared_slot_limit():
+    """Stages sharing one physical slot still select their actual owner depth."""
+    context = Mock()
+    forward = _DistMoeForwardContext(
+        context,
+        active_stage_indices=frozenset({0, 2}),
+        activation_slot_id_by_stage_and_microbatch={(0, 0): 0, (2, 0): 0},
+        activation_slot_ids_S=torch.arange(1),
+        num_moe_layers_in_slot_by_stage={0: 1, 2: 4},
+    )
+    for stage in (0, 2):
+        with forward(PipelineStageInfo(stage_index=stage, microbatch_index=0)):
+            pass
+    assert [call.args for call in context.select_activation_slot.call_args_list] == [
+        (0, 1),
+        (0, 4),
+    ]
+
+
+def test_microbatch_slots_keep_aggregate_owner_depth():
+    """A legacy microbatch owner spans all local MoE stages."""
+    order = [
+        _Action(0, FORWARD, 0),
+        _Action(2, FORWARD, 0),
+        _Action(2, FULL_BACKWARD, 0),
+        _Action(0, FULL_BACKWARD, 0),
+    ]
+    plan = _activation_plan(
+        order, {0: 1, 2: 4}, 1, pp_activation_slot_policy="microbatch"
+    )
+    assert plan.max_live_activation_slots == 1
+    assert plan.max_moe_layers_per_activation_slot == 5
+    assert plan.num_moe_layers_in_slot_by_stage == {0: 5, 2: 5}
+    assert len(set(plan.activation_slot_id_by_stage_and_microbatch.values())) == 1
+
+
+def test_heterogeneous_slot_lifetime_includes_weight_backward():
+    """Input backward alone cannot release a shallow activation slot."""
+    order = [
+        _Action(0, FORWARD, 0),
+        _Action(2, FORWARD, 0),
+        _Action(2, BACKWARD_INPUT, 0),
+        _Action(0, BACKWARD_INPUT, 0),
+        _Action(0, FORWARD, 1),
+        _Action(2, BACKWARD_WEIGHT, 0),
+        _Action(0, BACKWARD_WEIGHT, 0),
+        _Action(2, FORWARD, 1),
+        _Action(2, BACKWARD_INPUT, 1),
+        _Action(2, BACKWARD_WEIGHT, 1),
+        _Action(0, BACKWARD_INPUT, 1),
+        _Action(0, BACKWARD_WEIGHT, 1),
+    ]
+    plan = _activation_plan(order, {0: 1, 2: 4}, 2)
+    assert plan.num_moe_layers_in_slot_by_stage == {0: 1, 2: 4}
+    assert plan.activation_slot_id_by_stage_and_microbatch[(0, 0)] != (
+        plan.activation_slot_id_by_stage_and_microbatch[(0, 1)]
+    )
+
+
+def test_graph_runtime_keeps_uniform_layout_until_depth_wiring():
+    """The consumer does not assume GraphTrainer has stage-depth capture inputs."""
+    order = [
+        _Action(0, FORWARD, 0),
+        _Action(2, FORWARD, 0),
+        _Action(2, FULL_BACKWARD, 0),
+        _Action(0, FULL_BACKWARD, 0),
+    ]
+    plan = _activation_plan(order, {0: 1, 2: 4}, 1, graph_runtime=True)
+    assert plan.max_live_activation_slots == 2
+    assert plan.max_moe_layers_per_activation_slot == 4
 
 
 def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
