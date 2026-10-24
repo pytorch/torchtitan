@@ -20,7 +20,8 @@ from torchtitan.rl.generator.generation_server import GenerationServer
 from torchtitan.rl.generator.http_client import GeneratorClient
 
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.rollout import RolloutStatus
+from torchtitan.rl.rollout import RolloutGroup, RolloutStatus
+from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.rollouter import RolloutWorker
 from torchtitan.rl.rollout.rubric import RubricOutput
@@ -244,6 +245,48 @@ class _CountingMessageEnv:
         pass
 
 
+def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage() -> None:
+    class _FirstRolloutFails(_GenerateFn):
+        async def __call__(self, prompt_token_ids, **kwargs) -> Completion:
+            if kwargs["request_id"].startswith("group=7/rollout=0/"):
+                raise ConnectionError("generator unreachable")
+            return await super().__call__(prompt_token_ids, **kwargs)
+
+    async def release_session_fn(**kwargs) -> None:
+        pass
+
+    async def run() -> RolloutGroup:
+        worker = RolloutWorker(
+            SimpleNamespace(
+                rubric=_Config(_Rubric()),
+                message_env=_MessageEnvConfig(),
+                token_env=_TokenEnvConfig(),
+                advantage=AdvantageEstimator.Config(),
+                rollout_timeout_s=None,
+            )
+        )
+        await worker.setup_async(
+            tokenizer_config=HuggingFaceTokenizer.Config(),
+            renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
+            hf_assets_path="tests/assets/tokenizer",
+        )
+        return await worker.run_group(
+            generate_fn=_FirstRolloutFails(),
+            release_session_fn=release_session_fn,
+            sample="sample",
+            group_id=7,
+            group_size=3,
+            sampling=SamplingConfig(),
+        )
+
+    failed, *scored = asyncio.run(run()).rollouts
+    assert failed.status is RolloutStatus.ERROR_SYSTEM
+    assert "generator unreachable" in failed.logs["error"]
+    assert (failed.reward, failed.advantage) == (None, None)
+    # `_Rubric` rewards rollout_id + 1, so 2 and 3, centered on their mean 2.5.
+    assert [rollout.advantage for rollout in scored] == [-0.5, 0.5]
+
+
 def test_cancelled_group_waits_for_every_sibling_release() -> None:
     """A cancelled group returns only after each sibling released its session: the controller
     releases the group next, and no sibling's router call may still be in flight."""
@@ -407,8 +450,9 @@ async def _connect_timeout(prompt_token_ids, **kwargs) -> Completion:
     [
         # Past rollout_timeout_s: the rollout ends as ERROR_TIMEOUT.
         (_hang, RolloutStatus.ERROR_TIMEOUT),
-        # A TimeoutError from inside the turn (e.g. a connect timeout) is a plain error.
-        (_connect_timeout, RolloutStatus.ERROR),
+        # A TimeoutError raised inside the turn (e.g. a connect timeout) is an error of the code,
+        # not of the policy.
+        (_connect_timeout, RolloutStatus.ERROR_SYSTEM),
     ],
 )
 def test_rollout_timeout(generate_fn, expected_status) -> None:
