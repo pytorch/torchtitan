@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import os
 import queue as queue_lib
 import shutil
@@ -25,6 +26,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
+from safetensors import safe_open
 from torch.distributed.checkpoint.api import CheckpointException
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
@@ -44,6 +46,9 @@ from torchtitan.components.checkpointer.dcp import (
 )
 from torchtitan.components.optim import EMA
 from torchtitan.config import Function
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
+from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 from torchtitan.observability import structured_logger as sl
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 
@@ -276,6 +281,34 @@ class TestCheckpointManager(unittest.TestCase):
             storage_reader=sd_adapter.get_hf_storage_reader.return_value,
         )
         manager.close()
+
+    def test_hf_save_skips_index_entries_the_model_does_not_write(self):
+        build_config, max_context_length = LLAMA3_MODEL_FLAVORS["debugmodel"]
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
+        shard = "model-00001-of-00001.safetensors"
+        weight_map = {"model.norm.weight": shard, "mtp.fc.weight": shard}
+        index_path = os.path.join(self.test_folder, "model.safetensors.index.json")
+        with open(index_path, "w") as f:
+            json.dump({"weight_map": weight_map}, f)
+        manager = CheckpointManager.__new__(CheckpointManager)
+        manager.sd_adapter = Llama3StateDictAdapter(
+            config, hf_assets_path=self.test_folder
+        )
+        checkpoint_id = os.path.join(self.test_folder, "step-1")
+
+        manager.dcp_save(
+            {"norm.weight": torch.ones(4)},
+            checkpoint_id,
+            AsyncMode.DISABLED,
+            to_hf=True,
+        )
+
+        with safe_open(os.path.join(checkpoint_id, shard), "pt") as f:
+            self.assertEqual(list(f.keys()), ["model.norm.weight"])
 
     def test_legacy_import_path(self):
         from torchtitan.components.checkpointer import (

@@ -55,8 +55,6 @@ from torchtitan.models.muse_glimmer.state_dict_adapter import (
 from torchtitan.models.qwen3 import MODEL_FLAVORS as QWEN3_MODEL_FLAVORS
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
-from torchtitan.models.qwen3_5 import MODEL_FLAVORS as QWEN3_5_MODEL_FLAVORS
-from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 
 
 class MuseGlimmerVisionStateDictAdapterTest(unittest.TestCase):
@@ -287,30 +285,6 @@ class Qwen3StateDictAdapterTest(unittest.TestCase):
         self.assertEqual(restored["tok_embeddings.weight"].ndim, 2)
         self.assertEqual(restored["lm_head.weight"].ndim, 2)
         model.load_state_dict(restored, strict=True)
-
-
-class Qwen35StateDictAdapterTest(unittest.TestCase):
-    def test_released_index_drops_mtp_entries(self) -> None:
-        build_config, max_context_length = QWEN3_5_MODEL_FLAVORS["debugmodel"]
-        config = build_config(
-            attn_backend="flex",
-            seq_len=max_context_length,
-            parallelism=ParallelismConfig(),
-        )
-        weight_map = {
-            "model.language_model.norm.weight": "model-00001-of-00002.safetensors",
-            "mtp.fc.weight": "model-00002-of-00002.safetensors",
-        }
-        with tempfile.TemporaryDirectory() as hf_assets_path:
-            with open(f"{hf_assets_path}/model.safetensors.index.json", "w") as f:
-                json.dump({"weight_map": weight_map}, f)
-            adapter = Qwen35StateDictAdapter(config, hf_assets_path=hf_assets_path)
-
-        hf_state_dict = adapter.to_hf({"norm.weight": torch.ones(config.dim)})
-        self.assertEqual(
-            adapter.fqn_to_index_mapping_for(hf_state_dict),
-            {"model.language_model.norm.weight": 1},
-        )
 
 
 class UnsupportedQuantizedKeysTest(unittest.TestCase):

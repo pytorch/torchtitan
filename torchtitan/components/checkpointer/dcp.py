@@ -256,7 +256,7 @@ class CheckpointManager(BaseCheckpointManager):
         async_mode: AsyncMode,
         enable_garbage_collection: bool = False,
         to_hf: bool = False,
-    ) -> Future | AsyncSaveResponse | None:
+    ) -> Future | AsyncSaveResponse | Metadata | None:
         """Execute the DCP saving process.
 
         This method orchestrates the state_dict transformation (e.g., to HuggingFace
@@ -272,13 +272,13 @@ class CheckpointManager(BaseCheckpointManager):
                 state_dict to be compatible with safetensors and HF model definitions.
 
         Returns:
-            - None: If saved synchronously (AsyncMode.DISABLED).
+            - Metadata: If saved synchronously (AsyncMode.DISABLED).
             - Future: If AsyncMode.ASYNC is used (tracks disk I/O).
             - AsyncSaveResponse: If AsyncMode.ASYNC_WITH_PINNED_MEM is used
               (tracks both staging and disk I/O).
         """
 
-        ret: Future | AsyncSaveResponse | None = None
+        ret: Future | AsyncSaveResponse | Metadata | None = None
 
         storage_writer: HuggingFaceStorageWriter | None = None
         fqn_to_index_mapping: dict[Any, int] | None = None
