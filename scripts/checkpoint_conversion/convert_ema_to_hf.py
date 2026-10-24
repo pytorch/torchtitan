@@ -16,6 +16,7 @@ from torchtitan.components.checkpointer import EMA, ModelWrapper
 from torchtitan.components.optim import EMA as EMAContainer  # noqa: N811
 from torchtitan.components.optim.ema import parse_ema_key
 from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.observability.logging import init_logger
 
 if __package__:
     from scripts.checkpoint_conversion.utils import build_model_config_for_conversion
@@ -195,7 +196,7 @@ def convert_ema_to_hf(
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
         save_distributed=True,
-        fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping,
+        fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping_for(hf_state_dict),
         enable_consolidation=True,
         thread_count_consolidation=5,
     )
@@ -212,6 +213,8 @@ def convert_ema_to_hf(
 
 
 if __name__ == "__main__":
+    init_logger()
+
     parser = argparse.ArgumentParser(
         description="Convert the EMA weights of a DCP checkpoint to HF format."
     )

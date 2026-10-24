@@ -39,14 +39,6 @@ if TYPE_CHECKING:
 class Qwen35StateDictAdapter(StateDictAdapter):
     def __init__(self, model_config: Qwen35Model.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
-        # fqn_to_index_mapping lists the tensors an HF save writes. Released
-        # indexes also list the MTP weights (mtp.*), which this model does not have.
-        if self.fqn_to_index_mapping is not None:
-            self.fqn_to_index_mapping = {
-                key: index
-                for key, index in self.fqn_to_index_mapping.items()
-                if not key.startswith("mtp.")
-            }
         self.model_config = model_config
         self.hf_language_model_prefix = (
             "model.language_model"
