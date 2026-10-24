@@ -150,10 +150,10 @@ mkdir -p \
 # subprocesses must import the installed TestPyPI RC rather than the checkout.
 cp "${REPO_ROOT}/run_train.sh" "${VALIDATION_ROOT}/run_train.sh"
 cp "${REPO_ROOT}/scripts/loss_compare.py" "${VALIDATION_ROOT}/scripts/loss_compare.py"
+cp "${REPO_ROOT}/scripts/_checkpoint_test_config.py" "${VALIDATION_ROOT}/scripts/_checkpoint_test_config.py"
 if [[ "${VALIDATION_SUITE}" == rl* ]]; then
   mkdir -p "${VALIDATION_ROOT}/scripts/rl"
   cp "${REPO_ROOT}/scripts/rl/loss_compare.py" "${VALIDATION_ROOT}/scripts/rl/loss_compare.py"
-  cp "${REPO_ROOT}/scripts/_checkpoint_test_config.py" "${VALIDATION_ROOT}/scripts/_checkpoint_test_config.py"
 fi
 cp -R "${REPO_ROOT}/tests" "${VALIDATION_ROOT}/tests"
 cp "${REPO_ROOT}/pyproject.toml" "${VALIDATION_ROOT}/pyproject.toml"
@@ -434,13 +434,16 @@ PY
     -m "not multi_gpu" --strict-markers --durations=20 -vv
 
   model_path="$(download_rl_model)"
-  export HF_ASSETS_PATH="${model_path}"
   export RL_TEST_DUMP_FOLDER="${ARTIFACTS}/rl_unit"
   local test_class
-  for test_class in TestBitwiseParityVarlen TestBitwiseParityFlex TestBitwiseParityQwen35DebugVarlen; do
-    python -m torch.distributed.run --standalone --nproc-per-node=2 -m pytest \
+  for test_class in TestBitwiseParityVarlen TestBitwiseParityFlex; do
+    HF_ASSETS_PATH="${model_path}" python -m torch.distributed.run \
+      --standalone --nproc-per-node=2 -m pytest \
       "tests/rl/unit_tests/gpu/test_bitwise_parity.py::${test_class}" -v
   done
+  python -m torch.distributed.run --standalone --nproc-per-node=2 -m pytest \
+    tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen \
+    -v
   python -m torch.distributed.run --standalone --nproc-per-node=4 -m pytest \
     tests/rl/unit_tests/gpu/test_generator_uneven_decode.py -v
 
