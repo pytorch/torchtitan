@@ -125,6 +125,7 @@ class DeepSeekV3Model(MTPDecoder):
                 "moe_aux_loss",
                 "rope",
                 "mla_qk",
+                "mla_kv",
             ]
         )
 
