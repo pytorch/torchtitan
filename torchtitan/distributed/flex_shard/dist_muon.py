@@ -1987,23 +1987,62 @@ def _zeropower_via_newtonschulz(
         result = result.transpose(-2, -1)
     result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
 
+    quack_symmetric_gemm = None
+    if _can_use_quack_symmetric_mm(result):
+        from torch._inductor.kernel.symmetric_mm import quack_symmetric_mm
+
+        quack_symmetric_gemm = quack_symmetric_mm
+
     if result.ndim == 2:
         for _ in range(ns_steps):
-            gram = result @ result.T
-            gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
-            result = torch.addmm(result, gram_update, result, beta=a)
+            if quack_symmetric_gemm is None:
+                gram = result @ result.T
+                gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
+                result = torch.addmm(result, gram_update, result, beta=a)
+            else:
+                gram = quack_symmetric_gemm(result)
+                gram_square = quack_symmetric_gemm(gram)
+                gram_update = gram.mul(b).add_(gram_square, alpha=c)
+                result = torch.addmm(result, gram_update, result, beta=a)
     else:
         original_shape = result.shape
         matrices = result.reshape(-1, *original_shape[-2:])
         # Batched kernels and independent matrix calls can use different BF16
         # reduction orders.
         for _ in range(ns_steps):
-            gram = matrices @ matrices.transpose(-2, -1)
-            gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
-            matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
+            if quack_symmetric_gemm is None:
+                gram = matrices @ matrices.transpose(-2, -1)
+                gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+                matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
+            else:
+                gram = quack_symmetric_gemm(matrices)
+                gram_square = quack_symmetric_gemm(gram)
+                gram_update = gram.mul(b).add_(gram_square, alpha=c)
+                matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
         result = matrices.reshape(original_shape)
 
     return result.transpose(-2, -1) if transposed else result
+
+
+def _can_use_quack_symmetric_mm(matrices: Tensor) -> bool:
+    """Mirror Inductor's BF16 SM100 symmetric MM performance heuristic."""
+    if (
+        matrices.device.type != "cuda"
+        or torch.version.hip is not None
+        or matrices.dtype != torch.bfloat16
+        or not matrices.is_contiguous()
+        or matrices.shape[-2] < 4096
+        or matrices.shape[-1] < matrices.shape[-2]
+        or any(size % 8 != 0 for size in matrices.shape[-2:])
+        or any(stride != 1 and stride % 8 != 0 for stride in matrices.stride())
+        or matrices.data_ptr() % 16 != 0
+        or torch.cuda.get_device_capability(matrices.device)[0] != 10
+    ):
+        return False
+
+    from torch._inductor.utils import ensure_cute_available
+
+    return ensure_cute_available()
 
 
 def _after_load_state_dict(optimizer: Optimizer) -> None:
