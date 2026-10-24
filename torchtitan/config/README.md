@@ -91,6 +91,14 @@ a completed model config. They are optional, and users may use their own tools.
 
 ### Validation
 
+`config.validator.global_batch_size` selects the number of context rows in a
+validation step independently of training; `None` preserves the training batch.
+It must divide evenly across data-parallel ranks and microbatch context rows.
+Pipeline evaluation uses separate stage metadata and receive buffers while
+sharing model parameters, registered contexts and cached edge communicators.
+Independent validation batches require eager manual pipeline stages; GraphTrainer
+and CSV schedule support remain downstream work.
+
 Keep simple invariants that use one config's fields in its `__post_init__`.
 Keep checks that span config sections in [validation.py](validation.py).
 `Trainer.Config.__post_init__` calls these checks after its local validation.

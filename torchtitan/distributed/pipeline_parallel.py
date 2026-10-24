@@ -16,6 +16,7 @@ import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
+from torch.distributed.pipelining._utils import GetMeshCallback
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
@@ -49,7 +50,7 @@ __all__ = [
 
 def _build_get_mesh_callback(
     parallelism_context: ParallelismContext,
-) -> Callable[[tuple[str, ...], _MeshLayout | None], DeviceMesh | None]:
+) -> GetMeshCallback:
     """Build a callback that resolves a DeviceMesh from dimension names.
 
     Pipeline parallelism requires an SPMD mesh during module split so that
@@ -62,10 +63,13 @@ def _build_get_mesh_callback(
 
     def _get_mesh(
         mesh_dim_names: tuple[str, ...], mesh_layout: _MeshLayout | None
-    ) -> DeviceMesh | None:
+    ) -> DeviceMesh:
         mesh = parallelism_context.get_mesh(list(mesh_dim_names))
         if mesh_layout is not None and mesh._layout != mesh_layout:
-            return None
+            raise ValueError(
+                f"Pipeline mesh layout mismatch for axes {mesh_dim_names}: "
+                f"requested {mesh_layout}, got {mesh._layout}"
+            )
         return mesh
 
     return _get_mesh
