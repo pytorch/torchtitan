@@ -109,9 +109,6 @@ def compute_config_fingerprint(
         f"compile:ep_overlap:enabled:{compile_config.ep_overlap.enabled}\n".encode()
     )
     h.update(
-        f"compile:ep_overlap:chunk_dim:{compile_config.ep_overlap.chunk_dim}\n".encode()
-    )
-    h.update(
         f"compile:ep_overlap:module_fqn:{compile_config.ep_overlap.module_fqn}\n".encode()
     )
     h.update(f"torch_version:{torch.__version__}\n".encode())

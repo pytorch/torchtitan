@@ -144,62 +144,24 @@ def deepseek_v3_fsdp_tp_ep_regional_inductor():
     return config
 
 
-def _deepseek_v3_ep_overlap(
-    *, inductor_compilation: str, chunk_dim: str, module_fqn: str
-):
+def _deepseek_v3_ep_overlap(*, inductor_compilation: str):
     config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel(
         parallelism=ParallelismConfig(expert_parallel_degree=4)
     )
     config.training.disable_cuda_graphs = True
     config.compile.inductor_compilation = inductor_compilation
     config.compile.ep_overlap.enabled = True
-    config.compile.ep_overlap.chunk_dim = chunk_dim
-    config.compile.ep_overlap.module_fqn = module_fqn
     config.parallelism.data_parallel_shard_degree = 8
     config.parallelism.tensor_parallel_degree = 1
     return config
 
 
-def deepseek_v3_regional_ep_overlap_transformer_batch():
-    return _deepseek_v3_ep_overlap(
-        inductor_compilation="regional", chunk_dim="batch", module_fqn="layers.*"
-    )
+def deepseek_v3_regional_ep_overlap_moe_tokens():
+    return _deepseek_v3_ep_overlap(inductor_compilation="regional")
 
 
-def deepseek_v3_regional_ep_overlap_moe_batch():
-    return _deepseek_v3_ep_overlap(
-        inductor_compilation="regional",
-        chunk_dim="batch",
-        module_fqn="layers.*.feed_forward",
-    )
-
-
-def deepseek_v3_regional_ep_overlap_moe_seq():
-    return _deepseek_v3_ep_overlap(
-        inductor_compilation="regional",
-        chunk_dim="seq",
-        module_fqn="layers.*.feed_forward",
-    )
-
-
-def deepseek_v3_full_ep_overlap_transformer_batch():
-    return _deepseek_v3_ep_overlap(
-        inductor_compilation="full", chunk_dim="batch", module_fqn="layers.*"
-    )
-
-
-def deepseek_v3_full_ep_overlap_moe_batch():
-    return _deepseek_v3_ep_overlap(
-        inductor_compilation="full",
-        chunk_dim="batch",
-        module_fqn="layers.*.feed_forward",
-    )
-
-
-def deepseek_v3_full_ep_overlap_moe_seq():
-    return _deepseek_v3_ep_overlap(
-        inductor_compilation="full", chunk_dim="seq", module_fqn="layers.*.feed_forward"
-    )
+def deepseek_v3_full_ep_overlap_moe_tokens():
+    return _deepseek_v3_ep_overlap(inductor_compilation="full")
 
 
 def deepseek_v3_graph_pp_interleaved_1f1b():
@@ -397,49 +359,16 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
 def _build_deepseek_v3_tests() -> list[IntegrationTestDefinition]:
     """DeepSeek-v3-based integration tests (require H100 machines)."""
     ep_overlap_flex_tests = [
-        # TODO(#4342): Remove transformer-level chunking. After the model batch
-        # dimension was folded into the token dimension, splitting `layers.*`
-        # in half cuts the packed token stream mid-document, so neither chunk
-        # has full attention context. This variant aborts at step 1 with a
-        # non-finite loss.
         (
-            deepseek_v3_regional_ep_overlap_transformer_batch,
+            deepseek_v3_regional_ep_overlap_moe_tokens,
             "regional",
-            "transformer_batch",
+            "moe_tokens",
             True,
         ),
         (
-            deepseek_v3_regional_ep_overlap_moe_batch,
-            "regional",
-            "moe_batch",
-            True,
-        ),
-        (
-            deepseek_v3_regional_ep_overlap_moe_seq,
-            "regional",
-            "moe_seq",
-            True,
-        ),
-        # TODO(#4342): Remove transformer-level chunking, as above. Under full
-        # Inductor the mid-document split surfaces earlier than the non-finite
-        # loss: this variant aborts before step 1 on a Triton index-out-of-
-        # bounds assertion.
-        (
-            deepseek_v3_full_ep_overlap_transformer_batch,
+            deepseek_v3_full_ep_overlap_moe_tokens,
             "full",
-            "transformer_batch",
-            True,
-        ),
-        (
-            deepseek_v3_full_ep_overlap_moe_batch,
-            "full",
-            "moe_batch",
-            True,
-        ),
-        (
-            deepseek_v3_full_ep_overlap_moe_seq,
-            "full",
-            "moe_seq",
+            "moe_tokens",
             True,
         ),
     ]

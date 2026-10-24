@@ -140,30 +140,22 @@ real expert-parallel collectives. Enable it only with
 
 ```python
 config.compile.ep_overlap.enabled = True
-config.compile.ep_overlap.chunk_dim = "batch"
-config.compile.ep_overlap.module_fqn = "layers.*"
+config.compile.ep_overlap.module_fqn = "layers.*.feed_forward"
 config.parallelism.data_parallel_shard_degree = 4
 config.parallelism.expert_parallel_degree = 2
 ```
 
-Supported chunking selections are:
-
-- `chunk_dim="batch", module_fqn="layers.*"`
-  for transformer-block chunking.
-- `chunk_dim="batch", module_fqn="layers.*.feed_forward"`
-  for MoE-only batch chunking.
-- `chunk_dim="seq", module_fqn="layers.*.feed_forward"`
-  for MoE-only sequence chunking.
-
-Selected module forwards are wrapped with eager chunking before tracing; the
-chunk annotations recorded during tracing are the contract consumed by the
-EP-overlap scheduler.
+Selected MoE forwards are split into two equal chunks of the token axis before
+tracing. The input has shape `(T, D)` and its optional padding mask has shape
+`(T,)`; both are split together. Dense feed-forward modules are not chunked.
+The chunk annotations recorded during tracing are the contract consumed by
+the EP-overlap scheduler. Transformer-block chunking and the `chunk_dim`
+setting have been removed.
 
 Current limitations:
 
 - EP overlap is only meaningful when `expert_parallel_degree > 1`.
-- Sequence chunking is restricted to `layers.*.feed_forward`; chunking attention over
-  sequence is not supported.
+- The token count must be even.
 - EP overlap is validated against the tested DP/EP configurations in the
   graph-trainer numerics and integration suites. Composability with additional
   overlap or sharding modes should be validated with loss comparison before use.
