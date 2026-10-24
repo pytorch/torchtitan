@@ -36,9 +36,11 @@ from torchtitan.models.common.config_utils import (
     make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.decoder_sharding import (
+    head_norm_sharding_config,
     lm_head_sharding_config,
     norm_sharding_config,
     pre_lm_head_norm_sharding_config,
+    replicated_input_colwise_sharding_config,
     replicated_state_sharding_config,
 )
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
@@ -53,10 +55,12 @@ from torchtitan.models.common.vision_encoder import (
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_sharding_config,
     multimodal_token_embedding_sharding_config,
+    transformer_block_sharding_config,
     vision_attention_sharding_config,
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_projector_sharding_config,
     vision_rowwise_sharding_config,
 )
 
@@ -67,7 +71,7 @@ from .attention import (
     MSAInnerAttention,
 )
 from .model import MiniMaxM3Model, MiniMaxM3TransformerBlock
-from .sharding import msa_inner_attention_sharding_config
+from .sharding import msa_attention_sharding_config, msa_inner_attention_sharding_config
 from .vision_encoder import MiniMaxM3VisionEncoder, MiniMaxM3VisionProjector
 
 __all__ = [
@@ -127,24 +131,26 @@ def _offset_norm(dim: int, **kwargs) -> OffsetRMSNorm.Config:
 def _indexer_config(
     *, dim: int, num_index_heads: int, index_head_dim: int
 ) -> MSAIndexer.Config:
-    def projection(out_features: int) -> Linear.Config:
+    def projection(out_features: int, sharding_config) -> Linear.Config:
         return Linear.Config(
             in_features=dim,
             out_features=out_features,
             param_init=_LINEAR_INIT,
-            sharding_config=replicated_state_sharding_config("weight"),
+            sharding_config=sharding_config,
         )
 
+    # Index query heads shard with their KV groups; the shared key head replicates.
+    replicated = replicated_state_sharding_config("weight")
     return MSAIndexer.Config(
         head_dim=index_head_dim,
-        wq=projection(num_index_heads * index_head_dim),
-        wk=projection(index_head_dim),
+        wq=projection(
+            num_index_heads * index_head_dim, replicated_input_colwise_sharding_config()
+        ),
+        wk=projection(index_head_dim, replicated),
         q_norm=_offset_norm(
-            index_head_dim, sharding_config=replicated_state_sharding_config("weight")
+            index_head_dim, sharding_config=head_norm_sharding_config()
         ),
-        k_norm=_offset_norm(
-            index_head_dim, sharding_config=replicated_state_sharding_config("weight")
-        ),
+        k_norm=_offset_norm(index_head_dim, sharding_config=replicated),
     )
 
 
@@ -163,6 +169,7 @@ def _attention_config(
     topk_blocks: int,
     sparse_attention: bool,
     indexer_loss_coeff: float,
+    enable_sp: bool,
 ) -> GQAttention.Config:
     attention = make_gqa_config(
         dim=dim,
@@ -174,7 +181,7 @@ def _attention_config(
         inner_attention=get_attention_config(attn_backend),
         rope=rope,
         qk_norm=_offset_norm(head_dim),
-        enable_sp=False,
+        enable_sp=enable_sp,
     )
     if not sparse_layer:
         return attention
@@ -185,21 +192,38 @@ def _attention_config(
         aux_loss=MSAIndexerLoss.Config(
             coeff=indexer_loss_coeff,
             reduce_mesh="loss",
+            num_groups=n_kv_heads,
             softmax_scale=head_dim**-0.5,
             index_softmax_scale=index_head_dim**-0.5,
         ),
         sharding_config=msa_inner_attention_sharding_config(),
     )
+    # x_TD arrives gathered, so wqkv is a plain Linear (ColumnParallelLinear regathers).
+    wqkv = attention.qkv_linear.wqkv
+    qkv_linear = dataclasses.replace(
+        attention.qkv_linear,
+        wqkv=Linear.Config(
+            **{
+                f.name: getattr(wqkv, f.name)
+                for f in dataclasses.fields(wqkv)
+                if f.init and f.name != "sharding_config"
+            },
+            sharding_config=replicated_input_colwise_sharding_config(),
+        ),
+    )
+    replaced = {"inner_attention", "qkv_linear", "sharding_config"}
     return MiniMaxSparseAttention.Config(
         **{
             f.name: getattr(attention, f.name)
             for f in dataclasses.fields(attention)
-            if f.init and f.name != "inner_attention"
+            if f.init and f.name not in replaced
         },
         inner_attention=inner_attention,
+        qkv_linear=qkv_linear,
         indexer=_indexer_config(
             dim=dim, num_index_heads=n_kv_heads, index_head_dim=index_head_dim
         ),
+        sharding_config=msa_attention_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -213,6 +237,7 @@ def _feed_forward_config(
     num_experts: int,
     top_k: int,
     enable_ep: bool,
+    enable_sp: bool,
 ):
     activation_fn = ClampedSwiGLU.Config()
     if not moe_layer:
@@ -222,7 +247,7 @@ def _feed_forward_config(
                 hidden_dim=dense_hidden_dim,
                 w13_param_init=_LINEAR_INIT,
                 w2_param_init=_depth_init(layer_id),
-                enable_sp=False,
+                enable_sp=enable_sp,
             ),
             activation_fn=activation_fn,
         )
@@ -254,12 +279,12 @@ def _feed_forward_config(
                 hidden_dim=moe_hidden_dim,
                 w13_param_init=_LINEAR_INIT,
                 w2_param_init=_depth_init(layer_id),
-                enable_sp=False,
+                enable_sp=enable_sp,
             ),
             activation_fn=activation_fn,
         ),
         load_balance_coeff=1e-3,
-        enable_sp=False,
+        enable_sp=enable_sp,
     )
 
 
@@ -361,6 +386,7 @@ def _vision_encoder_config(
                 merged_dim, out_dim, sharding_config=vision_colwise_sharding_config()
             ),
             merge_linear_2=row_parallel(out_dim, out_dim),
+            sharding_config=vision_projector_sharding_config(),
         ),
     )
 
@@ -395,10 +421,11 @@ def _minimax_m3_config(
     indexer_loss_coeff: float,
 ) -> MiniMaxM3Model.Config:
     enable_ep = parallelism.expert_parallel_degree > 1
+    enable_sp = parallelism.enable_sequence_parallel
     rope = CosSinRoPE.Config(
         dim=rotary_dim, max_context_length=seq_len, theta=rope_theta
     )
-    norm = norm_sharding_config(enable_sp=False)
+    norm = norm_sharding_config(enable_sp=enable_sp)
     layers = [
         MiniMaxM3TransformerBlock.Config(
             attention=_attention_config(
@@ -415,6 +442,7 @@ def _minimax_m3_config(
                 topk_blocks=topk_blocks,
                 sparse_attention=sparse_attention,
                 indexer_loss_coeff=indexer_loss_coeff,
+                enable_sp=enable_sp,
             ),
             feed_forward=_feed_forward_config(
                 layer_id=layer_id,
@@ -425,9 +453,13 @@ def _minimax_m3_config(
                 num_experts=num_experts,
                 top_k=top_k,
                 enable_ep=enable_ep,
+                enable_sp=enable_sp,
             ),
             attention_norm=_offset_norm(dim, sharding_config=norm),
             ffn_norm=_offset_norm(dim, sharding_config=norm),
+            sharding_config=transformer_block_sharding_config(
+                enable_sp=enable_sp, after_vision_scatter=layer_id == 0
+            ),
         )
         for layer_id in range(n_layers)
     ]
@@ -436,7 +468,7 @@ def _minimax_m3_config(
         vocab_size=vocab_size,
         dim=dim,
         norm=_offset_norm(
-            dim, sharding_config=pre_lm_head_norm_sharding_config(enable_sp=False)
+            dim, sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp)
         ),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
@@ -478,10 +510,10 @@ _DEBUG_SIZES = dict(
     index_head_dim=32,
     index_block_size=16,
     topk_blocks=4,
-    vision_dim=64,
+    vision_dim=128,
     vision_layers=2,
-    vision_heads=4,
-    vision_ffn_dim=256,
+    vision_heads=8,
+    vision_ffn_dim=512,
 )
 
 _M3_SIZES = dict(

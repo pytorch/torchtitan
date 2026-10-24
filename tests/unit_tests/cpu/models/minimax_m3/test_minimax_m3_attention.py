@@ -142,6 +142,7 @@ def test_indexer_loss_matches_reference_kl(msa_case) -> None:
 
     loss = MSAIndexerLoss.Config(
         coeff=1.0,
+        num_groups=_NUM_GROUPS,
         softmax_scale=_HEAD_DIM**-0.5,
         index_softmax_scale=_INDEX_HEAD_DIM**-0.5,
     ).build()
@@ -212,3 +213,27 @@ def test_dense_mode_keeps_the_document_causal_mask() -> None:
 def test_rejects_index_blocks_larger_than_the_flex_tile() -> None:
     with pytest.raises(ValueError, match="index_block_size"):
         MSAInnerAttention.Config(index_block_size=256, block_size=128)
+
+
+def test_indexer_loss_rejects_groups_that_do_not_tile_tp(msa_case) -> None:
+    positions, index_q, index_k, metadata, block_indices, _ = msa_case
+    num_tokens = positions.numel()
+    loss = MSAIndexerLoss.Config(
+        coeff=1.0,
+        num_groups=2 * _NUM_GROUPS,
+        softmax_scale=1.0,
+        index_softmax_scale=1.0,
+    ).build()
+    with pytest.raises(ValueError, match="do not tile"):
+        loss(
+            torch.randn(num_tokens, _NUM_GROUPS * _HEADS_PER_GROUP, _HEAD_DIM),
+            torch.randn(num_tokens, _NUM_GROUPS, _HEAD_DIM),
+            index_q,
+            index_k,
+            torch.zeros(num_tokens, _NUM_GROUPS * _HEADS_PER_GROUP),
+            metadata,
+            block_indices_TGS=block_indices,
+            occupied_XGX=None,
+            carrier=torch.zeros(1),
+            denominator=torch.tensor(1.0),
+        )

@@ -21,10 +21,16 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
+from torch.distributed._functional_collectives import all_reduce, wait_tensor
 from torch.nn.attention.flex_attention import AuxRequest, BlockMask
 
+from torchtitan.distributed.spmd_types import spmd_mesh_group, spmd_mesh_size
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import FlexInnerAttention, GQAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    GQAttention,
+    local_head_split,
+)
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.norm import OffsetRMSNorm
@@ -251,11 +257,14 @@ class MSAIndexerLoss(AuxLoss):
 
     @dataclass(kw_only=True, slots=True)
     class Config(AuxLoss.Config):
+        num_groups: int
+        """KV groups of the layer across all TP ranks."""
         softmax_scale: float
         index_softmax_scale: float
 
     def __init__(self, config: Config):
         super().__init__(config)
+        self.num_groups = config.num_groups
         self.softmax_scale = config.softmax_scale
         self.index_softmax_scale = config.index_softmax_scale
 
@@ -281,6 +290,10 @@ class MSAIndexerLoss(AuxLoss):
         """
         num_tokens, num_heads, _ = q_THK.shape
         num_groups = k_TGK.shape[1]
+        if num_groups * spmd_mesh_size("tp") != self.num_groups:
+            raise ValueError(
+                f"{num_groups} local KV groups do not tile {self.num_groups} over TP."
+            )
         heads_per_group = num_heads // num_groups
         tile = metadata.tile_size
         token_T = torch.arange(num_tokens, device=q_THK.device)
@@ -342,9 +355,13 @@ class MSAIndexerLoss(AuxLoss):
             if padding_mask_T is not None:
                 kl_CG = kl_CG.masked_fill(padding_mask_T[q0:q1, None], 0.0)
             raw_sum = raw_sum + kl_CG.sum()
-        return self.inject(
-            raw_sum / num_groups, carrier=carrier, denominator=denominator
-        )
+        raw_sum = raw_sum / self.num_groups
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            # The logged value sums every TP rank's groups; the gradient keeps this rank's.
+            total = wait_tensor(all_reduce(raw_sum.detach(), "sum", tp_group))
+            raw_sum = raw_sum + (total - raw_sum.detach())
+        return self.inject(raw_sum, carrier=carrier, denominator=denominator)
 
 
 class MSAInnerAttention(FlexInnerAttention):
@@ -499,7 +516,7 @@ class MSAIndexer(Module):
         rope: RoPE,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the normalized, rotated index queries ``[T, G, I]`` and keys ``[T, I]``."""
-        index_q_TGI = self.wq(x_TD).unflatten(-1, (-1, self.head_dim))
+        index_q_TGI = local_head_split(self.wq(x_TD), self.head_dim)
         index_k_T1I = self.wk(x_TD).unflatten(-1, (1, self.head_dim))
         remat.recompute_needs_tensor(index_q_TGI, index_k_T1I)
         index_q_TGI = self.q_norm(index_q_TGI)

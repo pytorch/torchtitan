@@ -5,9 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import pytest
+import spmd_types as spmd
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.common import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.minimax_m3 import build_model_config, MODEL_FLAVORS
 from torchtitan.models.minimax_m3.attention import (
@@ -80,3 +83,31 @@ def test_seq_len_above_the_flavor_context_is_rejected() -> None:
         build_model_config(
             "debugmodel", seq_len=1 << 20, parallelism=ParallelismConfig()
         )
+
+
+def test_tensor_parallel_shards_index_queries_with_their_kv_groups() -> None:
+    config = build_model_config(
+        "debugmodel",
+        parallelism=ParallelismConfig(
+            tensor_parallel_degree=2,
+            expert_parallel_degree=2,
+            enable_sequence_parallel=True,
+        ),
+    )
+    sparse = config.layers[1].attention
+    assert isinstance(sparse, MiniMaxSparseAttention.Config)
+    tp = MeshAxisName.TP
+    boundary = sparse.sharding_config
+    assert boundary is not None and boundary.in_dst_shardings is not None
+    # The boundary gathers x_TD once for the q/k/v and index projections.
+    assert boundary.in_dst_shardings["x_TD"].local_type[tp] == spmd.R
+    assert type(sparse.qkv_linear.wqkv) is Linear.Config
+    wq_sharding = sparse.indexer.wq.sharding_config
+    wk_sharding = sparse.indexer.wk.sharding_config
+    assert wq_sharding is not None and wq_sharding.state_shardings is not None
+    assert wk_sharding is not None and wk_sharding.state_shardings is not None
+    assert wq_sharding.state_shardings["weight"].local_type[tp] == spmd.S(0)
+    assert wk_sharding.state_shardings["weight"].local_type[tp] == spmd.R
+    inner = sparse.inner_attention
+    assert isinstance(inner, MSAInnerAttention.Config) and inner.aux_loss is not None
+    assert inner.aux_loss.num_groups == sparse.n_kv_heads

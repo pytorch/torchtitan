@@ -114,7 +114,6 @@ class MiniMaxM3Model(MultimodalModel):
     state_dict_adapter_cls = MiniMaxM3StateDictAdapter
     multimodal_encoder_fqns = ("vision_encoder",)
     pipeline_first_stage_module_fqns = ("vision_encoder",)
-    supports_pipeline_parallel = False
 
     @classmethod
     def _register_optimizer_hooks(
@@ -177,16 +176,11 @@ class MiniMaxM3Model(MultimodalModel):
             return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
-        from torchtitan.distributed.spmd_types import spmd_mesh_size, spmd_sparse_mesh
+        from torchtitan.distributed.spmd_types import spmd_mesh_size
 
-        unsupported = [
-            axis.upper() for axis in ("tp", "cp") if spmd_mesh_size(axis) > 1
-        ]
-        if spmd_sparse_mesh() is not None:
-            unsupported.append("EP")
-        if unsupported:
+        if spmd_mesh_size("cp") > 1:
             raise NotImplementedError(
-                f"MiniMax M3 supports data parallelism only; got {', '.join(unsupported)}."
+                "Context Parallel is not yet supported for MiniMax Sparse Attention."
             )
         super().__init__(config)
         self.vision_encoder = (

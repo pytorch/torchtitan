@@ -45,6 +45,7 @@ _CONFIG = MSAInnerAttention.Config(
     topk_blocks=4,
     aux_loss=MSAIndexerLoss.Config(
         coeff=0.5,
+        num_groups=_NUM_GROUPS,
         softmax_scale=_HEAD_DIM**-0.5,
         index_softmax_scale=_INDEX_HEAD_DIM**-0.5,
     ),

@@ -10,10 +10,22 @@ from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     dense_activation_placement,
+    replicated_activation_placement,
+    residual_activation_placement,
     token_id_placement,
 )
 
-__all__ = ["msa_inner_attention_sharding_config"]
+__all__ = ["msa_attention_sharding_config", "msa_inner_attention_sharding_config"]
+
+
+def msa_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
+    """MSA boundary: gather ``x_TD`` once for the q/k/v and index projections."""
+    layout = residual_activation_placement(enable_sp=enable_sp)
+    return ShardingConfig(
+        in_src_shardings={"x_TD": layout},
+        in_dst_shardings={"x_TD": replicated_activation_placement()},
+        out_src_shardings=layout,
+    )
 
 
 def msa_inner_attention_sharding_config() -> ShardingConfig:

@@ -54,15 +54,14 @@ def _vision_rope_cache(
         positions.append(
             torch.stack([frame_ids, row_ids.repeat(frames), col_ids.repeat(frames)], -1)
         )
-    positions_N3 = torch.cat(positions)
+    freqs_NR = (torch.cat(positions)[..., None].float() * inv_freq).flatten(1)
     if spmd.is_type_checking():
         # Built from each rank's own grids: rank-local on DP, invariant on TP/CP.
-        positions_N3 = spmd.mutate_type(
-            positions_N3,
+        freqs_NR = spmd.mutate_type(
+            freqs_NR,
             src={"dp": spmd.R, "tp": spmd.R, "cp": spmd.R},
             dst={"dp": spmd.V, "tp": spmd.I, "cp": spmd.I},
         )
-    freqs_NR = (positions_N3[..., None].float() * inv_freq).flatten(1)
     freqs_NR = torch.cat([freqs_NR, freqs_NR], dim=-1)
     return torch.cat([freqs_NR.cos(), freqs_NR.sin()], dim=-1).unsqueeze(1)
 
