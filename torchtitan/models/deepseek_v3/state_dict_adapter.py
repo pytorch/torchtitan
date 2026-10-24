@@ -28,6 +28,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
     """
 
     hf_experts_key_fragment = "mlp.experts"
+    hf_rope_config_cls: type = ComplexRoPE.Config
 
     # HF checkpoints store embedding and output-head copies under each MTP
     # layer. TorchTitan shares the native tensors; HF exports need independent
@@ -62,7 +63,13 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                     continue
                 fqn_to_index_for_save[key] = index
             self.fqn_to_index_mapping = fqn_to_index_for_save
-        self.from_hf_map = {
+        self.from_hf_map = self._build_from_hf_map(model_config)
+
+    def _build_from_hf_map(
+        self, model_config: DeepSeekV3Model.Config
+    ) -> dict[str, str]:
+        """Return the HF-to-torchtitan key map for ``model_config``."""
+        from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention Module
             "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": "layers.{}.attention.wkv_a.weight",
@@ -96,7 +103,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
 
         # Adjustments for from_hf_map based on model architecture
         if model_config.layers[0].attention.q_lora_rank != 0:
-            self.from_hf_map.update(
+            from_hf_map.update(
                 {
                     "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
                     "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
@@ -104,11 +111,12 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 }
             )
         else:
-            self.from_hf_map.update(
+            from_hf_map.update(
                 {
                     "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
                 }
             )
+        return from_hf_map
 
     def _map_from_hf_layer_key(
         self,
@@ -267,7 +275,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         2. Convert between the HF shape and the torchtitan shape.
         3. Concatenate individual expert weights into grouped-linear weights.
         """
-        self._validate_hf_rope_config(ComplexRoPE.Config)
+        self._validate_hf_rope_config(self.hf_rope_config_cls)
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
