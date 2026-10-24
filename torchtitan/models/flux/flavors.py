@@ -109,7 +109,6 @@ def _make_double_block_config(
                 ),
             ),
             inner_attention=VarlenInnerAttention.Config(
-                window_size=(-1, -1),
                 sharding_config=flux_inner_attention_sharding_config(),
             ),
         ),
@@ -139,7 +138,6 @@ def _make_double_block_config(
                 ),
             ),
             inner_attention=VarlenInnerAttention.Config(
-                window_size=(-1, -1),
                 sharding_config=flux_inner_attention_sharding_config(),
             ),
         ),
@@ -168,7 +166,7 @@ def _make_double_block_config(
             param_init=_XAVIER_LINEAR,
         ),
         inner_attention=VarlenInnerAttention.Config(
-            window_size=(-1, -1), sharding_config=flux_inner_attention_sharding_config()
+            sharding_config=flux_inner_attention_sharding_config()
         ),
     )
 
@@ -217,7 +215,7 @@ def _make_single_block_config(
             ),
         ),
         inner_attention=VarlenInnerAttention.Config(
-            window_size=(-1, -1), sharding_config=flux_inner_attention_sharding_config()
+            sharding_config=flux_inner_attention_sharding_config()
         ),
     )
 

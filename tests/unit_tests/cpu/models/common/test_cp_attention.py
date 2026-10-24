@@ -34,6 +34,7 @@ from torchtitan.models.common.attention import (
     InnerAttention,
     MLAAttention,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
@@ -224,7 +225,9 @@ class TestKernelSelection(unittest.TestCase):
         self.assertEqual(config.block_size, 256)
 
     def test_sliding_cp_kernel_is_a_sliding_flex_kernel(self):
-        config = AllGatherKVSlidingWindowFlexInnerAttention.Config(window_size=128)
+        config = AllGatherKVSlidingWindowFlexInnerAttention.Config(
+            sliding_window_size=128
+        )
         self.assertIsInstance(config, CPInnerAttention.Config)
         self.assertIsInstance(config, SlidingWindowFlexInnerAttention.Config)
 
@@ -252,7 +255,7 @@ class TestKernelSelection(unittest.TestCase):
         ).build_attention_metadata(positions)
         sliding_metadata = AllGatherKVSlidingWindowFlexInnerAttention.Config(
             block_size=4,
-            window_size=4,
+            sliding_window_size=4,
         ).build_attention_metadata(positions)
         varlen_metadata = UlyssesVarlenInnerAttention.Config().build_attention_metadata(
             positions
@@ -268,9 +271,12 @@ class TestCpMlaMetadata(unittest.TestCase):
         for backend in (MLAAttention, AllGatherKVMLAFlexAttention, UlyssesMLAAttention):
             for inner_attention, expected in (
                 (FlexInnerAttention.Config(), True),
-                (SlidingWindowFlexInnerAttention.Config(window_size=4), False),
+                (SlidingWindowFlexInnerAttention.Config(sliding_window_size=4), False),
                 (VarlenInnerAttention.Config(), True),
-                (VarlenInnerAttention.Config(window_size=(4, 0)), False),
+                (
+                    SlidingWindowVarlenInnerAttention.Config(sliding_window_size=4),
+                    False,
+                ),
             ):
                 if backend is AllGatherKVMLAFlexAttention and isinstance(
                     inner_attention, VarlenInnerAttention.Config
@@ -396,7 +402,7 @@ class TestDecoderCpSharding(unittest.TestCase):
     ):
         sliding_attention = mock.Mock(
             spec=Attention.Config,
-            inner_attention=sliding_type.Config(window_size=128),
+            inner_attention=sliding_type.Config(sliding_window_size=128),
         )
         layers = [
             SimpleNamespace(attention=None),

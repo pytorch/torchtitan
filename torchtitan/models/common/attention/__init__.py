@@ -23,6 +23,7 @@ from .attention import (  # noqa: F401
     local_head_split,
     QKVLinear,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
