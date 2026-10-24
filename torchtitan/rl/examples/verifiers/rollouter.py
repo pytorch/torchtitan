@@ -37,6 +37,7 @@ from torchtitan.rl.generator.generation_server import (
 from torchtitan.rl.generator.http_client import GeneratorClient
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRLDataLoader
+from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
@@ -80,8 +81,10 @@ class VerifiersRollouter(Rollouter):
     """Adapt Verifiers execution to TitanRL's ``Rollouter`` contract.
 
     Verifiers owns environment execution, including its process pool and the
-    message/tool loop, so this path bypasses TitanRL's ``RolloutWorkerActor``,
-    ``RolloutWorker``, ``MessageEnv``, and ``TokenEnv``. Token-in/token-out is
+    message/tool loop, so this path bypasses TitanRL's `MessageEnv` and
+    `TokenEnv`. The rollouter starts one Verifiers EnvServer; each rollout worker
+    process runs a `VerifiersRolloutWorker` that connects to it, so the controller
+    receives finished groups only, as with native rollouts. Token-in/token-out is
     preserved because Verifiers' agents post every model call straight to one
     generator's `GenerationServer`, which the router picks for each rollout.
 
@@ -99,13 +102,8 @@ class VerifiersRollouter(Rollouter):
         """Verifiers taskset used for validation samples."""
 
         worker: RolloutWorker.Config | None = None
-        """Inherited schema field; hidden because Verifiers replaces that path."""
-
-        worker_pool_size: int = 1
-        """Unused because the Verifiers EnvServer owns its worker pool."""
-
-        num_threads_per_worker: int = 1
-        """Unused because no TitanRL rollout-worker process is spawned."""
+        """Must stay None: the rollouter builds a `VerifiersRolloutWorker.Config` at setup,
+        once the EnvServer's address is known."""
 
         verifiers_env_server: VerifiersEnvServer.Config
         """Environment server spawned and owned by this rollouter."""
@@ -130,6 +128,10 @@ class VerifiersRollouter(Rollouter):
 
         def __post_init__(self) -> None:
             Rollouter.Config.__post_init__(self)
+            if self.worker is not None:
+                raise ValueError(
+                    "VerifiersRollouter builds its worker config at setup; leave worker unset"
+                )
             configured_taskset = self.verifiers_env_server.environment.taskset
             if configured_taskset not in (
                 VerifiersTasksetConfig(),
@@ -159,11 +161,7 @@ class VerifiersRollouter(Rollouter):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self._verifiers_config = config
-        self._rubric: Rubric = config.rubric.build()
-        self._advantage_estimator: AdvantageEstimator = config.advantage.build()
         self._verifiers_env_server = config.verifiers_env_server.build()
-        self._verifiers_env_client: VerifiersEnvClient | None = None
-        self._verifiers_train_client_config: VerifiersTrainClientConfig | None = None
 
     async def setup_async(
         self,
@@ -173,25 +171,81 @@ class VerifiersRollouter(Rollouter):
         renderer_config: RendererConfig,
         hf_assets_path: str,
     ) -> None:
-        """Start the EnvServer and connect to it.
-
-        Rollouts run in the EnvServer, so no rollout worker pool is spawned through
-        ``actor_system``.
-        """
-        del actor_system, tokenizer_config
-        if self._verifiers_env_client is not None:
-            return
+        """Start the EnvServer, then the rollout workers that connect to it."""
         if not isinstance(renderer_config, RenderersConfigAdapter):
             raise ValueError(
                 "Verifiers requires a renderer configured with from_renderers(...) "
                 "so its client can construct the same renderer in the "
                 "environment-server process"
             )
-
-        verifiers_server_address = await self._verifiers_env_server.start()
-        verifiers_env_client = None
+        config = self._verifiers_config
         try:
-            verifiers_env_client = VerifiersEnvClient(verifiers_server_address)
+            env_server_address = await self._verifiers_env_server.start()
+            await super().setup_async(
+                actor_system=actor_system,
+                tokenizer_config=tokenizer_config,
+                renderer_config=renderer_config,
+                hf_assets_path=hf_assets_path,
+                worker_config=VerifiersRolloutWorker.Config(
+                    rubric=config.rubric,
+                    advantage=config.advantage,
+                    renderer_multiplex=config.renderer_multiplex,
+                    connection_timeout_sec=config.connection_timeout_sec,
+                    env_server_address=env_server_address,
+                ),
+            )
+        except BaseException:
+            await self.close()
+            raise
+
+    async def close(self) -> None:
+        """Stop the rollout workers, then the EnvServer."""
+        try:
+            await super().close()
+        finally:
+            await self._verifiers_env_server.close()
+
+
+class VerifiersRolloutWorker(RolloutWorker):
+    """Runs Verifiers rollout groups in a rollout worker process: the env client, the trace
+    decode and the conversion to rollout turns.
+
+    Unused inherited field: `token_env`."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RolloutWorker.Config):
+        message_env: MessageEnv.Config | None = None
+        """Unused: Verifiers runs the env and its tool loop."""
+
+        renderer_multiplex: int
+        """See `VerifiersRollouter.Config.renderer_multiplex`."""
+
+        connection_timeout_sec: float
+        """See `VerifiersRollouter.Config.connection_timeout_sec`."""
+
+        env_server_address: str
+        """Address of the rollouter's running EnvServer."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self._verifiers_config = config
+        # Never closed: the worker process exits with the pool.
+        self._verifiers_env_client: VerifiersEnvClient | None = None
+        self._verifiers_train_client_config: VerifiersTrainClientConfig | None = None
+
+    async def setup_async(
+        self,
+        *,
+        tokenizer_config: HuggingFaceTokenizer.Config,
+        renderer_config: RendererConfig,
+        hf_assets_path: str,
+    ) -> None:
+        """Connect to the EnvServer. Verifiers renders in the env server, so no tokenizer here."""
+        del tokenizer_config
+        verifiers_env_client = VerifiersEnvClient(
+            self._verifiers_config.env_server_address
+        )
+        try:
             await verifiers_env_client.wait_for_server_startup(
                 timeout=self._verifiers_config.connection_timeout_sec
             )
@@ -206,24 +260,12 @@ class VerifiersRollouter(Rollouter):
                 renderer_model_name=hf_assets_path,
             )
         except BaseException:
-            if verifiers_env_client is not None:
-                await verifiers_env_client.close()
-            await self._verifiers_env_server.close()
+            await verifiers_env_client.close()
             raise
         self._verifiers_env_client = verifiers_env_client
         self._verifiers_train_client_config = verifiers_train_client_config
 
-    async def close(self) -> None:
-        """Close the Verifiers client and environment server."""
-        try:
-            if self._verifiers_env_client is not None:
-                await self._verifiers_env_client.close()
-        finally:
-            self._verifiers_env_client = None
-            self._verifiers_train_client_config = None
-            await self._verifiers_env_server.close()
-
-    async def run_group_rollouts(
+    async def run_group(
         self,
         *,
         generate_fn: GenerateFn,
@@ -265,13 +307,13 @@ class VerifiersRollouter(Rollouter):
                 raise result
         rollouts = results
 
-        outputs = await self._rubric.score_group(rollouts, sample)
+        outputs = await self.score_group(rollouts, sample)
         for rollout, output in zip(rollouts, outputs, strict=True):
             rollout.reward = output.reward
             rollout.reward_breakdown = output.reward_breakdown
 
         group = RolloutGroup(group_id=group_id, rollouts=rollouts)
-        advantages = self._advantage_estimator(group)
+        advantages = self.advantage_estimator(group)
         for rollout, advantage in zip(group.rollouts, advantages, strict=True):
             rollout.advantage = advantage
         return group
@@ -286,6 +328,7 @@ class VerifiersRollouter(Rollouter):
         rollout_id: int,
     ) -> Rollout:
         """Send one task to Verifiers, release its sessions, and convert its trace to a rollout.
+        Replaces the base method with Verifiers' arguments; only this class's `run_group` calls it.
 
         A rollout (one `VerifiersEnvClient.run`) has one trace per agent: the trainable one, plus any
         sub-agents. Verifiers sends each trace's id as its generator session id (X-Session-ID):
@@ -298,7 +341,7 @@ class VerifiersRollouter(Rollouter):
             self._verifiers_env_client is None
             or self._verifiers_train_client_config is None
         ):
-            raise RuntimeError("Verifiers rollouter is not initialized")
+            raise RuntimeError("Verifiers rollout worker is not initialized")
 
         # One VerifiersEnvClient.run executes a complete rollout. The harness owns the
         # multi-turn model/tool loop and posts every generation to one generator's server,
