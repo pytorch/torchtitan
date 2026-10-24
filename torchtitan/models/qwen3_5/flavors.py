@@ -65,6 +65,7 @@ from torchtitan.models.common.vision_encoder import (
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_sharding_config,
     multimodal_token_embedding_sharding_config,
+    transformer_block_sharding_config,
     vision_attention_sharding_config,
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
@@ -83,7 +84,6 @@ from .sharding import (
     inner_gated_delta_net_sharding_config,
     sigmoid_gate_sharding_config,
     sigmoid_gated_w13_sharding_config,
-    transformer_block_sharding_config,
     vision_encoder_sharding_config,
     vision_merger_sharding_config,
     vision_rotary_embedding_sharding_config,

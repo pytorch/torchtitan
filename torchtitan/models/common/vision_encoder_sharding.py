@@ -15,6 +15,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     replicated_activation_placement,
+    residual_activation_placement,
     token_id_placement,
 )
 
@@ -72,6 +73,25 @@ def multimodal_token_embedding_sharding_config() -> ShardingConfig:
         out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         out_dst_shardings=replicated_activation_placement(),
         local_spmd=True,
+    )
+
+
+def transformer_block_sharding_config(
+    *, enable_sp: bool, after_vision_scatter: bool
+) -> ShardingConfig:
+    """Transformer block boundary in the residual layout.
+
+    The first block after the vision scatter takes a Replicate input and
+    restores the decoder layout.
+    """
+    layer_layout = residual_activation_placement(enable_sp=enable_sp)
+    input_layout = (
+        replicated_activation_placement() if after_vision_scatter else layer_layout
+    )
+    return ShardingConfig(
+        in_src_shardings={"x_TD": input_layout},
+        in_dst_shardings={"x_TD": layer_layout},
+        out_src_shardings=layer_layout,
     )
 
 
