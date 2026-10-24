@@ -48,6 +48,7 @@ from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.cpu_kv_offload import CPUKVOffload
 from torchtitan.rl.generator.vllm.engine import (
     _build_sampling_params,
     _extract_request_metrics_inputs,
@@ -619,13 +620,35 @@ def test_batch_invariant_requires_kv_cache_reset():
         )
 
 
-def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_path):
-    with pytest.raises(
-        ValueError, match="needs reset_kv_cache_on_model_state_dict_load=False"
-    ):
-        VLLMEngine.Config(session_kv_holder=VLLMSessionKVHolder.Config()).build(
+@pytest.mark.parametrize(
+    "holder, parallelism, reset_kv_cache, match",
+    [
+        (
+            VLLMSessionKVHolder.Config(),
+            _PARALLELISM,
+            True,
+            "needs reset_kv_cache_on_model_state_dict_load=False",
+        ),
+        (
+            VLLMSessionKVHolder.Config(cpu_kv_offload=CPUKVOffload.Config(size_gib=16)),
+            # Full EP, as a generator at DP > 1 requires.
+            InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=2,
+                expert_parallel_degree=4,
+            ),
+            False,
+            "needs parallelism.data_parallel_degree=1",
+        ),
+    ],
+)
+def test_session_kv_holder_rejects_unsupported_settings(
+    tmp_path, holder, parallelism, reset_kv_cache, match
+):
+    with pytest.raises(ValueError, match=match):
+        VLLMEngine.Config(session_kv_holder=holder).build(
             model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
+            parallelism=parallelism,
             model_path="unused",
             max_num_seqs=8,
             model_dtype="bfloat16",
@@ -634,7 +657,7 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             checkpointer=None,
             dist_moe_runtime=None,
             debug=DebugConfig(),
-            reset_kv_cache_on_model_state_dict_load=True,
+            reset_kv_cache_on_model_state_dict_load=reset_kv_cache,
             rank=0,
             generator_name="generator",
             output_dir=str(tmp_path),
@@ -706,6 +729,27 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
     assert engine_kwargs["scheduling_policy"] == "priority"
 
 
+def test_cpu_kv_offload_names_vllms_offloading_connector(monkeypatch, tmp_path):
+    # The engine is a mock here, so skip reading its scheduler.
+    monkeypatch.setattr(VLLMSessionKVHolder, "attach", lambda self, engine: None)
+    engine_kwargs = _build_engine_kwargs(
+        monkeypatch,
+        tmp_path,
+        Generator.Config(
+            model=_MODEL_CONFIG,
+            engine=VLLMEngine.Config(
+                session_kv_holder=VLLMSessionKVHolder.Config(
+                    cpu_kv_offload=CPUKVOffload.Config(size_gib=16)
+                )
+            ),
+        ),
+    )
+    kv_transfer_config = engine_kwargs["kv_transfer_config"]
+    # Named, not set through kv_offloading_size, so vLLM's config check rejects router replay with it.
+    assert kv_transfer_config.kv_connector == "OffloadingConnector"
+    assert kv_transfer_config.kv_connector_extra_config["offload_prompt_only"] is False
+
+
 @pytest.mark.parametrize(
     "key, match",
     [
@@ -717,6 +761,10 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
             r"use Generator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use Generator\.Config\.debug\.seed"),
+        (
+            "kv_offloading_size",
+            r"use VLLMEngine\.Config\.session_kv_holder\.cpu_kv_offload",
+        ),
     ],
 )
 def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):

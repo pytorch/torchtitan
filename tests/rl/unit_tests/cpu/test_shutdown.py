@@ -15,10 +15,12 @@ from torchtitan.rl import train
 from torchtitan.rl.actors.monarch import provisioning, system as monarch_system
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 from torchtitan.rl.actors.system import ServiceHandle, TrainerHandle
-from torchtitan.rl.controller.controller import AsyncLoopConfig
+from torchtitan.rl.controller.controller import AsyncLoopConfig, generator_launch_env
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.generator.vllm.cpu_kv_offload import CPUKVOffload
+from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 
@@ -164,6 +166,36 @@ def test_main_shuts_down_after_success(monkeypatch):
 
     trainer = _FakeController.instances[0]
     assert trainer.events == ["setup", "train", "close"]
+
+
+@pytest.mark.parametrize(
+    "session_kv_holder, generator_env",
+    [
+        (None, {}),
+        (VLLMSessionKVHolder.Config(), {}),
+        (
+            VLLMSessionKVHolder.Config(cpu_kv_offload=CPUKVOffload.Config(size_gib=16)),
+            {
+                "PYTORCH_ALLOC_CONF": "expandable_segments:False",
+                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False,max_split_size_mb:512",
+                "PYTHONHASHSEED": "0",
+            },
+        ),
+    ],
+)
+def test_kv_offload_generators_launch_without_expandable_segments(
+    monkeypatch, session_kv_holder, generator_env
+):
+    """Offload needs expandable_segments off (other allocator options stay) and PYTHONHASHSEED=0."""
+    monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    monkeypatch.setenv(
+        "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:512"
+    )
+    generator_config = SimpleNamespace(
+        engine=SimpleNamespace(session_kv_holder=session_kv_holder)
+    )
+
+    assert generator_launch_env(generator_config) == generator_env
 
 
 def test_main_shuts_down_after_train_failure(monkeypatch):

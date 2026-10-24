@@ -232,6 +232,29 @@ def _default_actor_system_config() -> ActorSystem.Config:
     return MonarchActorSystem.Config()
 
 
+def generator_launch_env(generator_config: Generator.Config) -> dict[str, str]:
+    """Extra env for generator procs with CPU KV offload, on top of ``RL_ENV_DEFAULTS``:
+    - ``expandable_segments:False``: vLLM refuses a KV connector under ``expandable_segments:True``.
+    - ``PYTHONHASHSEED=0``: TP ranks must iterate vLLM's sets in the same order.
+
+    Example:
+
+        this proc:        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
+        generator procs:  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False,max_split_size_mb:512
+                          PYTHONHASHSEED=0
+    """
+    launch_env = {}
+    # Only VLLMEngine.Config has a session KV holder.
+    holder_config = getattr(generator_config.engine, "session_kv_holder", None)
+    if holder_config is not None and holder_config.cpu_kv_offload is not None:
+        for key in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"):
+            launch_env[key] = os.environ.get(key, "").replace(
+                "expandable_segments:True", "expandable_segments:False"
+            )
+        launch_env["PYTHONHASHSEED"] = "0"
+    return launch_env
+
+
 class Controller(Configurable):
     """Top-level RL async training orchestrator.
 
@@ -611,7 +634,13 @@ class Controller(Configurable):
 
         with sl.log_trace_span("mesh_spawn"):
             if actor_system is None:
-                actor_system = config.actor_system.build()
+                launch_env = generator_launch_env(config.generator)
+                # Only MonarchActorSystem takes `generator_env`, so pass it only when offload needs it.
+                actor_system = (
+                    config.actor_system.build(generator_env=launch_env)
+                    if launch_env
+                    else config.actor_system.build()
+                )
             self.actor_system = actor_system
             await actor_system.provision(
                 trainer_parallelism=config.trainer.parallelism,
