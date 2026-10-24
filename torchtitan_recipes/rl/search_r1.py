@@ -29,7 +29,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import OverrideConfig, TrainingConfig
+from torchtitan.config import apply_overrides, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, TokenDispatcherTransform
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
@@ -235,8 +235,9 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     DeepEP v2 runs multi-node on H100 (NVLink intra-node + IB/RoCE inter-node), so unlike
     a HybridEP generator (whose all-to-all is intra-node only) this generator may span
     nodes. Qwen3-30B-A3B has 4 KV heads, so the generator TP must be <=4. The trainer
-    keeps the compact (host-synced, backward-able) DeepEP path; the generator's model
-    uses the CUDA-graph-compatible EXPAND layout. Applies the same ``fused_swiglu``
+    keeps the compact (host-synced, backward-able) DeepEP path; the generator's routed
+    experts read the routes on DeepEP's compact layout without the host sync (CUDA-graph
+    safe). Applies the same ``fused_swiglu``
     performance override as ``rl_grpo_qwen3_30b_a3b_varlen_perf`` to both models.
     """
     seq_len = 4096
@@ -332,8 +333,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             )
         ],
     )
-    # The generator captures CUDA graphs, so it needs DeepEP's static,
-    # host-sync-free EXPAND dispatch.
+    # The generator captures CUDA graphs, so its DeepEP dispatch must skip the host sync.
     config.generator = apply_transforms(
         config.generator,
         [
@@ -347,6 +347,17 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 kwargs={"cuda_graph_compatible": True},
             )
         ],
+    )
+    # The generator's experts read each token's routes, so DeepEP sends a token once per
+    # rank instead of once per expert. Its own call: one OverrideConfig rejects overrides
+    # of nested nodes (these experts and fused_swiglu's activation inside them).
+    apply_overrides(
+        OverrideConfig(
+            imports=[
+                "torchtitan_recipes.overrides.triton_routed_experts.triton_routed_experts"
+            ]
+        ),
+        config.generator,
     )
     return config
 
