@@ -238,17 +238,32 @@ class Decoder(BaseModel):
         RoPE cache, identical across layers with the same config; at long
         context these add up to GiBs per rank. The cache is a non-persistent,
         read-only buffer, so sharing it does not change numerics or checkpoints.
+
+        Sharing only holds after ``init_states``: any later ``_apply`` (e.g.
+        ``model.to(...)``) gives every RoPE its own copy again. That costs
+        memory but not correctness.
         """
+        # TODO: this lowers steady-state memory only. ``to_empty()`` and each
+        # ``RoPE._init_self_buffers()`` still materialize one cache per RoPE
+        # before they are tied here. If init-time peak memory becomes a problem,
+        # have ``_init_self_buffers`` reuse a cache already built for an equal
+        # config during the same ``init_states`` pass.
         representatives: list[RoPE] = []
         for module in self.modules():
             if not isinstance(module, RoPE):
                 continue
-            for rep in representatives:
-                if type(rep) is type(module) and rep.config == module.config:
-                    module.cache = rep.cache
-                    break
-            else:
+            rep = next(
+                (
+                    r
+                    for r in representatives
+                    if type(r) is type(module) and r.config == module.config
+                ),
+                None,
+            )
+            if rep is None:
                 representatives.append(module)
+            else:
+                module.cache = rep.cache
 
     def forward(
         self,

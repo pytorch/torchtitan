@@ -13,6 +13,7 @@ import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.rope import RoPE
+from torchtitan.models.deepseek_v4 import build_model_config as build_dsv4_config
 from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 
@@ -72,6 +73,35 @@ class TestRoPECacheTying(unittest.TestCase):
         self.assertIsNot(odd.cache, shared[0].cache)
         torch.testing.assert_close(odd.cache, odd._precompute_cache(), rtol=0, atol=0)
         self.assertFalse(torch.equal(odd.cache, shared[0].cache))
+
+
+class TestDeepSeekV4RoPECacheTying(unittest.TestCase):
+    """dsv4 mixes RoPE configs: ``rope`` on uncompressed layers and
+    ``rope_compress`` on compressed ones, which is also used by the RoPEs
+    inside ``Compressor`` and ``Indexer``."""
+
+    def test_one_cache_per_rope_config(self):
+        config = build_dsv4_config(
+            "debugmodel", seq_len=256, parallelism=ParallelismConfig()
+        )
+        with torch.device("meta"):
+            model = config.build()
+        model.to_empty(device="cpu")
+        model.init_states()
+
+        caches = {}
+        for name, module in model.named_modules():
+            if isinstance(module, RoPE):
+                caches.setdefault(id(module.cache), []).append((name, module))
+        self.assertEqual(len(caches), 2)
+
+        groups = list(caches.values())
+        self.assertNotEqual(groups[0][0][1].config, groups[1][0][1].config)
+        for group in groups:
+            rep = group[0][1]
+            torch.testing.assert_close(
+                rep.cache, rep._precompute_cache(), rtol=0, atol=0
+            )
 
 
 if __name__ == "__main__":
