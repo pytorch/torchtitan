@@ -44,6 +44,7 @@ def llama3_fsdp_tp():
     config = llama3_recipes.graph_trainer_llama3_debugmodel()
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.tensor_parallel_degree = 2
+    config.optim.enable_accelerator_graph = True
     return config
 
 

@@ -808,6 +808,7 @@ def _build_gradient_accumulation_fwd_bwd_graphs(
         loss_fn=loss_fn,
         compile_config=trainer_config.compile,
         parallelism_context=parallelism_context,
+        optimizer_update=None,
     )
     stage.graphs = _build_scheduled_fwd_bwd_graphs(
         stage,
