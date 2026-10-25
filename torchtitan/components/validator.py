@@ -171,7 +171,7 @@ class Validator(BaseValidator):
             accelerator_graph_manager.capture_allowed = False
         elif cuda_graph_enabled:
             logger.warning(
-                "CUDA graph capture is only supported on NVIDIA CUDA; "
+                "Graph capture is unavailable on this accelerator; "
                 "using eager validation."
             )
 

@@ -238,7 +238,7 @@ class GraphBackend:
         annotation_config: dict[str, Any] | None,
     ) -> tuple[Any, Any]:
         """Capture ``fn(*args)`` into a new graph and return the graph and output."""
-        graph = torch.accelerator.Graph(pool=pool)
+        graph = torch.accelerator.Graph(pool=pool, capture_error_mode="thread_local")
         with stream, graph:
             output = fn(*args)
         return graph, output
