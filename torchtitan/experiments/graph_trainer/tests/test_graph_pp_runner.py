@@ -1119,6 +1119,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         run_traced_mock.assert_called_once_with(
             traced,
             module=module,
+            optimizers=(),
             precompile_meshes=runtime_meshes,
         )
 
@@ -1158,6 +1159,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 loss_fn=loss_fn,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
+                optimizer_update=None,
             )
 
         self.assertIsInstance(stage.graphs, GraphTrainerJointStageGraphs)
@@ -1318,6 +1320,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                         trainer_config=cast(Any, trainer_config),
                         loss_fn=mock.Mock(),
                         parallelism_context=mock.Mock(),
+                        optimizer_update=None,
                     )
                 config = register_mock.call_args.kwargs["config"]
                 self.assertEqual(

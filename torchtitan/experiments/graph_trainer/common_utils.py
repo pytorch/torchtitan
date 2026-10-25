@@ -171,6 +171,7 @@ _MODULE_FQN = "module_fqn"
 # Tuple of unique parameter FQNs naming one gradient value. Consumers must
 # treat it as a set: tied parameters can associate multiple FQNs with one node.
 PARAMETER_GRADIENT_FQNS_META = "parameter_gradient_fqns"
+OPTIMIZER_UPDATE_META = "optimizer_update"
 _EP_TOKEN_COUNT_EXCHANGE = "EP_token_count_exchange"
 _EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
 _EP_TOKEN_EXCHANGE = "EP_token_exchange"
