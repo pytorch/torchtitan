@@ -73,9 +73,16 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
     and process groups directly, without the DTensor-based context manager.
 
     Supports uneven vocab sharding (last TP rank may hold fewer classes) and
-    ``IGNORE_INDEX`` labels.  Forward uses three TP all-reduces (max, sumexp,
-    gather) to aggregate intermediate results in distributed softmax;
-    backward is fused (NLL + log-softmax) with zero collectives.
+    ``IGNORE_INDEX`` labels.  Forward uses three TP all-reduces (max,
+    non-target sumexp, target logit) to aggregate intermediate results in
+    distributed softmax; backward is fused (NLL + log-softmax) with zero
+    collectives.
+
+    The NLL is ``softplus(logsumexp_{j != t}(z_j) - z_t)`` rather than
+    ``logsumexp(z) - z_t``, so confident targets keep a nonzero loss and target
+    gradient instead of both rounding to exactly 0 (fp32 rounds once the target
+    margin exceeds ~16.6) while non-target gradients survive. This is no longer
+    bitwise identical to ``loss_parallel()``.
 
     All inputs and outputs are plain ``torch.Tensor`` (not DTensor).
     """
@@ -151,16 +158,10 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             local_max, reduceOp=dist.ReduceOp.MAX.name, group=tp_group
         )
 
-        # All-reduce sum over shifted logits for the global softmax denominator.
         shifted = logits - local_max
-        shifted_sumexp = torch.sum(torch.exp(shifted), dim=-1, keepdim=True)
-        shifted_sumexp = funcol.all_reduce(
-            shifted_sumexp, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
-        )
-        log_probs = shifted - torch.log(shifted_sumexp)
 
-        # Mask labels outside this vocab shard; the TP all-reduce below selects
-        # the owner rank's log probability for each target token.
+        # Mask labels outside this vocab shard; only the owner rank holds the
+        # target logit for each token.
         safe_labels = torch.where(labels != IGNORE_INDEX, labels, 0)
         out_of_range = (safe_labels < vocab_start) | (
             safe_labels >= vocab_start + local_vocab_size
@@ -168,18 +169,41 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         local_labels = safe_labels - vocab_start
         local_labels[out_of_range] = 0
 
-        local_result = torch.gather(log_probs, -1, local_labels.unsqueeze(-1))
-        local_result[out_of_range.unsqueeze(-1)] = 0
-        local_result = funcol.all_reduce(
-            local_result, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
+        # All-reduce sum of exp over the non-target classes only. The owner
+        # rank drops the target term before summing: once the target dominates,
+        # summing it in and subtracting it afterwards loses the small terms to
+        # rounding against its exp(0) = 1.
+        shifted_exp = torch.exp(shifted)
+        local_target_exp = torch.gather(shifted_exp, -1, local_labels.unsqueeze(-1))
+        shifted_exp.scatter_(
+            -1,
+            local_labels.unsqueeze(-1),
+            torch.where(out_of_range.unsqueeze(-1), local_target_exp, 0),
+        )
+        non_target_sumexp = torch.sum(shifted_exp, dim=-1, keepdim=True)
+        non_target_sumexp = funcol.all_reduce(
+            non_target_sumexp, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
         )
 
-        # Per-token NLL, dropping ignored labels (logprob 0 for ignored).
-        result = -local_result.squeeze(-1)
-        result = torch.where(labels != IGNORE_INDEX, result, 0)
+        # The TP all-reduce selects the owner rank's shifted target logit.
+        target_shifted = torch.gather(shifted, -1, local_labels.unsqueeze(-1))
+        target_shifted[out_of_range.unsqueeze(-1)] = 0
+        target_shifted = funcol.all_reduce(
+            target_shifted, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
+        )
 
-        # Save local-shard log probabilities for the fused CE backward.
-        ctx.save_for_backward(log_probs, labels)
+        # NLL = softplus(logsumexp_{j != t}(z_j) - z_t) (Barron et al., "A Fix
+        # for Softmax and Cross-Entropy", arXiv:2610.31642), which stays
+        # accurate when log_softmax at the target rounds to 0. With no non-target
+        # mass, log(0) = -inf and the NLL is softplus(-inf) = 0.
+        nll = F.softplus(torch.log(non_target_sumexp) - target_shifted)
+
+        # Per-token NLL, dropping ignored labels (logprob 0 for ignored).
+        result = torch.where(labels != IGNORE_INDEX, nll.squeeze(-1), 0)
+
+        # log_softmax is z - (z_t + NLL); the backward exponentiates it locally.
+        log_probs = shifted.sub_(target_shifted + nll)
+        ctx.save_for_backward(log_probs, labels, nll)
         ctx.logits_dtype = logits_dtype
         ctx.vocab_start = vocab_start
         ctx.local_vocab_size = local_vocab_size
@@ -193,7 +217,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, None, None, None, None]:
-        log_probs, labels = ctx.saved_tensors
+        log_probs, labels, nll = ctx.saved_tensors
         safe_labels = torch.where(labels != IGNORE_INDEX, labels, 0)
         out_of_range = (safe_labels < ctx.vocab_start) | (
             safe_labels >= ctx.vocab_start + ctx.local_vocab_size
@@ -201,10 +225,16 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         local_labels = safe_labels - ctx.vocab_start
         local_labels[out_of_range] = 0
 
-        grad_input = torch.zeros_like(log_probs)
+        # Softmax on every class, except the owner rank's target slot gets
+        # p_t - 1 = expm1(-NLL): forming exp(log_p_t) - 1 cancels to 0 once p_t
+        # rounds to 1, while the non-target gradients stay nonzero.
+        grad_logits = torch.exp(log_probs)
         row_idx = torch.arange(local_labels.shape[0], device=local_labels.device)
-        grad_update = out_of_range.to(grad_input.dtype) - 1.0
-        grad_input[row_idx, local_labels] = grad_update
+        grad_logits[row_idx, local_labels] = torch.where(
+            out_of_range,
+            grad_logits[row_idx, local_labels],
+            torch.expm1(-nll.squeeze(-1)),
+        )
 
         # reduction="none" gives a per-token ``[T]`` upstream grad; unsqueeze to
         # ``[T, 1]`` to broadcast over the local vocab. "sum" gives the scalar
@@ -214,7 +244,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         grad_output = torch.where(
             (labels != IGNORE_INDEX).unsqueeze(-1), grad_output, 0
         )
-        grad_logits = (grad_input + torch.exp(log_probs)) * grad_output
+        grad_logits = grad_logits * grad_output
         grad_logits = grad_logits.to(ctx.logits_dtype)
         return grad_logits, None, None, None, None
 
