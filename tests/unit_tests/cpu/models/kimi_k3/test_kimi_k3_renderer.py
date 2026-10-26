@@ -11,6 +11,8 @@ Token-level equality with the checkpoint's ``apply_chat_template`` is checked by
 released tokenizer; these tests pin the message structure without it.
 """
 
+import re
+
 import pytest
 
 from torchtitan.models.kimi_k3.renderer import KimiK3Renderer, KimiK3RendererConfig
@@ -52,6 +54,15 @@ class _ByteTokenizer:
                 pending.append(token_id)
         text.append(pending.decode())
         return "".join(text)
+
+
+def _encode_xtml(text: str) -> list[int]:
+    """Encode text with the K3 chat markers as their special ids."""
+    pattern = "(" + "|".join(re.escape(marker) for marker in _SPECIAL_IDS) + ")"
+    ids = []
+    for part in re.split(pattern, text):
+        ids += [_SPECIAL_IDS[part]] if part in _SPECIAL_IDS else list(part.encode())
+    return ids
 
 
 def _message(attrs: str, body: str) -> str:
@@ -160,6 +171,56 @@ def test_parse_response_splits_reasoning_from_the_answer():
     truncated = renderer.parse_response(tokenizer.encode("still thinking"))
     assert truncated.reasoning_content == "still thinking"
     assert truncated.content == ""
+
+
+def test_bridge_appends_the_next_turn_to_the_sampled_ids():
+    renderer = KimiK3Renderer(_ByteTokenizer(), KimiK3RendererConfig())
+    conversation = [{"role": "user", "content": "1+1?"}]
+    prompt = renderer.render_ids(conversation, add_generation_prompt=True)
+    new_messages = [{"role": "user", "content": "2+2?"}]
+    turn_end = (
+        "<|close|>think<|sep|><|open|>response<|sep|>2<|close|>response<|sep|>"
+        "<|close|>message<|sep|><|end_of_msg|>"
+    )
+
+    # A canonical completion bridges to exactly the full re-render, with the effort
+    # message once.
+    completion = _encode_xtml("Add." + turn_end)
+    bridged = renderer.bridge_to_next_turn(prompt, completion, new_messages)
+    conversation.append(
+        {"role": "assistant", "content": "2", "reasoning_content": "Add."}
+    )
+    assert bridged.token_ids == renderer.render_ids(
+        conversation + new_messages, add_generation_prompt=True
+    )
+    assert not any(bridged.sampled_mask)
+
+    # parse_response strips this newline, so a re-render would drop it; the bridge
+    # keeps every sampled id.
+    completion = _encode_xtml("\nAdd." + turn_end)
+    bridged = renderer.bridge_to_next_turn(prompt, completion, new_messages)
+    assert bridged.token_ids[: len(prompt) + len(completion)] == prompt + completion
+
+
+def test_bridge_falls_back_to_a_rerender():
+    renderer = KimiK3Renderer(_ByteTokenizer(), KimiK3RendererConfig())
+    prompt = renderer.render_ids(
+        [{"role": "user", "content": "1+1?"}], add_generation_prompt=True
+    )
+    user = [{"role": "user", "content": "go on"}]
+
+    # Cut at the token limit inside the think channel: no <|end_of_msg|> to extend.
+    assert (
+        renderer.bridge_to_next_turn(prompt, _encode_xtml("still thinking"), user)
+        is None
+    )
+    # An assistant turn would re-tokenize model output.
+    completion = _encode_xtml(
+        "Add.<|close|>think<|sep|><|open|>response<|sep|>2<|close|>response<|sep|>"
+        "<|close|>message<|sep|><|end_of_msg|>"
+    )
+    assistant = [{"role": "assistant", "content": "4"}]
+    assert renderer.bridge_to_next_turn(prompt, completion, assistant) is None
 
 
 def test_tools_are_rejected():

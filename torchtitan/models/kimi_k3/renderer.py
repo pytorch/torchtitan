@@ -29,7 +29,12 @@ from __future__ import annotations
 
 from typing import Literal, NamedTuple
 
-from renderers.base import ParsedResponse, RenderedTokens
+from renderers.base import (
+    ParsedResponse,
+    reject_assistant_in_extension,
+    RenderedTokens,
+    trim_to_turn_close,
+)
 from renderers.configs import BaseRendererConfig
 
 OPEN = "<|open|>"
@@ -84,7 +89,9 @@ class KimiK3Renderer:
 
     # ---------------------------------------------------------------- rendering
 
-    def _build(self, messages, *, tools, add_generation_prompt) -> list[_Piece]:
+    def _build(
+        self, messages, *, tools, add_generation_prompt, effort_message: bool = True
+    ) -> list[_Piece]:
         if tools:
             raise ValueError("KimiK3Renderer does not support tools yet")
         pieces: list[_Piece] = []
@@ -112,7 +119,11 @@ class KimiK3Renderer:
             text(tag, idx, sampled)
             control(SEP, idx, sampled)
 
-        if self._config.thinking and self._config.thinking_effort is not None:
+        if (
+            effort_message
+            and self._config.thinking
+            and self._config.thinking_effort is not None
+        ):
             open_tag("message", -1, [("role", "system"), ("type", "thinking-effort")])
             text(
                 "`thinking_effort` guides on how much to think in your thinking "
@@ -179,21 +190,30 @@ class KimiK3Renderer:
             ids += self._encode(piece)
         return ids
 
-    def render(
-        self, messages, *, tools=None, add_generation_prompt: bool = False
-    ) -> RenderedTokens:
+    def _encode_pieces(
+        self, pieces: list[_Piece]
+    ) -> tuple[list[int], list[int], list[bool], list[bool]]:
+        """Token ids with their message index, sampled flag and body flag."""
         token_ids: list[int] = []
         message_indices: list[int] = []
         sampled_mask: list[bool] = []
         is_content: list[bool] = []
-        for piece in self._build(
-            messages, tools=tools, add_generation_prompt=add_generation_prompt
-        ):
+        for piece in pieces:
             encoded = self._encode(piece)
             token_ids += encoded
             message_indices += [piece.msg_idx] * len(encoded)
             sampled_mask += [piece.sampled] * len(encoded)
             is_content += [piece.is_body] * len(encoded)
+        return token_ids, message_indices, sampled_mask, is_content
+
+    def render(
+        self, messages, *, tools=None, add_generation_prompt: bool = False
+    ) -> RenderedTokens:
+        token_ids, message_indices, sampled_mask, is_content = self._encode_pieces(
+            self._build(
+                messages, tools=tools, add_generation_prompt=add_generation_prompt
+            )
+        )
         return RenderedTokens(
             token_ids=token_ids,
             message_indices=message_indices,
@@ -212,8 +232,50 @@ class KimiK3Renderer:
         *,
         tools=None,
     ) -> RenderedTokens | None:
-        """Not supported yet: the caller re-renders the whole conversation."""
-        return None
+        """Extend the previous prompt + sampled completion with the next turn.
+
+        A re-render rebuilds the previous assistant turn from ``parse_response``'s
+        stripped text, so it can drop or re-tokenize sampled ids. The next prompt then
+        no longer extends the previous one: the generator re-prefills from the first
+        changed token and the trainer sees a history the generator never sampled.
+        Rendering concatenates per-message pieces, so appending the new messages'
+        pieces to the sampled ids equals a re-render that keeps the sampled turn.
+
+        Returns ``None``, and the caller re-renders, when there is nothing to extend,
+        the new messages include an assistant turn or tools, or the completion did
+        not end its message with ``<|end_of_msg|>`` (cut at the token limit or
+        stopped at ``[EOS]``).
+        """
+        if not previous_prompt_ids or not new_messages or tools:
+            return None
+        if reject_assistant_in_extension(new_messages):
+            return None
+        previous_ids = trim_to_turn_close(
+            previous_prompt_ids,
+            previous_completion_ids,
+            {self._special_ids[END_OF_MSG]},
+        )
+        if previous_ids is None:
+            return None
+        # The effort message opens the conversation and is already in previous_ids.
+        token_ids, message_indices, _, is_content = self._encode_pieces(
+            self._build(
+                new_messages,
+                tools=None,
+                add_generation_prompt=True,
+                effort_message=False,
+            )
+        )
+        num_previous = len(previous_ids)
+        return RenderedTokens(
+            token_ids=previous_ids + token_ids,
+            message_indices=[-1] * num_previous + message_indices,
+            sampled_mask=[False] * (num_previous + len(token_ids)),
+            is_content=[False] * num_previous + is_content,
+            message_roles=[m.get("role") for m in new_messages],
+            message_tool_names=[m.get("name") for m in new_messages],
+            multi_modal_data=None,
+        )
 
     # ------------------------------------------------------------------ parsing
 
