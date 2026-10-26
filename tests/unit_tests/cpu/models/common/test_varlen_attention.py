@@ -10,6 +10,7 @@
 
 import importlib
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import cast
@@ -97,10 +98,15 @@ def test_decoder_shares_metadata_by_backend():
         SlidingWindowVarlenInnerAttention.Config(sliding_window_size=4),
     ]
     template = config.layers[0]
-    config.layers = [
-        replace(template, attention=replace(template.attention, inner_attention=inner))
-        for inner in configs
-    ]
+    config = replace(
+        config,
+        layers=[
+            replace(
+                template, attention=replace(template.attention, inner_attention=inner)
+            )
+            for inner in configs
+        ],
+    )
     with patch(
         "torchtitan.models.common.attention.attention."
         "create_varlen_metadata_for_document",
@@ -121,14 +127,19 @@ def test_decoder_shares_metadata_by_backend():
 
 
 @pytest.mark.parametrize(
-    "backend", [SlidingWindowFlexInnerAttention, SlidingWindowVarlenInnerAttention]
+    "backends",
+    [
+        (SlidingWindowFlexInnerAttention, SlidingWindowFlexInnerAttention),
+        (SlidingWindowVarlenInnerAttention, SlidingWindowVarlenInnerAttention),
+        (SlidingWindowFlexInnerAttention, SlidingWindowVarlenInnerAttention),
+    ],
 )
-def test_decoder_rejects_different_windows_on_one_backend(backend):
-    from torchtitan.models.llama3 import build_model_config
-
-    config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+@pytest.mark.parametrize("model", ["llama3", "muse_spark"])
+def test_decoder_validates_shared_window_sizes(backends, model):
+    module = importlib.import_module(f"torchtitan.models.{model}")
+    config = module.build_model_config("debugmodel", parallelism=ParallelismConfig())
     template = config.layers[0]
-    config.layers = [
+    layers = [
         replace(
             template,
             attention=replace(
@@ -136,15 +147,20 @@ def test_decoder_rejects_different_windows_on_one_backend(backend):
                 inner_attention=backend.Config(sliding_window_size=window_size),
             ),
         )
-        for window_size in (4, 5)
+        for backend, window_size in zip(backends, (4, 8))
     ]
-    with patch.object(
-        backend.Config, "build_attention_metadata", return_value=object()
-    ):
+    expected = (
+        pytest.raises(ValueError, match="must use the same sliding_window_size")
+        if backends[0] is backends[1]
+        else nullcontext()
+    )
+    with expected:
+        replace(config, layers=layers)
+
+    if backends[0] is backends[1]:
+        config.layers = layers
         with pytest.raises(ValueError, match="must use the same sliding_window_size"):
-            Decoder._get_attention_metadata(
-                SimpleNamespace(config=config), torch.arange(8)
-            )
+            config.build()
 
 
 @pytest.mark.parametrize("model", ["gpt_oss", "muse_glimmer", "muse_spark"])

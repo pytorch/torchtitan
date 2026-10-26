@@ -93,6 +93,30 @@ class Decoder(BaseModel):
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
         enable_weight_tying: bool = False
 
+        def __post_init__(self) -> None:
+            sliding_window_sizes: dict[type[InnerAttention], int] = {}
+            for layer_config in self.layers:
+                for _, attention, _, _ in layer_config.traverse(Attention.Config):
+                    config = attention.inner_attention
+                    if not isinstance(
+                        config,
+                        (
+                            SlidingWindowFlexInnerAttention.Config,
+                            SlidingWindowVarlenInnerAttention.Config,
+                        ),
+                    ):
+                        continue
+                    backend = config._owner
+                    assert backend is not None and issubclass(backend, InnerAttention)
+                    window_size = sliding_window_sizes.setdefault(
+                        backend, config.sliding_window_size
+                    )
+                    if window_size != config.sliding_window_size:
+                        raise ValueError(
+                            f"{backend.__name__} layers must use the same "
+                            "sliding_window_size because they share attention metadata."
+                        )
+
         @property
         def first_full_attention(self) -> Attention.Config | None:
             """First full-attention config, including causal attention, else None."""
@@ -391,27 +415,11 @@ class Decoder(BaseModel):
         max_context_length: int | None = None,
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
-        sliding_window_sizes: dict[type[InnerAttention], int] = {}
         for layer_config in self.config.layers:
             for _, attention, _, _ in layer_config.traverse(Attention.Config):
                 config = attention.inner_attention
                 backend = config._owner
                 assert backend is not None and issubclass(backend, InnerAttention)
-                if isinstance(
-                    config,
-                    (
-                        SlidingWindowFlexInnerAttention.Config,
-                        SlidingWindowVarlenInnerAttention.Config,
-                    ),
-                ):
-                    window_size = sliding_window_sizes.setdefault(
-                        backend, config.sliding_window_size
-                    )
-                    if window_size != config.sliding_window_size:
-                        raise ValueError(
-                            f"{backend.__name__} layers must use the same "
-                            "sliding_window_size because they share attention metadata."
-                        )
                 if backend in attention_metadata:
                     continue
                 metadata = config.build_attention_metadata(
