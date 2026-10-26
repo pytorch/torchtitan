@@ -24,8 +24,8 @@ from torchtitan.models.common.attn_gym import (
 from .cp_attention import CPInnerAttention, Ulysses
 from .cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
-    prepare_linear_attention_cp_metadata,
-    prepare_ulysses_linear_attention_cp_metadata,
+    prepare_cp_linear_attention_metadata,
+    prepare_ulysses_linear_attention_metadata,
     UlyssesLinearAttentionMetadata,
 )
 from .gdn import InnerGDN
@@ -50,7 +50,7 @@ class UlyssesInnerGDN(Ulysses[LinearAttentionMetadata], InnerGDN):
         permutation: torch.Tensor | None,
     ) -> LinearAttentionMetadata:
         """Prepare Ulysses GDN metadata in original token order."""
-        return prepare_ulysses_linear_attention_cp_metadata(
+        return prepare_ulysses_linear_attention_metadata(
             attention_metadata, permutation=permutation
         )
 
@@ -163,7 +163,7 @@ class ContextParallelInnerGDN(
         permutation: torch.Tensor | None,
     ) -> ContextParallelLinearAttentionMetadata:
         """Build rank-local routing from global Gated DeltaNet sequence metadata."""
-        return prepare_linear_attention_cp_metadata(
+        return prepare_cp_linear_attention_metadata(
             attention_metadata, permutation=permutation, family="Gated DeltaNet"
         )
 

@@ -23,8 +23,8 @@ from torchtitan.models.common.attn_gym import (
 from .cp_attention import CPInnerAttention, Ulysses
 from .cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
-    prepare_linear_attention_cp_metadata,
-    prepare_ulysses_linear_attention_cp_metadata,
+    prepare_cp_linear_attention_metadata,
+    prepare_ulysses_linear_attention_metadata,
     UlyssesLinearAttentionMetadata,
 )
 from .kda import InnerKDA
@@ -49,7 +49,7 @@ class UlyssesInnerKDA(Ulysses[LinearAttentionMetadata], InnerKDA):
         permutation: torch.Tensor | None,
     ) -> LinearAttentionMetadata:
         """Prepare Ulysses KDA metadata in original token order."""
-        return prepare_ulysses_linear_attention_cp_metadata(
+        return prepare_ulysses_linear_attention_metadata(
             attention_metadata, permutation=permutation
         )
 
@@ -147,7 +147,7 @@ class ContextParallelInnerKDA(
         permutation: torch.Tensor | None,
     ) -> ContextParallelLinearAttentionMetadata:
         """Build rank-local routing from global KDA sequence metadata."""
-        return prepare_linear_attention_cp_metadata(
+        return prepare_cp_linear_attention_metadata(
             attention_metadata, permutation=permutation, family="KDA"
         )
 

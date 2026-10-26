@@ -51,7 +51,7 @@ class UlyssesLinearAttentionMetadata(LinearAttentionMetadata):
         spmd.assert_type(self.inverse_permutation, self._PERMUTATION_SPMD_TYPE)
 
 
-def prepare_ulysses_linear_attention_cp_metadata(
+def prepare_ulysses_linear_attention_metadata(
     attention_metadata: LinearAttentionMetadata,
     *,
     permutation: torch.Tensor | None,
@@ -95,7 +95,7 @@ class ContextParallelLinearAttentionMetadata(LinearAttentionMetadata):
                 spmd.assert_type(value, self._ROUTING_SPMD_TYPE)
 
 
-def prepare_linear_attention_cp_metadata(
+def prepare_cp_linear_attention_metadata(
     attention_metadata: LinearAttentionMetadata,
     *,
     permutation: torch.Tensor | None,
