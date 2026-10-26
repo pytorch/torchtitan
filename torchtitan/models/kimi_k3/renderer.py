@@ -70,6 +70,9 @@ class _Piece(NamedTuple):
     is_body: bool = False
 
 
+# TODO: Remove this renderer once the `renderers` package ships one for Kimi K3, and
+# point the README and convert_kimi_k3_tokenizer.py at it. The upstream attempt,
+# PrimeIntellect-ai/renderers#129, was closed unmerged.
 class KimiK3Renderer:
     config_class = KimiK3RendererConfig
 
