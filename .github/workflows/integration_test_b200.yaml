@@ -82,7 +82,9 @@ jobs:
 
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-          CUDA_HOME=/usr/local/cuda TORCH_SHOW_CPP_STACKTRACES=1 \
+          # The Kimi K3 golden uses kernels compiled with FP fusion disabled.
+          TRITON_DEFAULT_FP_FUSION=0 \
+            CUDA_HOME=/usr/local/cuda TORCH_SHOW_CPP_STACKTRACES=1 \
             python -m tests.integration_tests.run_tests \
             "$RUNNER_TEMP/artifacts-to-be-uploaded/b200" \
             --test_suite b200 \
