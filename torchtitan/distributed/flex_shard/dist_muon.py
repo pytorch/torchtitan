@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import heapq
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -39,6 +38,7 @@ from ._optimizer_reshard_schedule import (
     _ParticipantPartition,
     _RedistributionGroup,
     _RedistributionPlan,
+    _tensor_region_intersection,
     _TensorRegion,
     _validate_bucket_plans_across_ranks,
 )
@@ -1016,6 +1016,7 @@ class _ComputeJob:
     num_bytes: int
     item_index: int
     region: _TensorRegion
+    stored_numel_by_position: tuple[int, ...]
     stable_key: tuple[str, int]
 
 
@@ -1084,8 +1085,9 @@ def _assign_balanced_compute_regions(
 
     Any number of a parameter's chunks can share a participant. Each chunk
     retains its original matrix batches; packing does not merge NS calls.
-    Current-bucket cost takes priority over bytes, then earlier bucket cost.
-    Entirely local buckets bypass redistribution planning.
+    Current-bucket cost takes priority, then elements the rank already
+    stores, then bytes, then earlier bucket cost. Entirely local buckets
+    bypass redistribution planning.
     """
     participants = group.participants
     num_participants = len(participants)
@@ -1105,7 +1107,7 @@ def _assign_balanced_compute_regions(
                 bucket_loads[position_of[participant]] += cost
             continue
         assert domain is not None
-        logical_shape, _storage_regions = domain
+        logical_shape, storage_regions = domain
         for chunk_index, region in enumerate(
             _compute_chunk_regions(
                 layout.compute_sharding,
@@ -1116,6 +1118,12 @@ def _assign_balanced_compute_regions(
             if not region.numel:
                 continue
             views = _matrix_batch_views_for_regions(layout.compute_sharding, (region,))
+            stored_numel = [0] * num_participants
+            for holders, storage_region in storage_regions:
+                intersection = _tensor_region_intersection(storage_region, region)
+                if intersection is not None:
+                    for holder in holders:
+                        stored_numel[position_of[holder]] += intersection.numel
             jobs.append(
                 _ComputeJob(
                     cost=sum(
@@ -1125,34 +1133,34 @@ def _assign_balanced_compute_regions(
                     num_bytes=region.numel * layout.param.element_size(),
                     item_index=index,
                     region=region,
+                    stored_numel_by_position=tuple(stored_numel),
                     stable_key=(layout.fqn, chunk_index),
                 )
             )
 
-    heap = [
-        (load, 0, cumulative_loads[position] + load, position)
+    loads = [
+        (load, 0, cumulative_loads[position] + load)
         for position, load in enumerate(bucket_loads)
     ]
-    heapq.heapify(heap)
     assignments: list[list[_ComputeRegionMapping]] = [[] for _layout in compute_layouts]
     for job in sorted(
         jobs, key=lambda entry: (-entry.cost, -entry.num_bytes, entry.stable_key)
     ):
-        load, num_bytes, cumulative, position = heapq.heappop(heap)
+        *_key, position = min(
+            (load, -stored_numel, num_bytes, cumulative, position)
+            for position, ((load, num_bytes, cumulative), stored_numel) in enumerate(
+                zip(loads, job.stored_numel_by_position, strict=True)
+            )
+        )
         assignments[job.item_index].append((participants[position], job.region))
-        heapq.heappush(
-            heap,
-            (
-                load + job.cost,
-                num_bytes + job.num_bytes,
-                cumulative + job.cost,
-                position,
-            ),
+        load, num_bytes, cumulative = loads[position]
+        loads[position] = (
+            load + job.cost,
+            num_bytes + job.num_bytes,
+            cumulative + job.cost,
         )
 
-    updated_cumulative_loads = [0] * num_participants
-    for _load, _num_bytes, cumulative, position in heap:
-        updated_cumulative_loads[position] = cumulative
+    updated_cumulative_loads = [cumulative for _load, _num_bytes, cumulative in loads]
     return (
         tuple(
             tuple(sorted(regions, key=lambda entry: entry[1].offsets))

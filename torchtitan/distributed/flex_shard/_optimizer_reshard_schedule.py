@@ -656,7 +656,6 @@ class _PackedAllToAllSchedule:
 class _RedistributionGroup:
     process_group: dist.ProcessGroup
     participants: tuple[int, ...]
-    mesh_axis_participants: tuple[int, ...]
     local_participant: int
 
 
@@ -815,13 +814,11 @@ def _device_mesh_ranks(mesh: DeviceMesh) -> tuple[int, ...]:
 def _redistribution_group(mesh: DeviceMesh) -> _RedistributionGroup:
     process_group = mesh.get_group()
     participants = tuple(dist.get_process_group_ranks(process_group))
-    mesh_axis_participants = _device_mesh_ranks(mesh)
-    if set(mesh_axis_participants) != set(participants):
+    if set(_device_mesh_ranks(mesh)) != set(participants):
         raise ValueError("bucket mesh and process group participants do not match")
     return _RedistributionGroup(
         process_group=process_group,
         participants=participants,
-        mesh_axis_participants=mesh_axis_participants,
         local_participant=participants[dist.get_rank(process_group)],
     )
 

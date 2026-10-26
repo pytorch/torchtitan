@@ -70,12 +70,14 @@ class TestMuonPlanConstruction(unittest.TestCase):
             )
         plans = [bucket.redistribution_plans[0] for bucket in optimizer._bucket_plans]
         # Fixed work [1600, 0] exceeds both chunks together (960 + 200).
-        # Layers 0 and 2 put both chunks on rank 1; layer 1 uses both ranks.
+        # Layers 0 and 2 put both chunks on rank 1; layer 1 keeps each chunk
+        # on the rank that stores most of it.
         self.assertIs(plans[0], plans[2])
         self.assertIsNot(plans[0], plans[1])
         self.assertEqual(plans[0].storage_partitions, plans[1].storage_partitions)
         self.assertEqual(plans[0].compute_partition(0).logical_regions, ())
         self.assertEqual(plans[0].compute_partition(1).tensor_shape, (6, 4))
+        self.assertEqual(plans[1].compute_partition(0).tensor_shape, (4, 4))
         self.assertEqual(
             [
                 (tuple(view.shape), view.offset)
