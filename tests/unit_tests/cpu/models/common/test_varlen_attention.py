@@ -39,6 +39,7 @@ class TestPackedVarlenAttentionMetadata(unittest.TestCase):
         expected_type = spmd.SpmdType(
             {
                 MeshAxisName.DP: spmd.V,
+                MeshAxisName.CP: spmd.R,
                 MeshAxisName.TP: spmd.R,
             },
             partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
