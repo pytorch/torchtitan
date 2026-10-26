@@ -11,13 +11,12 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Generic, Literal, TypeVar
+from typing import Generic, Literal, NamedTuple, TypeVar
 
 import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
-from torch.utils import _pytree as pytree
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.context_parallel import cp_all_gather_tensors
@@ -260,19 +259,15 @@ class AllGatherKVSlidingWindowFlexInnerAttention(
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
 
-@dataclass(frozen=True, eq=False, kw_only=True)
-class AllGatherKVVarlenMetadata:
+class AllGatherKVVarlenAttentionMetadata(NamedTuple):
     """Global document offsets and optional K/V reordering indices."""
 
     varlen_metadata: VarlenAttentionMetadata
-    kv_restore_indices: torch.Tensor | None
-
-
-pytree.register_dataclass(AllGatherKVVarlenMetadata)
+    inverse_permutation: torch.Tensor | None
 
 
 class AllGatherKVVarlen(
-    CPInnerAttention[VarlenAttentionMetadata, AllGatherKVVarlenMetadata],
+    CPInnerAttention[VarlenAttentionMetadata, AllGatherKVVarlenAttentionMetadata],
 ):
     """Share K/V all-gather CP logic across the varlen variants."""
 
@@ -287,7 +282,7 @@ class AllGatherKVVarlen(
         attention_metadata: VarlenAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
-    ) -> AllGatherKVVarlenMetadata:
+    ) -> AllGatherKVVarlenAttentionMetadata:
         """Prepare global document offsets and K/V reordering indices."""
         if not isinstance(attention_metadata, VarlenAttentionMetadata):
             raise ValueError(
@@ -300,8 +295,8 @@ class AllGatherKVVarlen(
         if attention_metadata.cu_seq_k is not attention_metadata.cu_seq_q:
             raise ValueError("Varlen K/V all-gather CP supports only self-attention.")
         if permutation is None:
-            return AllGatherKVVarlenMetadata(
-                varlen_metadata=attention_metadata, kv_restore_indices=None
+            return AllGatherKVVarlenAttentionMetadata(
+                varlen_metadata=attention_metadata, inverse_permutation=None
             )
         # A permutation must come from global head-tail load balancing.
         if permutation.ndim != 2 or permutation.shape[0] != 1:
@@ -310,15 +305,15 @@ class AllGatherKVVarlen(
             )
 
         seq_len = permutation.shape[1]
-        restore_indices = torch.empty_like(permutation[0])
-        restore_indices[permutation[0]] = torch.arange(
+        inverse_permutation = torch.empty_like(permutation[0])
+        inverse_permutation[permutation[0]] = torch.arange(
             seq_len,
             device=permutation.device,
             dtype=permutation.dtype,
         )
-        return AllGatherKVVarlenMetadata(
+        return AllGatherKVVarlenAttentionMetadata(
             varlen_metadata=attention_metadata,
-            kv_restore_indices=restore_indices,
+            inverse_permutation=inverse_permutation,
         )
 
     @staticmethod
@@ -360,13 +355,15 @@ class AllGatherKVVarlen(
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
-        attention_metadata: VarlenAttentionMetadata | AllGatherKVVarlenMetadata,
+        attention_metadata: (
+            VarlenAttentionMetadata | AllGatherKVVarlenAttentionMetadata
+        ),
         **kwargs,
     ) -> torch.Tensor:
-        if not isinstance(attention_metadata, AllGatherKVVarlenMetadata):
+        if not isinstance(attention_metadata, AllGatherKVVarlenAttentionMetadata):
             raise ValueError(
-                f"{type(self).__name__} requires AllGatherKVVarlenMetadata, but got "
-                f"{type(attention_metadata).__name__}."
+                f"{type(self).__name__} requires AllGatherKVVarlenAttentionMetadata, "
+                f"but got {type(attention_metadata).__name__}."
             )
         varlen_metadata = attention_metadata.varlen_metadata
         k_THK, v_THV = cp_all_gather_tensors(
@@ -403,16 +400,16 @@ class AllGatherKVVarlen(
                 **kwargs,
             )
 
-        restore_indices = attention_metadata.kv_restore_indices
-        if restore_indices is None:
+        inverse_permutation = attention_metadata.inverse_permutation
+        if inverse_permutation is None:
             # No load balancer: Q is one contiguous shard.
             out_THV = run_chunk(q_THK, cp_rank * q_THK.shape[0])
         else:
             # Head-tail load balancer.
             gathered_k_THK, gathered_v_THV = k_THK, v_THV
             with spmd.no_typecheck():
-                k_THK = gathered_k_THK.index_select(0, restore_indices)
-                v_THV = gathered_v_THV.index_select(0, restore_indices)
+                k_THK = gathered_k_THK.index_select(0, inverse_permutation)
+                v_THV = gathered_v_THV.index_select(0, inverse_permutation)
             if spmd.is_type_checking():
                 spmd.assert_type_like(k_THK, gathered_k_THK)
                 spmd.assert_type_like(v_THV, gathered_v_THV)

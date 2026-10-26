@@ -29,8 +29,8 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVSlidingWindowVarlenInnerAttention,
     AllGatherKVVarlen,
+    AllGatherKVVarlenAttentionMetadata,
     AllGatherKVVarlenInnerAttention,
-    AllGatherKVVarlenMetadata,
 )
 
 
@@ -50,14 +50,14 @@ class TestAllGatherKVVarlenPreparation(TestCase):
         )
         reordered = torch.arange(8).index_select(0, permutation[0])
         self.assertEqual(
-            reordered.index_select(0, metadata.kv_restore_indices), torch.arange(8)
+            reordered.index_select(0, metadata.inverse_permutation), torch.arange(8)
         )
 
     def test_builds_chunk_metadata(self) -> None:
         metadata = AllGatherKVVarlen.prepare_cp_metadata(
             _metadata([0, 3, 7, 8]), permutation=None
         )
-        self.assertIsNone(metadata.kv_restore_indices)
+        self.assertIsNone(metadata.inverse_permutation)
         for kv_start, expected_k in ((0, [0, 3, 6, 6]), (2, [0, 1, 4, 4])):
             with self.subTest(kv_start=kv_start):
                 chunk = AllGatherKVVarlen._chunk_metadata(
@@ -123,21 +123,24 @@ class TestAllGatherKVVarlenPreparation(TestCase):
 
 class TestVarlenMetadataCudaGraphInputs(TestCase):
     def test_metadata_inputs_are_stable(self) -> None:
-        for restore_indices in (None, torch.arange(4, dtype=torch.int32)):
-            with self.subTest(head_tail=restore_indices is not None):
-                captured_metadata = AllGatherKVVarlenMetadata(
+        for inverse_permutation in (None, torch.arange(4, dtype=torch.int32)):
+            with self.subTest(head_tail=inverse_permutation is not None):
+                captured_metadata = AllGatherKVVarlenAttentionMetadata(
                     varlen_metadata=_metadata([0, 4]),
-                    kv_restore_indices=restore_indices,
+                    inverse_permutation=inverse_permutation,
                 )
-                rebuilt_metadata = AllGatherKVVarlenMetadata(
+                rebuilt_metadata = AllGatherKVVarlenAttentionMetadata(
                     varlen_metadata=_metadata([0, 4]),
-                    kv_restore_indices=restore_indices,
+                    inverse_permutation=inverse_permutation,
                 )
                 spec = CUDAGraphInputSpec({"metadata": captured_metadata})
                 captured = spec.flatten({"metadata": captured_metadata})
                 rebuilt = spec.flatten({"metadata": rebuilt_metadata})
+                self.assertEqual(
+                    spec.unflatten(rebuilt), {"metadata": rebuilt_metadata}
+                )
                 tensors = [leaf for leaf in captured if isinstance(leaf, torch.Tensor)]
-                self.assertEqual(len(tensors), 2 if restore_indices is None else 3)
+                self.assertEqual(len(tensors), 2 if inverse_permutation is None else 3)
                 for first, second in zip(captured, rebuilt, strict=True):
                     if not isinstance(first, torch.Tensor):
                         self.assertEqual(first, second)

@@ -239,7 +239,7 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be None"):
             config.__post_init__()
 
-    def test_sliding_only_rejects_reordering_and_validates_heads(self):
+    def test_sliding_only_ignores_load_balancer_but_validates_heads(self):
         from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
         from torchtitan.models.common.attention.cp_attention import (
             UlyssesSlidingWindowFlexInnerAttention,
@@ -254,11 +254,8 @@ class TestUlyssesConfigValidation(unittest.TestCase):
                 UlyssesSlidingWindowFlexInnerAttention.Config(sliding_window_size=128)
             )
         self.assertIsNone(model.first_full_attention)
-        with self.assertRaisesRegex(ValueError, "must be None"):
-            config.__post_init__()
-
-        config.parallelism.context_parallel_load_balancer = None
         config.__post_init__()
+
         model.layers[0].attention.n_heads = 3
         with self.assertRaisesRegex(ValueError, r"n_heads \(3\)"):
             config.__post_init__()

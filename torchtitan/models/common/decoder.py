@@ -93,6 +93,30 @@ class Decoder(BaseModel):
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
         enable_weight_tying: bool = False
 
+        def __post_init__(self) -> None:
+            sliding_window_sizes: dict[type[InnerAttention], int] = {}
+            for layer_config in self.layers:
+                for _, attention, _, _ in layer_config.traverse(Attention.Config):
+                    config = attention.inner_attention
+                    if not isinstance(
+                        config,
+                        (
+                            SlidingWindowFlexInnerAttention.Config,
+                            SlidingWindowVarlenInnerAttention.Config,
+                        ),
+                    ):
+                        continue
+                    backend = config._owner
+                    assert backend is not None and issubclass(backend, InnerAttention)
+                    window_size = sliding_window_sizes.setdefault(
+                        backend, config.sliding_window_size
+                    )
+                    if window_size != config.sliding_window_size:
+                        raise ValueError(
+                            f"{backend.__name__} layers must use the same "
+                            "sliding_window_size because they share attention metadata."
+                        )
+
         @property
         def first_full_attention(self) -> Attention.Config | None:
             """First full-attention config, including causal attention, else None."""
@@ -339,9 +363,7 @@ class Decoder(BaseModel):
         if load_balancer_config is not None:
             # All PP stages retain the full model config and share one permutation.
             attention = self.config.first_full_attention
-            if attention is None and not isinstance(
-                load_balancer_config, context_parallel.HeadTailCPLoadBalancer.Config
-            ):
+            if attention is None:
                 warn_once(
                     logger,
                     "Ignoring context_parallel_load_balancer because the model "
@@ -349,7 +371,7 @@ class Decoder(BaseModel):
                 )
             else:
                 selected_attention_metadata = None
-                if attention is not None and attention_metadata is not None:
+                if attention_metadata is not None:
                     cp_inner_attention = attention.inner_attention._owner
                     assert cp_inner_attention is not None and issubclass(
                         cp_inner_attention, CPInnerAttention
@@ -393,27 +415,11 @@ class Decoder(BaseModel):
         max_context_length: int | None = None,
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
-        sliding_window_sizes: dict[type[InnerAttention], int] = {}
         for layer_config in self.config.layers:
             for _, attention, _, _ in layer_config.traverse(Attention.Config):
                 config = attention.inner_attention
                 backend = config._owner
                 assert backend is not None and issubclass(backend, InnerAttention)
-                if isinstance(
-                    config,
-                    (
-                        SlidingWindowFlexInnerAttention.Config,
-                        SlidingWindowVarlenInnerAttention.Config,
-                    ),
-                ):
-                    window_size = sliding_window_sizes.setdefault(
-                        backend, config.sliding_window_size
-                    )
-                    if window_size != config.sliding_window_size:
-                        raise ValueError(
-                            f"{backend.__name__} layers must use the same "
-                            "sliding_window_size because they share attention metadata."
-                        )
                 if backend in attention_metadata:
                     continue
                 metadata = config.build_attention_metadata(

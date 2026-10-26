@@ -21,8 +21,8 @@ from torchtitan.models.common.attention import cp_attention, VarlenAttentionMeta
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVSlidingWindowVarlenInnerAttention,
     AllGatherKVVarlen,
+    AllGatherKVVarlenAttentionMetadata,
     AllGatherKVVarlenInnerAttention,
-    AllGatherKVVarlenMetadata,
 )
 
 
@@ -49,7 +49,7 @@ class TestKVAllGatherVarlenInnerAttention(TestCase):
         permutation: torch.Tensor | None,
         *,
         window_size: tuple[int, int] = (-1, 0),
-    ) -> AllGatherKVVarlenMetadata:
+    ) -> AllGatherKVVarlenAttentionMetadata:
         cu_seq = torch.tensor(offsets, device="cuda", dtype=torch.int32)
         lengths = torch.diff(cu_seq)
         global_metadata = VarlenAttentionMetadata(

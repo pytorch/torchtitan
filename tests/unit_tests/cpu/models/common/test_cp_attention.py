@@ -480,82 +480,57 @@ class TestDecoderCpSharding(unittest.TestCase):
             attention_metadata=expected_metadata,
         )
 
-    def test_head_tail_without_full_attention(self):
-        model = SimpleNamespace(config=SimpleNamespace(first_full_attention=None))
-        cp_group = SimpleNamespace(size=lambda: 2)
-        permutation = torch.tensor([[0, 1, 6, 7, 2, 3, 4, 5]], dtype=torch.int32)
-        inner_attention = AllGatherKVSlidingWindowVarlenInnerAttention
-        metadata = object()
-        input_dict = {
-            "input": torch.arange(8),
-            "labels": torch.arange(8) + 10,
-            "attention_metadata": {inner_attention: metadata},
-        }
-        parallelism = SimpleNamespace(
-            context_parallel_load_balancer=HeadTailCPLoadBalancer.Config()
-        )
-        with mock.patch.object(
-            context_parallel, "spmd_mesh_group", return_value=cp_group
-        ), mock.patch.object(
-            context_parallel,
-            "current_spmd_mesh",
-            return_value=SimpleNamespace(device_type="cpu"),
-        ), mock.patch.object(
-            spmd,
-            "shard",
-            side_effect=lambda tensor, *_args, **_kwargs: tensor.chunk(2)[0],
-        ), mock.patch.object(
-            inner_attention, "prepare_cp_metadata", return_value=metadata
-        ) as prepare_metadata:
-            result = Decoder._cp_shard(
-                cast(Any, model),
-                input_dict,
-                input_shardings=decoder_input_sharding(),
-                parallelism_context=cast(Any, SimpleNamespace()),
-                parallelism=cast(Any, parallelism),
-            )
+    def test_no_full_attention_disables_load_balancing(self):
+        from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
+        from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
 
-        prepare_metadata.assert_called_once()
-        self.assertIs(prepare_metadata.call_args.args[0], metadata)
-        torch.testing.assert_close(
-            prepare_metadata.call_args.kwargs["permutation"], permutation
-        )
-        expected = permutation[0].long().chunk(2)[0]
-        torch.testing.assert_close(result["input"], expected)
-        torch.testing.assert_close(result["labels"], expected + 10)
-
-    def test_ptrr_without_full_attention_uses_contiguous_sharding(self):
         model = SimpleNamespace(config=SimpleNamespace(first_full_attention=None))
-        metadata = object()
-        input_dict = {
-            "attention_metadata": {AllGatherKVSlidingWindowFlexInnerAttention: metadata}
-        }
-        parallelism = ParallelismConfig(
-            context_parallel_degree=2,
-            context_parallel_load_balancer=PTRRFlexAttentionCPLoadBalancer.Config(),
-        )
-        with mock.patch.object(
-            PTRRFlexAttentionCPLoadBalancer.Config, "build"
-        ) as build, mock.patch.object(
+        for inner_attention in (
             AllGatherKVSlidingWindowFlexInnerAttention,
-            "prepare_cp_metadata",
-            return_value=metadata,
-        ) as prepare, mock.patch.object(
-            context_parallel, "shard_tensors", return_value=input_dict
-        ) as shard, mock.patch(
-            "torchtitan.models.common.decoder.warn_once"
-        ) as warn:
-            Decoder._cp_shard(
-                cast(Any, model),
-                input_dict,
-                input_shardings={},
-                parallelism_context=mock.Mock(),
-                parallelism=parallelism,
-            )
-        build.assert_not_called()
-        prepare.assert_called_once_with(metadata, permutation=None)
-        self.assertIsNone(shard.call_args.kwargs["permutation"])
-        warn.assert_called_once()
+            AllGatherKVSlidingWindowVarlenInnerAttention,
+            ContextParallelInnerGDN,
+            ContextParallelInnerKDA,
+        ):
+            for load_balancer_type in (
+                HeadTailCPLoadBalancer,
+                PTRRFlexAttentionCPLoadBalancer,
+            ):
+                with self.subTest(
+                    attention=inner_attention.__name__,
+                    load_balancer=load_balancer_type.__name__,
+                ):
+                    metadata = object()
+                    input_dict = {
+                        "input": torch.arange(8),
+                        "attention_metadata": {inner_attention: metadata},
+                    }
+                    parallelism = SimpleNamespace(
+                        context_parallel_load_balancer=load_balancer_type.Config()
+                    )
+                    with mock.patch.object(
+                        load_balancer_type.Config, "build"
+                    ) as build_load_balancer, mock.patch.object(
+                        inner_attention,
+                        "prepare_cp_metadata",
+                        return_value=metadata,
+                    ) as prepare_metadata, mock.patch.object(
+                        context_parallel, "shard_tensors", return_value=input_dict
+                    ) as shard_tensors, mock.patch(
+                        "torchtitan.models.common.decoder.warn_once"
+                    ) as warn:
+                        Decoder._cp_shard(
+                            cast(Any, model),
+                            input_dict,
+                            input_shardings=decoder_input_sharding(),
+                            parallelism_context=cast(Any, SimpleNamespace()),
+                            parallelism=cast(Any, parallelism),
+                        )
+
+                    build_load_balancer.assert_not_called()
+                    prepare_metadata.assert_called_once_with(metadata, permutation=None)
+                    self.assertIsNone(shard_tensors.call_args.kwargs["permutation"])
+                    warn.assert_called_once()
+                    self.assertIn("no full attention", warn.call_args.args[1])
 
     def test_ptrr_prefers_full_metadata(self):
         full_metadata = object.__new__(BlockMask)
