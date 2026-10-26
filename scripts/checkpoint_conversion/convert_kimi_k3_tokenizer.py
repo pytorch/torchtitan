@@ -130,8 +130,6 @@ def check_renderer(output: Path, reference) -> None:
                 thinking=thinking,
                 thinking_effort=effort,
             )
-            if not isinstance(expected, list):
-                expected = expected["input_ids"]
             rendered = renderer.render_ids(conversation, add_generation_prompt=True)
             if rendered != expected:
                 raise ValueError(

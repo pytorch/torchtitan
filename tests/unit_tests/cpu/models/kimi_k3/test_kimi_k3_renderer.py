@@ -202,6 +202,34 @@ def test_bridge_appends_the_next_turn_to_the_sampled_ids():
     assert bridged.token_ids[: len(prompt) + len(completion)] == prompt + completion
 
 
+def test_bridge_closes_a_turn_cut_at_the_token_limit():
+    renderer = KimiK3Renderer(_ByteTokenizer(), KimiK3RendererConfig())
+    conversation = [{"role": "user", "content": "1+1?"}]
+    prompt = renderer.render_ids(conversation, add_generation_prompt=True)
+    user = [{"role": "user", "content": "go on"}]
+
+    # Cut in the think channel, between channels and in the response channel: the
+    # bridge closes the turn as a re-render of the parsed turn does.
+    for sampled, reasoning, content in (
+        ("still thinking", "still thinking", ""),
+        ("Add.<|close|>think<|sep|>", "Add.", ""),
+        ("Add.<|close|>think<|sep|><|open|>response<|sep|>2", "Add.", "2"),
+    ):
+        completion = _encode_xtml(sampled)
+        bridged = renderer.bridge_to_next_turn(prompt, completion, user)
+        assistant = {
+            "role": "assistant",
+            "content": content,
+            "reasoning_content": reasoning,
+        }
+        assert bridged.token_ids == renderer.render_ids(
+            conversation + [assistant] + user, add_generation_prompt=True
+        )
+        assert bridged.token_ids[: len(prompt) + len(completion)] == (
+            prompt + completion
+        )
+
+
 def test_bridge_falls_back_to_a_rerender():
     renderer = KimiK3Renderer(_ByteTokenizer(), KimiK3RendererConfig())
     prompt = renderer.render_ids(
@@ -209,9 +237,9 @@ def test_bridge_falls_back_to_a_rerender():
     )
     user = [{"role": "user", "content": "go on"}]
 
-    # Cut at the token limit inside the think channel: no <|end_of_msg|> to extend.
+    # Cut inside a marker: there is no well-formed turn to close.
     assert (
-        renderer.bridge_to_next_turn(prompt, _encode_xtml("still thinking"), user)
+        renderer.bridge_to_next_turn(prompt, _encode_xtml("Add.<|close|>"), user)
         is None
     )
     # An assistant turn would re-tokenize model output.

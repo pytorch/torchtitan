@@ -241,10 +241,11 @@ class KimiK3Renderer:
         Rendering concatenates per-message pieces, so appending the new messages'
         pieces to the sampled ids equals a re-render that keeps the sampled turn.
 
-        Returns ``None``, and the caller re-renders, when there is nothing to extend,
-        the new messages include an assistant turn or tools, or the completion did
-        not end its message with ``<|end_of_msg|>`` (cut at the token limit or
-        stopped at ``[EOS]``).
+        A completion cut at the token limit gets the closing markers a re-render of the
+        parsed turn would emit, after its sampled ids. Returns ``None``, and the caller
+        re-renders, when there is nothing to extend, the new messages include an
+        assistant turn or tools, or the completion was cut inside a marker or stopped
+        at ``[EOS]``.
         """
         if not previous_prompt_ids or not new_messages or tools:
             return None
@@ -256,7 +257,14 @@ class KimiK3Renderer:
             {self._special_ids[END_OF_MSG]},
         )
         if previous_ids is None:
-            return None
+            closing_ids = self._closing_ids(previous_completion_ids)
+            if closing_ids is None:
+                return None
+            previous_ids = [
+                *previous_prompt_ids,
+                *previous_completion_ids,
+                *closing_ids,
+            ]
         # The effort message opens the conversation and is already in previous_ids.
         token_ids, message_indices, _, is_content = self._encode_pieces(
             self._build(
@@ -276,6 +284,45 @@ class KimiK3Renderer:
             message_tool_names=[m.get("name") for m in new_messages],
             multi_modal_data=None,
         )
+
+    def _closing_ids(self, completion_ids: list[int]) -> list[int] | None:
+        """Markers that close an assistant turn cut at the token limit.
+
+        In the think channel: close it and add an empty response. In the response
+        channel: close it. Then close the message. Markers the completion already
+        emitted are skipped. Returns ``None`` when the cut fell inside a marker or the
+        completion stopped at ``[EOS]``.
+        """
+        ids = self._special_ids
+        if ids[EOS] in completion_ids:
+            return None
+        # A marker is <|open|> or <|close|>, its tag, then <|sep|>.
+        last_sep = max(
+            (i for i, token in enumerate(completion_ids) if token == ids[SEP]),
+            default=-1,
+        )
+        if {ids[OPEN], ids[CLOSE]} & set(completion_ids[last_sep + 1 :]):
+            return None
+
+        def marker(edge: str, tag: str) -> list[int]:
+            return [
+                ids[edge],
+                *self._tok.encode(tag, add_special_tokens=False),
+                ids[SEP],
+            ]
+
+        steps = []
+        if self._config.thinking:
+            steps += [marker(CLOSE, "think"), marker(OPEN, "response")]
+        steps += [
+            marker(CLOSE, "response"),
+            marker(CLOSE, "message"),
+            [ids[END_OF_MSG]],
+        ]
+        start = 0
+        while steps and (found := _find(completion_ids, steps[0], start)) >= 0:
+            start = found + len(steps.pop(0))
+        return [token for step in steps for token in step]
 
     # ------------------------------------------------------------------ parsing
 
@@ -315,6 +362,14 @@ class KimiK3Renderer:
             reasoning_content=(reasoning or "").strip() or None,
             tool_calls=[],
         )
+
+
+def _find(sequence: list[int], target: list[int], start: int) -> int:
+    """Index of the first ``target`` in ``sequence`` at or after ``start``, else -1."""
+    for index in range(start, len(sequence) - len(target) + 1):
+        if sequence[index : index + len(target)] == target:
+            return index
+    return -1
 
 
 def _content_text(content) -> str:
