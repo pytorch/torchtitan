@@ -59,6 +59,7 @@ __all__ = [
     "InnerAttention",
     "QKVLinear",
     "SlidingWindowFlexInnerAttention",
+    "SlidingWindowVarlenInnerAttention",
     "VarlenInnerAttention",
     "VarlenAttentionMetadata",
     "create_attention_mask",
@@ -293,15 +294,24 @@ class GQAttention(Attention):
 
 
 class VarlenAttentionMetadata(NamedTuple):
-    """
-    Cumulative sequence positions for queries and keys/values.
-
-    """
+    """Packed document offsets and attention window limits."""
 
     cu_seq_q: torch.Tensor
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
+    window_size: tuple[int, int] = (-1, 0)
+    """``window_size=(left, right)`` controls the attention window relative to
+    each query position. ``left`` is how many tokens before the query to attend
+    to, and ``right`` is how many tokens after. A value of -1 means unlimited.
+
+    - ``(-1, 0)``: Causal attention. Each token attends to all previous tokens
+      and itself, but no future tokens. Equivalent to ``is_causal=True``.
+    - ``(-1, -1)``: Full bidirectional attention (no masking). Equivalent to
+      ``is_causal=False``.
+    - ``(W, 0)``: Sliding-window causal attention. Attend to at most W previous
+      tokens and the current token.
+    """
 
     _OFFSETS_SPMD_TYPE = spmd.SpmdType(
         {
@@ -322,17 +332,6 @@ class VarlenAttentionMetadata(NamedTuple):
 class VarlenInnerAttention(InnerAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
-        window_size: tuple[int, int] = (-1, 0)
-        """ window_size=(left, right) controls the attention window relative to each
-            query position. 'left' is how many tokens before the query to attend to,
-            and 'right' is how many tokens after. A value of -1 means unlimited.
-
-              - (-1, 0): Causal attention - each token attends to all previous tokens
-                         and itself, but no future tokens. Equivalent to is_causal=True.
-              - (-1, -1): Full bidirectional attention (no masking). Equivalent to
-                          is_causal=False.
-              - (W, 0): Sliding window causal - attend to at most W previous tokens.
-        """
         sdpa_backends: list[SDPBackend] = field(
             default_factory=lambda: [
                 SDPBackend.CUDNN_ATTENTION,
@@ -345,7 +344,7 @@ class VarlenInnerAttention(InnerAttention):
 
         @property
         def is_full_attention(self) -> bool:
-            return self.window_size[0] == -1 and self.window_size[1] in (-1, 0)
+            return True
 
         def build_attention_metadata(
             self,
@@ -365,7 +364,6 @@ class VarlenInnerAttention(InnerAttention):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.window_size = config.window_size
         self.sdpa_backends = config.sdpa_backends
 
         from torchtitan.tools.utils import get_cuda_flash_attention_impl
@@ -436,7 +434,7 @@ class VarlenInnerAttention(InnerAttention):
                 max_q,
                 max_k,
                 scale=scale,
-                window_size=self.window_size,
+                window_size=attention_metadata.window_size,
                 **varlen_kwargs,
             )
 
@@ -450,6 +448,48 @@ class VarlenInnerAttention(InnerAttention):
         out_THV = out_THV.to(q_THK.dtype)
         lse_TH = lse_HT.transpose(0, 1)
         return out_transform(out_THV, lse_TH)
+
+
+class SlidingWindowVarlenInnerAttention(VarlenInnerAttention):
+    """Varlen attention with a causal sliding window."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(VarlenInnerAttention.Config):
+        sliding_window_size: int
+        """Maximum visible tokens, including the current token.
+
+        This matches SlidingWindowFlexInnerAttention. A value of 4 becomes
+        ``(3, 0)`` in VarlenAttentionMetadata.
+        """
+
+        def __post_init__(self) -> None:
+            if (
+                not isinstance(self.sliding_window_size, int)
+                or self.sliding_window_size < 1
+            ):
+                raise ValueError("sliding_window_size must be an integer >= 1.")
+
+        @property
+        def is_full_attention(self) -> bool:
+            return False
+
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> VarlenAttentionMetadata:
+            """Build packed document metadata with a causal sliding window."""
+            metadata = VarlenInnerAttention.Config.build_attention_metadata(
+                self,
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
+            return metadata._replace(window_size=(self.sliding_window_size - 1, 0))
 
 
 FlexAttentionMetadata: TypeAlias = BlockMask
@@ -651,7 +691,8 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(FlexInnerAttention.Config):
-        window_size: int
+        sliding_window_size: int
+        """Maximum visible tokens, including the current token."""
 
         @property
         def is_full_attention(self) -> bool:
@@ -672,7 +713,7 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
                 and_masks(
                     get_causal_mask_mod(),
                     get_efficient_causal_mask_mod_for_packed_document(positions),
-                    get_sliding_window_mask_mod(self.window_size),
+                    get_sliding_window_mask_mod(self.sliding_window_size),
                 ),
                 1,
                 None,

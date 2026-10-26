@@ -163,7 +163,7 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         cfg.layers[
             0
         ].attention.inner_attention = SlidingWindowFlexInnerAttention.Config(
-            window_size=128
+            sliding_window_size=128
         )
         cfg.layers[1].attention.n_heads = 3
 

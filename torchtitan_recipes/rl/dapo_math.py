@@ -34,8 +34,14 @@ from torchtitan.config.transform import (
 )
 from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
+from torchtitan.models.common.attention import (
+    SlidingWindowVarlenInnerAttention,
+    VarlenInnerAttention,
+)
+from torchtitan.models.common.attention.cp_attention import (
+    UlyssesSlidingWindowVarlenInnerAttention,
+    UlyssesVarlenInnerAttention,
+)
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.muse_spark import (
@@ -381,7 +387,12 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         config.trainer,
         [
             ContextParallelTransform(
-                inner_attention_map={VarlenInnerAttention: UlyssesVarlenInnerAttention}
+                inner_attention_map={
+                    VarlenInnerAttention: UlyssesVarlenInnerAttention,
+                    SlidingWindowVarlenInnerAttention: (
+                        UlyssesSlidingWindowVarlenInnerAttention
+                    ),
+                }
             ),
             DistMoeTransform(inplace_wgrad_accum=True),
         ],

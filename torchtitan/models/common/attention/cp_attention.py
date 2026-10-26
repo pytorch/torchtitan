@@ -29,6 +29,7 @@ from .attention import (
     FlexInnerAttention,
     InnerAttention,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "UlyssesInnerAttention",
     "UlyssesFlexInnerAttention",
     "UlyssesSlidingWindowFlexInnerAttention",
+    "UlyssesSlidingWindowVarlenInnerAttention",
     "UlyssesVarlenInnerAttention",
 ]
 
@@ -344,4 +346,18 @@ class UlyssesVarlenInnerAttention(
 
     @dataclass(kw_only=True, slots=True)
     class Config(UlyssesInnerAttention.Config, VarlenInnerAttention.Config):
+        pass
+
+
+class UlyssesSlidingWindowVarlenInnerAttention(
+    UlyssesInnerAttention[VarlenAttentionMetadata],
+    SlidingWindowVarlenInnerAttention,
+):
+    """Sliding-window varlen attention under Ulysses CP."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(
+        UlyssesInnerAttention.Config,
+        SlidingWindowVarlenInnerAttention.Config,
+    ):
         pass
