@@ -235,20 +235,27 @@ class KimiK3Renderer:
         *,
         tools=None,
     ) -> RenderedTokens | None:
-        """Extend the previous prompt + sampled completion with the next turn.
+        """Build the next turn's prompt by appending to the sampled ids.
 
-        A re-render rebuilds the previous assistant turn from ``parse_response``'s
-        stripped text, so it can drop or re-tokenize sampled ids. The next prompt then
-        no longer extends the previous one: the generator re-prefills from the first
-        changed token and the trainer sees a history the generator never sampled.
-        Rendering concatenates per-message pieces, so appending the new messages'
-        pieces to the sampled ids equals a re-render that keeps the sampled turn.
+        The previous prompt and completion are kept verbatim; only the new messages and
+        the generation prompt are rendered. A re-render would rebuild the sampled turn
+        from ``parse_response``'s stripped text and can change its ids, so the next
+        prompt would no longer extend the one the generator sampled from.
 
-        A completion cut at the token limit gets the closing markers a re-render of the
-        parsed turn would emit, after its sampled ids. Returns ``None``, and the caller
-        re-renders, when there is nothing to extend, the new messages include an
-        assistant turn or tools, or the completion was cut inside a marker or stopped
-        at ``[EOS]``.
+        Example, ``thinking=True``::
+
+            prompt      ...<|open|>message role="assistant"<|sep|><|open|>think<|sep|>
+            completion  Add.<|close|>think<|sep|><|open|>response<|sep|>2
+                        <|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|>
+            new         [{"role": "user", "content": "go on"}]
+            returned    prompt + completion, unchanged
+                        + <|open|>message role="user"<|sep|>go on<|close|>message<|sep|>
+                          <|end_of_msg|>
+                        + <|open|>message role="assistant"<|sep|><|open|>think<|sep|>
+
+        A completion cut at the token limit is closed first (``_closing_ids``). Returns
+        ``None``, and the caller re-renders, if ``new_messages`` has an assistant turn
+        or tools, or the completion cannot be closed.
         """
         if not previous_prompt_ids or not new_messages or tools:
             return None
@@ -291,9 +298,16 @@ class KimiK3Renderer:
     def _closing_ids(self, completion_ids: list[int]) -> list[int] | None:
         """Markers that close an assistant turn cut at the token limit.
 
-        In the think channel: close it and add an empty response. In the response
-        channel: close it. Then close the message. Markers the completion already
-        emitted are skipped. Returns ``None`` when the cut fell inside a marker or the
+        Appends, in order, the markers the completion has not emitted yet, so the turn
+        has the structure a re-render of the parsed turn has::
+
+            still thinking                                     (cut in think)
+              -> <|close|>think<|sep|><|open|>response<|sep|>
+                 <|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|>
+            Add.<|close|>think<|sep|><|open|>response<|sep|>2  (cut in response)
+              -> <|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|>
+
+        Returns ``None`` if the cut fell inside a marker (``Add.<|close|>``) or the
         completion stopped at ``[EOS]``.
         """
         ids = self._special_ids
