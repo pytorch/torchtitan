@@ -238,7 +238,52 @@ print(Path(torchtitan.__file__).parent)
 PY
 )"
 
+run_gpu_training_smoke_test() {
+  CUDA_VISIBLE_DEVICES=0 python - <<'PY'
+import torch
+import torch.nn.functional as F
+
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.llama3 import build_model_config
+
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+torch.compiler.set_stance("force_eager")
+device = torch.device("cuda")
+model_config = build_model_config(
+    "debugmodel",
+    parallelism=ParallelismConfig(),
+    seq_len=16,
+    attn_backend="flex",
+)
+model = model_config.build()
+model.init_states(buffer_device=device)
+model.to(device)
+model.train()
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+tokens_T = torch.randint(0, 2048, (16,), device=device)
+positions_T = torch.arange(16, device=device)
+attention_metadata = model._get_attention_metadata(positions_T)
+losses = []
+
+for _ in range(3):
+    optimizer.zero_grad(set_to_none=True)
+    logits_TV = model(tokens_T, positions_T, attention_metadata)
+    loss = F.cross_entropy(logits_TV[:-1], tokens_T[1:])
+    assert torch.isfinite(loss), loss
+    loss.backward()
+    optimizer.step()
+    losses.append(loss.item())
+
+assert losses[-1] < losses[0], losses
+assert all(parameter.grad is not None for parameter in model.parameters())
+print(f"losses={losses}")
+PY
+}
+
 run_core_tests() {
+  run_gpu_training_smoke_test
+
   CUDA_VISIBLE_DEVICES=0 python -m pytest tests/unit_tests/gpu \
     -m "not multi_gpu" \
     --strict-markers \
