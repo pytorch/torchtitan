@@ -20,6 +20,7 @@ from torchtitan.models.common.attention import (
     LinearAttention,
     MLAAttention,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.gdn import GDN
@@ -112,9 +113,9 @@ def test_first_full_attention_skips_sliding_window(backend):
     )
     first_attention = config.layers[0].attention
     first_attention.inner_attention = (
-        SlidingWindowFlexInnerAttention.Config(window_size=128)
+        SlidingWindowFlexInnerAttention.Config(sliding_window_size=128)
         if backend == "flex"
-        else VarlenInnerAttention.Config(window_size=(128, 0))
+        else SlidingWindowVarlenInnerAttention.Config(sliding_window_size=128)
     )
     assert config.first_full_attention is config.layers[1].attention
 

@@ -460,6 +460,7 @@ class MuseSparkModel(MultimodalModel):
         perception_emb_norm: MuseSparkRMSNorm.Config | None = None
 
         def __post_init__(self) -> None:
+            MultimodalModel.Config.__post_init__(self)
             if self.enable_weight_tying:
                 raise ValueError(
                     "Muse Spark does not support token embedding weight tying"

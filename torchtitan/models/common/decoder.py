@@ -23,6 +23,8 @@ from torchtitan.models.common.attention import (
     AttentionMetadata,
     AttentionMetadataMap,
     InnerAttention,
+    SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -90,6 +92,30 @@ class Decoder(BaseModel):
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
         enable_weight_tying: bool = False
+
+        def __post_init__(self) -> None:
+            sliding_window_sizes: dict[type[InnerAttention], int] = {}
+            for layer_config in self.layers:
+                for _, attention, _, _ in layer_config.traverse(Attention.Config):
+                    config = attention.inner_attention
+                    if not isinstance(
+                        config,
+                        (
+                            SlidingWindowFlexInnerAttention.Config,
+                            SlidingWindowVarlenInnerAttention.Config,
+                        ),
+                    ):
+                        continue
+                    backend = config._owner
+                    assert backend is not None and issubclass(backend, InnerAttention)
+                    window_size = sliding_window_sizes.setdefault(
+                        backend, config.sliding_window_size
+                    )
+                    if window_size != config.sliding_window_size:
+                        raise ValueError(
+                            f"{backend.__name__} layers must use the same "
+                            "sliding_window_size because they share attention metadata."
+                        )
 
         @property
         def first_full_attention(self) -> Attention.Config | None:
