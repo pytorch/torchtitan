@@ -324,6 +324,10 @@ class MuseSparkLMHead(HiMidLoLinear):
         self.output_multiplier = config.output_multiplier
         self.output_soft_cap_temp = config.output_soft_cap_temp
 
+    # TODO(ruisizhang123): the compiled bwd still computes
+    # dz * temp * (1 - tanh^2) * (1/temp) * mult (4 fp32 roundings). A custom
+    # autograd.Function bwd (recompute tanh from the saved fp32 logits) can cancel
+    # temp * (1/temp) into dz * mult * (1 - tanh^2) (2 roundings).
     @local_compile("muse_spark_logit_postprocess", batch_invariant=True)
     def postprocess_logits(self, logits_TV: torch.Tensor) -> torch.Tensor:
         """Apply Muse Spark Open's output scaling and smooth logit cap."""

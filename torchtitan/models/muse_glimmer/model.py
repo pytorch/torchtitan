@@ -18,6 +18,7 @@ import torch_remat as remat
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -221,8 +222,13 @@ class SoftCappedLinear(Linear):
         self.output_multiplier = config.output_multiplier
         self.output_soft_cap_temp = config.output_soft_cap_temp
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        logits = super().forward(input).float()
+    # TODO(ruisizhang123): the compiled bwd still computes
+    # dz * temp * (1 - tanh^2) * (1/temp) * mult (4 fp32 roundings). A custom
+    # autograd.Function bwd (recompute tanh from the saved bf16 logits) can cancel
+    # temp * (1/temp) into dz * mult * (1 - tanh^2) (2 roundings).
+    @local_compile("muse_glimmer_logit_postprocess", batch_invariant=True)
+    def postprocess_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        logits = logits.float()
         if self.output_soft_cap_temp is not None:
             logits = self.output_soft_cap_temp * torch.tanh(
                 logits * self.output_multiplier / self.output_soft_cap_temp
@@ -230,6 +236,9 @@ class SoftCappedLinear(Linear):
         else:
             logits = logits * self.output_multiplier
         return logits
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self.postprocess_logits(super().forward(input))
 
 
 class EmbeddingWithNorm(Module):
@@ -292,7 +301,12 @@ class MuseGlimmerModel(MultimodalModel):
         dim: int = 6656
         vocab_size: int = 202048
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "fused_binary_activation", "rope"]
+            default_factory=lambda: [
+                "loss",
+                "fused_binary_activation",
+                "rope",
+                "muse_glimmer_logit_postprocess",
+            ]
         )
         # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
         # bundled embedding+norm unit whose .embedding/.norm children carry the sharding.
