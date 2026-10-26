@@ -153,13 +153,13 @@ def validate_context_parallel(
     """Validate CP inner attentions, load balancers, and Ulysses head sharding."""
     from torchtitan.distributed.context_parallel import supports_cp_inner_attention
     from torchtitan.models.common.attention.cp_attention import (
+        AllGatherKVVarlen,
         CPInnerAttention,
         Ulysses,
     )
     from torchtitan.models.common.decoder import Decoder
 
     cp = parallelism.context_parallel_degree
-
     for fqn, traversed, _, _ in model.traverse(Attention.Config):
         attention = traversed
         inner_attention = attention.inner_attention
@@ -202,7 +202,13 @@ def validate_context_parallel(
             continue
         if load_balancer_config is None:
             continue
-        if isinstance(model, Decoder.Config) and model.first_full_attention is None:
+        # Decoder ignores load balancers without full attention.
+        # And Varlen rejects PTRR.
+        if (
+            isinstance(model, Decoder.Config)
+            and model.first_full_attention is None
+            and not issubclass(cp_inner_attention, AllGatherKVVarlen)
+        ):
             continue
         if issubclass(cp_inner_attention, Ulysses):
             raise ValueError(

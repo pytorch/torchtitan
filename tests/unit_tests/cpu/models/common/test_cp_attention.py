@@ -41,6 +41,8 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
     AllGatherKVSlidingWindowFlexInnerAttention,
+    AllGatherKVSlidingWindowVarlenInnerAttention,
+    AllGatherKVVarlenInnerAttention,
     CPInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesInnerAttention,
@@ -230,6 +232,16 @@ class TestKernelSelection(unittest.TestCase):
         )
         self.assertIsInstance(config, CPInnerAttention.Config)
         self.assertIsInstance(config, SlidingWindowFlexInnerAttention.Config)
+
+    def test_sliding_varlen_cp_kernel_preserves_semantic_type(self):
+        config = AllGatherKVSlidingWindowVarlenInnerAttention.Config(
+            sliding_window_size=128
+        )
+        self.assertIsInstance(config, CPInnerAttention.Config)
+        self.assertIsInstance(config, SlidingWindowVarlenInnerAttention.Config)
+
+        self.assertTrue(AllGatherKVVarlenInnerAttention.Config().is_full_attention)
+        self.assertFalse(config.is_full_attention)
 
     def test_cp_kernel_is_not_an_attention_backend(self):
         with self.assertRaisesRegex(ValueError, "Unknown backend"):
@@ -475,6 +487,7 @@ class TestDecoderCpSharding(unittest.TestCase):
         model = SimpleNamespace(config=SimpleNamespace(first_full_attention=None))
         for inner_attention in (
             AllGatherKVSlidingWindowFlexInnerAttention,
+            AllGatherKVSlidingWindowVarlenInnerAttention,
             ContextParallelInnerGDN,
             ContextParallelInnerKDA,
         ):
