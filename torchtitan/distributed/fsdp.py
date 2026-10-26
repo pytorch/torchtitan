@@ -270,6 +270,7 @@ def apply_fsdp_to_decoder(
     symm_mem_scope: FSDPSymmMemScope = None,
     *,
     param_dtype_override_fn: Callable[[nn.Parameter], torch.dtype | None] | None = None,
+    unshard_async_op: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to a decoder-style transformer model.
@@ -278,7 +279,7 @@ def apply_fsdp_to_decoder(
     gpt_oss, qwen3_vl, ...). The MoE handling is a strict superset of the dense
     case: a dense model leaves ``ep_degree=1`` / ``edp_mesh=None`` and has no
     MoE blocks, so every transformer block is sharded as a single
-    FSDP unit and the expert-parallel prefetching below is skipped.
+    FSDP unit.
 
     Args:
         model (Decoder): The model to apply data parallelism to.
@@ -312,6 +313,8 @@ def apply_fsdp_to_decoder(
         symm_mem_scope: Which FSDP modules use symmetric-memory communication.
         param_dtype_override_fn: Optional callback that overrides ``param_dtype``
             for selected parameters.
+        unshard_async_op: Whether to issue pre-forward/pre-backward
+            all-gathers with ``async_op=True`` from the compute stream.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -477,12 +480,12 @@ def apply_fsdp_to_decoder(
     if cpu_offload:
         logger.info("Applied CPU Offloading to the model")
 
-    # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
-    # in EP could interfere with implicit prefetching in FSDP
-    if ep_degree == 1:
-        return
+    # NOTE: always use explicit prefetching. Implicit prefetching relies on
+    # the CPU running ahead of the GPU, which D2H syncs (e.g. in EP) break,
+    # and all-gathers issued on the compute stream with async_op=True only
+    # overlap with compute if they are issued ahead of time.
 
-    # set up explicit prefetching when EP is enabled for forward
+    # set up explicit prefetching for forward
     transformer_blocks = list(model.layers.values())
     next_transformer_blocks = transformer_blocks[1:] + [None]
 
@@ -501,7 +504,7 @@ def apply_fsdp_to_decoder(
                 [model.norm, model.lm_head]
             )
 
-    # set up explicit prefetching when EP is enabled for backward
+    # set up explicit prefetching for backward
     # pyrefly: ignore [no-matching-overload]
     reversed_transformer_blocks = list(reversed(model.layers.values()))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
@@ -518,3 +521,6 @@ def apply_fsdp_to_decoder(
         elif model.tok_embeddings is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
+
+    if unshard_async_op:
+        model._set_unshard_async_op(True)

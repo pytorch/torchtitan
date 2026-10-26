@@ -69,6 +69,16 @@ class ParallelismConfig:
     experts.
     """
 
+    fsdp_unshard_async_op: bool = False
+    """
+    Issue FSDP pre-forward/pre-backward all-gathers with ``async_op=True`` from
+    the compute stream instead of on separate all-gather streams. All-gather
+    buffers are then allocated in the compute stream's memory pool, avoiding
+    inter-stream fragmentation. All-gathers still overlap with compute via
+    explicit forward/backward prefetching, but the pre-all-gather copy-in and
+    dtype cast no longer overlap with compute.
+    """
+
     tensor_parallel_degree: int = 1
     """Tensor Parallelism degree. 1 means disabled."""
 
