@@ -87,8 +87,8 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
     # Import by path so this CPU test does not load the RL package initializer,
     # which intentionally requires the optional vLLM runtime.
     module_path = (
-        Path(__file__).resolve().parents[4]
-        / "torchtitan/rl/generator/vllm/batch_invariance.py"
+        Path(loss_module.__file__).resolve().parents[1]
+        / "rl/generator/vllm/batch_invariance.py"
     )
     spec = importlib.util.spec_from_file_location(
         "torchtitan_batch_invariance_test", module_path
