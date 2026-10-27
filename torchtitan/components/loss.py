@@ -16,7 +16,7 @@ import torch.distributed._functional_collectives as funcol
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.config import Configurable, Function
+from torchtitan.config import Configurable
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
@@ -30,11 +30,11 @@ LossInput: TypeAlias = torch.Tensor | tuple[torch.Tensor, ...]
 LossInputT = TypeVar("LossInputT", contravariant=True)
 
 
-class Loss(ABC, Function[LossResult], Generic[LossInputT]):
+class Loss(ABC, Configurable, Generic[LossInputT]):
     """Callable loss contract used by trainers and loss wrappers."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+    class Config(Configurable.Config):
         """Base configuration type for loss components."""
 
     @abstractmethod
