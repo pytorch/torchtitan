@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-27T22:41:39.562241+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-27T22:56:46.944920+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -84,7 +84,22 @@ These are the maximum reported rank-local durations for two separate stages. Che
 
 | ID | Constructor ranks observed | Constructor max seconds | Checkpoint ranks observed | Checkpoint load max seconds |
 | --- | ---: | ---: | ---: | ---: |
+| `64g_sac_bs6` | 64 | 51.38 | 0 | - |
 | `64g_full_bs6` | 64 | 47.83 | 64 | 2,167.19 |
+
+## Full recompute BS6 profile interpretation
+
+The synchronized measured update averages are 41.30 seconds for graph trainer and 43.34 seconds for native eager. Update 16 is separately profiled and excluded from those averages.
+
+| Original rank-0 update-16 observation | Graph trainer | Native eager |
+| --- | ---: | ---: |
+| GPU slice interval union, seconds | 43.19 | 85.68 |
+| Symmetric-memory barrier slice union, seconds | 0.75 | 42.27 |
+| NCCL all-gather GPU slices | 1024 | 1048 |
+| NCCL reduce-scatter GPU slices | 640 | 520 |
+| Trace events | 355,167 | 2,953,367 |
+
+The native profiled update has substantial instrumentation disturbance and long symmetric-memory waits. Its trace duration must not replace the measured training time or establish a steady-state communication penalty. GPU slice counts are not logical collective counts, and individual category durations can overlap. Analysis uses the original trace files, not compacted display lanes.
 
 ## Additional execution controls
 
