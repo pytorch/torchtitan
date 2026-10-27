@@ -12,29 +12,8 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.components.loss import BaseLoss, compute_logprobs
-from torchtitan.distributed.spmd_types import spmd_mesh_group
-
-# Clamp |log(pi_theta/pi_old)| before exp() so a large generator/trainer
-# logprob mismatch cannot overflow exp() to inf/NaN.
-_MAX_LOG_RATIO = 10.0
-
-
-def _normalize(
-    value: torch.Tensor,
-    global_loss_token_counts: torch.Tensor | None,
-) -> torch.Tensor:
-    if global_loss_token_counts is None:
-        return value
-    global_loss_token_count = (
-        global_loss_token_counts
-        if global_loss_token_counts.ndim == 0
-        else global_loss_token_counts[0]
-    )
-    # A device tensor is required because the count is a mutable CUDA graph
-    # input. Multiplication also preserves the established CUDA scalar-division
-    # rounding for the float32 RL loss.
-    return value * global_loss_token_count.clamp_min(1).reciprocal()
+from torchtitan.components.loss import BaseLoss
+from torchtitan.rl.trainer.losses.common import normalize, policy_metrics, score_tokens
 
 
 class DAPOLoss(BaseLoss):
@@ -75,93 +54,44 @@ class DAPOLoss(BaseLoss):
         logits: torch.Tensor,
         labels: torch.Tensor,
         global_loss_token_counts: torch.Tensor | None = None,
-        *,
-        generator_logprobs: torch.Tensor,
-        temperature: torch.Tensor,
-        advantages: torch.Tensor,
-        loss_mask: torch.Tensor,
+        **loss_inputs: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute the per-token clip-higher surrogate loss.
 
         Args:
             logits: [T, V] current-policy output.
             labels: [T] pre-shifted target token ids.
-            generator_logprobs: [T] logprobs from the sampling policy.
-            temperature: [T] temperature each token was sampled at.
-            loss_mask: [T] bool mask; True for response tokens.
-            advantages: [T] per-token advantages (0.0 for prompt/padding).
             global_loss_token_counts: total response tokens with finite generator logprobs
                 across all microbatches and DP ranks; the loss denominator.
+            **loss_inputs: the [T] tensors `score_tokens` takes (generator logprobs,
+                temperature, loss mask, advantages).
 
         Returns:
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of
             scalar tensors pre-normalized for SUM reduction across DP ranks.
         """
-        # Score tokens under the distribution vLLM sampled from. Dividing by a per-token fp32
-        # tensor matches vLLM's op, so batch-invariant runs stay bitwise equal to the generator.
-        logits = logits / temperature.unsqueeze(-1)
-        trainer_logprobs, token_entropy = compute_logprobs(
-            logits,
-            labels,
-            vocab_parallel_group=spmd_mesh_group("tp"),
-            return_entropy=True,
+        tokens = score_tokens(
+            logits=logits,
+            labels=labels,
             global_vocab_size=self.global_vocab_size,
+            **loss_inputs,
         )
-        # A non-finite generator logprob (notably under CUDA graph) has no valid
-        # old-policy reference, so DROP that token from the loss + denominator (cleaner
-        # than nan->0, which trains it as if it were on-policy).
-        effective_loss_mask = loss_mask & torch.isfinite(generator_logprobs)
-        raw_log_ratio = trainer_logprobs - generator_logprobs
-        masked_log_ratio = torch.where(
-            effective_loss_mask, raw_log_ratio, torch.zeros_like(raw_log_ratio)
-        )
-        log_ratio = torch.clamp(masked_log_ratio, -_MAX_LOG_RATIO, _MAX_LOG_RATIO)
-        ratio = torch.exp(log_ratio)
-
         clipped_ratio = torch.clamp(
-            ratio, 1 - self.ratio_clip_low, 1 + self.ratio_clip_high
+            tokens.ratio, 1 - self.ratio_clip_low, 1 + self.ratio_clip_high
         )
-        token_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
-
-        masked_loss = token_loss * effective_loss_mask
-        loss = _normalize(masked_loss.sum(), global_loss_token_counts)
+        token_loss = -torch.min(
+            tokens.ratio * tokens.advantages, clipped_ratio * tokens.advantages
+        )
+        loss = normalize((token_loss * tokens.mask).sum(), global_loss_token_counts)
 
         with torch.no_grad():
-            diff_for_metrics = torch.where(
-                effective_loss_mask,
-                raw_log_ratio,
-                torch.zeros_like(raw_log_ratio),
-            )
-            masked_ratio = ratio * effective_loss_mask
-            metrics = {
-                "loss/mean": loss.detach(),
-                "loss/ratio_mean": _normalize(
-                    masked_ratio.sum(), global_loss_token_counts
-                ),
-                "loss/ratio_clipped_frac": _normalize(
-                    (
-                        (torch.abs(ratio - clipped_ratio) > 1e-6).float()
-                        * effective_loss_mask
-                    ).sum(),
-                    global_loss_token_counts,
-                ),
-                # Mean per-token log-ratio (log p_trainer - log q_generator) over
-                # sampled tokens. This is the k1 Monte-Carlo estimate of -KL(q || p).
-                "bit_wise/logprob_diff/mean": _normalize(
-                    diff_for_metrics.float().sum(), global_loss_token_counts
-                ),
-                "bit_wise/ratio_tokens_different/mean": _normalize(
-                    (
-                        (diff_for_metrics.abs() > 1e-6).float() * effective_loss_mask
-                    ).sum(),
-                    global_loss_token_counts,
-                ),
-                "bit_wise/logprob_diff/max": diff_for_metrics.abs().max(),
-                # Mean entropy of softmax(logits / temperature) over tokens used by the loss.
-                "trainer/entropy/mean": _normalize(
-                    (token_entropy * effective_loss_mask).sum(),
-                    global_loss_token_counts,
-                ),
+            was_clipped = (torch.abs(tokens.ratio - clipped_ratio) > 1e-6).float()
+            loss_metric_sums = {
+                "loss/ratio_clipped_frac": (was_clipped * tokens.mask).sum()
             }
-
-        return loss, metrics
+        return loss, policy_metrics(
+            tokens,
+            loss_metric_sums,
+            loss=loss,
+            global_loss_token_counts=global_loss_token_counts,
+        )
