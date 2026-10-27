@@ -14,6 +14,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.common.flops import get_nparams_and_active_nparams
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.glm5 import build_model_config, MODEL_FLAVORS
 from torchtitan.models.glm5.dsa import Glm5AllGatherKVFlexAttention, Glm5FlexAttention
 from torchtitan.models.glm5.model import Glm5Attention
@@ -152,6 +153,40 @@ class TestGlm5Config(unittest.TestCase):
             glm5_debugmodel(mtp_scale=0.125)
         with self.assertRaisesRegex(ValueError, "must be non-negative"):
             glm5_2_debugmodel_mtp(mtp_scale=-0.1)
+
+    def test_deepep_recipe_replaces_only_the_dispatcher(self) -> None:
+        from torchtitan_recipes.tests.models.glm5 import (
+            glm5_2_debugmodel_deepep,
+        )
+
+        config = glm5_2_debugmodel_deepep(seq_len=128)
+        self.assertEqual(config.parallelism.expert_parallel_degree, 4)
+        routed_experts = [
+            layer.feed_forward.routed_experts
+            for layer in config.model.layers
+            if isinstance(layer.feed_forward, MoE.Config)
+        ]
+        self.assertTrue(routed_experts)
+        self.assertTrue(
+            all(
+                isinstance(
+                    experts.token_dispatcher,
+                    DeepEPTokenDispatcher.Config,
+                )
+                for experts in routed_experts
+            )
+        )
+        self.assertTrue(
+            all(
+                experts.token_dispatcher.num_max_tokens_per_rank == 8 * 128
+                for experts in routed_experts
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "expert_parallel_degree > 1"):
+            glm5_2_debugmodel_deepep(
+                parallelism=ParallelismConfig(expert_parallel_degree=1)
+            )
 
     def test_preprocess_inputs_returns_loss_kwargs(self) -> None:
         config = build_model_config(

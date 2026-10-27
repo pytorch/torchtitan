@@ -17,11 +17,13 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import apply_transforms, TokenDispatcherTransform
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
+from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.glm5 import build_model_config, MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
@@ -113,6 +115,39 @@ def glm5_2_debugmodel_mtp(
         parallelism=parallelism,
         flavor="glm5_2_debugmodel_mtp",
         mtp_scale=mtp_scale,
+    )
+
+
+def glm5_2_debugmodel_deepep(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Return the GLM-5.2 debug recipe with the official DeepEP dispatcher."""
+    if parallelism is None:
+        parallelism = ParallelismConfig(expert_parallel_degree=4)
+    if parallelism.expert_parallel_degree <= 1:
+        raise ValueError("GLM DeepEP acceptance requires expert_parallel_degree > 1")
+    config = glm5_debugmodel(
+        seq_len,
+        parallelism=parallelism,
+        flavor="glm5_2_debugmodel",
+    )
+    num_max_tokens_per_rank = (
+        config.training.num_tokens_per_microbatch_per_dp_rank
+        // (
+            config.parallelism.context_parallel_degree
+            * config.parallelism.tensor_parallel_degree
+        )
+    )
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=DeepEPTokenDispatcher,
+                num_max_tokens_per_rank=num_max_tokens_per_rank,
+            )
+        ],
     )
 
 
