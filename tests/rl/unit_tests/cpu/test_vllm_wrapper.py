@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import asyncio
 import dataclasses
 import importlib
 from unittest import mock
@@ -157,6 +158,7 @@ class _Wrapper:
     """Stand-in `self` for VLLMModelWrapper's real model state dict load methods (no vLLM)."""
 
     load_state_dict = VLLMModelWrapper.load_state_dict
+    load_state_dict_direct = VLLMModelWrapper.load_state_dict_direct
 
     def __init__(self, model: nn.Module):
         self.model = model
@@ -232,6 +234,73 @@ def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
         )
         for name, param in model.named_parameters(remove_duplicate=False):
             assert param.equal(new_state_dict[name].to_local()), name
+    finally:
+        dist.destroy_process_group()
+
+
+def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> None:
+    """Fetch new weights into the sharded parameters with one FSDP group allocated at a time."""
+    dist.init_process_group(
+        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
+    )
+    try:
+        model = nn.Module()
+        model.tok_embeddings = nn.Embedding(32, 16)
+        model.layers = nn.ModuleList(nn.Linear(16, 16) for _ in range(3))
+        model.lm_head = nn.Linear(16, 32, bias=False)
+        model.lm_head.weight = model.tok_embeddings.weight
+        model.register_buffer("scale", torch.zeros(4))
+        mesh = init_device_mesh("cpu", (1,))
+        fully_shard([model.tok_embeddings, model.lm_head], mesh=mesh)
+        for block in model.layers:
+            fully_shard(block, mesh=mesh)
+        fully_shard(model, mesh=mesh)
+        model.set_keep_unsharded_storage(True)
+        new_state_dict = {k: v.detach() + 1.0 for k, v in model.state_dict().items()}
+        wrapper = _Wrapper(model)
+        (
+            wrapper._direct_load_groups,
+            wrapper._direct_load_other_keys,
+        ) = model_wrapper._direct_load_groups(model)
+        groups = [
+            group
+            for module in (model.tok_embeddings, *model.layers)
+            for group in module._get_fsdp_state()._fsdp_param_groups
+        ]
+
+        def is_allocated(group) -> bool:
+            return all(
+                p._sharded_param_data.untyped_storage().size() > 0
+                for p in group.fsdp_params
+            )
+
+        for module in model.modules():  # as after the initial load
+            if isinstance(module, FSDPModule):
+                model_wrapper._unshard_and_free_sharded_params(module)
+
+        fetched_keys = []
+
+        async def fetch(state_dict: dict[str, torch.Tensor]) -> None:
+            fetched_keys.append(sorted(state_dict))
+            # Only the fetched group may hold sharded buffers.
+            assert sum(map(is_allocated, groups)) <= 1
+            with torch.no_grad():
+                for key, tensor in state_dict.items():
+                    tensor.copy_(new_state_dict[key])
+
+        asyncio.run(wrapper.load_state_dict_direct(fetch))
+
+        assert fetched_keys == [
+            ["lm_head.weight", "tok_embeddings.weight"],
+            ["layers.0.bias", "layers.0.weight"],
+            ["layers.1.bias", "layers.1.weight"],
+            ["layers.2.bias", "layers.2.weight"],
+            ["scale"],
+        ]
+        assert not any(map(is_allocated, groups))
+        for name, param in model.named_parameters(remove_duplicate=False):
+            assert param.equal(new_state_dict[name].to_local()), name
+        assert model.scale.equal(new_state_dict["scale"])
     finally:
         dist.destroy_process_group()
 

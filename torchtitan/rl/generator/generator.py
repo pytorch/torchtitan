@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -154,6 +155,16 @@ class Generator(Configurable):
         Enable this to clear prefix-cache entries and preempt running requests; the engine
         then recomputes their KV under the new weights when they resume."""
 
+        direct_rdma_model_state_dict: bool = False
+        """Read the trainer's pinned CPU staging buffers over RDMA directly into
+        the engine's GPU weights, one FSDP group at a time, instead of first
+        prefetching a full pinned CPU copy on the generator host.
+
+        Saves generator host memory (one full copy of the weights) on hosts with
+        little CPU memory, e.g. GB300. The transfer then happens inside the
+        model state dict load, while the engine is paused, instead of
+        overlapping generation."""
+
         def __post_init__(self):
             # The generator runs full expert parallelism: the engine forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -235,6 +246,7 @@ class Generator(Configurable):
                     reset_kv_cache_on_model_state_dict_load=(
                         config.reset_kv_cache_on_model_state_dict_load
                     ),
+                    direct_rdma_model_state_dict=config.direct_rdma_model_state_dict,
                     rank=self._rank,
                     generator_name=generator_name,
                     output_dir=output_dir,
@@ -273,6 +285,8 @@ class Generator(Configurable):
             )
 
         self._prefetched_model_state_dict = engine.prefetched_model_state_dict
+        # Set by `initialize_torchstore_client`: the event loop TorchStore reads run on.
+        self._torchstore_loop: asyncio.AbstractEventLoop | None = None
 
         broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
         # The engine loop owns the engine from here on and releases it on exit, so this
@@ -293,6 +307,11 @@ class Generator(Configurable):
             broadcast_group=broadcast_group,
             max_engine_steps_between_decisions=config.max_engine_steps_between_decisions,
             reset_kv_cache_on_model_state_dict_load=config.reset_kv_cache_on_model_state_dict_load,
+            fetch_model_state_dict=(
+                self._fetch_model_state_dict
+                if config.direct_rdma_model_state_dict
+                else None
+            ),
         )
 
         logger.info("Generator initialized")
@@ -422,14 +441,16 @@ class Generator(Configurable):
             requester_index: Index used to namespace this generator mesh.
         """
         await ts.client(role=RankRole.REQUESTER, group=requester_index)
+        self._torchstore_loop = asyncio.get_running_loop()
 
     @sl.log_trace_span("load_model_state_dict")
     async def load_model_state_dict(self, version: int) -> None:
         """Queues a model state dict load for `version` and blocks until the engine loop has finished loading.
         Loads queued together are applied once, at the highest version.
 
-        The network transfer has already completed and this load applies the
-        prefetched weights to the GPU.
+        Without `direct_rdma_model_state_dict`, the network transfer has already
+        completed and this load applies the prefetched weights to the GPU. With
+        it, this load also reads the weights from the trainer.
 
         NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
         an idle engine holds off new `generate` calls until the queue drains, then calls this.
@@ -441,7 +462,12 @@ class Generator(Configurable):
 
     @sl.log_trace_span("prefetch_model_state_dict")
     async def prefetch_model_state_dict(self) -> None:
-        """Fetch weights into pinned CPU memory without interrupting generation."""
+        """Fetch weights into pinned CPU memory without interrupting generation.
+
+        A no-op with `direct_rdma_model_state_dict`: the load reads the weights.
+        """
+        if self.config.direct_rdma_model_state_dict:
+            return
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
         await ts.get_state_dict(
@@ -449,6 +475,27 @@ class Generator(Configurable):
             user_state_dict=self._prefetched_model_state_dict,
             strict=False,
             direct_rdma=False,
+        )
+
+    async def _fetch_model_state_dict(
+        self, state_dict: dict[str, torch.Tensor]
+    ) -> None:
+        """Read `state_dict`'s weights in place from the trainer's staging buffers over RDMA.
+
+        Called on the engine loop thread during a load; the read runs on the TorchStore
+        client's event loop.
+        """
+        assert self._torchstore_loop is not None
+        await asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(
+                ts.get_state_dict(
+                    "model_state_dict",
+                    user_state_dict=state_dict,
+                    strict=False,
+                    direct_rdma=True,
+                ),
+                self._torchstore_loop,
+            )
         )
 
     async def close(self) -> None:
