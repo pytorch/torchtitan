@@ -16,6 +16,8 @@ from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.activation import UnaryActivationFn
 
+# T = tokens, H = heads, D = features per head.
+
 
 class GatedRMSNorm(Module):
     """Apply RMSNorm followed by a unary gate activation."""
@@ -25,10 +27,13 @@ class GatedRMSNorm(Module):
         dim: int
         eps: float
         activation_fn: UnaryActivationFn.Config
+        cast_before_gate: bool = False
+        """Round the unweighted norm to the input dtype before weight and gate."""
 
     def __init__(self, config: Config):
         super().__init__()
         self.eps = config.eps
+        self.cast_before_gate = config.cast_before_gate
         self.activation_fn = config.activation_fn.build()
         self.weight = nn.Parameter(torch.empty(config.dim))
 
@@ -39,13 +44,15 @@ class GatedRMSNorm(Module):
         gate: torch.Tensor,
     ) -> torch.Tensor:
         input_dtype = input.dtype
-        normalized = F.rms_norm(
+        normalized_THD = F.rms_norm(
             input.float(),
             (input.shape[-1],),
-            self.weight.float(),
+            None if self.cast_before_gate else self.weight.float(),
             self.eps,
         )
-        return (normalized * self.activation_fn(gate.float())).to(input_dtype)
+        if self.cast_before_gate:
+            normalized_THD = normalized_THD.to(input_dtype) * self.weight
+        return (normalized_THD * self.activation_fn(gate.float())).to(input_dtype)
 
 
 __all__ = ["GatedRMSNorm"]

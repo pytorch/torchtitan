@@ -1,0 +1,374 @@
+{
+  "reference_revision": "494470d677d05d44153d235d795e0d01040307ab",
+  "checkpoint_revision": "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+  "device": "cuda",
+  "torch": "2.16.0.dev20261006+cu132",
+  "component_dtype": "float32",
+  "torch_revision": "1a66f68165eb1685c14874588d9a2e0cd475e116",
+  "transformers": "5.21.0.dev0",
+  "gpu": "NVIDIA GB300",
+  "cuda": "13.2",
+  "backbone_dtype": "bfloat16",
+  "seed": 42,
+  "attention_backend": "SDPA MATH",
+  "tolerance_rationale": "FP32 operation-order error; BF16 half-epsilon absolute plus one epsilon relative. Packed expert-ID replay is diagnostic only; unconstrained routing differences are reported separately.",
+  "tokens": [
+    29,
+    33,
+    54,
+    6,
+    47,
+    30,
+    24,
+    63,
+    30,
+    26,
+    45,
+    23,
+    14,
+    27,
+    43,
+    55,
+    50,
+    58,
+    19,
+    33,
+    12,
+    22,
+    13,
+    35,
+    5,
+    60,
+    28,
+    2,
+    40,
+    52,
+    51,
+    51,
+    53,
+    32,
+    25,
+    31,
+    32,
+    21,
+    30
+  ],
+  "results": {
+    "residual_read": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 2e-05,
+      "rtol": 2e-05
+    },
+    "residual_write": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 2e-05,
+      "rtol": 2e-05
+    },
+    "residual_gradient/input": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "residual_gradient/hc_norm.weight": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "residual_gradient/input_mix_weight_down.weight": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "residual_gradient/input_mix_weight_up.weight": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "residual_gradient/block_inject_weight.weight": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "ple": {
+      "max_abs": 7.450580596923828e-09,
+      "rms": 5.350747160354476e-10,
+      "relative_l2": 5.0056295728951035e-08,
+      "atol": 2e-05,
+      "rtol": 2e-05
+    },
+    "ple_gradient/input": {
+      "max_abs": 6.394884621840902e-14,
+      "rms": 2.266811067824661e-15,
+      "relative_l2": 2.1467755140455987e-07,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "ple_gradient/ple_embedding.ngram_embedding.weight": {
+      "max_abs": 3.183231456205249e-12,
+      "rms": 1.1273768810943256e-13,
+      "relative_l2": 2.4171891542943295e-07,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "ple_gradient/key_proj.weight": {
+      "max_abs": 6.821210263296962e-13,
+      "rms": 4.814471783710669e-14,
+      "relative_l2": 2.323302344494695e-07,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "ple_gradient/value_proj.weight": {
+      "max_abs": 4.547473508864641e-13,
+      "rms": 3.9089400498971816e-14,
+      "relative_l2": 1.5757442985503002e-07,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "ple_gradient/norm_key.weight": {
+      "max_abs": 8.526512829121202e-14,
+      "rms": 1.488792888092496e-14,
+      "relative_l2": 2.2196236176506467e-07,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "ple_gradient/norm_query.weight": {
+      "max_abs": 9.947598300641403e-14,
+      "rms": 1.5037651743919753e-14,
+      "relative_l2": 2.241945602133329e-07,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "ple_gradient/norm_conv.weight": {
+      "max_abs": 1.7053025658242404e-13,
+      "rms": 1.525334924643182e-14,
+      "relative_l2": 6.69310800122868e-08,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "ple_gradient/conv1d.weight": {
+      "max_abs": 1.8189894035458565e-12,
+      "rms": 3.3007677384173863e-13,
+      "relative_l2": 6.684725525011683e-08,
+      "atol": 3e-06,
+      "rtol": 3e-05
+    },
+    "indexer_selection": "exact",
+    "qsa": {
+      "max_abs": 4.0978193283081055e-08,
+      "rms": 6.244539016179204e-09,
+      "relative_l2": 2.739614965881419e-07,
+      "atol": 2e-05,
+      "rtol": 2e-05
+    },
+    "router_logits": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 2e-05,
+      "rtol": 2e-05
+    },
+    "router_mixing_weights": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 2e-05,
+      "rtol": 2e-05
+    },
+    "block_0": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "block_1": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "block_3": {
+      "max_abs": 0.00048828125,
+      "rms": 2.7992225101674757e-06,
+      "relative_l2": 2.77487056125972e-06,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_block_0": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_0": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_margin_0": 0.0008544921875,
+    "stack_block_1": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_1": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_margin_1": 0.00146484375,
+    "stack_block_2": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_2": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_margin_2": 0.000732421875,
+    "stack_block_3": {
+      "max_abs": 0.000244140625,
+      "rms": 2.5156643853734994e-06,
+      "relative_l2": 9.674663298167051e-05,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_3": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_margin_3": 0.00048828125,
+    "stack_block_4": {
+      "max_abs": 0.00048828125,
+      "rms": 1.781158788223919e-05,
+      "relative_l2": 0.0006783102108371472,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_4": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_margin_4": 0.00048828125,
+    "stack_block_5": {
+      "max_abs": 0.00048828125,
+      "rms": 3.336169433248839e-05,
+      "relative_l2": 0.001259943406760459,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_5": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_margin_5": 0.00048828125,
+    "stack_block_6": {
+      "max_abs": 0.00048828125,
+      "rms": 4.727174939620982e-05,
+      "relative_l2": 0.0017643829027516992,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_6": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "relative_l2": 0.0,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_margin_6": 0.0050048828125,
+    "stack_block_7": {
+      "max_abs": 0.0009765625,
+      "rms": 6.942843050724731e-05,
+      "relative_l2": 0.00234855274260743,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_7": {
+      "max_abs": 0.00390625,
+      "rms": 0.0004945016440838216,
+      "relative_l2": 0.0009875422222673448,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "stack_router_margin_7": 0.005615234375,
+    "logits": {
+      "max_abs": 0.001953125,
+      "rms": 0.0004088068913862112,
+      "relative_l2": 0.0026871488528413005,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "logit_probability_metrics": {
+      "cosine": 0.9999963897752312,
+      "mean_kl_reference_to_native": 8.096007889348156e-08,
+      "top1_agreement": 1.0,
+      "top5_set_overlap": 1.0
+    },
+    "packed_documents_unimposed": {
+      "max_abs": 0.02587890625,
+      "rms": 0.0023384643718600273,
+      "changed_router_tokens_by_layer": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 1,
+        "6": 0,
+        "7": 1
+      }
+    },
+    "packed_documents_imposed_ids": {
+      "max_abs": 0.00390625,
+      "rms": 0.0011736027055773725,
+      "relative_l2": 0.007629933681862833,
+      "atol": 0.00390625,
+      "rtol": 0.0078125
+    },
+    "vision": {
+      "max_abs": 3.2782554626464844e-07,
+      "rms": 9.134070482852603e-08,
+      "relative_l2": 7.958801889507811e-07,
+      "atol": 2e-05,
+      "rtol": 2e-05
+    }
+  }
+}

@@ -28,16 +28,21 @@ class Embedding(nn.Embedding, Module):
         num_embeddings: int
         embedding_dim: int
         padding_idx: int | None = None
+        vocab_parallel: bool = True
+        """Use rank-local vocabulary rows under TP. False uses standard lookup,
+        including when TP shards embedding features instead of vocabulary rows.
+        """
 
     def __init__(self, config: Config):
         super().__init__(
             config.num_embeddings, config.embedding_dim, padding_idx=config.padding_idx
         )
+        self.vocab_parallel = config.vocab_parallel
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Run vocab-parallel embedding when the active mesh has a TP group."""
         tp_group = spmd_mesh_group("tp")
-        if tp_group is None:
+        if tp_group is None or not self.vocab_parallel:
             return F.embedding(
                 input,
                 self.weight,

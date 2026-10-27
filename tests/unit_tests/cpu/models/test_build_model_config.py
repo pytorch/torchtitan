@@ -33,6 +33,7 @@ _MODELS = [
     "qwen3_5",
     "qwen3_6",
     "qwen3_8",
+    "qwen3_8_flash_next",
     "deepseek_v3",
     "deepseek_v4",
     "gpt_oss",
@@ -44,7 +45,7 @@ _MODELS = [
 
 
 @pytest.mark.parametrize(
-    "model", [name for name in _MODELS if name not in ("deepseek_v4", "kimi_k2_7")]
+    "model", [name for name in _MODELS if name not in ("deepseek_v4", "kimi_k2_7", "qwen3_8_flash_next")]
 )
 def test_model_defaults_to_varlen(model):
     module = importlib.import_module(f"torchtitan.models.{model}")
@@ -74,7 +75,7 @@ def test_model_defaults_to_varlen(model):
     )
 
 
-@pytest.mark.parametrize("model", ["qwen3_5", "qwen3_6", "qwen3_8", "kimi_k3"])
+@pytest.mark.parametrize("model", ["qwen3_5", "qwen3_6", "qwen3_8", "qwen3_8_flash_next", "kimi_k3"])
 def test_hybrid_layers_have_one_attention_config(model):
     module = importlib.import_module(f"torchtitan.models.{model}")
     config = module.build_model_config("debugmodel", parallelism=ParallelismConfig())

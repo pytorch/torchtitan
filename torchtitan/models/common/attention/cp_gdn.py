@@ -261,8 +261,13 @@ class ContextParallelInnerGDN(
                 "Gated DeltaNet context parallelism requires an active "
                 "multi-rank CP mesh axis."
             )
-        normalized_q_1THK = l2norm(xq_THK.unsqueeze(0), cu_seqlens=routing.cu_seqlens)
-        normalized_k_1THK = l2norm(xk_THK.unsqueeze(0), cu_seqlens=routing.cu_seqlens)
+        autotune = not torch.are_deterministic_algorithms_enabled()
+        normalized_q_1THK = l2norm(
+            xq_THK.unsqueeze(0), cu_seqlens=routing.cu_seqlens, autotune=autotune
+        )
+        normalized_k_1THK = l2norm(
+            xk_THK.unsqueeze(0), cu_seqlens=routing.cu_seqlens, autotune=autotune
+        )
         output_1THV, _ = context_parallel_gdn(
             normalized_q_1THK,
             normalized_k_1THK,

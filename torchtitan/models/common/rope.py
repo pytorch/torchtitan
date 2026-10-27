@@ -14,6 +14,8 @@ import torch
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
 
+# T = packed tokens, H = attention heads, R = rotary features.
+
 __all__ = [
     "ComplexRoPE",
     "CosSinRoPE",
@@ -385,7 +387,12 @@ class _RotatePairs(torch.autograd.Function):
 class CosSinRoPE(RoPE):
     @dataclass(kw_only=True, slots=True)
     class Config(RoPE.Config):
-        pass
+        compute_in_float32: bool = True
+        """False rounds cos/sin and each rotation operation to the input dtype."""
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.compute_in_float32 = config.compute_in_float32
 
     @local_compile("rope", batch_invariant=True)
     def forward(
@@ -396,7 +403,13 @@ class CosSinRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super().forward(query, key, positions, inverse=inverse)
+        return self.apply_rotary_emb(
+            query,
+            key,
+            self._reshape_cache(query, positions),
+            inverse=inverse,
+            compute_in_float32=self.compute_in_float32,
+        )
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute cos/sin values.
@@ -458,22 +471,26 @@ class CosSinRoPE(RoPE):
         rope_cache: torch.Tensor,
         *,
         inverse: bool = False,
+        compute_in_float32: bool = True,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Apply cos/sin RoPE using the rotate-half convention."""
         if inverse:
             raise NotImplementedError("CosSinRoPE does not support inverse rotation.")
 
         head_dim = query.shape[-1]
-        cos = rope_cache[..., :head_dim]
-        sin = rope_cache[..., head_dim:]
-        query_f = query.float()
-        xq_out = (query_f * cos) + (CosSinRoPE._rotate_half(query_f) * sin)
+        cos_T1R = rope_cache[..., :head_dim]
+        sin_T1R = rope_cache[..., head_dim:]
+        query_THR = query.float() if compute_in_float32 else query
+        if not compute_in_float32:
+            cos_T1R = cos_T1R.to(query.dtype)
+            sin_T1R = sin_T1R.to(query.dtype)
+        xq_THR = (query_THR * cos_T1R) + (CosSinRoPE._rotate_half(query_THR) * sin_T1R)
         if key is None:
-            return xq_out.type_as(query)
+            return xq_THR.type_as(query)
 
-        key_f = key.float()
-        xk_out = (key_f * cos) + (CosSinRoPE._rotate_half(key_f) * sin)
-        return xq_out.type_as(query), xk_out.type_as(key)
+        key_THR = key.float() if compute_in_float32 else key
+        xk_THR = (key_THR * cos_T1R) + (CosSinRoPE._rotate_half(key_THR) * sin_T1R)
+        return xq_THR.type_as(query), xk_THR.type_as(key)
 
     @staticmethod
     def _rotate_half(x: torch.Tensor) -> torch.Tensor:

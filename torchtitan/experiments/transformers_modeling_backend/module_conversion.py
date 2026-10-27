@@ -56,7 +56,7 @@ def convert_hf_to_module(model: nn.Module) -> None:
     for child in model.children():
         if type(child) is nn.Embedding:
             child.__class__ = Embedding
-            cast(Embedding, child).tp_group = None
+            cast(Embedding, child).vocab_parallel = True
         elif not isinstance(child, Module):
             cls = type(child)
             if any("__slots__" in k.__dict__ for k in cls.__mro__[:-1]):

@@ -7,7 +7,7 @@
 """Gated DeltaNet linear attention backed by Attention Gym."""
 
 # Shape suffixes:
-# T = packed tokens, D = model dimension, C = projection channels,
+# B = batch, T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # S = state slots, W = convolution kernel width.
 
@@ -122,8 +122,8 @@ def _recurrent_gdn_fwd(
         device=q_BTHK.device,
     )
     # The recurrent operator consumes normalized Q/K.
-    normalized_q_BTHK = l2norm(q_BTHK, cu_seqlens=cu_seqlens)
-    normalized_k_BTHK = l2norm(k_BTHK, cu_seqlens=cu_seqlens)
+    normalized_q_BTHK = l2norm(q_BTHK, cu_seqlens=cu_seqlens, autotune=False)
+    normalized_k_BTHK = l2norm(k_BTHK, cu_seqlens=cu_seqlens, autotune=False)
     out_BTHV, _ = recurrent_gdn(
         normalized_q_BTHK,
         normalized_k_BTHK,
@@ -166,11 +166,12 @@ def _chunk_gdn_gradients(
         inputs = tuple(
             tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
         )
-        normalized_q = l2norm(inputs[0], cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(inputs[1], cu_seqlens=cu_seqlens)
+        autotune = not torch.are_deterministic_algorithms_enabled()
+        normalized_q_BTHK = l2norm(inputs[0], cu_seqlens=cu_seqlens, autotune=autotune)
+        normalized_k_BTHK = l2norm(inputs[1], cu_seqlens=cu_seqlens, autotune=autotune)
         output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             inputs[2],
             inputs[3],
             inputs[4],
@@ -250,11 +251,14 @@ class GDNKernel(Module):
                 cu_seqlens,
             ).squeeze(0)
 
-        normalized_q = l2norm(xq_BTHK, cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(xk_BTHK, cu_seqlens=cu_seqlens)
+        # Backward tile tuning changes the FP32 reduction order even when the
+        # GDN chunk backend itself is fixed for deterministic execution.
+        autotune = not torch.are_deterministic_algorithms_enabled()
+        normalized_q_BTHK = l2norm(xq_BTHK, cu_seqlens=cu_seqlens, autotune=autotune)
+        normalized_k_BTHK = l2norm(xk_BTHK, cu_seqlens=cu_seqlens, autotune=autotune)
         output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             xv_BTHV,
             g_BTH,
             beta_BTH,

@@ -21,6 +21,10 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
 from torchtitan_recipes.tests.models.multimodal import (
     set_rank_conditional_image_presence,
 )
+from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
+    qwen38_flash_next_debugmodel,
+    qwen38_flash_next_debugmodel_tp2,
+)
 
 from tests.integration_tests import IntegrationTestDefinition
 
@@ -136,6 +140,18 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
 def build_b200_tests_list() -> list[IntegrationTestDefinition]:
     """Build integration tests that require B200-class hardware."""
     return [
+        IntegrationTestDefinition(
+            configs=[qwen38_flash_next_debugmodel_tp2],
+            test_descr="Qwen3.8-Flash-Next deterministic TP, EP and SP numerics",
+            test_name="qwen3_8_flash_next_tp_ep_numerics",
+            ngpu=2,
+            use_real_pg=True,
+            skip_rocm_test=True,
+            golden_numerics_path=(
+                "tests/assets/losses/real_pg/qwen3_8_flash_next_gb200.txt"
+            ),
+            loss_compare_seed_config=qwen38_flash_next_debugmodel,
+        ),
         IntegrationTestDefinition(
             configs=[kimi_k3_debugmodel_mm],
             test_descr="Kimi K3 multimodal SPMD-typed FSDP, TP and EP",
