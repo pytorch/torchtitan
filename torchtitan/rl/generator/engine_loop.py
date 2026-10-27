@@ -14,7 +14,7 @@ import enum
 import gc
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TypeVar
 
@@ -113,7 +113,8 @@ class EngineLoop:
     NOT drain in-flight requests first ("hotswap"). This behavior can be changed in the
     inter-generator router, by blocking new requests until the engine is drained. The network
     transfer into the engine's pinned CPU buffers happens before this loop action, which then
-    performs the local CPU-to-GPU copy.
+    performs the local CPU-to-GPU copy. With `fetch_model_state_dict`, the loop action performs
+    the transfer itself, straight into the engine's weights.
 
     Args:
         engine: The inference engine, built on the engine loop thread. The loop releases it on exit.
@@ -123,6 +124,9 @@ class EngineLoop:
         broadcast_group: All-ranks gloo group that `LoopDecision`s are broadcast over.
         max_engine_steps_between_decisions: ``Generator.Config``'s field.
         reset_kv_cache_on_model_state_dict_load: ``Generator.Config``'s field.
+        fetch_model_state_dict: Fills the given model state dict tensors in place with the new
+            weights. When set, loads fetch through it instead of loading the engine's prefetched
+            model state dict.
     """
 
     def __init__(
@@ -135,8 +139,12 @@ class EngineLoop:
         broadcast_group: dist.ProcessGroup,
         max_engine_steps_between_decisions: int,
         reset_kv_cache_on_model_state_dict_load: bool,
+        fetch_model_state_dict: (
+            Callable[[dict[str, torch.Tensor]], Awaitable[None]] | None
+        ) = None,
     ):
         self._engine: GenerationEngine | None = engine
+        self._fetch_model_state_dict = fetch_model_state_dict
         self._event_loop = event_loop
         self._request_dispatcher = request_dispatcher
         self._rank = rank
@@ -490,9 +498,15 @@ class EngineLoop:
         version.
 
         The model state dict was already fetched into the engine's pinned CPU buffers; this
-        performs the local CPU-to-GPU copy.
+        performs the local CPU-to-GPU copy. With `fetch_model_state_dict`, this fetches the
+        model state dict straight into the engine's weights instead.
         """
-        self._engine.load_prefetched_model_state_dict()
+        if self._fetch_model_state_dict is not None:
+            await self._engine.load_model_state_dict_direct(
+                self._fetch_model_state_dict
+            )
+        else:
+            self._engine.load_prefetched_model_state_dict()
         self.policy_version = version
         gc.collect()
 

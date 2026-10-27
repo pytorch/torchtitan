@@ -132,6 +132,7 @@ def register_to_vllm(
     parallelism: InferenceParallelismConfig,
     checkpointer_config: CheckpointManager.Config | None,
     dist_moe_runtime: DistMoeRuntime.Config | None = None,
+    direct_rdma_model_state_dict: bool = False,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -164,6 +165,9 @@ def register_to_vllm(
             weights arrive from TorchStore.
         dist_moe_runtime: ``DistMoeRuntime.Config(inference=True)`` for models
             with Dist-MoE routed experts; ``None`` otherwise.
+        direct_rdma_model_state_dict: Load model state dicts directly into the
+            model's GPU weights instead of allocating a pinned CPU copy. See
+            ``Generator.Config.direct_rdma_model_state_dict``.
     """
     has_gdn = any(
         isinstance(layer.attention, GDN.Config) for layer in model_config.layers
@@ -201,6 +205,7 @@ def register_to_vllm(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 dist_moe_runtime=dist_moe_runtime,
+                direct_rdma_model_state_dict=direct_rdma_model_state_dict,
             )
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME

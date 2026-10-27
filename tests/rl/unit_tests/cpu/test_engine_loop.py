@@ -99,6 +99,7 @@ def _bare_loop(
     dp_size: int = 1,
     dp_routing_strategy: RoutingStrategy.Config | None = None,
     reset_kv_cache_on_model_state_dict_load: bool = False,
+    fetch_model_state_dict: Callable[[dict], Any] | None = None,
 ) -> EngineLoop:
     # _decide_next_action delegates the in-flight check and routing to the
     # dispatcher, so wire up a bare one (no engine / GPU needed here).
@@ -111,6 +112,7 @@ def _bare_loop(
         broadcast_group=None,
         max_engine_steps_between_decisions=16,
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache_on_model_state_dict_load,
+        fetch_model_state_dict=fetch_model_state_dict,
     )
     # An outstanding generation models in-flight work (possibly in a peer DP rank).
     if inflight:
@@ -886,6 +888,7 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
     async def run() -> None:
         # The generator's endpoints around the engine loop, without building vLLM.
         generator = object.__new__(Generator)
+        generator.config = SimpleNamespace(direct_rdma_model_state_dict=False)
         generator._engine_loop = engine_thread(engine)
         generator._prefetched_model_state_dict = {}
         await generator.start_engine_loop()
@@ -901,6 +904,54 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
         # The load applies the prefetched weights without reading TorchStore again.
         await asyncio.wait_for(generator.load_model_state_dict(4), _TIMEOUT_S)
         assert reads == [actor_loop]
+        assert generator.policy_version == 4
+
+        await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+def test_direct_load_reads_torchstore_on_the_actor_loop_during_the_load(
+    engine_thread, monkeypatch
+) -> None:
+    reads: list[tuple] = []
+
+    async def get_state_dict(*args, **kwargs):
+        reads.append(
+            (threading.current_thread(), asyncio.get_running_loop(), args, kwargs)
+        )
+
+    monkeypatch.setattr(generator_module.ts, "get_state_dict", get_state_dict)
+    weights = {"weight": object()}
+
+    class _DirectEngine(_FakeEngine):
+        async def load_model_state_dict_direct(self, fetch) -> None:
+            await fetch(weights)
+
+        def load_prefetched_model_state_dict(self) -> None:
+            raise AssertionError("direct loads must not read prefetched buffers")
+
+    async def run() -> None:
+        generator = object.__new__(Generator)
+        generator.config = SimpleNamespace(direct_rdma_model_state_dict=True)
+        generator._torchstore_loop = asyncio.get_running_loop()
+        generator._engine_loop = engine_thread(
+            _DirectEngine(), fetch_model_state_dict=generator._fetch_model_state_dict
+        )
+        await generator.start_engine_loop()
+
+        await asyncio.wait_for(generator.prefetch_model_state_dict(), _TIMEOUT_S)
+        assert reads == []
+
+        await asyncio.wait_for(generator.load_model_state_dict(4), _TIMEOUT_S)
+        assert reads == [
+            (
+                threading.current_thread(),
+                asyncio.get_running_loop(),
+                ("model_state_dict",),
+                {"user_state_dict": weights, "strict": False, "direct_rdma": True},
+            )
+        ]
         assert generator.policy_version == 4
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
