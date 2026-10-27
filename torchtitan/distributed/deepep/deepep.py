@@ -5,12 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-DeepEP v2 primitives for MoE Expert Parallel, on the unified ``ElasticBuffer`` API.
+DeepEP v2 primitives for MoE Expert Parallel, on the unified ``EPBuffer`` API.
 
 DeepEP v2 (>= 2.0.0) collapses the v1 two-path design -- high-throughput (HT,
 ``buffer.dispatch``/``combine``) and low-latency (LL,
 ``buffer.low_latency_dispatch``/``combine``) -- into a SINGLE ``dispatch``/``combine``
-on ``deep_ep.ElasticBuffer``. There is one buffer, one pair of custom ops, and one
+on ``deep_ep.EPBuffer`` (``ElasticBuffer`` before v2.5). There is one buffer, one
+dispatch/combine op pair (plus the split launch/wait dispatch and the backward ops), and one
 ``DispatchState`` for both modes; only ``dispatch`` branches. The branch is chosen at
 runtime by the GRAD context, not by prefill-vs-decode: ``dispatch_tokens`` forces the
 compact path whenever ``torch.is_grad_enabled()`` (training), so the expand path is taken
@@ -44,32 +45,36 @@ import torch_remat as remat
 from torch.distributed import ProcessGroup
 
 try:
-    from deep_ep import ElasticBuffer
-except ImportError as e:
-    raise ImportError(
-        "DeepEP v2 (>= 2.0.0, ElasticBuffer) is required for this module. "
-        "Install from: https://github.com/deepseek-ai/DeepEP"
-    ) from e
+    from deep_ep import EPBuffer
+except ImportError:
+    try:
+        # DeepEP < 2.5 named the unified buffer ``ElasticBuffer``.
+        from deep_ep import ElasticBuffer as EPBuffer
+    except ImportError as e:
+        raise ImportError(
+            "DeepEP v2 (>= 2.0.0, EPBuffer or ElasticBuffer) is required for this "
+            "module. Install from: https://github.com/deepseek-ai/DeepEP"
+        ) from e
 
 
 # Global buffer (single buffer per process, recreated if the group changes or a
-# larger size is needed). v2 uses ONE ElasticBuffer for both training and inference.
-_buffer: ElasticBuffer | None = None
+# larger size is needed). v2 uses ONE buffer for both training and inference.
+_buffer: EPBuffer | None = None
 
 # Global cache for dispatch handles (EPHandle objects), keyed by an int handle_id.
 # The torch.library custom ops can only pass tensors across the op boundary, so we
 # smuggle the opaque EPHandle through a CPU int64 handle_id tensor + this cache.
-# SAC saves the handle_id tensor; we use it to retrieve the non-tensor handle.
-# Combine removes the entry it uses. If a dispatch never reaches its combine (a recomputed
-# dispatch whose combine region is saved), a finalizer in _dispatch_op_impl removes it.
+# SAC saves the handle_id tensor; the backward ops use it to retrieve the non-tensor
+# handle. A finalizer on the handle_id tensor removes the entry once nothing (an
+# autograd node, a saved activation, a graph runtime) holds the tensor anymore; a
+# combine that will not be followed by a backward pops its entry eagerly.
 # TODO: return an opaque handle from the ops (like hybridep.DispatchHandle) and delete this cache.
 _handle_cache: dict = {}
 _handle_counter: int = 0
 
-# Pending combine event for deferred synchronization. The caller MUST call
-# sync_combine() before using the result. Process-local + single-threaded, so a
-# module var suffices.
-_pending_combine_event = None
+# Deferred dispatches (DeepEP v2.5 ``defer_epilogue``) between ``launch_dispatch`` and
+# ``wait_dispatch``, keyed like the handles by a CPU int64 pending_id tensor.
+_pending_dispatch_cache: dict = {}
 
 
 def _get_next_handle_id() -> torch.Tensor:
@@ -83,37 +88,77 @@ def _get_next_handle_id() -> torch.Tensor:
 # Custom Op Registration for SAC Integration + autograd
 # ============================================================================
 #
-# ElasticBuffer.dispatch/combine are not autograd-aware. We wrap them in
+# EPBuffer.dispatch/combine are not autograd-aware. We wrap them in
 # torch.library custom ops so (a) SAC saves the comm outputs instead of recomputing
 # them and (b) we attach manual backward: dispatch backward is a combine and combine
 # backward is a dispatch (the DeepEP forward/backward duality). The opaque EPHandle
 # is passed across the op boundary via a CPU handle_id + _handle_cache.
+#
+# Every op has a fake kernel and the backward communications are ops of their own
+# (``dispatch_bwd``/``combine_bwd``), so the whole training step can be traced with
+# fake tensors (the graph trainer): no DeepEP call runs at trace time and the
+# data-dependent received row count becomes an unbacked size.
 
 _lib = torch.library.Library("deepep", "DEF")
 
 # dispatch returns: (recv_x, recv_topk_idx, recv_scores, num_recv_per_expert, handle_id).
 # recv_topk_idx is the per-received-token local-expert assignment, used by the compact
 # path to gather tokens into expert-major order (it is an empty placeholder in expand mode,
-# whose static layout is already expert-grouped).
+# whose static layout is already expert-grouped). num_local_experts only sizes the
+# per-expert counts of the fake kernel.
 _lib.define(
     "dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, "
-    "int num_experts, int num_tokens_per_rank, bool cuda_graph_compatible) "
-    "-> (Tensor, Tensor, Tensor, Tensor, Tensor)"
+    "int num_experts, int num_local_experts, int num_tokens_per_rank, "
+    "bool cuda_graph_compatible) -> (Tensor, Tensor, Tensor, Tensor, Tensor)"
+)
+# launch_dispatch/wait_dispatch split the compact training dispatch into the
+# asynchronous launch (DeepEP v2.5 ``defer_epilogue``) and the host-synchronized
+# epilogue that materializes the received tokens. Work queued between the two ops
+# runs while the dispatch is in flight; ``dispatch_tokens`` queues nothing between
+# them, the graph trainer schedules independent work there with a pass. The wait op
+# takes the dispatch inputs so its outputs get the dispatch autograd edges.
+_lib.define(
+    "launch_dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, "
+    "int num_experts, int num_tokens_per_rank) -> Tensor"
+)
+_lib.define(
+    "wait_dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, Tensor pending_id, "
+    "int num_local_experts) -> (Tensor, Tensor, Tensor, Tensor, Tensor)"
+)
+# The dispatch backward (a combine of the gradients) and the combine backward (a
+# dispatch of the gradient over the cached layout) as ops, so a traced joint graph
+# contains the backward communication instead of running DeepEP at trace time.
+_lib.define(
+    "dispatch_bwd(Tensor grad_recv_x, Tensor? grad_recv_scores, Tensor handle_id, "
+    "SymInt num_tokens, int num_topk, ScalarType input_dtype) -> (Tensor, Tensor)"
 )
 # combine returns: combined_x. ``will_backward`` is the caller's outer grad state
 # (torch.is_grad_enabled() evaluated before the op): it is the only reliable signal for
 # whether a backward will consume the cached handle, since inside a custom-op forward
 # autograd disables grad regardless of the outer context. When False (generator no_grad /
-# inference), the op frees the handle itself (setup_context never runs).
-_lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
+# inference), the op frees the handle itself. ``num_tokens`` (the dispatch input row
+# count) sizes the fake kernel's output.
+_lib.define(
+    "combine(Tensor x, Tensor handle_id, bool will_backward, SymInt num_tokens) -> Tensor"
+)
+_lib.define(
+    "combine_bwd(Tensor grad_combined, Tensor handle_id, SymInt num_recv_tokens) -> Tensor"
+)
 # Ordered effects, so graph-level selective checkpointing (the graph trainer's memory
 # policy) saves both ops instead of replaying them in backward. DeepEP assigns receive
 # slots with atomics, so a replayed dispatch can receive rows in another order, while
 # backward routes the gradients with the forward's handle. torch_remat ignores effects and
 # follows the ``recompute`` argument of dispatch_tokens/combine_tokens; dispatch_tokens
 # only replays with a deterministic buffer.
-_lib._register_effectful_op("deepep::dispatch", torch.library.EffectType.ORDERED)
-_lib._register_effectful_op("deepep::combine", torch.library.EffectType.ORDERED)
+for _op_name in (
+    "dispatch",
+    "launch_dispatch",
+    "wait_dispatch",
+    "dispatch_bwd",
+    "combine",
+    "combine_bwd",
+):
+    _lib._register_effectful_op(f"deepep::{_op_name}", torch.library.EffectType.ORDERED)
 
 
 # Fallback dispatch/combine SM count when deep_ep's bandwidth heuristic cannot run
@@ -139,51 +184,14 @@ def _resolve_dispatch_num_sms(buffer, num_experts: int, num_topk: int) -> int:
         return min(_DEEPEP_MULTINODE_NUM_SMS, num_device_sms)
 
 
-@torch.library.impl(_lib, "dispatch", "CUDA")
-def _dispatch_op_impl(
-    x: torch.Tensor,
-    topk_idx: torch.Tensor,
-    topk_weights: torch.Tensor,
-    num_experts: int,
-    num_tokens_per_rank: int,
+def _dispatch_outputs(
+    recv_x: torch.Tensor,
+    recv_topk_idx: torch.Tensor,
+    recv_scores: torch.Tensor,
+    handle,
     cuda_graph_compatible: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Execute DeepEP v2 dispatch.
-
-    ``cuda_graph_compatible=False`` (training / any grad-enabled forward): the COMPACT (non-expand)
-    layout. ``recv_x`` is
-    DEDUPLICATED -- one row per unique received token -- while ``recv_topk_idx`` gives each
-    token's local-expert assignments (-1 for picks not on this rank). ``dispatch_tokens``
-    gathers this into expert-major order for the grouped GEMM (matching the v1 path). A host
-    sync gives exact per-expert counts, so it is NOT CUDA-graph-compatible.
-    ``cuda_graph_compatible=True`` (inference, both prefill and decode): the static ``do_expand`` layout, already
-    expert-grouped (tokens packed in ``[0:sum(counts)]``, tail unused) with no host sync, so
-    the forward is CUDA-graph-capturable; per-expert counts come from the device-side
-    ``psum_num_recv_tokens_per_expert``.
-    """
-    global _buffer
-    buffer = _buffer
-    assert buffer is not None, "Buffer must be initialized before dispatch"
-
-    # Resolve num_sms ourselves and pass it explicitly: the resolver calls deep_ep's
-    # bandwidth heuristic but catches its multi-node RDMA-bandwidth divide-by-zero, so
-    # dispatch() never falls into that heuristic internally with the default num_sms=0.
-    # See _resolve_dispatch_num_sms.
-    num_sms = _resolve_dispatch_num_sms(buffer, num_experts, topk_idx.shape[1])
-    recv_x, recv_topk_idx, recv_scores, handle, _event = buffer.dispatch(
-        x,
-        topk_idx=topk_idx,
-        topk_weights=topk_weights,
-        num_experts=num_experts,
-        # Denote C = num_tokens_per_rank. DeepEP uses C as the per-rank layout stride
-        # (global token ID = rank * C + local token ID) and, in expand mode,
-        # to size recv_x. MoE physically pads x so C is identical across ranks.
-        num_max_tokens_per_rank=num_tokens_per_rank,
-        num_sms=num_sms,
-        do_expand=cuda_graph_compatible,
-        do_cpu_sync=not cuda_graph_compatible,
-    )
-
+    """Cache the handle and build the op outputs shared by the dispatch ops."""
     handle_id = _get_next_handle_id()
     handle_key = handle_id.item()
     _handle_cache[handle_key] = handle
@@ -210,11 +218,221 @@ def _dispatch_op_impl(
     return recv_x, recv_topk_idx, recv_scores, num_recv_per_expert, handle_id
 
 
+def _fake_dispatch_outputs(
+    x: torch.Tensor, topk_idx: torch.Tensor, num_local_experts: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fake compact dispatch outputs; the received row count is an unbacked size."""
+    num_recv = torch.library.get_ctx().new_dynamic_size()
+    num_topk = topk_idx.shape[1]
+    recv_x = x.new_empty((num_recv, x.shape[1]))
+    recv_topk_idx = topk_idx.new_empty((num_recv, num_topk))
+    recv_scores = x.new_empty((num_recv, num_topk), dtype=torch.float32)
+    num_recv_per_expert = torch.empty(
+        num_local_experts, dtype=torch.int32, device="cpu"
+    )
+    handle_id = torch.empty(1, dtype=torch.int64, device="cpu")
+    return recv_x, recv_topk_idx, recv_scores, num_recv_per_expert, handle_id
+
+
+@torch.library.impl(_lib, "dispatch", "CUDA")
+def _dispatch_op_impl(
+    x: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    num_experts: int,
+    num_local_experts: int,
+    num_tokens_per_rank: int,
+    cuda_graph_compatible: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Execute DeepEP v2 dispatch.
+
+    ``cuda_graph_compatible=False`` (training / any grad-enabled forward): the COMPACT (non-expand)
+    layout. ``recv_x`` is
+    DEDUPLICATED -- one row per unique received token -- while ``recv_topk_idx`` gives each
+    token's local-expert assignments (-1 for picks not on this rank). ``dispatch_tokens``
+    gathers this into expert-major order for the grouped GEMM (matching the v1 path). A host
+    sync gives exact per-expert counts, so it is NOT CUDA-graph-compatible.
+    ``cuda_graph_compatible=True`` (inference, both prefill and decode): the static ``do_expand`` layout, already
+    expert-grouped (tokens packed in ``[0:sum(counts)]``, tail unused) with no host sync, so
+    the forward is CUDA-graph-capturable; per-expert counts come from the device-side
+    ``psum_num_recv_tokens_per_expert``.
+    """
+    del num_local_experts  # the counts come from the handle; the fake kernel needs it
+    buffer = _buffer
+    assert buffer is not None, "Buffer must be initialized before dispatch"
+
+    # Resolve num_sms ourselves and pass it explicitly: the resolver calls deep_ep's
+    # bandwidth heuristic but catches its multi-node RDMA-bandwidth divide-by-zero, so
+    # dispatch() never falls into that heuristic internally with the default num_sms=0.
+    # See _resolve_dispatch_num_sms.
+    num_sms = _resolve_dispatch_num_sms(buffer, num_experts, topk_idx.shape[1])
+    recv_x, recv_topk_idx, recv_scores, handle, _event = buffer.dispatch(
+        x,
+        topk_idx=topk_idx,
+        topk_weights=topk_weights,
+        num_experts=num_experts,
+        # Denote C = num_tokens_per_rank. DeepEP uses C as the per-rank layout stride
+        # (global token ID = rank * C + local token ID) and, in expand mode,
+        # to size recv_x. MoE physically pads x so C is identical across ranks.
+        num_max_tokens_per_rank=num_tokens_per_rank,
+        num_sms=num_sms,
+        do_expand=cuda_graph_compatible,
+        do_cpu_sync=not cuda_graph_compatible,
+    )
+    return _dispatch_outputs(
+        recv_x, recv_topk_idx, recv_scores, handle, cuda_graph_compatible
+    )
+
+
+@torch.library.register_fake("deepep::dispatch")
+def _dispatch_op_fake(
+    x: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    num_experts: int,
+    num_local_experts: int,
+    num_tokens_per_rank: int,
+    cuda_graph_compatible: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if cuda_graph_compatible:
+        raise NotImplementedError(
+            "The expand dispatch layout (cuda_graph_compatible=True) has no fake kernel"
+        )
+    return _fake_dispatch_outputs(x, topk_idx, num_local_experts)
+
+
+@torch.library.impl(_lib, "launch_dispatch", "CUDA")
+def _launch_dispatch_op_impl(
+    x: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    num_experts: int,
+    num_tokens_per_rank: int,
+) -> torch.Tensor:
+    """Launch a compact dispatch and defer its epilogue to ``wait_dispatch``."""
+    buffer = _buffer
+    assert buffer is not None, "Buffer must be initialized before dispatch"
+    try:
+        event = buffer.dispatch(
+            x,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+            num_experts=num_experts,
+            num_max_tokens_per_rank=num_tokens_per_rank,
+            num_sms=_resolve_dispatch_num_sms(buffer, num_experts, topk_idx.shape[1]),
+            do_expand=False,
+            do_cpu_sync=True,
+            async_with_compute_stream=True,
+            defer_epilogue=True,
+        )
+    except TypeError as e:
+        raise RuntimeError(
+            "Split dispatch requires DeepEP v2.5 or newer (defer_epilogue)"
+        ) from e
+    pending_id = _get_next_handle_id()
+    pending_key = pending_id.item()
+    _pending_dispatch_cache[pending_key] = event
+    weakref.finalize(pending_id, lambda: _pending_dispatch_cache.pop(pending_key, None))
+    return pending_id
+
+
+@torch.library.register_fake("deepep::launch_dispatch")
+def _launch_dispatch_op_fake(
+    x: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    num_experts: int,
+    num_tokens_per_rank: int,
+) -> torch.Tensor:
+    return torch.empty(1, dtype=torch.int64, device="cpu")
+
+
+@torch.library.impl(_lib, "wait_dispatch", "CUDA")
+def _wait_dispatch_op_impl(
+    x: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    pending_id: torch.Tensor,
+    num_local_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run the deferred epilogue of ``launch_dispatch`` on the current stream."""
+    del num_local_experts  # the counts come from the handle; the fake kernel needs it
+    event = _pending_dispatch_cache.pop(pending_id.item())
+    recv_x, recv_topk_idx, recv_scores, handle = event.current_stream_wait()
+    return _dispatch_outputs(recv_x, recv_topk_idx, recv_scores, handle, False)
+
+
+@torch.library.register_fake("deepep::wait_dispatch")
+def _wait_dispatch_op_fake(
+    x: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    pending_id: torch.Tensor,
+    num_local_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _fake_dispatch_outputs(x, topk_idx, num_local_experts)
+
+
+@torch.library.impl(_lib, "dispatch_bwd", "CUDA")
+def _dispatch_bwd_op_impl(
+    grad_recv_x: torch.Tensor,
+    grad_recv_scores: torch.Tensor | None,
+    handle_id: torch.Tensor,
+    num_tokens: int,
+    num_topk: int,
+    input_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Backward for dispatch: a combine of the gradients.
+
+    The combine reduces grad_recv_x back to the original tokens (grad for x); passing
+    grad_recv_scores as the combine's topk_weights yields the gradient for the
+    dispatched routing scores (DeepEP combine returns the reduced weights too). The
+    score gradient is an empty placeholder when no score gradient was requested.
+    """
+    buffer = _buffer
+    assert buffer is not None, "Buffer must be initialized before combine"
+    handle = _handle_cache.get(handle_id.item())
+    assert handle is not None, f"Handle not found for handle_id={handle_id.item()}"
+
+    grad_x, grad_scores, _event = buffer.combine(
+        grad_recv_x,
+        handle=handle,
+        topk_weights=grad_recv_scores.float() if grad_recv_scores is not None else None,
+    )
+    grad_x = grad_x.to(input_dtype)
+    if grad_scores is None:
+        grad_scores = grad_x.new_empty((num_tokens, num_topk))
+    return grad_x, grad_scores.to(input_dtype)
+
+
+@torch.library.register_fake("deepep::dispatch_bwd")
+def _dispatch_bwd_op_fake(
+    grad_recv_x: torch.Tensor,
+    grad_recv_scores: torch.Tensor | None,
+    handle_id: torch.Tensor,
+    num_tokens: int,
+    num_topk: int,
+    input_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    grad_x = grad_recv_x.new_empty(
+        (num_tokens, grad_recv_x.shape[1]), dtype=input_dtype
+    )
+    grad_scores = grad_recv_x.new_empty((num_tokens, num_topk), dtype=input_dtype)
+    return grad_x, grad_scores
+
+
 def _dispatch_setup_context(ctx, inputs, output):
-    x, *_ = inputs
+    x, topk_idx, *_ = inputs
     *_, handle_id = output
+    # Keep the handle_id tensor object itself (not through save_for_backward, whose
+    # saved-tensor hooks may replace it by a detached copy): the cache entry lives as
+    # long as this object, and the backward op looks the handle up at run time, so
+    # tracing the forward never touches the cache.
+    ctx.handle_id = handle_id
     ctx.input_dtype = x.dtype
-    ctx.saved_handle = _handle_cache.get(handle_id.item())
+    ctx.num_tokens = x.shape[0]
+    ctx.num_topk = topk_idx.shape[1]
+    ctx.num_inputs = len(inputs)
 
 
 def _dispatch_backward(
@@ -225,51 +443,42 @@ def _dispatch_backward(
     grad_num_recv,
     grad_handle_id,
 ):
-    """Backward for dispatch: a combine of the gradients.
+    """Backward for ``dispatch`` and ``wait_dispatch``; only x and the scores get grads.
 
-    The combine reduces grad_recv_x back to the original tokens (grad for x); passing
-    grad_recv_scores as the combine's topk_weights yields the gradient for the
-    dispatched routing scores (DeepEP combine returns the reduced weights too).
-    recv_topk_idx is non-differentiable, so grad_recv_topk_idx is ignored.
+    Backward only runs on the compact (cuda_graph_compatible=False) path; the expand layout
+    is inference-only ("must not be backward"). recv_topk_idx is non-differentiable.
     """
-    global _buffer
     if grad_recv_x is None:
-        return None, None, None, None, None, None
-
-    buffer = _buffer
-    assert buffer is not None, "Buffer must be initialized before combine"
-
-    handle = ctx.saved_handle
-    assert handle is not None
-
-    grad_x, grad_scores, _event = buffer.combine(
+        return (None,) * ctx.num_inputs
+    grad_x, grad_topk_weights = torch.ops.deepep.dispatch_bwd(
         grad_recv_x,
-        handle=handle,
-        topk_weights=grad_recv_scores.float() if grad_recv_scores is not None else None,
+        grad_recv_scores,
+        ctx.handle_id,
+        ctx.num_tokens,
+        ctx.num_topk,
+        ctx.input_dtype,
     )
-    grad_x = grad_x.to(ctx.input_dtype)
-    grad_topk_weights = (
-        grad_scores.to(ctx.input_dtype) if grad_scores is not None else None
-    )
-    # Order matches op inputs: x, topk_idx, topk_weights, num_experts,
-    # num_tokens_per_rank, cuda_graph_compatible.
-    # Backward only runs on the compact (cuda_graph_compatible=False) path; the expand layout is
-    # inference-only ("must not be backward").
-    return grad_x, None, grad_topk_weights, None, None, None
+    if grad_recv_scores is None:
+        grad_topk_weights = None
+    return (grad_x, None, grad_topk_weights) + (None,) * (ctx.num_inputs - 3)
 
 
 @torch.library.impl(_lib, "combine", "CUDA")
 def _combine_op_impl(
-    x: torch.Tensor, handle_id: torch.Tensor, will_backward: bool
+    x: torch.Tensor, handle_id: torch.Tensor, will_backward: bool, num_tokens: int
 ) -> torch.Tensor:
-    """Execute DeepEP v2 combine (pure reduction; scores already applied upstream)."""
-    global _buffer, _pending_combine_event
+    """Execute DeepEP v2 combine (pure reduction; scores already applied upstream).
+
+    The combine is synchronous: the current stream waits for the communication before
+    the op returns, so the result is valid in eager and in a traced graph alike.
+    """
+    del num_tokens  # the output shape comes from the handle; the fake kernel needs it
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before combine"
 
-    # When no backward will run (generator forward under no_grad/inference_mode), the
-    # dispatch setup_context never fires to free the handle, so pop it here. When a backward
-    # will run (training), keep it: _combine_setup_context pops it for combine-backward.
+    # When no backward will run (generator forward under no_grad/inference_mode), nothing
+    # else frees the handle, so pop it here. When a backward will run (training), keep
+    # it for dispatch_bwd/combine_bwd; the handle_id finalizer frees it afterwards.
     # ``will_backward`` is the caller's OUTER grad state -- inside this forward impl
     # torch.is_grad_enabled() is always False (autograd disables grad during forward), so it
     # cannot tell training from inference here.
@@ -279,32 +488,30 @@ def _combine_op_impl(
         handle = _handle_cache.get(handle_id.item())
     assert handle is not None, f"Handle not found for handle_id={handle_id.item()}"
 
-    combined, _combined_weights, after_event = buffer.combine(
+    combined, _combined_weights, _event = buffer.combine(
         x,
         handle=handle,
         topk_weights=None,
-        async_with_compute_stream=True,
     )
-    # Record completion so the dispatcher can synchronize before returning.
-    _pending_combine_event = after_event
     return combined
 
 
-def _combine_setup_context(ctx, inputs, output):
-    _, handle_id, _will_backward = inputs
-    ctx.saved_handle = _handle_cache.pop(handle_id.item(), None)
+@torch.library.register_fake("deepep::combine")
+def _combine_op_fake(
+    x: torch.Tensor, handle_id: torch.Tensor, will_backward: bool, num_tokens: int
+) -> torch.Tensor:
+    return x.new_empty((num_tokens, x.shape[1]))
 
 
-def _combine_backward(ctx, grad_combined):
-    """Backward for combine: a dispatch of the gradient (reuses the cached handle).
-
-    Returns grads for op inputs (x, handle_id, will_backward); only x is differentiable.
-    """
-    global _buffer
+@torch.library.impl(_lib, "combine_bwd", "CUDA")
+def _combine_bwd_op_impl(
+    grad_combined: torch.Tensor, handle_id: torch.Tensor, num_recv_tokens: int
+) -> torch.Tensor:
+    """Backward for combine: a dispatch of the gradient over the cached layout."""
+    del num_recv_tokens  # the output shape comes from the handle; the fake kernel needs it
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before dispatch"
-
-    handle = ctx.saved_handle
+    handle = _handle_cache.get(handle_id.item())
     assert handle is not None, "Handle not found in combine backward"
 
     # Reuse the dispatch layout via the cached handle (no CPU sync, topk_idx/weights None).
@@ -317,11 +524,36 @@ def _combine_backward(ctx, grad_combined):
         num_sms=handle.num_sms,
         do_cpu_sync=False,
     )
-    return grad_x, None, None
+    return grad_x
+
+
+@torch.library.register_fake("deepep::combine_bwd")
+def _combine_bwd_op_fake(
+    grad_combined: torch.Tensor, handle_id: torch.Tensor, num_recv_tokens: int
+) -> torch.Tensor:
+    return grad_combined.new_empty((num_recv_tokens, grad_combined.shape[1]))
+
+
+def _combine_setup_context(ctx, inputs, output):
+    x, handle_id, _will_backward, _num_tokens = inputs
+    # See _dispatch_setup_context for why the tensor object is kept directly.
+    ctx.handle_id = handle_id
+    ctx.num_recv_tokens = x.shape[0]
+
+
+def _combine_backward(ctx, grad_combined):
+    """Backward for combine; only x (the expert outputs) is differentiable."""
+    grad_x = torch.ops.deepep.combine_bwd(
+        grad_combined, ctx.handle_id, ctx.num_recv_tokens
+    )
+    return grad_x, None, None, None
 
 
 torch.library.register_autograd(
     "deepep::dispatch", _dispatch_backward, setup_context=_dispatch_setup_context
+)
+torch.library.register_autograd(
+    "deepep::wait_dispatch", _dispatch_backward, setup_context=_dispatch_setup_context
 )
 torch.library.register_autograd(
     "deepep::combine", _combine_backward, setup_context=_combine_setup_context
@@ -329,18 +561,8 @@ torch.library.register_autograd(
 
 
 def sync_combine() -> None:
-    """Wait the current CUDA stream on the pending async combine.
-
-    MUST be called before using a combine result. Guarded under compile (CUDA event
-    ops are not traceable); during make_fx tracing _pending_combine_event is None
-    (no real combine ran), so the body is a no-op. Safe to call multiple times.
-    """
-    global _pending_combine_event
-    if torch.compiler.is_compiling():
-        return
-    if _pending_combine_event is not None:
-        _pending_combine_event.current_stream_wait()
-        _pending_combine_event = None
+    """No-op kept for callers: the combine op waits for its communication itself."""
+    return None
 
 
 def get_hidden_bytes(x: torch.Tensor) -> int:
@@ -356,8 +578,8 @@ def get_buffer(
     num_topk: int,
     use_fp8_dispatch: bool = False,
     deterministic: bool = False,
-) -> ElasticBuffer:
-    """Get or create the process-global DeepEP v2 ``ElasticBuffer``.
+) -> EPBuffer:
+    """Get or create the process-global DeepEP v2 ``EPBuffer``.
 
     A single buffer serves both training and inference (v2 unified the HT/LL buffers).
     It is recreated only if the group changes or a larger buffer is needed. The size
@@ -377,7 +599,7 @@ def get_buffer(
     buffer is recreated as deterministic once any caller asks for it, and kept so.
     """
     global _buffer
-    needed_bytes = ElasticBuffer.get_buffer_size_hint(
+    needed_bytes = EPBuffer.get_buffer_size_hint(
         group,
         num_max_tokens_per_rank,
         hidden,
@@ -388,7 +610,7 @@ def get_buffer(
         deterministic = deterministic or _buffer.deterministic
         if _buffer.num_bytes >= needed_bytes and _buffer.deterministic == deterministic:
             return _buffer
-    _buffer = ElasticBuffer(
+    _buffer = EPBuffer(
         group,
         num_bytes=needed_bytes,
         num_max_tokens_per_rank=num_max_tokens_per_rank,
@@ -430,8 +652,10 @@ def _permute_tokens(
 
     # Repeat each token by its valid count and select tokens in expert order.
     sort_order = torch.argsort(valid_expert_ids, stable=True)
+    # shape[0] rather than len(): under fake tracing the received row count is an
+    # unbacked size, which len() would have to concretize.
     permuted_indices = torch.arange(
-        len(hidden_states), device=hidden_states.device
+        hidden_states.shape[0], device=hidden_states.device
     ).repeat_interleave(mask.sum(dim=1))[sort_order]
     permuted_hidden_states = hidden_states.index_select(0, permuted_indices)
     permuted_scores = valid_scores[sort_order]
@@ -463,6 +687,7 @@ class DispatchState:
 
     handle_id: torch.Tensor  # CPU tensor used to retrieve the cached EPHandle
     num_recv_tokens: int
+    num_tokens: int  # dispatch input row count, i.e. the combine output row count
     cuda_graph_compatible: bool = False
     # Compact path (cuda_graph_compatible=False): gather/scatter mapping for the grouped GEMM.
     permuted_indices: torch.Tensor | None = None
@@ -482,8 +707,9 @@ def dispatch_tokens(
     remat_region_name: str,
     recompute: bool,
     cuda_graph_compatible: bool = False,
+    split_launch_wait: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
-    """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
+    """Dispatch tokens to experts via DeepEP v2 ``EPBuffer``.
 
     Returns tokens in expert-major order for the grouped-GEMM expert path. In compact mode
     (``cuda_graph_compatible=False``) the deduplicated dispatch output is gathered by ``_permute_tokens``
@@ -511,12 +737,15 @@ def dispatch_tokens(
             CUDA-graph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
             layout with a host sync and full autograd (training).
+        split_launch_wait: Issue the compact dispatch as two ops, ``launch_dispatch``
+            (asynchronous, DeepEP v2.5 ``defer_epilogue``) followed directly by
+            ``wait_dispatch``. Eager execution gains nothing from the split; a traced
+            graph can schedule independent work between the two ops. Ignored by the
+            expand layout.
 
     Returns:
         (routed_tokens [num_recv, hidden], tokens_per_expert [num_local_experts], state)
     """
-    del num_local_experts  # counts come from the handle, not this hint
-
     # The expand layout is inference-only ("must not be backward"), so gate it on a
     # no-grad context. With a single model_config shared by trainer and generator, this
     # auto-selects: the trainer (autograd enabled) takes the compact path, while the
@@ -552,25 +781,50 @@ def dispatch_tokens(
     if top_scores.dtype != torch.float32:
         top_scores = top_scores.float()
 
-    dispatch_region = remat.region(
-        torch.ops.deepep.dispatch,
-        remat_region_name,
-        recompute=recompute,
-    )
+    if split_launch_wait and not cuda_graph_compatible:
+        pending_id = remat.region(
+            torch.ops.deepep.launch_dispatch,
+            f"{remat_region_name}.launch",
+            recompute=recompute,
+        )(
+            hidden_states,
+            selected_experts_indices,
+            top_scores,
+            num_experts,
+            num_tokens_per_rank,
+        )
+        dispatch_result = remat.region(
+            torch.ops.deepep.wait_dispatch,
+            f"{remat_region_name}.wait",
+            recompute=recompute,
+        )(
+            hidden_states,
+            selected_experts_indices,
+            top_scores,
+            pending_id,
+            num_local_experts,
+        )
+    else:
+        dispatch_result = remat.region(
+            torch.ops.deepep.dispatch,
+            remat_region_name,
+            recompute=recompute,
+        )(
+            hidden_states,
+            selected_experts_indices,
+            top_scores,
+            num_experts=num_experts,
+            num_local_experts=num_local_experts,
+            num_tokens_per_rank=num_tokens_per_rank,
+            cuda_graph_compatible=cuda_graph_compatible,
+        )
     (
         recv_x,
         recv_topk_idx,
         recv_scores,
         num_recv_per_expert,
         handle_id,
-    ) = dispatch_region(
-        hidden_states,
-        selected_experts_indices,
-        top_scores,
-        num_experts=num_experts,
-        num_tokens_per_rank=num_tokens_per_rank,
-        cuda_graph_compatible=cuda_graph_compatible,
-    )
+    ) = dispatch_result
     # The saved region is skipped during replay, while the postprocessing below
     # still runs and therefore needs its original outputs.
     remat.recompute_needs_tensor(
@@ -588,6 +842,7 @@ def dispatch_tokens(
         state = DispatchState(
             handle_id=handle_id,
             num_recv_tokens=recv_x.shape[0],
+            num_tokens=hidden_states.shape[0],
             cuda_graph_compatible=True,
             recv_scores=recv_scores,
         )
@@ -602,6 +857,7 @@ def dispatch_tokens(
     state = DispatchState(
         handle_id=handle_id,
         num_recv_tokens=num_recv_tokens,
+        num_tokens=hidden_states.shape[0],
         cuda_graph_compatible=False,
         permuted_indices=permuted_indices,
         permuted_scores=permuted_scores,
@@ -619,8 +875,7 @@ def combine_tokens(
     """Combine expert outputs back to tokens via DeepEP v2.
 
     Routing scores are applied here (in plain PyTorch) before the pure-reduction combine
-    op, so autograd handles the score gradient. Combine is async; the caller MUST call
-    ``sync_combine()`` before using the result.
+    op, so autograd handles the score gradient. The combine op is synchronous.
 
     Compact (``cuda_graph_compatible=False``): weight each expert-major row, scatter-add back to the
     deduplicated tokens (``_unpermute_tokens``), then combine -- matching the v1 path.
@@ -663,7 +918,7 @@ def combine_tokens(
         torch.ops.deepep.combine,
         remat_region_name,
         recompute=recompute,
-    )(hidden_states, state.handle_id, will_backward)
+    )(hidden_states, state.handle_id, will_backward, state.num_tokens)
     # The caller consumes this output outside another remat region.
     remat.recompute_needs_tensor(combined)
     return combined

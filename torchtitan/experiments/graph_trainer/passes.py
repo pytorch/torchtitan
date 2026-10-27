@@ -53,6 +53,9 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     snapshot_graph,
     tlparse_log_graph_pass,
 )
+from torchtitan.experiments.graph_trainer.deepep_overlap_pass import (
+    deepep_dispatch_overlap_pass,
+)
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     populate_eager_chunk_metadata_pass,
 )
@@ -330,6 +333,9 @@ def compile_time_passes(
                 pair_first_token_exchange=ep_overlap_module_fqn == MOE_BLOCK_FQN,
             )
         )
+
+    if config.compile.deepep_dispatch_overlap:
+        passes.append(deepep_dispatch_overlap_pass)
 
     enable_fsdp_dense_region_overlap = config.compile.enable_fsdp_dense_region_overlap
     if enable_fsdp_dense_region_overlap and ep_overlap_enabled:
