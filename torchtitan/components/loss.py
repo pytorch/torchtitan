@@ -27,6 +27,228 @@ IGNORE_INDEX = -100
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
+try:
+    import triton
+    import triton.language as tl
+except ImportError:  # CPU-only installs fall back to the torch reference below
+    triton = None
+
+
+def _owned_labels(
+    labels: torch.Tensor, vocab_start: int, local_vocab_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return (owned, safe_local_labels): labels that are valid and in this shard."""
+    local_labels = labels - vocab_start
+    owned = (
+        (labels != IGNORE_INDEX)
+        & (local_labels >= 0)
+        & (local_labels < local_vocab_size)
+    )
+    return owned, torch.where(owned, local_labels, 0).unsqueeze(-1)
+
+
+def _ce_local_stats_reference(
+    logits: torch.Tensor, labels: torch.Tensor, vocab_start: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-row ``logsumexp`` over this shard, and the target logit.
+
+    The target logit is 0 on shards that do not own the label. Ignored rows get
+    ``lse = 0`` and a 0 target logit; their loss and gradient are masked.
+    """
+    x = logits.float()
+    owned, safe = _owned_labels(labels, vocab_start, x.shape[-1])
+    lse = torch.where(labels != IGNORE_INDEX, torch.logsumexp(x, -1), 0.0)
+    return lse, torch.where(owned, x.gather(-1, safe).squeeze(-1), 0.0)
+
+
+def _ce_local_grad_reference(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    vocab_start: int,
+    grad: torch.Tensor,
+    lse: torch.Tensor,
+) -> torch.Tensor:
+    """``grad * (softmax(logits) - onehot(label))`` on this shard; 0 if ignored."""
+    probs = torch.exp(logits.float() - lse.unsqueeze(-1))
+    owned, safe = _owned_labels(labels, vocab_start, probs.shape[-1])
+    probs = probs.scatter_add(-1, safe, -owned.unsqueeze(-1).to(probs.dtype))
+    grad_logits = torch.where(
+        (labels != IGNORE_INDEX).unsqueeze(-1), probs * grad.unsqueeze(-1), 0.0
+    )
+    return grad_logits.to(logits.dtype)
+
+
+if triton is not None:
+
+    @triton.jit
+    def _ce_stats_kernel(
+        logits_ptr,
+        labels_ptr,
+        lse_ptr,
+        target_logit_ptr,
+        vocab_size,
+        vocab_start,
+        ignore_index,
+        BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64)
+        label = tl.load(labels_ptr + row)
+        if label == ignore_index:
+            tl.store(lse_ptr + row, 0.0)
+            tl.store(target_logit_ptr + row, 0.0)
+            return
+        local_label = label - vocab_start
+        row_ptr = logits_ptr + row * vocab_size
+        running_max = -float("inf")
+        running_sum = 0.0
+        target_logit = 0.0
+        for start in range(0, vocab_size, BLOCK):
+            offsets = start + tl.arange(0, BLOCK)
+            in_bounds = offsets < vocab_size
+            x = tl.load(row_ptr + offsets, mask=in_bounds, other=-float("inf"))
+            x = x.to(tl.float32)
+            target_logit += tl.sum(
+                tl.where((offsets == local_label) & in_bounds, x, 0.0)
+            )
+            new_max = tl.maximum(running_max, tl.max(x, 0))
+            safe_max = tl.where(new_max == -float("inf"), 0.0, new_max)
+            running_sum = running_sum * tl.exp(running_max - safe_max) + tl.sum(
+                tl.exp(x - safe_max), 0
+            )
+            running_max = new_max
+        safe_max = tl.where(running_max == -float("inf"), 0.0, running_max)
+        tl.store(lse_ptr + row, safe_max + tl.log(running_sum))
+        tl.store(target_logit_ptr + row, target_logit)
+
+    @triton.jit
+    def _ce_grad_kernel(
+        grad_logits_ptr,
+        logits_ptr,
+        labels_ptr,
+        grad_ptr,
+        lse_ptr,
+        vocab_size,
+        vocab_start,
+        ignore_index,
+        BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64)
+        offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+        in_bounds = offsets < vocab_size
+        label = tl.load(labels_ptr + row)
+        out_ptr = grad_logits_ptr + row * vocab_size + offsets
+        if label == ignore_index:
+            tl.store(out_ptr, tl.zeros((BLOCK,), tl.float32), mask=in_bounds)
+            return
+        grad = tl.load(grad_ptr + row)
+        lse = tl.load(lse_ptr + row)
+        x = tl.load(
+            logits_ptr + row * vocab_size + offsets,
+            mask=in_bounds,
+            other=-float("inf"),
+        )
+        probs = tl.exp(x.to(tl.float32) - lse)
+        onehot = (offsets == label - vocab_start).to(tl.float32)
+        tl.store(out_ptr, (probs - onehot) * grad, mask=in_bounds)
+
+
+def _ce_block_size(vocab_size: int) -> int:
+    return min(4096, max(128, triton.next_power_of_2(vocab_size)))
+
+
+@torch.library.custom_op("torchtitan::ce_local_stats", mutates_args=())
+def _ce_local_stats(
+    logits: torch.Tensor, labels: torch.Tensor, vocab_start: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _ce_local_stats_reference(logits, labels, vocab_start)
+
+
+@_ce_local_stats.register_fake
+def _(
+    logits: torch.Tensor, labels: torch.Tensor, vocab_start: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        logits.new_empty(labels.shape, dtype=torch.float32),
+        logits.new_empty(labels.shape, dtype=torch.float32),
+    )
+
+
+@_ce_local_stats.register_kernel("cuda")
+def _(
+    logits: torch.Tensor, labels: torch.Tensor, vocab_start: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if triton is None:
+        return _ce_local_stats_reference(logits, labels, vocab_start)
+    lse = torch.empty(labels.shape, dtype=torch.float32, device=logits.device)
+    target_logit = torch.empty_like(lse)
+    vocab_size = logits.shape[-1]
+    block = _ce_block_size(vocab_size)
+    with torch.cuda.device(logits.device):
+        _ce_stats_kernel[(labels.numel(),)](
+            logits.contiguous(),
+            labels.contiguous(),
+            lse,
+            target_logit,
+            vocab_size,
+            vocab_start,
+            IGNORE_INDEX,
+            BLOCK=block,
+            num_warps=8 if block >= 2048 else 4,
+        )
+    return lse, target_logit
+
+
+@torch.library.custom_op("torchtitan::ce_local_grad", mutates_args=())
+def _ce_local_grad(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    vocab_start: int,
+    grad: torch.Tensor,
+    lse: torch.Tensor,
+) -> torch.Tensor:
+    return _ce_local_grad_reference(logits, labels, vocab_start, grad, lse)
+
+
+@_ce_local_grad.register_fake
+def _(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    vocab_start: int,
+    grad: torch.Tensor,
+    lse: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty_like(logits)
+
+
+@_ce_local_grad.register_kernel("cuda")
+def _(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    vocab_start: int,
+    grad: torch.Tensor,
+    lse: torch.Tensor,
+) -> torch.Tensor:
+    if triton is None:
+        return _ce_local_grad_reference(logits, labels, vocab_start, grad, lse)
+    grad_logits = torch.empty_like(logits, memory_format=torch.contiguous_format)
+    num_rows, vocab_size = logits.shape
+    block = _ce_block_size(vocab_size)
+    with torch.cuda.device(logits.device):
+        _ce_grad_kernel[(num_rows, triton.cdiv(vocab_size, block))](
+            grad_logits,
+            logits.contiguous(),
+            labels.contiguous(),
+            grad.contiguous(),
+            lse,
+            vocab_size,
+            vocab_start,
+            IGNORE_INDEX,
+            BLOCK=block,
+            num_warps=8 if block >= 2048 else 4,
+        )
+    return grad_logits
+
+
 @local_compile("loss", batch_invariant=False)
 def cross_entropy_loss(
     pred: torch.Tensor,
@@ -37,45 +259,39 @@ def cross_entropy_loss(
 ) -> torch.Tensor:
     """Cross-entropy over ``pred[T, V]`` and ``labels[T]``.
 
-    ``pred`` is upcast to fp32 here rather than in the model forward, so that
-    compiling the loss region fuses the forward and backward casts into the loss
-    kernels, which saves both time and memory.
+    ``pred`` is read in its own dtype and upcast to fp32 in registers by the
+    fused kernels, so no fp32 copy of the logits is materialized. With tensor
+    parallelism ``pred`` holds a local vocab shard, and the same fused forward
+    and backward run with a shard offset and two extra TP all-reduces.
     """
     if reduction not in ("sum", "none"):
         raise ValueError(f"Unsupported cross-entropy reduction: {reduction}")
+    tp_group = None
     if spmd_mesh_size("tp") > 1:
         if global_vocab_size is None:
             raise ValueError(
                 "global_vocab_size is required for vocab-parallel cross-entropy"
             )
-        return _LossParallelCrossEntropy.apply(
-            pred.float(),
-            labels,
-            current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
-            global_vocab_size,
-            reduction,
-        )
-
-    return torch.nn.functional.cross_entropy(
-        pred.float(),
-        labels,
-        reduction=reduction,
-        ignore_index=IGNORE_INDEX,
+        tp_group = current_spmd_mesh().get_group("tp")  # pyrefly: ignore[missing-attribute]
+    return _FusedCrossEntropy.apply(
+        pred, labels, tp_group, global_vocab_size, reduction
     )
 
 
-class _LossParallelCrossEntropy(torch.autograd.Function):
+class _FusedCrossEntropy(torch.autograd.Function):
     """
-    Vocab-parallel cross-entropy on local ``[T, V_local]`` logits.
+    Cross-entropy on local ``[T, V_local]`` logits for both TP and non-TP.
 
-    Replaces ``torch.distributed.tensor.parallel.loss_parallel()`` with an
-    explicit autograd Function so that SPMD code can operate on local tensors
-    and process groups directly, without the DTensor-based context manager.
+    ``tp_group=None`` means ``logits`` hold the full vocabulary. Otherwise they
+    hold this rank's vocab shard (uneven sharding is supported: the last TP rank
+    may hold fewer classes), the labels are global ids, and forward combines the
+    shards with two TP all-reduces (max, then a packed sum of the shifted
+    exponent and the owner's target logit).
 
-    Supports uneven vocab sharding (last TP rank may hold fewer classes) and
-    ``IGNORE_INDEX`` labels.  Forward uses three TP all-reduces (max, sumexp,
-    gather) to aggregate intermediate results in distributed softmax;
-    backward is fused (NLL + log-softmax) with zero collectives.
+    Backward is a single fused ``softmax - onehot`` pass with zero collectives:
+    each rank turns the global logsumexp into its shard's slice of the gradient,
+    and labels owned by another shard get no onehot term. ``IGNORE_INDEX`` labels
+    give zero loss and gradient.
 
     All inputs and outputs are plain ``torch.Tensor`` (not DTensor).
     """
@@ -86,19 +302,34 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         *,
         logits: torch.Tensor,
         labels: torch.Tensor,
-        tp_group: dist.ProcessGroup,
+        tp_group: dist.ProcessGroup | None,
+        reduction: str,
     ) -> None:
         """
-        SPMD type: logits S(-1)@TP, labels I@TP -> loss I@TP.
+        SPMD type with TP: logits S(-1)@TP, labels I@TP -> loss I@TP.
         Non-TP axes are passed through from logits to the output.
         """
-        spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
-        spmd.assert_type(labels, {tp_group: spmd.I})
-        spmd.assert_local_type_like(
-            result,
-            logits,
-            {tp_group: spmd.I},  # pyrefly: ignore [bad-argument-type]
-        )
+        if tp_group is not None:
+            spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
+            spmd.assert_type(labels, {tp_group: spmd.I})
+            spmd.assert_local_type_like(
+                result,
+                logits,
+                {tp_group: spmd.I},  # pyrefly: ignore [bad-argument-type]
+            )
+            return
+        # Without TP the loss is per token, so it takes the logits' types, and
+        # for per-token output also their sharding minus the vocab dim.
+        spmd.rules.ignore(logits, labels)
+        logits_spec = spmd.get_partition_spec(logits)
+        if reduction == "none" and logits_spec is not None:
+            spmd.assert_type(
+                result,
+                spmd.get_local_type(logits),
+                partition_spec=spmd.PartitionSpec(*logits_spec[:-1]),
+            )
+        else:
+            spmd.assert_local_type_like(result, logits)
 
     @staticmethod
     # pyrefly: ignore [bad-override]
@@ -106,36 +337,38 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx,
         logits: torch.Tensor,
         labels: torch.Tensor,
-        tp_group: dist.ProcessGroup,
-        global_vocab_size: int,
+        tp_group: dist.ProcessGroup | None,
+        global_vocab_size: int | None,
         reduction: str = "sum",
     ) -> torch.Tensor:
-        """Compute exact CE from local vocab shards via TP all-reduces.
+        """Compute exact CE from (shards of) the vocab.
 
         ``reduction="sum"`` returns the scalar summed loss (SFT/CE).
-        ``reduction="none"`` returns the per-token NLL ``[T]``, which GRPO
-        negates to get per-token logprobs without all-gathering the vocab.
+        ``reduction="none"`` returns the per-token NLL, which GRPO negates to
+        get per-token logprobs without all-gathering the vocab.
         """
-        logits_dtype = logits.dtype
-        logits = logits.float()
-
-        # Compute this rank's vocab shard bounds for the local logits.
-        tp_world_size = dist.get_world_size(tp_group)
-        tp_rank = dist.get_rank(tp_group)
-        chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
-        vocab_start = min(global_vocab_size, chunk_size * tp_rank)
-        vocab_end = min(global_vocab_size, vocab_start + chunk_size)
-        local_vocab_size = max(0, vocab_end - vocab_start)
-        if logits.shape[-1] != local_vocab_size:
-            raise ValueError(
-                "_LossParallelCrossEntropy expected local vocab size "
-                f"{local_vocab_size} for global vocab size {global_vocab_size}, "
-                f"got {logits.shape[-1]}."
-            )
-        if local_vocab_size == 0:
-            raise ValueError(
-                "_LossParallelCrossEntropy does not support empty vocab shards."
-            )
+        local_vocab_size = logits.shape[-1]
+        vocab_start = 0
+        if tp_group is None:
+            global_vocab_size = local_vocab_size
+        else:
+            # Compute this rank's vocab shard bounds for the local logits.
+            tp_world_size = dist.get_world_size(tp_group)
+            tp_rank = dist.get_rank(tp_group)
+            chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
+            vocab_start = min(global_vocab_size, chunk_size * tp_rank)
+            vocab_end = min(global_vocab_size, vocab_start + chunk_size)
+            expected_local_vocab_size = max(0, vocab_end - vocab_start)
+            if local_vocab_size != expected_local_vocab_size:
+                raise ValueError(
+                    "_FusedCrossEntropy expected local vocab size "
+                    f"{expected_local_vocab_size} for global vocab size "
+                    f"{global_vocab_size}, got {local_vocab_size}."
+                )
+            if local_vocab_size == 0:
+                raise ValueError(
+                    "_FusedCrossEntropy does not support empty vocab shards."
+                )
 
         torch._assert_async(
             torch.all(
@@ -145,78 +378,48 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             f"labels must be {IGNORE_INDEX} or in [0, {global_vocab_size})",
         )
 
-        # All-reduce max for numerically stable distributed log-softmax.
-        local_max = torch.amax(logits, dim=-1, keepdim=True)
-        local_max = funcol.all_reduce(
-            local_max, reduceOp=dist.ReduceOp.MAX.name, group=tp_group
+        flat_logits = logits.reshape(-1, local_vocab_size).contiguous()
+        flat_labels = labels.reshape(-1)
+        lse, target_logit = torch.ops.torchtitan.ce_local_stats(
+            flat_logits, flat_labels, vocab_start
         )
+        if tp_group is not None:
+            max_lse = funcol.all_reduce(
+                lse, reduceOp=dist.ReduceOp.MAX.name, group=tp_group
+            )
+            sumexp, target_logit = funcol.all_reduce(
+                torch.stack((torch.exp(lse - max_lse), target_logit)),
+                reduceOp=dist.ReduceOp.SUM.name,
+                group=tp_group,
+            ).unbind()
+            lse = max_lse + torch.log(sumexp)
 
-        # All-reduce sum over shifted logits for the global softmax denominator.
-        shifted = logits - local_max
-        shifted_sumexp = torch.sum(torch.exp(shifted), dim=-1, keepdim=True)
-        shifted_sumexp = funcol.all_reduce(
-            shifted_sumexp, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
-        )
-        log_probs = shifted - torch.log(shifted_sumexp)
-
-        # Mask labels outside this vocab shard; the TP all-reduce below selects
-        # the owner rank's log probability for each target token.
-        safe_labels = torch.where(labels != IGNORE_INDEX, labels, 0)
-        out_of_range = (safe_labels < vocab_start) | (
-            safe_labels >= vocab_start + local_vocab_size
-        )
-        local_labels = safe_labels - vocab_start
-        local_labels[out_of_range] = 0
-
-        local_result = torch.gather(log_probs, -1, local_labels.unsqueeze(-1))
-        local_result[out_of_range.unsqueeze(-1)] = 0
-        local_result = funcol.all_reduce(
-            local_result, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
-        )
-
-        # Per-token NLL, dropping ignored labels (logprob 0 for ignored).
-        result = -local_result.squeeze(-1)
-        result = torch.where(labels != IGNORE_INDEX, result, 0)
-
-        # Save local-shard log probabilities for the fused CE backward.
-        ctx.save_for_backward(log_probs, labels)
-        ctx.logits_dtype = logits_dtype
+        nll = torch.where(flat_labels != IGNORE_INDEX, lse - target_logit, 0.0)
+        ctx.save_for_backward(flat_logits, flat_labels, lse)
+        ctx.logits_shape = logits.shape
         ctx.vocab_start = vocab_start
-        ctx.local_vocab_size = local_vocab_size
         ctx.reduction = reduction
         if reduction == "none":
-            return result
-        return result.sum()
+            return nll.reshape(labels.shape)
+        return nll.sum()
 
     @staticmethod
     def backward(  # pyrefly: ignore[bad-override]
         ctx,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, None, None, None, None]:
-        log_probs, labels = ctx.saved_tensors
-        safe_labels = torch.where(labels != IGNORE_INDEX, labels, 0)
-        out_of_range = (safe_labels < ctx.vocab_start) | (
-            safe_labels >= ctx.vocab_start + ctx.local_vocab_size
+        flat_logits, flat_labels, lse = ctx.saved_tensors
+        # reduction="none" gives a per-token upstream grad; "sum" gives the
+        # scalar loss grad, which every token shares.
+        grad = grad_output.float().reshape(-1).expand(flat_labels.shape)
+        grad_logits = torch.ops.torchtitan.ce_local_grad(
+            flat_logits,
+            flat_labels,
+            ctx.vocab_start,
+            grad,
+            lse,
         )
-        local_labels = safe_labels - ctx.vocab_start
-        local_labels[out_of_range] = 0
-
-        grad_input = torch.zeros_like(log_probs)
-        row_idx = torch.arange(local_labels.shape[0], device=local_labels.device)
-        grad_update = out_of_range.to(grad_input.dtype) - 1.0
-        grad_input[row_idx, local_labels] = grad_update
-
-        # reduction="none" gives a per-token ``[T]`` upstream grad; unsqueeze to
-        # ``[T, 1]`` to broadcast over the local vocab. "sum" gives the scalar
-        # loss grad, which broadcasts as-is.
-        if ctx.reduction == "none":
-            grad_output = grad_output.unsqueeze(-1)
-        grad_output = torch.where(
-            (labels != IGNORE_INDEX).unsqueeze(-1), grad_output, 0
-        )
-        grad_logits = (grad_input + torch.exp(log_probs)) * grad_output
-        grad_logits = grad_logits.to(ctx.logits_dtype)
-        return grad_logits, None, None, None, None
+        return grad_logits.reshape(ctx.logits_shape), None, None, None, None
 
 
 class _VocabParallelEntropy(torch.autograd.Function):
@@ -398,7 +601,7 @@ def compute_logprobs(
                 "global_vocab_size is required for vocab-parallel policy statistics"
             )
         if not is_in_batch_invariant_mode():
-            logprobs = -_LossParallelCrossEntropy.apply(
+            logprobs = -_FusedCrossEntropy.apply(
                 logits,
                 labels,
                 vocab_parallel_group,
@@ -426,17 +629,21 @@ def compute_logprobs(
             dst=spmd.I,
         )
 
-    # Single bf16->fp32 upcast, reused by both logprobs and (optionally) entropy.
-    logits = logits.float()
-    logprobs = -F.cross_entropy(
-        logits,
-        labels,
-        reduction="none",
-        ignore_index=IGNORE_INDEX,
-    )
+    if is_in_batch_invariant_mode():
+        # Keep the F.cross_entropy op sequence that the vLLM generator runs.
+        logits = logits.float()
+        logprobs = -F.cross_entropy(
+            logits,
+            labels,
+            reduction="none",
+            ignore_index=IGNORE_INDEX,
+        )
+    else:
+        logprobs = -_FusedCrossEntropy.apply(logits, labels, None, None, "none")
     if not return_entropy:
         return logprobs
     with torch.no_grad():
+        logits = logits.float()
         log_normalizer = torch.logsumexp(logits, dim=-1)
         # Match _VocabParallelEntropy's zero contribution for masked logits.
         weighted_logits = (torch.softmax(logits, dim=-1) * logits).nan_to_num_(

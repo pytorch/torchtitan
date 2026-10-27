@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+import itertools
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -24,7 +25,9 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.components.loss import (
-    _LossParallelCrossEntropy,
+    _ce_local_grad_reference,
+    _ce_local_stats_reference,
+    _FusedCrossEntropy,
     BaseLoss,
     ChunkedLossWrapper,
     compute_logprobs,
@@ -409,6 +412,172 @@ class TestLoss(unittest.TestCase):
         )
 
 
+class TestFusedCrossEntropy(unittest.TestCase):
+    def test_matches_cross_entropy(self):
+        for dtype in (torch.float32, torch.bfloat16):
+            for vocab_size in (1, 7, 4097):
+                for reduction in ("sum", "none"):
+                    with self.subTest(dtype=dtype, V=vocab_size, reduction=reduction):
+                        torch.manual_seed(vocab_size)
+                        logits = (torch.randn(37, vocab_size) * 3).to(dtype)
+                        logits.requires_grad_()
+                        labels = torch.randint(vocab_size, (37,))
+                        labels[::4] = IGNORE_INDEX
+                        loss = _FusedCrossEntropy.apply(
+                            logits, labels, None, None, reduction
+                        )
+                        ref_logits = logits.detach().double().requires_grad_()
+                        ref = F.cross_entropy(ref_logits, labels, reduction=reduction)
+                        grad = torch.randn_like(loss)
+                        loss.backward(grad)
+                        ref.backward(grad.double())
+                        tol = {"atol": 2e-2, "rtol": 2e-2}
+                        torch.testing.assert_close(loss.double(), ref, **tol)
+                        torch.testing.assert_close(
+                            logits.grad.double(), ref_logits.grad, **tol
+                        )
+                        self.assertEqual(logits.grad.dtype, dtype)
+                        self.assertEqual(
+                            logits.grad[labels == IGNORE_INDEX].abs().max().item(), 0
+                        )
+
+    def test_multi_dim_labels(self):
+        logits = torch.randn(3, 5, 11, requires_grad=True)
+        labels = torch.randint(11, (3, 5))
+        labels[0, 1] = IGNORE_INDEX
+        loss = _FusedCrossEntropy.apply(logits, labels, None, None, "none")
+        ref = F.cross_entropy(
+            logits.detach().reshape(-1, 11), labels.reshape(-1), reduction="none"
+        )
+        torch.testing.assert_close(loss.reshape(-1), ref, atol=1e-5, rtol=1e-4)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+class TestFusedCrossEntropyKernels(unittest.TestCase):
+    def _inputs(self, dtype, vocab_size, vocab_start, ignore):
+        torch.manual_seed(vocab_size + vocab_start)
+        num_rows = 29
+        logits = (torch.randn(num_rows, vocab_size, device="cuda") * 4).to(dtype)
+        logits[2, : vocab_size // 2] = -torch.inf
+        # Global labels: some owned by this shard, some by other shards.
+        labels = torch.randint(
+            0, vocab_size + 2 * vocab_start + 7, (num_rows,), device="cuda"
+        )
+        if ignore:
+            labels[::5] = IGNORE_INDEX
+        return logits, labels
+
+    def test_triton_matches_reference(self):
+        for dtype, vocab_size, vocab_start, ignore in itertools.product(
+            (torch.float32, torch.bfloat16, torch.float16),
+            (1, 5, 4097, 50000),
+            (0, 3, 100),
+            (False, True),
+        ):
+            with self.subTest(dtype=dtype, V=vocab_size, start=vocab_start):
+                logits, labels = self._inputs(dtype, vocab_size, vocab_start, ignore)
+                lse, target_logit = torch.ops.torchtitan.ce_local_stats(
+                    logits, labels, vocab_start
+                )
+                ref_lse, ref_target_logit = _ce_local_stats_reference(
+                    logits, labels, vocab_start
+                )
+                torch.testing.assert_close(
+                    lse, ref_lse, atol=1e-4, rtol=1e-5, equal_nan=True
+                )
+                torch.testing.assert_close(
+                    target_logit, ref_target_logit, atol=0, rtol=0
+                )
+
+                grad = torch.randn(labels.shape, device="cuda")
+                got = torch.ops.torchtitan.ce_local_grad(
+                    logits, labels, vocab_start, grad, lse
+                )
+                ref = _ce_local_grad_reference(logits, labels, vocab_start, grad, lse)
+                tol = {"atol": 1e-5, "rtol": 1e-4}
+                if dtype != torch.float32:
+                    tol = {"atol": 1e-3, "rtol": 1e-2}
+                torch.testing.assert_close(got, ref, equal_nan=True, **tol)
+
+    def test_label_in_padding_lanes_of_last_block(self):
+        # A label owned by the next shard whose local index falls inside the
+        # padded lanes of this shard's last block must not read as the target.
+        vocab_size = 130
+        logits = torch.randn(4, vocab_size, device="cuda")
+        labels = torch.tensor([vocab_size + 1, vocab_size + 100, 3, 0], device="cuda")
+        _, target_logit = torch.ops.torchtitan.ce_local_stats(logits, labels, 0)
+        self.assertEqual(target_logit[:2].abs().max().item(), 0)
+
+    def test_compiled_matches_cross_entropy(self):
+        fn = torch.compile(cross_entropy_loss.__wrapped__, fullgraph=True)
+        logits = torch.randn(
+            64, 1000, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        labels = torch.randint(1000, (64,), device="cuda")
+        labels[::7] = IGNORE_INDEX
+        out = fn(logits, labels)
+        out.backward()
+        ref_logits = logits.detach().clone().requires_grad_()
+        ref = F.cross_entropy(ref_logits.float(), labels, reduction="sum")
+        ref.backward()
+        torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(logits.grad, ref_logits.grad, atol=2e-2, rtol=2e-2)
+
+
+class TestFusedCrossEntropySPMD(DTensorTestBase):
+    """Non-TP fused cross-entropy under strict SPMD typechecking (DP only)."""
+
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cpu"
+
+    def _typed_inputs(self, mesh):
+        dp, cp, tp = (mesh.get_group(name) for name in ("dp", "cp", "tp"))
+        logits = torch.randn(16, 64, requires_grad=True)
+        labels = torch.randint(0, 64, (16,))
+        labels[3] = IGNORE_INDEX
+        spmd.assert_type(logits, {dp: spmd.S(0), cp: spmd.R, tp: spmd.R})
+        spmd.assert_type(labels, {dp: spmd.S(0), cp: spmd.R, tp: spmd.I})
+        return logits, labels
+
+    @with_comms
+    def test_cross_entropy_loss_typechecks(self):
+        mesh = init_device_mesh("cpu", (2, 1, 1), mesh_dim_names=("dp", "cp", "tp"))
+        dp, cp, tp = (mesh.get_group(name) for name in ("dp", "cp", "tp"))
+        loss_fn = CrossEntropyLoss(CrossEntropyLoss.Config(global_vocab_size=64))
+        with set_current_spmd_mesh(mesh):
+            logits, labels = self._typed_inputs(mesh)
+            counts = torch.tensor(30.0)
+            spmd.assert_type(counts, {dp: spmd.R, cp: spmd.R, tp: spmd.I})
+            with typecheck(strict_mode="strict", local=False):
+                loss, _ = loss_fn(logits, labels, counts)
+        ref = F.cross_entropy(
+            logits.detach().double(),
+            labels,
+            reduction="sum",
+            ignore_index=IGNORE_INDEX,
+        )
+        torch.testing.assert_close(loss.double() * counts, ref, atol=1e-3, rtol=1e-5)
+        loss.backward()
+        self.assertTrue(torch.isfinite(logits.grad).all())
+
+    @with_comms
+    def test_compute_logprobs_typechecks(self):
+        mesh = init_device_mesh("cpu", (2, 1, 1), mesh_dim_names=("dp", "cp", "tp"))
+        with set_current_spmd_mesh(mesh):
+            logits, labels = self._typed_inputs(mesh)
+            with typecheck(strict_mode="strict", local=False):
+                logprobs = compute_logprobs(logits, labels, vocab_parallel_group=None)
+        ref = -F.cross_entropy(
+            logits.detach(), labels, reduction="none", ignore_index=IGNORE_INDEX
+        )
+        torch.testing.assert_close(logprobs, ref, atol=1e-5, rtol=1e-5)
+
+
 class TestGradAccumulator(unittest.TestCase):
     def test_accumulate_matches_cat(self):
         """Verify GradAccumulator produces the same result as torch.cat."""
@@ -464,10 +633,10 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
     @with_comms
     def test_loss_parallel_cross_entropy_parity(self):
         """
-        Tests loss-parallel cross-entropy loss bitwise parity, with torch.distributed.tensor.parallel.loss_parallel().
+        Tests loss-parallel cross-entropy loss parity, with torch.distributed.tensor.parallel.loss_parallel().
         Tests even/uneven vocab sharding, TP, DP+TP, and IGNORE_INDEX labels.
 
-        Runs _LossParallelCrossEntropy under typing checking: logits S(1)@TP, labels I@TP -> I@TP.
+        Runs _FusedCrossEntropy under typing checking: logits S(1)@TP, labels I@TP -> I@TP.
         """
         # Ensure the determinism.
         torch.use_deterministic_algorithms(True)
@@ -541,7 +710,7 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     spmd.assert_type(local_logits, logits_type)
                     spmd.assert_type(local_labels, labels_type)
                     with typecheck(strict_mode="strict"):
-                        local_loss = _LossParallelCrossEntropy.apply(
+                        local_loss = _FusedCrossEntropy.apply(
                             local_logits,
                             local_labels,
                             tp_group,
@@ -552,9 +721,11 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         spmd.get_axis_local_type(local_loss, tp_group), spmd.I
                     )
 
-                    # Loss and local-shard gradients must be bitwise-equivalent
-                    # to torch.distributed.tensor.parallel.loss_parallel().
-                    self.assertTrue(torch.equal(local_loss, wrapper_loss.to_local()))
+                    # The fused kernels reduce in a different order than
+                    # loss_parallel(), so compare to fp32 rounding.
+                    torch.testing.assert_close(
+                        local_loss, wrapper_loss.to_local(), atol=1e-4, rtol=1e-5
+                    )
 
                     # compare grad_logits; easier to wrap DTensor -> full_tensor for check.
                     with loss_parallel():
@@ -567,12 +738,54 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         shape=torch.Size((T, vocab_size)),
                         stride=(vocab_size, 1),
                     )
-                    self.assertTrue(
-                        torch.equal(
-                            local_grad_dtensor.full_tensor(),
-                            logits_dtensor.grad.full_tensor(),
-                        )
+                    torch.testing.assert_close(
+                        local_grad_dtensor.full_tensor(),
+                        logits_dtensor.grad.full_tensor(),
+                        atol=1e-6,
+                        rtol=1e-4,
                     )
+
+    def _shard_vocab(self, full: torch.Tensor, vocab_size: int) -> torch.Tensor:
+        chunk = (vocab_size + self.world_size - 1) // self.world_size
+        start = min(vocab_size, chunk * self.rank)
+        return full[:, start : min(vocab_size, start + chunk)].contiguous()
+
+    @with_comms
+    def test_matches_full_vocab_cross_entropy(self):
+        group = dist.group.WORLD
+        cases = (
+            (32000, torch.float32, "sum"),
+            (32003, torch.float32, "none"),
+            (10, torch.float32, "none"),
+            (32003, torch.bfloat16, "sum"),
+        )
+        for vocab_size, dtype, reduction in cases:
+            with self.subTest(V=vocab_size, dtype=dtype, reduction=reduction):
+                generator = torch.Generator().manual_seed(vocab_size)
+                full = (torch.randn(64, vocab_size, generator=generator) * 3).to(
+                    dtype=dtype, device=self.device_type
+                )
+                labels = torch.randint(vocab_size, (64,), generator=generator)
+                labels[::3] = IGNORE_INDEX
+                labels = labels.to(self.device_type)
+                logits = self._shard_vocab(full, vocab_size).requires_grad_()
+                loss = _FusedCrossEntropy.apply(
+                    logits, labels, group, vocab_size, reduction
+                )
+                ref_logits = full.double().requires_grad_()
+                ref = F.cross_entropy(ref_logits, labels, reduction=reduction)
+                grad = torch.randn(loss.shape, generator=generator, device="cpu").to(
+                    self.device_type
+                )
+                loss.backward(grad)
+                ref.backward(grad.double())
+                tol = {"atol": 2e-2, "rtol": 2e-2}
+                torch.testing.assert_close(loss.double(), ref, **tol)
+                torch.testing.assert_close(
+                    logits.grad.double(),
+                    self._shard_vocab(ref_logits.grad, vocab_size),
+                    **tol,
+                )
 
     @with_comms
     def test_vocab_parallel_policy_stats_parity(self):
