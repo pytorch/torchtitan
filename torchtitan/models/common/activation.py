@@ -176,6 +176,29 @@ class SwiGLU(BinaryActivationFn):
         return F.silu(gate) * up
 
 
+class LimitedSwiGLU(BinaryActivationFn):
+    """SwiGLU that clamps gate above and up on both sides (DeepSeek-V4 ``swiglu_limit``)."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BinaryActivationFn.Config):
+        swiglu_limit: float
+
+        def __post_init__(self) -> None:
+            if not math.isfinite(self.swiglu_limit) or self.swiglu_limit <= 0:
+                raise ValueError(
+                    "swiglu_limit must be finite and positive, got "
+                    f"{self.swiglu_limit}"
+                )
+
+    def __init__(self, config: Config) -> None:
+        self.limit = config.swiglu_limit
+
+    def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        gate = gate.clamp(max=self.limit)
+        up = up.clamp(min=-self.limit, max=self.limit)
+        return F.silu(gate) * up
+
+
 class ClampedSwiGLU(BinaryActivationFn):
     """Clamped SwiGLU with configurable sigmoid scale and input bound."""
 
