@@ -240,9 +240,18 @@ def test_optim_update_uses_configured_grad_clip() -> None:
     optim.optimizers.step.assert_called_once_with()
 
 
-@pytest.mark.parametrize("accelerator_available", [False, True])
+@pytest.mark.parametrize(
+    "device_initialized, first_step",
+    [
+        (False, []),
+        (True, ["synchronize"]),
+        # Device modules without is_initialized(), such as torch.mps.
+        (None, ["synchronize"]),
+    ],
+)
 def test_optim_step_keeps_eager_state_outside_update(
-    accelerator_available: bool,
+    device_initialized: bool | None,
+    first_step: list[str],
 ) -> None:
     events = []
     optim = object.__new__(Optim)
@@ -255,28 +264,29 @@ def test_optim_step_keeps_eager_state_outside_update(
     optim.lr_schedulers = SimpleNamespace(step=lambda: events.append("lr_scheduler"))
     optim.ema = SimpleNamespace(step=lambda step: events.append(f"ema_{step}"))
 
-    # The first step goes through torch.accelerator, which already skips both
-    # calls when the accelerator has not been initialized.
+    device_module = MagicMock()
+    if device_initialized is None:
+        del device_module.is_initialized
+    else:
+        device_module.is_initialized.return_value = device_initialized
+    device_module.synchronize.side_effect = lambda: events.append("synchronize")
+    device_module.empty_cache.side_effect = lambda: events.append("empty_cache")
+
     with (
         patch(
             "torchtitan.components.optim.optim.torch.accelerator.is_available",
-            return_value=accelerator_available,
+            return_value=True,
         ),
-        patch(
-            "torchtitan.components.optim.optim.torch.accelerator.synchronize",
-            side_effect=lambda: events.append("synchronize"),
-        ),
-        patch(
-            "torchtitan.components.optim.optim.torch.accelerator.empty_cache",
-            side_effect=lambda: events.append("empty_cache"),
-        ),
+        patch("torchtitan.components.optim.optim.device_module", device_module),
     ):
         grad_norm = optim.step(torch.tensor(1.0), current_step=3)
         optim.step(torch.tensor(1.0), current_step=4)
 
+    device_module.empty_cache.assert_called_once_with()
+
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
-    first_step = ["synchronize", "empty_cache"] if accelerator_available else []
     assert events == first_step + [
+        "empty_cache",
         "update",
         "lr_scheduler",
         "ema_3",
