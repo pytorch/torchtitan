@@ -13,6 +13,10 @@ keywords = ["pytorch", "training", "llm"]
 # Docker image (whose build context is .ci/docker) share one source of truth.
 dynamic = ["version", "dependencies", "optional-dependencies"]
 
+[project.scripts]
+torchtitan_last_words_job = "torchtitan.last_words.job:main"
+torchtitan_last_words_external = "torchtitan.last_words.external:main"
+
 [project.urls]
 GitHub = "https://github.com/pytorch/torchtitan"
 Documentation = "https://github.com/pytorch/torchtitan/tree/main/docs"
