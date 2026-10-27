@@ -389,7 +389,7 @@ def test_shutdown_continues_after_generator_close_failure():
 
 
 class _FakeHostMesh:
-    """Records the CUDA_VISIBLE_DEVICES of each proc mesh spawned on it."""
+    """Records the visible devices of each proc mesh spawned on it."""
 
     def __init__(self, num_hosts=1):
         self.num_hosts = num_hosts
@@ -399,7 +399,9 @@ class _FakeHostMesh:
         return self.num_hosts
 
     def spawn_procs(self, *, per_host, bootstrap, bootstrap_command):
-        self.visible_devices.append(bootstrap_command["CUDA_VISIBLE_DEVICES"])
+        self.visible_devices.append(
+            bootstrap_command[provisioning._device_visibility_env()]
+        )
 
 
 @pytest.fixture

@@ -35,6 +35,7 @@ from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.tools.utils import device_type
 
 # Model-agnostic name used for vLLM model registration.
 VLLM_MODEL_NAME = "TorchTitanCausalLM"
@@ -44,7 +45,11 @@ VLLM_MODEL_NAME = "TorchTitanCausalLM"
 TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 
 # Selects the experiment-owned runner that pads tokens for dense and expert SP.
-TORCHTITAN_WORKER_CLS = "torchtitan.rl.generator.vllm.worker.TorchTitanGPUWorker"
+TORCHTITAN_WORKER_CLS = (
+    "torchtitan.rl.generator.vllm.worker.TorchTitanXPUWorker"
+    if device_type == "xpu"
+    else "torchtitan.rl.generator.vllm.worker.TorchTitanGPUWorker"
+)
 
 
 def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
