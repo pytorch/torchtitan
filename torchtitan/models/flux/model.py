@@ -88,6 +88,7 @@ def _get_attention_metadata(
     return metadata._replace(
         cu_seq_k=metadata.cu_seq_k * cp_size,
         max_k=metadata.max_k * cp_size,
+        window_size=(-1, -1),
     )
 
 

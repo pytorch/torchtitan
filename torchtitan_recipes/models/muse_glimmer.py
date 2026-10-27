@@ -29,6 +29,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     InnerAttention,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
@@ -36,6 +37,7 @@ from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVSlidingWindowFlexInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesSlidingWindowFlexInnerAttention,
+    UlyssesSlidingWindowVarlenInnerAttention,
     UlyssesVarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
@@ -157,7 +159,12 @@ def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={VarlenInnerAttention: UlyssesVarlenInnerAttention}
+                inner_attention_map={
+                    VarlenInnerAttention: UlyssesVarlenInnerAttention,
+                    SlidingWindowVarlenInnerAttention: (
+                        UlyssesSlidingWindowVarlenInnerAttention
+                    ),
+                }
             )
         ],
     )

@@ -39,10 +39,13 @@ jobs:
           "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pip install \
             --pre \
             --index-url https://download.pytorch.org/whl/test/cpu \
-            "torch==2.14.0" \
-            "torchvision==0.29.0" \
-            "torchao==0.18.0" \
-            "triton==3.8.0"
+            "torch==2.15.0" \
+            "torchvision==0.29.2" \
+            "triton==3.9.0"
+          USE_CPP=0 "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pip install \
+            --pre \
+            --index-url https://download.pytorch.org/whl/nightly/cpu \
+            torchao
 
       - name: Install RC from TestPyPI
         run: |
@@ -84,42 +87,39 @@ jobs:
           print(f"triton={triton.__version__}")
           PY
 
-      - name: Run CPU debug-model training smoke test
+      - name: Run CPU debug-model forward smoke test
         working-directory: ${{ runner.temp }}
         run: |
           "$RUNNER_TEMP/validate-rc-venv/bin/python" - <<'PY'
           import torch
           import torch.nn.functional as F
-          from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+
+          from torchtitan.config.parallelism import ParallelismConfig
           from torchtitan.models.llama3 import build_model_config
 
           torch.manual_seed(42)
-          model_config = build_model_config("debugmodel")
-          for layer_config in model_config.layers:
-              layer_config.attention.inner_attention = ScaledDotProductInnerAttention.Config()
-
+          torch.compiler.set_stance("force_eager")
+          model_config = build_model_config(
+              "debugmodel",
+              parallelism=ParallelismConfig(),
+              seq_len=16,
+              attn_backend="flex",
+          )
           model = model_config.build()
           model.init_states(buffer_device=torch.device("cpu"))
-          model.train()
-          optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-          tokens = torch.randint(0, 2048, (1, 16))
-          positions = torch.arange(16).unsqueeze(0)
-          losses = []
+          model.eval()
+          tokens_T = torch.randint(0, 2048, (16,))
+          positions_T = torch.arange(16)
+          attention_metadata = model._get_attention_metadata(positions_T)
 
-          for _ in range(3):
-              optimizer.zero_grad(set_to_none=True)
-              logits = model(tokens, positions, None)
-              loss = F.cross_entropy(
-                  logits[:, :-1].reshape(-1, logits.size(-1)),
-                  tokens[:, 1:].reshape(-1),
-              )
-              assert torch.isfinite(loss), loss
-              loss.backward()
-              optimizer.step()
-              losses.append(loss.item())
+          # Torch 2.15 FlexAttention does not support backward on CPU. The GPU
+          # release validation runs three full-model training steps instead.
+          with torch.no_grad():
+              logits_TV = model(tokens_T, positions_T, attention_metadata)
+              loss = F.cross_entropy(logits_TV[:-1], tokens_T[1:])
 
-          assert losses[-1] < losses[0], losses
-          print(f"losses={losses}")
+          assert torch.isfinite(loss), loss
+          print(f"loss={loss.item()}")
           PY
 
       - name: Run CPU unit tests against installed RC
@@ -129,6 +129,16 @@ jobs:
           cp -R tests "$test_root/tests"
           cp -R scripts "$test_root/scripts"
           cp pyproject.toml "$test_root/pyproject.toml"
+          mkdir -p "$test_root/torchtitan/models/flux"
+          cp torchtitan/models/flux/README.md "$test_root/torchtitan/models/flux/README.md"
+
+          # Installed test recipes resolve repository-local assets relative to
+          # site-packages. Link that location to the staged source-test assets.
+          site_packages="$("$RUNNER_TEMP/validate-rc-venv/bin/python" -c \
+            'import sysconfig; print(sysconfig.get_path("purelib"))')"
+          mkdir -p "$site_packages/tests/assets"
+          ln -s "$test_root/tests/assets/synthetic_multimodal" \
+            "$site_packages/tests/assets/synthetic_multimodal"
           cd "$test_root"
           unset PYTHONPATH
           "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pytest \
