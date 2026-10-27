@@ -80,6 +80,7 @@ def test_push_model_state_dict_reuses_final_dtype_cpu_staging_buffers() -> None:
         )
         trainer._transfer_dtype = torch.bfloat16
         trainer._staging_model_state_dict_stream = None
+        trainer._direct_rdma_model_state_dict = False
 
         empty_like = torch.empty_like
         pin_memory_requests = []
@@ -127,9 +128,11 @@ def test_push_model_state_dict_reuses_final_dtype_cpu_staging_buffers() -> None:
     asyncio.run(run())
 
 
-def test_push_model_state_dict_stages_on_dedicated_stream() -> None:
+@pytest.mark.parametrize("direct_rdma", [False, True])
+def test_push_model_state_dict_stages_on_dedicated_stream(direct_rdma: bool) -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
+        trainer._direct_rdma_model_state_dict = direct_rdma
         trainer._staging_state_dict = {"weight": torch.empty(4)}
         trainer._staging_model_state_dict_stream = MagicMock()
         source = torch.arange(4, dtype=torch.float32)
@@ -170,7 +173,7 @@ def test_push_model_state_dict_stages_on_dedicated_stream() -> None:
         put.assert_awaited_once_with(
             trainer._staging_state_dict,
             "model_state_dict",
-            direct_rdma=False,
+            direct_rdma=direct_rdma,
         )
         assert len(worker_thread_ids) == 2
         assert worker_thread_ids[0] == worker_thread_ids[1]

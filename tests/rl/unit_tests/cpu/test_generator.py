@@ -163,6 +163,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
     async def main():
         staging_state_dict = {"weight": "old"}
         generator = Generator.__new__(Generator)
+        generator.config = SimpleNamespace(direct_rdma_model_state_dict=False)
         generator._prefetched_model_state_dict = staging_state_dict
 
         def fill_state_dict(*args, **kwargs):
@@ -540,6 +541,28 @@ def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
     assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
 
 
+@pytest.mark.parametrize("reset_kv_cache", [False, True])
+def test_load_model_state_dict_direct_fetches_into_the_model(reset_kv_cache: bool):
+    async def fetch(state_dict):
+        pass
+
+    fetches = []
+
+    async def load_state_dict_direct(fetch):
+        fetches.append(fetch)
+
+    engine = _vllm_engine(
+        reset_kv_cache_on_model_state_dict_load=reset_kv_cache,
+        model=SimpleNamespace(load_state_dict_direct=load_state_dict_direct),
+    )
+
+    asyncio.run(engine.load_model_state_dict_direct(fetch))
+
+    assert fetches == [fetch]
+    expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
+    assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
+
+
 def test_sampling_config_rejects_top_p_below_one():
     with pytest.raises(ValueError, match="top_p must be 1.0, got 0.95"):
         SamplingConfig(top_p=0.95)
@@ -635,6 +658,7 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             dist_moe_runtime=None,
             debug=DebugConfig(),
             reset_kv_cache_on_model_state_dict_load=True,
+            direct_rdma_model_state_dict=False,
             rank=0,
             generator_name="generator",
             output_dir=str(tmp_path),
@@ -682,6 +706,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         dist_moe_runtime=None,
         debug=config.debug,
         reset_kv_cache_on_model_state_dict_load=False,
+        direct_rdma_model_state_dict=False,
         rank=0,
         generator_name="generator",
         output_dir=str(tmp_path),

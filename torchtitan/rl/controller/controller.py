@@ -622,6 +622,9 @@ class Controller(Configurable):
                 dp_degree=self.trainer_dp_degree,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
+                direct_rdma_model_state_dict=(
+                    config.generator.direct_rdma_model_state_dict
+                ),
                 max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
             )
