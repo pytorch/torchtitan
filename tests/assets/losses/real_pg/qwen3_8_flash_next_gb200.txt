@@ -22,7 +22,7 @@
 # state: fresh optimizer, scheduler and dataloader; strict deterministic=True
 # features: four residual streams, PLE, GDN, QSA top-4 blocks, MoE 8 experts/top-2
 # auxiliary_loss_coefficients: qsa_indexer=1.0, moe_load_balance=0.001
-# optimizer: fused AdamW, lr=0.0008, betas=(0.9,0.95), eps=1e-8, weight_decay=0.1
+# optimizer: fused AdamW, lr=0.0008, betas=(0.9,0.95), eps=1e-8, weight_decay=0.1, max_norm=1.0
 # scheduler: warmup_steps=2, linear decay_ratio=0.8, min_lr_factor=0.0
 # compile: off; activation_remat: off; cuda_graphs: off
 # input: context_length=64, tokens_per_train_step=128, shuffle=False, ConcatThenSplitPacking
@@ -35,6 +35,11 @@
 # repeatability: all 10 full-precision loss and grad_norm values matched before export
 # export_job: qwen38-flash-next-numerics-export-m-xlhlt75f, registered b200 integration runner
 # outputs: torchtrain_datasets/tree/shuhuay/qwen38-flash-next/{numerics-k,numerics-l,numerics-export-m}
+# replay_job: qwen38-flash-next-numerics-replay-n-s2744wlm
+# replay_source_commit: 43aaf58ec68902d6fa79dd5d0bf9b787fec548a1
+# replay_workspace: metaconda_demo:ed3fe5acc5b44b32ae58a3cd313eb5d9
+# replay: committed golden imported without export; all 10 loss and grad_norm assertions passed
+# replay_outputs: torchtrain_datasets/tree/shuhuay/qwen38-flash-next/numerics-replay-n
 # step loss grad_norm
 1 12.54901123046875 28.565948486328125
 2 12.50203800201416 29.09236717224121

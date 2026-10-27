@@ -168,6 +168,14 @@ python -m tests.integration_tests.run_tests outputs/flash-next-replay \
   --ngpu 2 --no-parallel
 ```
 
+The independent MAST replay `qwen38-flash-next-numerics-replay-n-s2744wlm`
+imports the committed golden without export and passes the exact loss and
+grad_norm assertions for all ten steps. Its persistent output directory is
+`torchtrain_datasets/tree/shuhuay/qwen38-flash-next/numerics-replay-n`.
+All pre-commit hooks pass; 146 targeted CPU tests and nine shared GDN GPU tests
+pass. The CPU coverage includes model/config contracts, the numerical recipe,
+checkpoint conversion, shared embedding/normalization/RoPE and CP attention.
+
 A 100-step reduced-model run on the `allenai/c4` English training stream with
 the official tokenizer from the pinned checkpoint revision decreases mean loss
 from `12.507574` (steps 1-10) to `7.963772` (steps 91-100). These convergence
