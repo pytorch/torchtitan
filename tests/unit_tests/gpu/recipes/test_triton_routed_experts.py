@@ -12,13 +12,17 @@ persistent 128-row blocks from there.
 
 import unittest
 from functools import partial
+from unittest import mock
 
 import torch
 from torch.nn import init
 
 from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.models.common.config_utils import make_routed_experts_config
-from torchtitan_recipes.overrides.triton_routed_experts import triton_routed_experts
+from torchtitan_recipes.overrides.triton_routed_experts import (
+    triton_routed_experts,
+    triton_routed_experts_op,
+)
 
 _DIM, _HIDDEN, _E, _K = 1024, 256, 16, 4
 # 16-row blocks below 128 tokens (32 rows per expert), persistent 64-row blocks to 256, 128-row above
@@ -106,7 +110,7 @@ class TestTritonRoutedExperts(unittest.TestCase):
                 self.assertLess(_rel(triton_out, expected), 5e-3)
 
     def test_cuda_graph_replay_matches_eager_bitwise(self):
-        for num_tokens in (37, 1500):
+        for num_tokens in (8, 37, 1500):
             with self.subTest(num_tokens=num_tokens):
                 routing = _routing(num_tokens, seed=2)
                 with torch.no_grad():
@@ -147,6 +151,106 @@ class TestTritonRoutedExperts(unittest.TestCase):
                         continue
                     expected = self.stock._expert_mlp(x_RD, offsets_E)
                 self.assertTrue(torch.equal(actual, expected))
+
+    def test_counts_left_to_the_kernels(self):
+        """On the EP=1 path the kernels count the ids themselves, so MoE skips the count."""
+        for num_tokens in (37, 1500):
+            with self.subTest(num_tokens=num_tokens):
+                x_TD, scores_TK, ids_TK, counts_E = _routing(num_tokens, seed=5)
+                routing_map_TE = torch.zeros(
+                    num_tokens, _E, dtype=torch.bool, device="cuda"
+                )
+                routing_map_TE.scatter_(1, ids_TK, True)
+                with torch.no_grad():
+                    self.assertIsNone(self.triton_experts.count_tokens(routing_map_TE))
+                    expected = self.triton_experts(x_TD, scores_TK, ids_TK, counts_E)
+                    actual = self.triton_experts(x_TD, scores_TK, ids_TK, None)
+                self.assertTrue(torch.equal(actual, expected))
+
+    def test_expert_parallel_rank_sums_only_its_routes(self):
+        """At EP > 1 each rank adds only its own experts' routes; padding rows come out 0.
+
+        Receive buffer, EP = 4, T rows per source block (24 experts, 6 per rank):
+            block 0: T real rows        block 2: T padding rows
+            block 1: T/2 real, padding  block 3: T-1 real, 1 padding
+        padding = expert -1, NaN score and x. Expected: the EP = 1 op on the real rows and this
+        rank's experts, with other ranks' routes sent to local expert 0 at score 0 (adds exactly
+        nothing). Scratch starts as NaN, so a read of a row the kernels never wrote shows up.
+        """
+        new_empty = torch.Tensor.new_empty
+
+        def nan_new_empty(tensor, *args, **kwargs):
+            out = new_empty(tensor, *args, **kwargs)
+            return out.fill_(float("nan") if out.is_floating_point() else 2**30)
+
+        ep, num_experts = 4, 24
+        num_local = num_experts // ep
+        gen = torch.Generator(device="cuda").manual_seed(5)
+        w13 = (
+            torch.randn(num_experts, 2, _HIDDEN, _DIM, device="cuda", generator=gen)
+            * 0.02
+        ).bfloat16()
+        w2 = (
+            torch.randn(num_experts, _DIM, _HIDDEN, device="cuda", generator=gen) * 0.02
+        ).bfloat16()
+        # T = 1 and 20 take the decode route scan, 1500 the persistent sorted path.
+        for num_tokens in (1, 20, 1500):
+            num_rows = ep * num_tokens
+            x_TD = torch.full((num_rows, _DIM), float("nan"), device="cuda").bfloat16()
+            scores_TK = torch.full((num_rows, _K), float("nan"), device="cuda")
+            ids_TK = torch.full((num_rows, _K), -1, device="cuda")
+            real_T = torch.zeros(num_rows, dtype=torch.bool, device="cuda")
+            for block, num_real in enumerate(
+                (num_tokens, num_tokens // 2, 0, num_tokens - 1)
+            ):
+                rows = slice(block * num_tokens, block * num_tokens + num_real)
+                real_T[rows] = True
+                x_TD[rows] = torch.randn(num_real, _DIM, device="cuda", generator=gen)
+                logits = torch.randn(
+                    num_real, num_experts, device="cuda", generator=gen
+                )
+                scores_TK[rows], ids_TK[rows] = logits.softmax(-1).topk(_K, dim=-1)
+            for rank in range(ep):
+                with self.subTest(num_tokens=num_tokens, rank=rank):
+                    first = rank * num_local
+                    local_w13 = w13[first : first + num_local]
+                    local_w2 = w2[first : first + num_local]
+                    mine_TK = (ids_TK >= first) & (ids_TK < first + num_local)
+                    with torch.no_grad(), mock.patch.object(
+                        torch.Tensor, "new_empty", nan_new_empty
+                    ):
+                        actual = triton_routed_experts_op(
+                            x_TD,
+                            scores_TK,
+                            ids_TK,
+                            local_w13,
+                            local_w2,
+                            ep_rank=rank,
+                            ep_size=ep,
+                        )
+                        # The other id style: local ids, -1 for other ranks' routes.
+                        local_ids = torch.where(mine_TK, ids_TK - first, -1)
+                        with_local_ids = triton_routed_experts_op(
+                            x_TD,
+                            scores_TK,
+                            local_ids,
+                            local_w13,
+                            local_w2,
+                            ep_rank=0,
+                            ep_size=ep,
+                        )
+                        # Fewer rows than at EP > 1, so maybe another tile class: GEMM rows are
+                        # bitwise the same for every class (test_expert_sorted_rows_match_stock_bitwise).
+                        expected = triton_routed_experts_op(
+                            x_TD[real_T],
+                            torch.where(mine_TK, scores_TK, 0.0)[real_T],
+                            torch.where(mine_TK, ids_TK - first, 0)[real_T],
+                            local_w13,
+                            local_w2,
+                        )
+                    self.assertTrue(torch.equal(actual[real_T], expected))
+                    self.assertTrue((actual[~real_T] == 0).all())
+                    self.assertTrue(torch.equal(actual, with_local_ids))
 
     def test_grad_enabled_takes_stock_path(self):
         routing = _routing(37, seed=4)
