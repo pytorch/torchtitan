@@ -1280,7 +1280,7 @@ def test_compute_training_performance_metrics():
 
 
 @pytest.mark.parametrize(
-    ("device_type", "accelerator", "hip_version"),
+    ("device_type", "current_accelerator", "hip_version"),
     [
         ("cpu", None, None),
         ("cuda", None, None),
@@ -1288,9 +1288,9 @@ def test_compute_training_performance_metrics():
         ("xpu", None, None),
     ],
 )
-def test_accelerator_graph_wrapper_is_noop_without_accelerator(
+def test_accelerator_graph_wrapper_is_noop_when_unsupported(
     device_type: str,
-    accelerator: str | None,
+    current_accelerator: str | None,
     hip_version: str | None,
 ) -> None:
     fwd_bwd = MagicMock()
@@ -1301,7 +1301,9 @@ def test_accelerator_graph_wrapper_is_noop_without_accelerator(
         ),
         patch(
             "torch.accelerator.current_accelerator",
-            return_value=torch.device(accelerator) if accelerator else None,
+            return_value=(
+                torch.device(current_accelerator) if current_accelerator else None
+            ),
         ),
         patch.object(torch.version, "hip", hip_version),
         patch("torchtitan.distributed.accelerator_graph.logger.warning") as warning,
