@@ -9,10 +9,13 @@
 """Triton grouped GEMMs for the routed experts' no-grad forward (generation).
 
 One kernel, launched for w13 (+ SwiGLU on the fp32 accumulators) and for w2. With any
-dispatcher it runs on the expert-sorted rows; with all experts local (EP=1) it reads the
-routes directly, so dispatch and the scatter go away and one kernel sums each token's
-routes. Forwards with grad, batch-invariant mode and quantized expert linears keep the
-stock path.
+dispatcher it runs on the expert-sorted rows. It reads the routes directly, so the expert
+sort and the scatter go away and one kernel sums each token's routes, in two cases:
+
+    EP = 1                      no dispatch
+    EP > 1, DeepEP, no grad     one row per (token, rank), DeepEP sums the ranks' rows
+
+Forwards with grad, batch-invariant mode and quantized expert linears keep the stock path.
 
 Example:
     >>> cfg = triton_routed_experts(moe_cfg.routed_experts)  # or the override import
@@ -31,9 +34,12 @@ from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher,
     LocalTokenDispatcher,
 )
 from triton.language.extra import libdevice
+
+from torchtitan_recipes.overrides.fused_swiglu import FusedSwiGLU
 
 __all__ = [
     "TritonRoutedExperts",
@@ -227,7 +233,7 @@ def _grouped_gemm_kernel(
     Else (w2, weight (E, D, F)): ``out = a @ W.T``.
     TMA_A: load a block's rows of ``a`` with one TMA box (rows past the expert are masked
     at the store); else with masked pointer loads.
-    ROUTES (no dispatcher): expert-sorted row ``i`` holds route ``routes[i] = token * TOP_K + k``;
+    ROUTES (the kernels read the routes): expert-sorted row ``i`` holds route ``routes[i] = token * TOP_K + k``;
     w13 reads ``a`` (x) at the route's token, and w2 writes ``out`` (y) at the route.
     """
     BLOCK_OUT: tl.constexpr = BLOCK_N // 2 if GATED else BLOCK_N
@@ -293,8 +299,8 @@ def _grouped_gemm_kernel(
         # Epilogue.
         if GATED:
             gate, up = acc.reshape(BLOCK_M, 2, BLOCK_OUT).permute(0, 2, 1).split()
-            # The trainer's math, so outputs match it bitwise: its grouped GEMM rounds
-            # gate/up to bf16, then its compiled SwiGLU computes this in fp32.
+            # The stock path's math (bitwise with its compiled SwiGLU region): its grouped
+            # GEMM rounds gate/up to bf16, then SwiGLU computes this in fp32.
             gate = gate.to(tl.bfloat16).to(tl.float32)
             up = up.to(tl.bfloat16).to(tl.float32)
             acc = gate / (1.0 + libdevice.exp(-gate)) * up
@@ -522,6 +528,31 @@ class TritonRoutedExperts(RoutedExperts):
                 _local(self.w13.weight),
                 _local(self.w2.weight),
             )
+        if self._runs_deepep_path() and x_TD.dtype == torch.bfloat16:
+            from torchtitan.distributed.deepep.deepep import (
+                combine_routes,
+                dispatch_routes,
+            )
+
+            dispatcher = self.token_dispatcher
+            recv_x_RD, recv_scores_RK, recv_ids_RK, handle = dispatch_routes(
+                x_TD,
+                selected_experts_indices=topk_expert_ids_TK,
+                top_scores=topk_scores_TK,
+                num_experts=dispatcher.num_experts,
+            )
+            # DeepEP's ids are local, so this rank's experts start at 0; ep_size > 1 makes
+            # the kernels skip -1 slots and size tiles for T x top-k routes, not EP x T x top-k.
+            out_RD = triton_routed_experts_op(
+                recv_x_RD,
+                recv_scores_RK,
+                recv_ids_RK,
+                _local(self.w13.weight),
+                _local(self.w2.weight),
+                ep_rank=0,
+                ep_size=dispatcher.ep_mesh.size(),
+            )
+            return combine_routes(out_RD, handle)
         if num_local_tokens_per_expert_E is None:  # count_tokens left it to us
             ids_N = topk_expert_ids_TK.reshape(-1)
             num_local_tokens_per_expert_E = torch.zeros(
@@ -537,13 +568,25 @@ class TritonRoutedExperts(RoutedExperts):
         )
 
     def count_tokens(self, routing_map_TE: torch.Tensor) -> torch.Tensor | None:
-        if self._runs_ep1_path():
-            return None  # the EP=1 kernels count the expert ids themselves
+        if self._runs_ep1_path() or self._runs_deepep_path():
+            return None  # the kernels count the expert ids themselves
         return super().count_tokens(routing_map_TE)
 
     def _runs_ep1_path(self) -> bool:
         return (
             self._all_experts_local()
+            and self.output_postprocess is None
+            and self._can_run_triton(_local(self.w13.weight), _local(self.w2.weight))
+        )
+
+    def _runs_deepep_path(self) -> bool:
+        """DeepEP at inference (EP > 1): send each token once per rank, not once per expert."""
+        dispatcher = self.token_dispatcher
+        return (
+            type(dispatcher) is DeepEPTokenDispatcher
+            and dispatcher.cuda_graph_compatible
+            and dispatcher.ep_mesh is not None
+            and dispatcher.ep_mesh.size() > 1
             and self.output_postprocess is None
             and self._can_run_triton(_local(self.w13.weight), _local(self.w2.weight))
         )
@@ -577,7 +620,8 @@ class TritonRoutedExperts(RoutedExperts):
         # Quantized expert linears subclass GroupedLinear and keep their own GEMMs.
         if type(self.w13) is not GroupedLinear or type(self.w2) is not GroupedLinear:
             return False
-        if type(self.activation_fn) is not SwiGLU:
+        # Both compute silu(gate) * up; the fused one is the fused_swiglu override's.
+        if type(self.activation_fn) not in (SwiGLU, FusedSwiGLU):
             return False
         if any(
             w.dtype != torch.bfloat16 or not w.is_contiguous()
