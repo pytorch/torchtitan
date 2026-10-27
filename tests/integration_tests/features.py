@@ -56,7 +56,10 @@ from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.tests import _set_spmd_typechecking
-from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
+from torchtitan_recipes.tests.models.deepseek_v3 import (
+    deepseek_v3_debugmodel,
+    deepseek_v3_debugmodel_mtp_pp2_dp2_ep2,
+)
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_ce_loss,
@@ -827,6 +830,13 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
     Each entry names one configuration per run.
     """
     return [
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_debugmodel_mtp_pp2_dp2_ep2],
+            test_descr="DeepSeek-V3 MTP1 eager PP2/DP2/EP2",
+            test_name="deepseek_v3_mtp_pp2_dp2_ep2",
+            ngpu=4,
+            use_real_pg=True,
+        ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_sdc_replay_cuda_graph],
             test_descr="SDC replay with CUDA graphs",

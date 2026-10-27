@@ -108,6 +108,12 @@ sharing model parameters, registered contexts and cached edge communicators.
 Independent validation batches require eager manual pipeline stages; GraphTrainer
 and CSV schedule support remain downstream work.
 
+For full-logit training with hidden-state-only evaluation, set
+`ChunkedLossWrapper.Config(validation_only=True, num_chunks=1, loss_fn=...)`.
+Training keeps its ordinary logits/loss and FSDP policy. Evaluation temporarily
+skips the model's head and lets the loss project and release each term; a
+multi-output loss must implement its own sequential projection hook.
+
 Keep simple invariants that use one config's fields in its `__post_init__`.
 Keep checks that span config sections in [validation.py](validation.py).
 `Trainer.Config.__post_init__` calls these checks after its local validation.

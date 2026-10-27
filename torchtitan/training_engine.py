@@ -433,7 +433,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             lm_head = model_with_lm_head.lm_head
             assert lm_head is not None, error_message
             self.loss_fn.set_lm_head(lm_head)
-            model_with_lm_head._skip_lm_head = True
+            model_with_lm_head._skip_lm_head = not self.loss_fn.validation_only
 
         logger.info(
             f"Model {type(self.model_config).__qualname__} size: "
@@ -858,7 +858,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         *,
         inputs: list[tuple[torch.Tensor, ...]] | None,
-        labels: list[torch.Tensor] | None,
+        labels: list[torch.Tensor | tuple[torch.Tensor, ...]] | None,
         model_kwargs: list[dict[str, Any]],
         loss_kwargs: list[dict[str, Any]],
         finalize_gradients: bool = True,

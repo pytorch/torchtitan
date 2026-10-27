@@ -6,6 +6,7 @@
 
 import copy
 import unittest
+import weakref
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -35,6 +36,7 @@ from torchtitan.components.loss import (
 )
 from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import LoRATransform, transform_model_config_
+from torchtitan.distributed.pipeline_parallel import _split_module
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.deepseek_v3.mtp import (
     get_mtp_token_counts,
@@ -42,10 +44,146 @@ from torchtitan.models.deepseek_v3.mtp import (
     MTPLoss,
     roll_mtp_sequence,
 )
+from torchtitan.models.deepseek_v3.pipeline import (
+    _finalize_mtp_embedding_gradients,
+    _synchronize_mtp_embeddings,
+    MTPGradientClipper,
+)
 from torchtitan.models.llama3 import build_model_config
 
 
+def test_mtp_clipper_preserves_logical_norm_and_both_optimizer_states():
+    """Same-rank PP owners match one logical embedding through repeated updates."""
+    canonical = nn.Parameter(torch.tensor([0.5, -0.25]))
+    replica = nn.Parameter(torch.zeros(2))
+    other = nn.Parameter(torch.tensor([0.1, 0.2]))
+    owners = [
+        SimpleNamespace(
+            _mtp_pipeline_enabled=True,
+            _mtp_pipeline_first_stage=first,
+            tok_embeddings=SimpleNamespace(weight=parameter),
+        )
+        for first, parameter in ((True, canonical), (False, replica))
+    ]
+    with torch.no_grad():
+        _synchronize_mtp_embeddings(owners)
+    reference = nn.Parameter(canonical.detach().clone())
+    reference_other = nn.Parameter(other.detach().clone())
+    parameters = [canonical, replica, other]
+    reference_parameters = [reference, reference_other]
+    optimizer = torch.optim.AdamW(parameters, lr=0.01)
+    reference_optimizer = torch.optim.AdamW(reference_parameters, lr=0.01)
+    clipper = MTPGradientClipper.Config().build()
+    clipper.bind_model_parts(owners)
+    context = SimpleNamespace(get_optional_mesh=lambda axis: None)
+
+    for step in range(3):
+        canonical.grad = torch.tensor([3.0 + step, 4.0])
+        replica.grad = torch.tensor([1.0, 2.0 + step])
+        other.grad = torch.tensor([2.0, 1.0])
+        reference.grad = canonical.grad + replica.grad
+        reference_other.grad = other.grad.clone()
+        expected_norm = torch.nn.utils.clip_grad_norm_(
+            reference_parameters, 1.0, foreach=True
+        )
+        actual_norm = clipper.clip_grad_norm_(
+            parameters, 1.0, parallelism_context=context
+        )
+        torch.testing.assert_close(actual_norm, expected_norm, atol=0, rtol=0)
+        optimizer.step()
+        reference_optimizer.step()
+        for parameter, expected in (
+            (canonical, reference),
+            (replica, reference),
+            (other, reference_other),
+        ):
+            torch.testing.assert_close(parameter, expected, atol=0, rtol=0)
+            for name, value in optimizer.state[parameter].items():
+                torch.testing.assert_close(
+                    value, reference_optimizer.state[expected][name], atol=0, rtol=0
+                )
+
+
 class TestLoss(unittest.TestCase):
+    def test_mtp_clipper_rejects_missing_runtime_binding(self):
+        clipper = MTPGradientClipper.Config().build()
+        with self.assertRaisesRegex(RuntimeError, "bind_model_parts"):
+            clipper.clip_grad_norm_(
+                [],
+                1.0,
+                parallelism_context=SimpleNamespace(
+                    get_optional_mesh=lambda axis: None
+                ),
+            )
+
+    def test_validation_only_mtp_matches_full_logits_without_retaining_them(self):
+        torch.manual_seed(42)
+        head = nn.Linear(4, 8, bias=False)
+        hidden = (torch.randn(4, 4), torch.randn(4, 4))
+        labels = (torch.tensor([1, 2, 3, 4]), torch.tensor([2, 3, 4, IGNORE_INDEX]))
+        counts = torch.tensor([4, 3])
+        inner = MTPLoss.Config(global_vocab_size=8, mtp_scale=0.1)
+        wrapper = ChunkedLossWrapper.Config(
+            num_chunks=1, validation_only=True, loss_fn=inner
+        ).build()
+        wrapper.set_lm_head(head)
+        predictions = tuple(head(item) for item in hidden)
+        expected, expected_metrics = inner.build()(predictions, labels, counts)
+        actual, actual_metrics = wrapper(predictions, labels, counts)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self.assertEqual(actual_metrics.keys(), expected_metrics.keys())
+        for key in expected_metrics:
+            torch.testing.assert_close(
+                actual_metrics[key], expected_metrics[key], rtol=0, atol=0
+            )
+        references = []
+
+        def record_output(module, args, output):
+            self.assertTrue(all(reference() is None for reference in references))
+            references.append(weakref.ref(output))
+
+        handle = head.register_forward_hook(record_output)
+        try:
+            head.eval()
+            with torch.no_grad():
+                actual, actual_metrics = wrapper(hidden, labels, counts)
+            self.assertEqual(len(references), 2)
+            self.assertTrue(all(reference() is None for reference in references))
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            for key in expected_metrics:
+                torch.testing.assert_close(
+                    actual_metrics[key], expected_metrics[key], rtol=0, atol=0
+                )
+        finally:
+            handle.remove()
+
+    def test_validation_only_loss_preserves_training_and_projects_only_in_eval(self):
+        torch.manual_seed(42)
+        head = nn.Linear(4, 8, bias=False)
+        hidden = torch.randn(4, 4)
+        labels = torch.tensor([1, 2, 3, IGNORE_INDEX])
+        counts = torch.tensor(3)
+        inner = CrossEntropyLoss.Config(global_vocab_size=8)
+        wrapper = ChunkedLossWrapper.Config(
+            num_chunks=1, validation_only=True, loss_fn=inner
+        ).build()
+        wrapper.set_lm_head(head)
+        predictions = head(hidden)
+        expected, _ = inner.build()(predictions, labels, counts)
+        calls = []
+        handle = head.register_forward_hook(lambda *_args: calls.append(True))
+        try:
+            actual, _ = wrapper(predictions, labels, counts)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            self.assertFalse(calls, "Training logits were projected a second time")
+            head.eval()
+            with torch.no_grad():
+                actual, _ = wrapper(hidden, labels, counts)
+            self.assertEqual(len(calls), 1)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        finally:
+            handle.remove()
+
     def test_compute_logprobs_token_major(self):
         torch.manual_seed(42)
         logits = torch.randn(8, 16)
@@ -751,7 +889,11 @@ class _AddMTPBlock(nn.Module):
 class _FakeMTPDecoder(MTPDecoder):
     def __init__(self, *, skip_lm_head: bool, num_mtp_layers: int = 1):
         nn.Module.__init__(self)
+        self.num_mtp_layers = num_mtp_layers
+        self._mtp_pipeline_enabled = False
+        self._mtp_pipeline_first_stage = False
         self._skip_lm_head = skip_lm_head
+        self.coalesce_lm_head = False
         self.tok_embeddings = nn.Embedding(16, 4)
         self.layers = nn.ModuleDict({"0": _IdentityDecoderBlock()})
         self.norm = nn.Identity()
@@ -1143,6 +1285,145 @@ class TestChunkedLossWrapper(unittest.TestCase):
         )
         self.assertEqual(full_outputs[0].shape, (4, 16))
         self.assertEqual(full_outputs[1].shape, (4, 16))
+
+    def test_mtp_shared_projection_preserves_objectives_and_gradients(self):
+        """One head invocation preserves each depth's loss and shared gradients."""
+        for num_depths in (1, 2):
+            with self.subTest(num_depths=num_depths):
+                torch.manual_seed(42)
+                model = _FakeMTPDecoder(skip_lm_head=False, num_mtp_layers=num_depths)
+                model.coalesce_lm_head = True
+                reference = copy.deepcopy(model)
+                reference._skip_lm_head = True
+                tokens = tuple(
+                    torch.tensor([1, 2, 3, 4]) + depth
+                    for depth in range(num_depths + 1)
+                )
+                masks = tuple(
+                    torch.tensor([True, True, True, False]) for _ in range(num_depths)
+                )
+                kwargs = {"positions": torch.arange(4), "mtp_input_valid_masks": masks}
+                calls = []
+                handle = model.lm_head.register_forward_hook(
+                    lambda _module, args, _output: calls.append(args[0].shape)
+                )
+                try:
+                    actual = model(tokens, **kwargs)
+                finally:
+                    handle.remove()
+                hidden = reference(tokens, **kwargs)
+                expected = tuple(reference.lm_head(item) for item in hidden)
+                self.assertEqual(calls, [torch.Size(((num_depths + 1) * 4, 4))])
+                labels = tuple(
+                    torch.tensor([1, 2, IGNORE_INDEX, IGNORE_INDEX]) for _ in tokens
+                )
+                labels[0][2] = 3
+                counts = torch.tensor([3, *([2] * num_depths)])
+                loss_fn = MTPLoss.Config(global_vocab_size=16, mtp_scale=0.1).build()
+                loss, metrics = loss_fn(actual, labels, counts)
+                ref_loss, ref_metrics = loss_fn(expected, labels, counts)
+                torch.testing.assert_close(loss, ref_loss)
+                for output, ref_output in zip(actual, expected, strict=True):
+                    torch.testing.assert_close(output, ref_output)
+                for key, value in metrics.items():
+                    torch.testing.assert_close(value, ref_metrics[key])
+                loss.backward()
+                ref_loss.backward()
+                for name, parameter in model.named_parameters():
+                    torch.testing.assert_close(
+                        parameter.grad,
+                        dict(reference.named_parameters())[name].grad,
+                        msg=f"shared projection gradient: {name}",
+                    )
+
+    def test_mtp_default_does_not_backward_an_ignored_head(self):
+        """Default projection preserves absent gradients for an unused MTP branch."""
+        self.assertFalse(
+            MTPDecoder.Config.__dataclass_fields__["coalesce_lm_head"].default
+        )
+        model = _FakeMTPDecoder(skip_lm_head=False)
+        calls = []
+        handle = model.mtp_layers[0].register_full_backward_hook(
+            lambda *_args: calls.append(True)
+        )
+        try:
+            tokens = torch.tensor([1, 2, 3, 4])
+            predictions = model(
+                (tokens, tokens),
+                torch.arange(4),
+                mtp_input_valid_masks=(torch.ones(4, dtype=torch.bool),),
+            )
+            predictions[0].sum().backward()
+            self.assertFalse(calls, "Ignored MTP branch unexpectedly ran backward")
+        finally:
+            handle.remove()
+
+    def test_mtp_embedding_owners_report_missing_embeddings(self):
+        tokens = torch.tensor([1, 2, 3, 4])
+        kwargs = {
+            "positions": torch.arange(4),
+            "mtp_input_valid_masks": (torch.ones(4, dtype=torch.bool),),
+        }
+        for first_stage in (None, True, False):
+            with self.subTest(first_stage=first_stage):
+                model = _FakeMTPDecoder(skip_lm_head=False)
+                model.tok_embeddings = None
+                if first_stage is None:
+                    inputs = (tokens, tokens)
+                else:
+                    model._mtp_pipeline_enabled = True
+                    model._mtp_pipeline_first_stage = first_stage
+                    inputs = tokens if first_stage else torch.randn(4, 4)
+                    kwargs["mtp_input_tokens"] = (tokens,)
+                with self.assertRaisesRegex(ValueError, "requires token embeddings"):
+                    model(inputs, **kwargs)
+
+    def test_mtp_pipeline_stage_chain_matches_single_model_gradients(self):
+        class ScaleBlock(nn.Module):
+            def __init__(self, scale):
+                super().__init__()
+                self.scale = scale
+
+            def forward(self, hidden, *args, **kwargs):
+                return hidden * self.scale
+
+        torch.manual_seed(42)
+        model = _FakeMTPDecoder(skip_lm_head=False)
+        model.layers = nn.ModuleDict({"0": ScaleBlock(2.0), "1": ScaleBlock(3.0)})
+        model.norm = nn.LayerNorm(4)
+        parts = [
+            _split_module(model, fqns)
+            for fqns in (
+                ["tok_embeddings", "layers.0"],
+                ["layers.1"],
+                ["tok_embeddings", "mtp_layers.0", "norm", "lm_head"],
+            )
+        ]
+        for index, part in enumerate(parts):
+            part._mtp_pipeline_enabled = True
+            part._mtp_pipeline_first_stage = index == 0
+        tokens = torch.tensor([1, 2, 3, 4])
+        positions = torch.tensor([0, 1, 0, 1])
+        shifted, valid = roll_mtp_sequence(
+            tokens, shift=1, positions=positions, fill_value=0, return_valid_mask=True
+        )
+        kwargs = {"positions": positions, "mtp_input_valid_masks": (valid,)}
+        expected = model((tokens, shifted), **kwargs)
+        hidden = tokens
+        for part in parts:
+            hidden = part(hidden, mtp_input_tokens=(shifted,), **kwargs)
+        actual = hidden
+        self.assertIsInstance(actual, tuple)
+        for actual_logits, expected_logits in zip(actual, expected, strict=True):
+            torch.testing.assert_close(actual_logits, expected_logits)
+        sum(output.square().sum() for output in expected).backward()
+        sum(output.square().sum() for output in actual).backward()
+        _finalize_mtp_embedding_gradients(parts)
+        for part in parts:
+            for name, parameter in part.named_parameters():
+                torch.testing.assert_close(
+                    parameter.grad, dict(model.named_parameters())[name].grad
+                )
 
     def test_chunked_mtp_matches_full_objective(self):
         torch.manual_seed(42)
