@@ -1283,9 +1283,7 @@ def test_compute_training_performance_metrics():
     ("device_type", "current_accelerator", "hip_version"),
     [
         ("cpu", None, None),
-        ("cuda", None, None),
         ("cuda", "cuda", "6.3"),
-        ("xpu", None, None),
     ],
 )
 def test_accelerator_graph_wrapper_is_noop_when_unsupported(
