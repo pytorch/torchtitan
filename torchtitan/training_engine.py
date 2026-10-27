@@ -818,7 +818,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             pred = self.model_parts[0](inputs, **model_kwargs)
             loss, self.loss_metrics = self.loss_fn(
                 pred,
-                labels,  # pyrefly: ignore[bad-argument-type]
+                labels,
                 **loss_kwargs,
             )
             del pred
