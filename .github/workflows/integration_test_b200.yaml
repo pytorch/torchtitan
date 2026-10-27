@@ -38,6 +38,9 @@ jobs:
           enable-cache: true
 
       - name: Run B200 integration tests
+        env:
+          # Keep the Kimi K3 reference stable across Triton default changes.
+          TRITON_DEFAULT_FP_FUSION: "1"
         run: |
           set -eux
 
@@ -78,13 +81,12 @@ jobs:
             tests/unit_tests/cpu/models/common/test_dist_moe.py \
             tests/unit_tests/gpu/models/common/test_dist_moe.py \
             tests/unit_tests/gpu/quantization/test_mxfp8_fsdp.py \
+            tests/unit_tests/gpu/models/kimi_k3/test_kimi_k3.py::TestKimiK3::test_attention_gym_kda_kernel_matches_recurrent_reference \
             -v
 
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-          # The Kimi K3 golden uses kernels compiled with FP fusion disabled.
-          TRITON_DEFAULT_FP_FUSION=0 \
-            CUDA_HOME=/usr/local/cuda TORCH_SHOW_CPP_STACKTRACES=1 \
+          CUDA_HOME=/usr/local/cuda TORCH_SHOW_CPP_STACKTRACES=1 \
             python -m tests.integration_tests.run_tests \
             "$RUNNER_TEMP/artifacts-to-be-uploaded/b200" \
             --test_suite b200 \
