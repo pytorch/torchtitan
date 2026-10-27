@@ -118,6 +118,44 @@ def test_validation_preserves_configured_shuffle(shuffle):
     assert validator.dl_config is not config.dataloader
 
 
+@pytest.mark.parametrize("owns_loss", [False, True])
+def test_validation_reduces_loss_metrics_only_on_owner(monkeypatch, owns_loss):
+    row = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 1),
+        labels=torch.ones(1, 1, dtype=torch.long),
+        positions=torch.zeros(1, 1, dtype=torch.long),
+        padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+        loss_token_counts=torch.tensor(1),
+        routing_token_counts=torch.tensor([1]),
+    )
+    validator = _generic_validator(_ClosableLoader([row]))
+    validator.parallelism_context.pp_enabled = True
+    validator.parallelism_context.dp_enabled = True
+    validator.parallelism_context.dp_cp_enabled = True
+    validator.parallelism_context.get_mesh = lambda axis: "dp mesh"
+    validator.parallelism_context.get_optional_mesh = lambda axis: "loss mesh"
+    validator.parallelism.num_pp_microbatches = 1
+    validator.pp_has_last_stage = owns_loss
+    validator._run_eval = lambda prepared: torch.tensor(1.0)
+    validator._init_validate_fn = lambda parts: validator._run_eval
+    counts = mock.Mock(side_effect=lambda value, mesh, *args: value * 2)
+    loss = mock.Mock(side_effect=lambda value, mesh: float(value) * 2)
+    monkeypatch.setattr(validator_module.dist_utils, "dist_sum_tensor", counts)
+    monkeypatch.setattr(validator_module.dist_utils, "dist_sum", loss)
+    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
+    try:
+        validator.validate([_EchoModel()], step=1)
+        assert counts.call_count == loss.call_count == int(owns_loss)
+        if owns_loss:
+            assert counts.call_args.args[1] == "dp mesh"
+            assert loss.call_args.args[1] == "loss mesh"
+        validator.metrics_processor.log_validation.assert_called_once_with(
+            loss=1.0 if owns_loss else -1.0, step=1
+        )
+    finally:
+        validator.close()
+
+
 def test_independent_non_pipeline_validation_consumes_complete_global_batch(
     monkeypatch,
 ):

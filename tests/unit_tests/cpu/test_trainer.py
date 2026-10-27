@@ -936,6 +936,151 @@ def no_registered_aux_losses():
 
 
 @pytest.mark.parametrize(
+    "pp_enabled,last_stage", [(False, True), (True, True), (True, False)]
+)
+@pytest.mark.parametrize("dp_enabled", [False, True])
+@pytest.mark.parametrize("should_log", [False, True])
+@pytest.mark.usefixtures("no_registered_aux_losses")
+def test_trainer_reduces_loss_counts_only_on_loss_owner(
+    monkeypatch, pp_enabled, last_stage, dp_enabled, should_log
+):
+    owns_loss = not pp_enabled or last_stage
+    reductions = []
+    scalar_reductions = []
+    max_reductions = []
+
+    def reduce_counts(value, mesh):
+        reductions.append(value.clone())
+        return value * 2
+
+    monkeypatch.setattr("torchtitan.trainer.dist_utils.dist_sum_tensor", reduce_counts)
+
+    def reduce_scalar(value, mesh):
+        scalar_reductions.append(float(value))
+        return float(value) * 2
+
+    def max_scalar(value, mesh):
+        max_reductions.append(float(value))
+        return float(value)
+
+    monkeypatch.setattr("torchtitan.trainer.dist_utils.dist_sum", reduce_scalar)
+    monkeypatch.setattr("torchtitan.trainer.dist_utils.dist_max", max_scalar)
+    forward_backward = MagicMock(
+        return_value=ForwardBackwardResult(torch.tensor(1.0), [])
+    )
+    engine = SimpleNamespace(
+        num_completed_steps=0,
+        pp_has_last_stage=last_stage,
+        device=torch.device("cpu"),
+        parallelism_context=SimpleNamespace(
+            pp_enabled=pp_enabled,
+            dp_enabled=dp_enabled,
+            dp_cp_enabled=dp_enabled,
+            get_mesh=lambda axis: object(),
+            get_optional_mesh=lambda axis: object(),
+        ),
+        forward_backward=forward_backward,
+        optim_step=lambda: torch.tensor(0.0),
+        optim=SimpleNamespace(lr_schedulers=SimpleNamespace(get_metrics=lambda: {})),
+        ntokens_seen=9,
+    )
+    trainer = SimpleNamespace(
+        engine=engine,
+        gradient_accumulation_steps=1,
+        num_pp_microbatches=1,
+        metrics_processor=SimpleNamespace(
+            should_log=lambda step: should_log, step_last_log=None, log=MagicMock()
+        ),
+    )
+    losses, routing = torch.tensor([1, 2]), torch.tensor([3, 4])
+    Trainer.train_step(trainer, iter([_batch(losses, routing)]))
+    assert len(reductions) == int(dp_enabled)
+    if dp_enabled:
+        torch.testing.assert_close(
+            reductions[0], torch.cat((losses, routing)) if owns_loss else routing
+        )
+    received = forward_backward.call_args.kwargs
+    factor = 2 if dp_enabled else 1
+    if owns_loss:
+        torch.testing.assert_close(
+            received["global_loss_token_counts"], losses * factor
+        )
+    else:
+        assert received["global_loss_token_counts"] is None
+    torch.testing.assert_close(
+        received["global_routing_token_counts"], routing * factor
+    )
+    expected_sums = [9.0, 1.0] if owns_loss else [9.0]
+    assert scalar_reductions == (expected_sums if should_log and dp_enabled else [])
+    assert len(max_reductions) == int(should_log and dp_enabled and owns_loss)
+    if should_log:
+        values = trainer.metrics_processor.log.call_args
+        assert values.args[1:3] == (
+            (float(factor), float(factor)) if owns_loss else (-1.0, -1.0)
+        )
+        assert values.kwargs["extra_metrics"]["n_tokens_seen"] == 9 * factor
+    else:
+        trainer.metrics_processor.log.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "pp_enabled,last_stage,counts,valid",
+    [
+        (False, True, None, False),
+        (True, True, None, False),
+        (True, False, torch.tensor(2), True),
+        (False, False, 2, True),
+        (True, True, torch.tensor(2), True),
+        (True, False, None, True),
+    ],
+)
+def test_forward_backward_validates_loss_owner_before_step_mutation(
+    pp_enabled, last_stage, counts, valid
+):
+    engine = SimpleNamespace(
+        parallelism_context=SimpleNamespace(pp_enabled=pp_enabled),
+        pp_has_last_stage=last_stage,
+        device=torch.device("cpu"),
+        num_completed_steps=0,
+        garbage_collector=MagicMock(),
+        optim=MagicMock(),
+        _cuda_graph_per_microbatch_group_enabled=False,
+        config=SimpleNamespace(
+            training=SimpleNamespace(preprocess_microbatch_groups_lazily=False)
+        ),
+        _preprocess_microbatch_groups=MagicMock(return_value=[]),
+        _run_forward_backward=MagicMock(
+            return_value=ForwardBackwardResult(torch.tensor(-1.0), [])
+        ),
+        sdc_replayer=None,
+    )
+
+    def run():
+        return TrainingEngine.forward_backward(
+            engine,
+            microbatch_groups=[[_batch(torch.tensor(1), torch.tensor([1]))]],
+            global_loss_token_counts=counts,
+            global_routing_token_counts=torch.tensor([1]),
+        )
+
+    if valid:
+        run()
+        actual_counts = engine._run_forward_backward.call_args.args[1]
+        if counts is None or (pp_enabled and not last_stage):
+            assert actual_counts is None
+        else:
+            torch.testing.assert_close(actual_counts, torch.tensor(2))
+        engine.garbage_collector.run.assert_called_once()
+        engine.optim.zero_grad.assert_called_once()
+        return
+    with pytest.raises(ValueError, match="global_loss_token_counts"):
+        run()
+    engine.garbage_collector.run.assert_not_called()
+    engine.optim.zero_grad.assert_not_called()
+    engine._run_forward_backward.assert_not_called()
+
+
+@pytest.mark.parametrize(
     ("loss_token_counts", "routing_token_counts"),
     (
         (torch.tensor(1), torch.tensor([1])),

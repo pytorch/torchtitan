@@ -362,19 +362,30 @@ class Trainer(Configurable):
             else local_loss_token_counts[0]
         )
         sl.log_trace_scalar({"local_valid_tokens": int(local_main_loss_token_count)})
-        num_loss_objectives = local_loss_token_counts.numel()
-        global_token_counts = torch.cat(
-            (
-                local_loss_token_counts.reshape(-1),
-                local_routing_token_counts.reshape(-1),
+        owns_loss = not parallelism_context.pp_enabled or engine.pp_has_last_stage
+        num_loss_objectives = local_loss_token_counts.numel() if owns_loss else 0
+        # Routing denominators belong to every MoE stage. Loss denominators
+        # belong only to stages that evaluate the loss.
+        global_token_counts = (
+            torch.cat(
+                (
+                    local_loss_token_counts.reshape(-1),
+                    local_routing_token_counts.reshape(-1),
+                )
             )
+            if owns_loss
+            else local_routing_token_counts.reshape(-1)
         ).to(engine.device)
         if parallelism_context.dp_enabled:
             global_token_counts = dist_utils.dist_sum_tensor(
                 global_token_counts, parallelism_context.get_mesh("dp")
             )
-        global_loss_token_counts = global_token_counts[:num_loss_objectives].reshape(
-            local_loss_token_counts.shape
+        global_loss_token_counts = (
+            global_token_counts[:num_loss_objectives].reshape(
+                local_loss_token_counts.shape
+            )
+            if owns_loss
+            else None
         )
         global_routing_token_counts = global_token_counts[num_loss_objectives:].reshape(
             local_routing_token_counts.shape
@@ -383,11 +394,6 @@ class Trainer(Configurable):
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
-        )
-        global_main_loss_token_count = (
-            global_loss_token_counts
-            if global_loss_token_counts.ndim == 0
-            else global_loss_token_counts[0]
         )
 
         # Capture the learning rates used by this optimizer update before the
@@ -402,12 +408,29 @@ class Trainer(Configurable):
         accumulated_loss = forward_backward_result.loss
 
         with sl.log_trace_span("collect_dist_metrics"):
-            sl.log_trace_scalar(
-                {"global_valid_tokens": int(global_main_loss_token_count)}
-            )
-
+            # Token-seen and auxiliary metrics still participate on every rank.
+            # Non-loss ranks retain the explicit loss sentinel, not local counts
+            # masquerading as a global denominator.
+            global_avg_loss = global_max_loss = -1.0
             if parallelism_context.dp_cp_enabled:
                 loss_mesh = parallelism_context.get_optional_mesh("loss")
+                global_ntokens_seen = dist_utils.dist_sum(
+                    torch.tensor(
+                        engine.ntokens_seen,
+                        dtype=torch.int64,
+                        device=engine.device,
+                    ),
+                    loss_mesh,
+                )
+            else:
+                loss_mesh = None
+                global_ntokens_seen = engine.ntokens_seen
+
+            if global_loss_token_counts is not None:
+                global_main_loss_token_count = global_loss_token_counts.reshape(-1)[0]
+                sl.log_trace_scalar(
+                    {"global_valid_tokens": int(global_main_loss_token_count)}
+                )
 
                 # For global_avg_loss, we want the average loss across all ranks:
                 # accumulated_loss = local_loss_sum / global_valid_tokens
@@ -418,26 +441,16 @@ class Trainer(Configurable):
                 # local_avg_loss = local_loss_sum / local_valid_tokens
                 #                = (accumulated_loss * global_valid_tokens) / local_valid_tokens
                 # global_max_loss = max(local_avg_loss)
-                local_avg_loss = (
-                    accumulated_loss
-                    * global_main_loss_token_count
-                    / local_main_loss_token_count
-                )
-                global_avg_loss, global_max_loss, global_ntokens_seen = (
-                    dist_utils.dist_sum(accumulated_loss, loss_mesh),
-                    dist_utils.dist_max(local_avg_loss, loss_mesh),
-                    dist_utils.dist_sum(
-                        torch.tensor(
-                            engine.ntokens_seen,
-                            dtype=torch.int64,
-                            device=engine.device,
-                        ),
-                        loss_mesh,
-                    ),
-                )
-            else:
-                global_avg_loss = global_max_loss = float(accumulated_loss.item())
-                global_ntokens_seen = engine.ntokens_seen
+                if parallelism_context.dp_cp_enabled:
+                    local_avg_loss = (
+                        accumulated_loss
+                        * global_main_loss_token_count
+                        / local_main_loss_token_count
+                    )
+                    global_avg_loss = dist_utils.dist_sum(accumulated_loss, loss_mesh)
+                    global_max_loss = dist_utils.dist_max(local_avg_loss, loss_mesh)
+                else:
+                    global_avg_loss = global_max_loss = float(accumulated_loss.item())
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
