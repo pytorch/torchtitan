@@ -748,3 +748,6 @@ def wrap_fwd_bwd_with_accelerator_graph(
         name=name,
         annotation_config=annotation_config,
     )
+
+
+from torchtitan.distributed.accelerator_graph import cuda_graph  # noqa: E402, F401

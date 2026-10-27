@@ -18,7 +18,7 @@ import torch
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.accelerator_graph import get_accelerator_graph_annotations
-from torchtitan.distributed.cuda_graph_backend import (
+from torchtitan.distributed.accelerator_graph.cuda_graph import (
     get_cuspy_cuda_graph_annotation_config,
 )
 from torchtitan.observability import structured_logger as sl

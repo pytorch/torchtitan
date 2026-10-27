@@ -121,7 +121,7 @@ def test_wrap_with_accelerator_graph_captures_first_invocation() -> None:
         patch("torch.cuda.CUDAGraph", return_value=graph) as graph_constructor,
         patch("torch.cuda.graph", return_value=nullcontext()),
         patch(
-            "torchtitan.distributed.cuda_graph_backend.get_kernel_annotations",
+            "torchtitan.distributed.accelerator_graph.cuda_graph.get_kernel_annotations",
             return_value={},
         ),
     ):
@@ -184,7 +184,7 @@ def test_accelerator_graph_wrapper_collects_annotations() -> None:
         patch("torch.cuda.CUDAGraph", return_value=graph),
         patch("torch.cuda.graph", return_value=nullcontext()) as cuda_graph,
         patch(
-            "torchtitan.distributed.cuda_graph_backend.get_kernel_annotations",
+            "torchtitan.distributed.accelerator_graph.cuda_graph.get_kernel_annotations",
             return_value=annotations,
         ),
     ):
@@ -251,7 +251,7 @@ def test_preparation_and_cache_release_run_only_before_first_capture() -> None:
             side_effect=lambda fn, *args: fn(*args),
         ),
         patch(
-            "torchtitan.distributed.cuda_graph_backend.get_kernel_annotations",
+            "torchtitan.distributed.accelerator_graph.cuda_graph.get_kernel_annotations",
             return_value={},
         ),
     ):
@@ -320,7 +320,7 @@ def test_structured_wrapper_validates_and_copies_replay_inputs() -> None:
         patch("torch.cuda.CUDAGraph", return_value=graph),
         patch("torch.cuda.graph", return_value=nullcontext()),
         patch(
-            "torchtitan.distributed.cuda_graph_backend.get_kernel_annotations",
+            "torchtitan.distributed.accelerator_graph.cuda_graph.get_kernel_annotations",
             return_value={},
         ),
     ):
@@ -375,7 +375,7 @@ def test_accelerator_graph_wrapper_restores_capture_allocated_gradients() -> Non
         patch("torch.cuda.CUDAGraph", return_value=graph),
         patch("torch.cuda.graph", return_value=nullcontext()),
         patch(
-            "torchtitan.distributed.cuda_graph_backend.get_kernel_annotations",
+            "torchtitan.distributed.accelerator_graph.cuda_graph.get_kernel_annotations",
             return_value={},
         ),
     ):
@@ -420,7 +420,7 @@ def test_accelerator_graph_wrapper_requires_cleared_owned_gradients(
         patch("torch.cuda.CUDAGraph", return_value=graph),
         patch("torch.cuda.graph", return_value=nullcontext()),
         patch(
-            "torchtitan.distributed.cuda_graph_backend.get_kernel_annotations",
+            "torchtitan.distributed.accelerator_graph.cuda_graph.get_kernel_annotations",
             return_value={},
         ),
     ):

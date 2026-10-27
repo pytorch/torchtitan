@@ -30,7 +30,7 @@ validator=Validator.Config(
 Omitting `dataloader` uses this configuration by default.
 
 Validation follows `training.disable_cuda_graphs` and shares the training graph pool.
-See [CUDA graphs](../torchtitan/distributed/CUDA_GRAPH.md) for capture order and tensor lifetimes.
+See [CUDA graphs](../torchtitan/distributed/accelerator_graph/README.md) for capture order and tensor lifetimes.
 
 ## Third-Party Evaluation
 With `./scripts/checkpoint_conversion/convert_to_hf.py`, `torchtitan` offers support for converting checkpoints from DCP to safetensors format. Using this script, users can perform efficient evaluation separate from their training using external libraries that support HuggingFace e.g. `lm_eval` with `vllm` backend.
