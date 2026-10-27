@@ -27,6 +27,7 @@ from torchtitan.models.qwen3 import build_model_config
         ("deepseek_v3", "debugmodel"),
         ("gpt_oss", "debugmodel"),
         ("kimi_k3", "debugmodel"),
+        ("minimax_m3", "debugmodel"),
         ("qwen3", "debugmodel"),
         ("qwen3", "debugmodel_moe"),
         ("qwen3_5", "debugmodel"),

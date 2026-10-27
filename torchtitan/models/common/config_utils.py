@@ -66,6 +66,7 @@ from torchtitan.models.common.moe.sharding import (
 )
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.norm import OffsetRMSNorm
 from torchtitan.models.common.rope import RoPE
 
 
@@ -234,7 +235,7 @@ def make_gqa_config(
     rope: RoPE.Config | None,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
-    qk_norm: RMSNorm.Config | None = None,
+    qk_norm: RMSNorm.Config | OffsetRMSNorm.Config | None = None,
     enable_sp: bool,
 ) -> GQAttention.Config:
     """Build a fully-specified, sharded GQAttention.Config.

@@ -46,6 +46,12 @@ from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
+from torchtitan.models.minimax_m3 import (
+    build_model_config as build_minimax_m3_model_config,
+)
+from torchtitan.models.minimax_m3.attention import MSAInnerAttention
+from torchtitan.models.minimax_m3.model import MiniMaxM3Model
+from torchtitan.models.minimax_m3.state_dict_adapter import MiniMaxM3StateDictAdapter
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
@@ -496,6 +502,68 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
                 self.assertIsInstance(restored[key], DTensor)
                 self.assertEqual(restored[key].placements, weight.placements)
                 torch.testing.assert_close(restored[key], weight, rtol=0, atol=0)
+
+
+class MiniMaxM3StateDictAdapterTest(unittest.TestCase):
+    def test_full_model_roundtrip(self) -> None:
+        config = build_minimax_m3_model_config(
+            "debugmodel", seq_len=128, parallelism=ParallelismConfig()
+        )
+        assert isinstance(config, MiniMaxM3Model.Config)
+        assert config.vision_encoder is not None
+        model = config.build()
+        model.init_states()
+        state_dict = model.state_dict()
+        for index, value in enumerate(state_dict.values()):
+            value.copy_(torch.arange(value.numel()).reshape(value.shape) + index)
+
+        adapter = MiniMaxM3StateDictAdapter(config, hf_assets_path=None)
+        hf_state_dict = adapter.to_hf(state_dict)
+        vision = config.vision_encoder
+        self.assertEqual(
+            hf_state_dict[
+                "vision_tower.vision_model.embeddings.patch_embedding.weight"
+            ].shape,
+            (
+                vision.dim,
+                vision.in_channels,
+                vision.temporal_patch_size,
+                vision.patch_size,
+                vision.patch_size,
+            ),
+        )
+        layer = "language_model.model.layers.{}."
+        for layer_id, layer_config in enumerate(config.layers):
+            sparse = isinstance(
+                layer_config.attention.inner_attention, MSAInnerAttention.Config
+            )
+            self.assertEqual(
+                f"{layer.format(layer_id)}self_attn.index_q_proj.weight"
+                in hf_state_dict,
+                sparse,
+            )
+        self.assertIn(
+            f"{layer.format(1)}block_sparse_moe.experts.0.w1.weight", hf_state_dict
+        )
+        self.assertIn(f"{layer.format(0)}mlp.gate_proj.weight", hf_state_dict)
+
+        restored = adapter.from_hf(hf_state_dict)
+        self.assertEqual(restored.keys(), state_dict.keys())
+        for key, value in state_dict.items():
+            torch.testing.assert_close(restored[key], value, rtol=0, atol=0)
+        config.build().load_state_dict(restored, strict=True)
+
+    def test_rejects_vision_weights_without_a_vision_encoder(self) -> None:
+        config = build_minimax_m3_model_config(
+            "debugmodel", seq_len=128, parallelism=ParallelismConfig()
+        )
+        config.vision_encoder = None
+        adapter = MiniMaxM3StateDictAdapter(config, hf_assets_path=None)
+        hf_state_dict = {
+            "vision_tower.vision_model.pre_layrnorm.weight": torch.ones(64),
+        }
+        with self.assertRaisesRegex(ValueError, "no vision encoder"):
+            adapter.from_hf(hf_state_dict)
 
 
 class KimiK3StateDictAdapterTest(unittest.TestCase):

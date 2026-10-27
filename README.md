@@ -112,6 +112,7 @@ and [`torchtitan_recipes`](torchtitan_recipes/README.md) for the verified recipe
 | [gpt-oss](torchtitan/models/gpt_oss) | 20B, 120B | Text | | ✅ |
 | [Kimi K2.7](torchtitan/models/kimi_k2_7) | Moonlight-16B-A3B, Kimi-VL-A3B, K2.5 | Text, vision | | |
 | [Kimi K3](torchtitan/models/kimi_k3) | K3 | Text, vision | | Soon |
+| [MiniMax M3](torchtitan/models/minimax_m3) | M3, M3.1-Flash | Text, vision | | |
 | [Muse Glimmer](torchtitan/models/muse_glimmer) | 30B | Text, vision | `muse_glimmer_30b` | ✅ |
 | [Muse-Spark-Open](torchtitan/models/muse_spark) | 816B-A42B | Text, vision, audio | `muse_spark_816b_a42b` | ✅ text |
 | [FLUX](torchtitan/models/flux) | dev, schnell | Text-to-image | `flux_dev`, `flux_schnell` | |

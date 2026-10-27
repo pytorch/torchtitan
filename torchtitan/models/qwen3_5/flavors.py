@@ -26,6 +26,7 @@ from torchtitan.models.common import (  # noqa: F401
     Embedding,
     GatedRMSNorm,
     Linear,
+    OffsetRMSNorm,
     RowParallelLinear,
     SiLU,
     Softmax,
@@ -70,7 +71,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_invariant_linear_sharding_config,
     vision_rowwise_sharding_config,
 )
-from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
+from .model import Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
 from .moe import SigmoidGatedFeedForward
 from .rope import MRoPE
 from .sharding import (
@@ -312,7 +313,6 @@ def _qwen35_attention_config(
     n_heads: int,
     n_kv_heads: int,
     head_dim: int,
-    rotary_dim: int,
     rope: MRoPE.Config,
     attn_backend: str,
     layer_id: int,
@@ -327,7 +327,6 @@ def _qwen35_attention_config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
-        rotary_dim=rotary_dim,
         # The per-layer rope ``cache`` buffer is replicated on TP.
         rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
         wq=Linear.Config(
@@ -460,7 +459,6 @@ def _build_qwen35_layers(
     n_heads: int,
     n_kv_heads: int,
     head_dim: int,
-    rotary_dim: int,
     rope: MRoPE.Config,
     hidden_dim: int,
     n_key_heads: int,
@@ -483,7 +481,6 @@ def _build_qwen35_layers(
                 n_heads=n_heads,
                 n_kv_heads=n_kv_heads,
                 head_dim=head_dim,
-                rotary_dim=rotary_dim,
                 rope=rope,
                 attn_backend=attn_backend,
                 layer_id=layer_id,
@@ -534,7 +531,6 @@ def _build_qwen35_moe_layers(
     n_heads: int,
     n_kv_heads: int,
     head_dim: int,
-    rotary_dim: int,
     rope: MRoPE.Config,
     moe_hidden_dim: int,
     num_experts: int,
@@ -561,7 +557,6 @@ def _build_qwen35_moe_layers(
                 n_heads=n_heads,
                 n_kv_heads=n_kv_heads,
                 head_dim=head_dim,
-                rotary_dim=rotary_dim,
                 rope=rope,
                 attn_backend=attn_backend,
                 layer_id=layer_id,
@@ -641,7 +636,6 @@ def _debugmodel(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -673,7 +667,6 @@ def _debugmodel(
             n_heads=4,
             n_kv_heads=2,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             hidden_dim=512,
             n_key_heads=2,
             n_value_heads=4,
@@ -713,7 +706,6 @@ def _debugmodel_moe(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -745,7 +737,6 @@ def _debugmodel_moe(
             n_heads=4,
             n_kv_heads=2,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             moe_hidden_dim=256,
             num_experts=8,
             top_k=2,
@@ -789,7 +780,6 @@ def _0_8b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -822,7 +812,6 @@ def _0_8b(
             n_heads=8,
             n_kv_heads=2,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             hidden_dim=3584,
             n_key_heads=16,
             n_value_heads=16,
@@ -862,7 +851,6 @@ def _2b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -895,7 +883,6 @@ def _2b(
             n_heads=8,
             n_kv_heads=2,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             hidden_dim=6144,
             n_key_heads=16,
             n_value_heads=16,
@@ -935,7 +922,6 @@ def _4b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -968,7 +954,6 @@ def _4b(
             n_heads=16,
             n_kv_heads=4,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             hidden_dim=9216,
             n_key_heads=16,
             n_value_heads=32,
@@ -1004,7 +989,6 @@ def _9b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -1036,7 +1020,6 @@ def _9b(
             n_heads=16,
             n_kv_heads=4,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             hidden_dim=12288,
             n_key_heads=16,
             n_value_heads=32,
@@ -1072,7 +1055,6 @@ def _27b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -1104,7 +1086,6 @@ def _27b(
             n_heads=24,
             n_kv_heads=4,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             hidden_dim=17408,
             n_key_heads=16,
             n_value_heads=48,
@@ -1143,7 +1124,6 @@ def _35b_a3b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -1175,7 +1155,6 @@ def _35b_a3b(
             n_heads=16,
             n_kv_heads=2,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             moe_hidden_dim=512,
             num_experts=256,
             top_k=8,
@@ -1218,7 +1197,6 @@ def _122b_a10b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -1250,7 +1228,6 @@ def _122b_a10b(
             n_heads=32,
             n_kv_heads=2,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             moe_hidden_dim=1024,
             num_experts=256,
             top_k=8,
@@ -1293,7 +1270,6 @@ def _397b_a17b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -1325,7 +1301,6 @@ def _397b_a17b(
             n_heads=32,
             n_kv_heads=2,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             moe_hidden_dim=1024,
             num_experts=512,
             top_k=10,

@@ -56,7 +56,6 @@ def _qwen3_8_2_4t_a95b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=pre_lm_head_norm_sharding_config(
@@ -90,7 +89,6 @@ def _qwen3_8_2_4t_a95b(
             n_heads=64,
             n_kv_heads=4,
             head_dim=head_dim,
-            rotary_dim=rotary_dim,
             moe_hidden_dim=2048,
             num_experts=512,
             top_k=10,

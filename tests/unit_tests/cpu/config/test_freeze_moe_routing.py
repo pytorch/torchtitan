@@ -51,6 +51,7 @@ _MOE_DEBUG_MODELS = [
     ("qwen3_8", "debugmodel_moe", 1e-3),
     ("kimi_k2_7", "debugmodel", 1e-3),
     ("kimi_k3", "debugmodel", None),  # quantile balancing: its own expert bias
+    ("minimax_m3", "debugmodel", 1e-3),
     ("deepseek_v3", "debugmodel", 1e-3),
     ("deepseek_v4", "debugmodel", 1e-3),
     ("gpt_oss", "debugmodel", 1e-3),  # gate bias
