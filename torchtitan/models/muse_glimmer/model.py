@@ -165,7 +165,7 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config[Attention.Config]):
+    class Config(TransformerBlock.Config):
         post_attention_norm: RMSNorm.Config
         post_ffn_norm: RMSNorm.Config
 
@@ -288,7 +288,7 @@ class MuseGlimmerModel(MultimodalModel):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config[MuseGlimmerTransformerBlock.Config]):
+    class Config(Decoder.Config):
         dim: int = 6656
         vocab_size: int = 202048
         local_compile_regions: list[str] = field(
@@ -329,6 +329,7 @@ class MuseGlimmerModel(MultimodalModel):
             attention_op_flops = 0
             for layer in self.layers:
                 attention = layer.attention
+                assert isinstance(attention, Attention.Config)
                 head_dim = (
                     attention.head_dim
                     if attention.head_dim is not None

@@ -149,6 +149,8 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
     ) -> dict[str, Any]:
         """Convert a TorchTitan state dict to unquantized HuggingFace format."""
+        from .model import KimiK3TransformerBlock
+
         if to_quantized_layout:
             raise ValueError(
                 f"{type(self).__name__} does not support loading quantized "
@@ -266,7 +268,9 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
 
         # The released HF model contain these unused layer-0 attn res parameters.
         # TT omits them, so synthesize deterministic, placeholders to preserve strict HF state-dict loading.
-        if self.kimi_config.layers[0].attention_res_norm is None:
+        first_layer = self.kimi_config.layers[0]
+        assert isinstance(first_layer, KimiK3TransformerBlock.Config)
+        if first_layer.attention_res_norm is None:
             norm_template_key = (
                 "language_model.model.layers.1.self_attention_res_norm.weight"
             )

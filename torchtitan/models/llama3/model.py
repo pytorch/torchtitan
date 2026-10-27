@@ -38,7 +38,7 @@ class Llama3TransformerBlock(TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config[GQAttention.Config]):
+    class Config(TransformerBlock.Config):
         pass
 
     def __init__(self, config: Config):
@@ -82,7 +82,7 @@ class Llama3Model(Decoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config[Llama3TransformerBlock.Config]):
+    class Config(Decoder.Config):
         dim: int = 4096
         vocab_size: int = 128256
         local_compile_regions: list[str] = field(
@@ -96,6 +96,7 @@ class Llama3Model(Decoder):
             attention_op_flops = 0
             for layer in self.layers:
                 attention = layer.attention
+                assert isinstance(attention, GQAttention.Config)
                 head_dim = (
                     attention.head_dim
                     if attention.head_dim is not None

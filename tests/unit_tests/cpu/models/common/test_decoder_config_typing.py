@@ -6,22 +6,29 @@
 
 import copy
 from dataclasses import dataclass, fields, replace
+from typing import get_type_hints
 
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.attention import Attention
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.deepseek_v3 import build_model_config as build_deepseek_config
-from torchtitan.models.deepseek_v3.model import DeepSeekV3TransformerBlock
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.llama3.model import Llama3TransformerBlock
 
 
-def test_typed_decoder_preserves_mutable_layers_serialization_and_build_owner():
+def test_decoder_config_uses_concrete_base_annotations():
+    assert get_type_hints(TransformerBlock.Config)["attention"] is Attention.Config
+    assert get_type_hints(Decoder.Config)["layers"] == list[TransformerBlock.Config]
+    assert get_type_hints(MTPDecoder.Config)["layers"] == list[TransformerBlock.Config]
+
+
+def test_decoder_subclass_preserves_mutable_layers_serialization_and_build_owner():
     class TypedDecoder(Decoder):
         @dataclass(kw_only=True, slots=True)
-        class Config(Decoder.Config[Llama3TransformerBlock.Config]):
+        class Config(Decoder.Config):
             pass
 
     source = build_model_config(
@@ -51,10 +58,10 @@ def test_typed_decoder_preserves_mutable_layers_serialization_and_build_owner():
     )
 
 
-def test_typed_mtp_decoder_keeps_main_and_prediction_layer_lists_separate():
+def test_mtp_decoder_subclass_keeps_main_and_prediction_layer_lists_separate():
     class TypedMTPDecoder(MTPDecoder):
         @dataclass(kw_only=True, slots=True)
-        class Config(MTPDecoder.Config[DeepSeekV3TransformerBlock.Config]):
+        class Config(MTPDecoder.Config):
             pass
 
     source = build_deepseek_config(

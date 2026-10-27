@@ -306,7 +306,7 @@ class MuseSparkLMHead(HiMidLoLinear):
 
 class MuseSparkTransformerBlock(TransformerBlock):
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config[MuseSparkAttention.Config]):
+    class Config(TransformerBlock.Config):
         post_attention_norm: MuseSparkRMSNorm.Config
         attention_residual: MuseSparkNormPreservingResidualConnection.Config
         post_ffn_norm: MuseSparkRMSNormWithInputScale.Config
@@ -379,7 +379,7 @@ class MuseSparkModel(MultimodalModel):
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
 
     @dataclass(kw_only=True, slots=True)
-    class Config(MultimodalModel.Config[MuseSparkTransformerBlock.Config]):
+    class Config(MultimodalModel.Config):
         """Configure stage modalities consistently across ranks.
 
         ``dataset_modalities`` is the union of modalities the current dataset can
@@ -445,6 +445,7 @@ class MuseSparkModel(MultimodalModel):
             attention_op_flops = 0
             for layer in self.layers:
                 attention = layer.attention
+                assert isinstance(attention, MuseSparkAttention.Config)
                 head_dim = (
                     attention.head_dim
                     if attention.head_dim is not None

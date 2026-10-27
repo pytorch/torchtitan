@@ -41,6 +41,7 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
     make_shared_expert_ffn_config,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
@@ -295,7 +296,7 @@ def build_mla_moe_layers(
     first_layer_sharding_config: ShardingConfig | None = None,
     enable_sp: bool,
     enable_ep: bool,
-) -> list[DeepSeekV3TransformerBlock.Config]:
+) -> list[TransformerBlock.Config]:
     """Build the sharded per-layer ``DeepSeekV3TransformerBlock`` configs.
 
     Layers with layer_id < n_dense_layers get a DenseFeedForward.
@@ -309,7 +310,7 @@ def build_mla_moe_layers(
     whose embedding output is not in the residual layout.
     """
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
-    layers = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         attn_cfg = make_mla_attention_config(
             layer_id=layer_id,
@@ -398,7 +399,7 @@ def _build_dsv3_layers(
     router_num_expert_groups: int | None = None,
     router_num_limited_groups: int | None = None,
     **kwargs,
-) -> list[DeepSeekV3TransformerBlock.Config]:
+) -> list[TransformerBlock.Config]:
     """Thin wrapper: ``build_mla_moe_layers`` with DeepSeek V3's own inits."""
     return build_mla_moe_layers(
         **kwargs,
@@ -415,7 +416,7 @@ def _build_dsv3_layers(
 
 
 def _build_mtp_layers(
-    inner_cfg: DeepSeekV3TransformerBlock.Config,
+    inner_cfg: TransformerBlock.Config,
     *,
     dim: int,
     num_mtp_layers: int,

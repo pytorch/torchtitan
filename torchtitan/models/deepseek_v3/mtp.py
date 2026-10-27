@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -187,11 +187,6 @@ class MTPTransformerBlock(TransformerBlock):
         )
 
 
-MTPDecoderLayerConfigT = TypeVar(
-    "MTPDecoderLayerConfigT", bound=TransformerBlock.Config
-)
-
-
 class MTPDecoder(Decoder):
     """Decoder variant that owns MTP layers.
 
@@ -203,9 +198,7 @@ class MTPDecoder(Decoder):
     mtp_layers: ModuleList[MTPTransformerBlock] | None
 
     @dataclass(kw_only=True, slots=True)
-    class Config(
-        Decoder.Config[MTPDecoderLayerConfigT], Generic[MTPDecoderLayerConfigT]
-    ):
+    class Config(Decoder.Config):
         mtp_layers: list[MTPTransformerBlock.Config] = field(default_factory=list)
 
     def __init__(self, config: Config):

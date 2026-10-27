@@ -37,6 +37,7 @@ from torchtitan.models.common.attention import (
     VarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import get_attention_config
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
     inner_attention_local_spmd_sharding_config,
@@ -218,14 +219,14 @@ def _build_gptoss_layers(
     rope: RoPE.Config,
     enable_sp: bool,
     enable_ep: bool,
-) -> list[GptOssTransformerBlock.Config]:
+) -> list[TransformerBlock.Config]:
     """Build sharded per-layer configs for GPT-OSS.
 
     Even-indexed layers (0, 2, 4, ...) use sliding window attention.
     All dimensional fields are set directly.
     """
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
-    layers = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         attn_cfg = _make_gptoss_attn_config(
             dim=dim,

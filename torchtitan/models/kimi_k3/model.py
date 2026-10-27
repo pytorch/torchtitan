@@ -234,7 +234,7 @@ class KimiK3TransformerBlock(TransformerBlock):
     """Hybrid KDA/MLA decoder block with Kimi attention residuals."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config[Attention.Config]):
+    class Config(TransformerBlock.Config):
         layer_id: int
         attn_res_block_size: int
         attention_res_norm: RMSNorm.Config | None
@@ -346,7 +346,7 @@ class KimiK3Model(MultimodalModel):
         return pipeline_kimi_k3(self, **kwargs)
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config[KimiK3TransformerBlock.Config]):
+    class Config(Decoder.Config):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None

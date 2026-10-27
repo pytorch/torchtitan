@@ -43,7 +43,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
     """Transformer block with HC pre/post mixing around attention and FFN."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config[DeepSeekV4Attention.Config]):
+    class Config(TransformerBlock.Config):
         hc_attn_pre: HcPre.Config
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
@@ -169,7 +169,7 @@ class DeepSeekV4Model(Decoder):
         )
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config[DeepSeekV4TransformerBlock.Config]):
+    class Config(Decoder.Config):
         dim: int
         vocab_size: int
         local_compile_regions: list[str] = field(
@@ -198,6 +198,7 @@ class DeepSeekV4Model(Decoder):
             for layers in (self.layers, self.mtp_layers or ()):
                 for layer in layers:
                     attention = layer.attention
+                    assert isinstance(attention, DeepSeekV4Attention.Config)
                     inner_attention = attention.inner_attention
                     attention_op_flops += quadratic_attention_flops_per_token(
                         num_heads=attention.n_heads,
@@ -243,12 +244,14 @@ class DeepSeekV4Model(Decoder):
         tp = spmd_mesh_size("tp")
         if tp > 1:
             for layer in config.layers[: config.n_layers]:
-                num_heads = layer.attention.n_heads
+                attention = layer.attention
+                assert isinstance(attention, DeepSeekV4Attention.Config)
+                num_heads = attention.n_heads
                 if num_heads % tp != 0:
                     raise ValueError(
                         f"n_heads ({num_heads}) must be divisible by tp ({tp})"
                     )
-                num_groups = layer.attention.n_groups
+                num_groups = attention.n_groups
                 if num_groups % tp != 0:
                     raise ValueError(
                         f"n_groups ({num_groups}) must be divisible by tp ({tp})"

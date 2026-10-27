@@ -226,7 +226,7 @@ class Qwen35TransformerBlock(TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config[Attention.Config]):
+    class Config(TransformerBlock.Config):
         pass
 
     def __init__(self, config: Config):
@@ -332,7 +332,7 @@ class Qwen35Model(MultimodalModel):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config[Qwen35TransformerBlock.Config]):
+    class Config(Decoder.Config):
         vision_encoder: Qwen35VisionEncoder.Config | None = None
         local_compile_regions: list[str] = field(
             default_factory=lambda: [

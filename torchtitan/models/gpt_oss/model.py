@@ -144,7 +144,7 @@ class GptOssTransformerBlock(TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config[GptOssAttention.Config]):
+    class Config(TransformerBlock.Config):
         pass
 
     def __init__(self, config: Config):
@@ -213,7 +213,7 @@ class GptOssModel(Decoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config[GptOssTransformerBlock.Config]):
+    class Config(Decoder.Config):
         dim: int = 2880
         vocab_size: int = 201088
         local_compile_regions: list[str] = field(
@@ -232,6 +232,7 @@ class GptOssModel(Decoder):
             attention_op_flops = 0
             for layer in self.layers:
                 attention = layer.attention
+                assert isinstance(attention, GptOssAttention.Config)
                 attention_op_flops += quadratic_attention_flops_per_token(
                     num_heads=attention.n_heads,
                     qk_head_dim=attention.head_dim,

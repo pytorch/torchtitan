@@ -181,7 +181,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config[DeepSeekMLAAttention.Config]):
+    class Config(TransformerBlock.Config):
         pass
 
     def __init__(self, config: Config):
@@ -221,7 +221,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
 
 
 def get_deepseek_v3_nparams_and_flops(
-    model_config: MTPDecoder.Config[DeepSeekV3TransformerBlock.Config],
+    model_config: MTPDecoder.Config,
     model: nn.Module,
     seq_len: int,
     *,
@@ -237,6 +237,7 @@ def get_deepseek_v3_nparams_and_flops(
     for layers in (model_config.layers, model_config.mtp_layers):
         for layer in layers:
             attention = layer.attention
+            assert isinstance(attention, DeepSeekMLAAttention.Config)
             attention_op_flops += quadratic_attention_flops_per_token(
                 num_heads=attention.n_heads,
                 qk_head_dim=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
@@ -263,7 +264,7 @@ class DeepSeekV3Model(MTPDecoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(MTPDecoder.Config[DeepSeekV3TransformerBlock.Config]):
+    class Config(MTPDecoder.Config):
         dim: int = 2048
         vocab_size: int = 102400
         local_compile_regions: list[str] = field(

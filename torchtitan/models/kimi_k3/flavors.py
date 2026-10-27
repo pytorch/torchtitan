@@ -39,6 +39,7 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_shared_expert_ffn_config,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
@@ -596,7 +597,7 @@ def _kimi_k3_config(
             ),
         )
 
-    layers = []
+    layers: list[TransformerBlock.Config] = []
     for layer_idx in range(num_layers):
         is_full_attention = layer_idx in full_attention_layers
         layers.append(

@@ -6,7 +6,7 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -37,9 +37,6 @@ __all__ = ["Decoder", "TransformerBlock"]
 
 logger = logging.getLogger(__name__)
 
-AttentionConfigT = TypeVar("AttentionConfigT", bound=Attention.Config)
-
-
 # TODO: we can unify the TransformerBlock impl across all models when
 # there is no special logic for each model.
 class TransformerBlock(Module):
@@ -60,14 +57,11 @@ class TransformerBlock(Module):
     feed_forward: FeedForward
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config, Generic[AttentionConfigT]):
-        attention: AttentionConfigT  # required, no default
+    class Config(Module.Config):
+        attention: Attention.Config
         feed_forward: FeedForward.Config
         attention_norm: Module.Config
         ffn_norm: Module.Config
-
-
-DecoderLayerConfigT = TypeVar("DecoderLayerConfigT", bound=TransformerBlock.Config)
 
 
 class Decoder(BaseModel):
@@ -80,14 +74,14 @@ class Decoder(BaseModel):
     layers: ModuleDict[TransformerBlock]
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseModel.Config, Generic[DecoderLayerConfigT]):
+    class Config(BaseModel.Config):
         max_context_length: int
         dim: int
         vocab_size: int
         lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
-        layers: list[DecoderLayerConfigT]
+        layers: list[TransformerBlock.Config]
         # Tie ``tok_embeddings`` and ``lm_head`` to share one weight. Models
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
