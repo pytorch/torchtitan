@@ -11,7 +11,10 @@ import pytest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import LinearAttention, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    LinearAttention,
+    SlidingWindowVarlenInnerAttention,
+)
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.qwen3_5 import build_model_config
@@ -42,8 +45,10 @@ def test_hf_config_uses_full_attention_after_sliding_attention(monkeypatch):
     from torchtitan.rl.generator.vllm import attention
 
     config = build_llama3_config("debugmodel", parallelism=ParallelismConfig())
-    config.layers[0].attention.inner_attention = VarlenInnerAttention.Config(
-        window_size=(128, 0)
+    config.layers[
+        0
+    ].attention.inner_attention = SlidingWindowVarlenInnerAttention.Config(
+        sliding_window_size=128
     )
     get_dimensions = Mock(wraps=attention.get_attention_dimensions)
     monkeypatch.setattr(attention, "get_attention_dimensions", get_dimensions)
@@ -65,8 +70,8 @@ def test_hf_config_requires_full_attention(attention_type):
     else:
         for layer in config.layers:
             if not isinstance(layer.attention, LinearAttention.Config):
-                layer.attention.inner_attention = VarlenInnerAttention.Config(
-                    window_size=(128, 0)
+                layer.attention.inner_attention = (
+                    SlidingWindowVarlenInnerAttention.Config(sliding_window_size=128)
                 )
 
     with pytest.raises(ValueError, match="no full attention layer"):

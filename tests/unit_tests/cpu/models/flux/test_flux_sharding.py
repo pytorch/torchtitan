@@ -54,7 +54,7 @@ class TestFluxSharding(unittest.TestCase):
         torch.testing.assert_close(_unpack_flux_attention_output(packed[0], 2), qkv)
         with patch("torchtitan.models.flux.model.spmd_mesh_size", return_value=2):
             metadata = _get_attention_metadata(
-                VarlenInnerAttention.Config(window_size=(-1, -1)),
+                VarlenInnerAttention.Config(),
                 2,
                 8,
                 device=torch.device("cpu"),
@@ -66,6 +66,7 @@ class TestFluxSharding(unittest.TestCase):
             metadata.cu_seq_k, torch.tensor([0, 16, 32], dtype=torch.int32)
         )
         self.assertEqual((metadata.max_q, metadata.max_k), (8, 16))
+        self.assertEqual(metadata.window_size, (-1, -1))
 
 
 if __name__ == "__main__":
