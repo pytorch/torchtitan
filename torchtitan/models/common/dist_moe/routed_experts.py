@@ -168,7 +168,7 @@ class DistMoeRoutedExperts(Module):
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,
+        routing_map_TE: torch.Tensor,
         *,
         padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -178,9 +178,7 @@ class DistMoeRoutedExperts(Module):
             x_TD: Local input tokens with model dimension ``D``.
             topk_scores_TK: Selected routing weights for ``K`` experts.
             topk_expert_ids_TK: Selected global expert IDs.
-            num_local_tokens_per_expert_E: Router statistics retained by the
-                surrounding MoE module; Dist-MoE derives dispatch metadata from
-                the selected IDs.
+            routing_map_TE: Unused; Dist-MoE dispatches from ``topk_expert_ids_TK``.
             padding_mask_T: Optional bool ``(T,)``, true for rows the caller
                 padded. Their routes get expert ID ``-1`` and score ``0``, which
                 Dist-MoE never dispatches, and their output rows are zero.
@@ -188,7 +186,7 @@ class DistMoeRoutedExperts(Module):
         Returns:
             Combined local expert output with shape ``(T, D)``.
         """
-        del num_local_tokens_per_expert_E
+        del routing_map_TE
         runtime = self._runtime
         if runtime is None:
             raise RuntimeError("Dist-MoE context is not initialized")

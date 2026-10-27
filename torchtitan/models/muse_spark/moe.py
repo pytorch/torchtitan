@@ -119,7 +119,6 @@ class MuseSparkMoE(MoE):
             **router_kwargs,
         )
         remat.recompute_needs_tensor(routing_map_TE)
-        num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
         expert_input_TC = self.pooler(x_TD)
         expert_input_TC = remat.region(
@@ -135,7 +134,7 @@ class MuseSparkMoE(MoE):
             expert_input_TC,
             topk_scores_TK,
             topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
+            routing_map_TE,
             padding_mask_T=padding_mask_T,
         )
         output_TD = self.unpooler(out_TC)
