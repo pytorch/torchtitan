@@ -224,6 +224,7 @@ class GptOssModel(Decoder):
                 "fused_binary_activation",
                 "rope",
                 "fp32_to_bf16_split",
+                "grouped_expert_bias",
             ]
         )
 
