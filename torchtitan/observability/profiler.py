@@ -17,8 +17,8 @@ from typing import Any, Literal
 import torch
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.accelerator_graph import get_accelerator_graph_annotations
-from torchtitan.distributed.accelerator_graph.cuda_graph import (
+from torchtitan.distributed.accelerator_graph import (
+    get_accelerator_graph_annotations,
     get_cuspy_cuda_graph_annotation_config,
 )
 from torchtitan.observability import structured_logger as sl

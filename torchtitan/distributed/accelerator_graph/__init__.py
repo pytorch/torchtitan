@@ -7,12 +7,14 @@
 """Accelerator graph wrappers with a shared memory pool."""
 
 import logging
+import warnings
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import torch
+from torch.cuda._graph_annotations import get_kernel_annotations
 from torch.nn.attention.flex_attention import BlockMask
 from torch.utils import _pytree as pytree
 
@@ -209,61 +211,6 @@ class _AcceleratorGraphGradientState:
         self._captured_parameter_gradients = None
 
 
-class GraphBackend:
-    """Graph capture through ``torch.accelerator.Graph``."""
-
-    def unsupported_reason(self) -> str | None:
-        """Return why graph capture is unavailable, or None if it is usable."""
-        try:
-            torch.accelerator.Graph()
-        except RuntimeError as e:
-            return str(e)
-        return None
-
-    def new_stream(self) -> torch.Stream:
-        """Return the stream used for warmup and capture."""
-        return torch.Stream()
-
-    def initialize(self, stream: torch.Stream) -> Any:
-        """Return the shared graph pool, or None to share the first graph's pool."""
-        return None
-
-    def capture(
-        self,
-        fn: Callable,
-        args: tuple[Any, ...],
-        *,
-        pool: Any,
-        stream: torch.Stream,
-        annotation_config: dict[str, Any] | None,
-    ) -> tuple[Any, Any]:
-        """Capture ``fn(*args)`` into a new graph and return the graph and output."""
-        graph = torch.accelerator.Graph(pool=pool, capture_error_mode="thread_local")
-        with stream, graph:
-            output = fn(*args)
-        return graph, output
-
-    def annotations(self) -> dict[int, list[Any]]:
-        """Return kernel annotations recorded by captures so far."""
-        return {}
-
-    def teardown(self) -> None:
-        pass
-
-
-_default_backend = GraphBackend()
-_backends: dict[str, GraphBackend] = {}
-
-
-def register_graph_backend(device_type: str, backend: GraphBackend) -> None:
-    """Use ``backend`` for graph capture on ``device_type``."""
-    _backends[device_type] = backend
-
-
-def _backend() -> GraphBackend:
-    return _backends.get(utils.device_type, _default_backend)
-
-
 def _unsupported_reason() -> str | None:
     accelerator = torch.accelerator.current_accelerator(check_available=True)
     if accelerator is None:
@@ -273,7 +220,15 @@ def _unsupported_reason() -> str | None:
             f"the active device type is {utils.device_type!r}, "
             f"not {accelerator.type!r}"
         )
-    return _backend().unsupported_reason()
+    if utils.device_type == "cuda":
+        if torch.version.hip is not None:
+            return "ROCm is not supported"
+        return None
+    try:
+        torch.accelerator.Graph()
+    except RuntimeError as e:
+        return str(e)
+    return None
 
 
 class AcceleratorGraphManager:
@@ -284,6 +239,7 @@ class AcceleratorGraphManager:
         self._wrappers: list["AcceleratorGraphWrapper"] = []
         self._graph_pool: Any = None
         self._stream: torch.Stream | None = None
+        self._dummy_graph: torch.cuda.CUDAGraph | None = None
         self.all_annotations: dict[int, list[Any]] = {}
         self.capture_allowed = True
 
@@ -294,6 +250,7 @@ class AcceleratorGraphManager:
 
     @property
     def graph_pool(self) -> Any:
+        assert self._graph_pool is not None
         return self._graph_pool
 
     @property
@@ -307,9 +264,25 @@ class AcceleratorGraphManager:
         reason = _unsupported_reason()
         if reason is not None:
             raise RuntimeError(f"Graph capture is unavailable: {reason}")
-        backend = _backend()
-        self._stream = backend.new_stream()
-        self._graph_pool = backend.initialize(self._stream)
+        if utils.device_type == "cuda":
+            graph_pool = torch.cuda.graph_pool_handle()
+            stream = torch.cuda.Stream()
+            dummy_graph = torch.cuda.CUDAGraph()
+            self._graph_pool = graph_pool
+            self._stream = stream
+            self._dummy_graph = dummy_graph
+            with (
+                warnings.catch_warnings(record=True),
+                torch.cuda.graph(
+                    dummy_graph,
+                    pool=graph_pool,
+                    stream=stream,
+                    capture_error_mode="thread_local",
+                ),
+            ):
+                pass
+        else:
+            self._stream = torch.Stream()
         self._initialized = True
 
     def capture(
@@ -320,30 +293,39 @@ class AcceleratorGraphManager:
         annotation_config: dict[str, Any] | None,
     ) -> tuple[Any, Any]:
         """Capture ``fn(*args)`` into a new graph and return the graph and output."""
-        backend = _backend()
-        graph, output = backend.capture(
-            fn,
-            args,
-            pool=self._graph_pool,
-            stream=self.stream,
-            annotation_config=annotation_config,
+        if utils.device_type == "cuda":
+            cuda_graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(
+                cuda_graph,
+                pool=self.graph_pool,
+                stream=cast(torch.cuda.Stream, self.stream),
+                enable_annotations=True,
+                annotation_config=annotation_config,
+                capture_error_mode="thread_local",
+            ):
+                output = fn(*args)
+            self.all_annotations.update(get_kernel_annotations())
+            return cuda_graph, output
+        graph = torch.accelerator.Graph(
+            pool=self._graph_pool, capture_error_mode="thread_local"
         )
+        with self.stream, graph:
+            output = fn(*args)
         if self._graph_pool is None:
             self._graph_pool = graph.pool()
-        self.all_annotations.update(backend.annotations())
         return graph, output
 
     def register(self, wrapper: "AcceleratorGraphWrapper") -> None:
         self._wrappers.append(wrapper)
 
     def teardown(self) -> None:
-        if self._initialized:
+        if self._initialized and utils.device_type != "cuda":
             torch.accelerator.synchronize()
         for wrapper in self._wrappers:
             wrapper.teardown()
         self._wrappers.clear()
         self.all_annotations.clear()
-        _backend().teardown()
+        self._dummy_graph = None
         self._stream = None
         self._graph_pool = None
         self._initialized = False
@@ -359,7 +341,7 @@ class AcceleratorGraphManager:
             "active=%d inactive_split=%d peak_allocated=%d peak_reserved=%d "
             "device_free=%d device_total=%d",
             name,
-            self.graph_pool,
+            self._graph_pool,
             boundary,
             stats["allocated_bytes.all.current"],
             stats["reserved_bytes.all.current"],
@@ -383,6 +365,35 @@ def accelerator_graph_teardown() -> None:
 def get_accelerator_graph_annotations() -> dict[int, list[Any]]:
     """Return all kernel annotations accumulated across accelerator graph captures."""
     return accelerator_graph_manager.all_annotations
+
+
+def get_cuspy_cuda_graph_annotation_config(
+    *, enable_event_node_ids: bool, record_py_stacks: bool = False
+) -> dict[str, Any] | None:
+    """``torch.cuda.graph`` annotation options for a Cuspy-profiled run.
+
+    ``backend="cupti"`` finds each ``mark_kernels`` scope's nodes through CUPTI
+    node-creation callbacks instead of walking the capture graph's edges, which
+    misses nodes created before the stream began capturing. ``key_by="auto"``
+    keeps annotations keyed to the capture graph, which Cuspy resolves through
+    CUPTI's ``sourceGraphNodeId``, falling back to the exec graph where CUPTI or
+    the driver is too old. Cuspy resolves graph event-record nodes (NCCL's under
+    ``NCCL_GRAPH_MIXING_SUPPORT``) only by exec-graph id, so ``enable_event_node_ids``
+    keys by the exec graph instead. ``record_py_stacks`` records each node's Python
+    launch stack, which needs the CUPTI backend.
+
+    Returns ``None`` when graph annotations are unavailable, so capture does not
+    take a CUPTI subscription for nothing; the profiler warns about that once.
+    """
+    if not torch.cuda.graph_annotations.is_available():
+        return None
+    config: dict[str, Any] = {
+        "backend": "cupti",
+        "key_by": "exec" if enable_event_node_ids else "auto",
+    }
+    if record_py_stacks:
+        config["record_py_stacks"] = True
+    return config
 
 
 def _run_eager_on_accelerator_graph_stream(
@@ -748,6 +759,3 @@ def wrap_fwd_bwd_with_accelerator_graph(
         name=name,
         annotation_config=annotation_config,
     )
-
-
-from torchtitan.distributed.accelerator_graph import cuda_graph  # noqa: E402, F401
