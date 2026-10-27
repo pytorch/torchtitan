@@ -234,7 +234,8 @@ class InterGeneratorRouter(Configurable):
         """
 
         async def _pull_one(h: _GeneratorHandle) -> None:
-            # Transfer over RDMA while the generator remains available
+            # Transfer over RDMA while the generator remains available. A no-op
+            # with direct_rdma_model_state_dict, where the load does the transfer.
             await h.actor.prefetch_model_state_dict.call()
             if self._config.hot_swap:
                 # Hot swap: pull concurrently with in-flight generation, without
@@ -245,7 +246,8 @@ class InterGeneratorRouter(Configurable):
                 # Drain: stop routing to this generator and wait for in-flight
                 # work to finish before pulling, then re-admit it.
                 # Draining starts only for the local CPU-to-GPU apply rather
-                # than the network transfer
+                # than the network transfer, except with
+                # direct_rdma_model_state_dict, where the load includes it.
                 self._set_serving(h, serving=False)
                 try:
                     with sl.log_trace_span("router_drain_wait"):
