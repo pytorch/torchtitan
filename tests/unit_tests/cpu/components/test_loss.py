@@ -1251,7 +1251,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         )
 
         with patch(
-            "torch.distributed._composable.fsdp.FSDPModule", _RecordingFSDPLinear
+            "torchtitan.distributed.fsdp_lifecycle.FSDPModule", _RecordingFSDPLinear
         ):
             chunked_loss(predictions, labels)
 
@@ -1271,7 +1271,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         labels = torch.randint(0, 8, (4,))
 
         with patch(
-            "torch.distributed._composable.fsdp.FSDPModule", _RecordingFSDPLinear
+            "torchtitan.distributed.fsdp_lifecycle.FSDPModule", _RecordingFSDPLinear
         ):
             chunked_loss(hidden_states, labels)
 

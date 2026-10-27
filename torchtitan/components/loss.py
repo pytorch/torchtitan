@@ -5,8 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
@@ -502,77 +501,6 @@ class GradAccumulator:
         self._next_idx += 1
 
 
-@contextmanager
-def _chunked_loss_fsdp(
-    lm_head: nn.Module, *, run_backward: bool, decoder_requires_grad: bool
-) -> Iterator[Callable[[], None] | None]:
-    from torch.distributed._composable.fsdp import FSDPModule
-
-    if not isinstance(lm_head, FSDPModule):
-        yield None
-        return
-
-    # FSDP exposes policy setters only. Retain the owning groups' settings so
-    # chunk-local coalescing preserves accumulation and HSDP replica policies.
-    state = lm_head._get_fsdp_state()
-    state._lazy_init()
-    state_ctx = state._state_ctx
-    is_last_backward = state_ctx.is_last_backward
-    auto_reshard_after_forward = state._auto_reshard_after_forward
-    # Inner backward callbacks visit the entire root context. Pending full or
-    # HSDP partial gradients must wait for this microbatch's decoder gradients.
-    defer_to_decoder = decoder_requires_grad and any(
-        group._post_backward_pending or group._partial_reduce_output is not None
-        for owner in state_ctx.all_states
-        for group in owner._fsdp_param_groups
-    )
-    states = state_ctx.all_states if defer_to_decoder else [state]
-    policies = [
-        (
-            group,
-            group.post_forward_mesh_info,
-            group.reshard_after_backward,
-            group.reduce_grads,
-            group.all_reduce_grads,
-        )
-        for owner in states
-        for group in owner._fsdp_param_groups
-    ]
-
-    def restore_gradient_sync() -> None:
-        for group, _, _, reduce_grads, all_reduce_grads in policies:
-            group.reduce_grads = reduce_grads
-            group.all_reduce_grads = all_reduce_grads
-
-    try:
-        lm_head.set_reshard_after_forward(False, recurse=False)
-        for group, _, _, _, _ in policies:
-            group.reshard_after_backward = False
-            group.reduce_grads = False
-        if defer_to_decoder:
-            # Each chunk's backward visits every group sharing the root state.
-            # Keep all gradients local until the decoder backward completes.
-            state_ctx.is_last_backward = False
-        # Explicit unshard avoids leaving an eager all-gather event for the
-        # next FSDP module when CUDA graph capture follows the warmup.
-        with spmd.no_typecheck():
-            lm_head.unshard()
-        yield None if defer_to_decoder else restore_gradient_sync
-    finally:
-        restore_gradient_sync()
-        state_ctx.is_last_backward = is_last_backward
-        state._auto_reshard_after_forward = auto_reshard_after_forward
-        for group, post_forward_mesh_info, reshard_after_backward, _, _ in policies:
-            group.post_forward_mesh_info = post_forward_mesh_info
-            group.reshard_after_backward = reshard_after_backward
-            if group in state._fsdp_param_groups and (
-                reshard_after_backward or not run_backward
-            ):
-                # Reshard releases weights; the autograd leaf retains gradients
-                # until decoder backward or caller finalization reduces them.
-                group.reshard()
-
-
 class ChunkedLossWrapper(BaseLoss):
     """Chunked loss wrapper that splits the sequence dimension to reduce peak memory.
 
@@ -600,11 +528,11 @@ class ChunkedLossWrapper(BaseLoss):
         The lm_head's FSDP reshard-after-forward and reshard-after-backward are
         temporarily disabled during the chunked loop so that the weight stays
         unsharded across all outputs and chunks (avoiding repeated all-gathers).
-        Gradient synchronization uses the caller's policy on the final chunk.
-        When earlier microbatches have pending gradients, synchronization for
-        the shared FSDP root waits for the decoder backward instead. This keeps
-        each group's accumulated gradients together. Deferred accumulation
-        retains the unsharded weights and gradients for the next microbatch.
+        The final chunk uses the caller's head synchronization policy. With
+        pending microbatch gradients, the decoder backward's group hooks or
+        root callback reduce the head instead, keeping each group's gradients
+        together. Inner backwards preserve the decoder's prefetch and
+        finalization state. Frozen decoders finish through the head backward.
 
     TP / SP composability:
         The root decoder norm emits hidden states that are replicated on the
@@ -660,7 +588,7 @@ class ChunkedLossWrapper(BaseLoss):
         head gradients are already accumulated. The returned loss is a leaf
         whose backward accumulates only its own gradient.
         """
-        from torch.distributed._composable.fsdp import FSDPModule
+        from torchtitan.distributed.fsdp_lifecycle import chunked_loss_fsdp
 
         num_chunks = self.num_chunks
         lm_head = self.lm_head
@@ -745,17 +673,14 @@ class ChunkedLossWrapper(BaseLoss):
                 )
             metrics: dict[str, torch.Tensor] = {}
 
-            with _chunked_loss_fsdp(
+            with chunked_loss_fsdp(
                 lm_head,
                 run_backward=run_backward,
                 decoder_requires_grad=decoder_requires_grad,
-            ) as restore_gradient_sync:
+            ) as fsdp:
                 for chunk_index in range(num_chunks):
-                    if (
-                        restore_gradient_sync is not None
-                        and chunk_index == num_chunks - 1
-                    ):
-                        restore_gradient_sync()
+                    if fsdp is not None and chunk_index == num_chunks - 1:
+                        fsdp.before_last_chunk()
 
                     h_chunks = tuple(
                         chunks[chunk_index] for chunks in hidden_state_chunks_per_output
@@ -775,17 +700,8 @@ class ChunkedLossWrapper(BaseLoss):
                     # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
                     # fails at lm_head's hooks, which can't be traced.
                     logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
-                    if (
-                        run_backward
-                        and not decoder_requires_grad
-                        and isinstance(lm_head, FSDPModule)
-                    ):
-                        state = lm_head._get_fsdp_state()
-                        if state._modules_to_run_forward:
-                            # Frozen inputs have no input backward hook. Finish
-                            # the partial grouped forward to register an output hook.
-                            logits = state._post_forward(lm_head, None, logits)
-                            state._modules_to_run_forward.clear()
+                    if fsdp is not None:
+                        logits = fsdp.after_forward(logits)
                     if not is_multi_output:
                         logits = logits[0]
                         label_chunks = label_chunks[0]

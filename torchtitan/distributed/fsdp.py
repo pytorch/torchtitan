@@ -21,6 +21,7 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import Shard
 
 from torchtitan.config.parallelism import FSDPSymmMemScope
+from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import MoE
@@ -53,10 +54,7 @@ def post_validate_fsdp_for_cuda_graph(model_parts: list[nn.Module]) -> None:
         for module in model.modules():
             if not isinstance(module, FSDPModule):
                 continue
-            state = module._get_fsdp_state()
-            if state._modules_to_run_forward:
-                state._post_forward(module, None, None)
-                state._modules_to_run_forward.clear()
+            complete_fsdp_grouped_forward(module, None)
             module.reshard()
 
 

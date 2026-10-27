@@ -20,14 +20,30 @@ from torchtitan.components.loss import ChunkedLossWrapper
 
 
 class _Decoder(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, *, tied=False, frozen=False):
         super().__init__()
+        self.frozen_decoder = frozen
+        self.tok_embeddings = torch.nn.Embedding(16, 8) if tied else None
         self.projection = torch.nn.Linear(8, 8)
         self.norm = torch.nn.LayerNorm(8)
         self.lm_head = torch.nn.Linear(8, 16)
+        if tied:
+            self.lm_head.weight = self.tok_embeddings.weight
+        if frozen:
+            self.projection.requires_grad_(False)
+            self.norm.requires_grad_(False)
 
     def forward(self, inputs):
+        if self.tok_embeddings is not None:
+            inputs = self.tok_embeddings(inputs)
+            if self.frozen_decoder:
+                inputs = inputs.detach()
         return self.norm(self.projection(inputs))
+
+    def sample_inputs(self, device):
+        if self.tok_embeddings is not None:
+            return torch.randint(16, (8,), device=device)
+        return torch.randn(8, 8, device=device)
 
 
 def _policies(head):
@@ -49,10 +65,60 @@ def _policies(head):
     )
 
 
+def _decoder_prefetch(head):
+    state = head._get_fsdp_state()
+    return tuple(
+        tuple(group._post_forward_indices)
+        for owner in state._state_ctx.all_states
+        for group in owner._fsdp_param_groups
+        if group not in state._fsdp_param_groups
+    )
+
+
 def _compare(actual, expected, label):
     if not torch.allclose(actual, expected, rtol=2e-5, atol=2e-6):
         difference = (actual - expected).abs().max().item()
         raise RuntimeError(f"{label}: maximum absolute difference {difference}")
+
+
+def _recover_from_chunk_failure(model, loss_fn, count, set_policy, device):
+    # Fail with earlier microbatches' full or HSDP partial gradients live.
+    for _ in range(2):
+        set_policy(False)
+        inputs = model.sample_inputs(device)
+        labels = torch.randint(16, (8,), device=device)
+        loss, _ = loss_fn(model(inputs), labels, count)
+        loss.backward()
+    set_policy(True)
+    inputs = model.sample_inputs(device)
+    labels = torch.randint(16, (8,), device=device)
+    hidden = model(inputs)
+    expected_policies = _policies(model.lm_head)
+    real_loss = loss_fn.loss_fn
+    chunks = 0
+
+    def fail_second_chunk(*args, **kwargs):
+        nonlocal chunks
+        chunks += 1
+        if chunks == 2:
+            raise RuntimeError("controlled chunk failure")
+        return real_loss(*args, **kwargs)
+
+    loss_fn.loss_fn = fail_second_chunk
+    try:
+        loss_fn(hidden, labels, count)
+    except RuntimeError as error:
+        if str(error) != "controlled chunk failure":
+            raise
+    else:
+        raise RuntimeError("The controlled chunk failure did not execute")
+    if _policies(model.lm_head) != expected_policies:
+        raise RuntimeError("A failed chunk changed the caller's FSDP policy")
+    del hidden
+    model.reset_iter_state()
+    if _policies(model.lm_head) != expected_policies:
+        raise RuntimeError("FSDP reset changed the caller's policy")
+    loss_fn.loss_fn = real_loss
 
 
 class TestChunkedLossFSDP(DTensorTestBase):
@@ -66,11 +132,11 @@ class TestChunkedLossFSDP(DTensorTestBase):
     def test_accumulation_and_recovery(self):
         torch.set_num_threads(1)
         device = torch.device(self.device_type, self.rank)
-        for replicated, grouped, deferred, frozen in itertools.product(
-            (False, True), repeat=4
+        for layout, replicated, deferred, frozen in itertools.product(
+            ("separate", "grouped", "tied"), (False, True), (False, True), (False, True)
         ):
             with self.subTest(
-                replicated=replicated, grouped=grouped, deferred=deferred, frozen=frozen
+                layout=layout, replicated=replicated, deferred=deferred, frozen=frozen
             ):
                 mesh = init_device_mesh(
                     self.device_type,
@@ -80,15 +146,15 @@ class TestChunkedLossFSDP(DTensorTestBase):
                     else ("dp_shard",),
                 )
                 torch.manual_seed(42)
-                model = _Decoder().to(device)
-                if frozen:
-                    model.projection.requires_grad_(False)
-                    model.norm.requires_grad_(False)
+                model = _Decoder(tied=layout == "tied", frozen=frozen).to(device)
                 reference = copy.deepcopy(model)
                 fully_shard(model.projection, mesh=mesh)
-                if grouped:
+                if layout != "separate":
+                    modules = [model.norm, model.lm_head]
+                    if layout == "tied":
+                        modules.insert(0, model.tok_embeddings)
                     fully_shard(
-                        [model.norm, model.lm_head],
+                        modules,
                         mesh=mesh,
                         reshard_after_forward=False,
                     )
@@ -111,45 +177,7 @@ class TestChunkedLossFSDP(DTensorTestBase):
                     if replicated:
                         model.set_requires_all_reduce(final)
 
-                # Fail with earlier microbatches' full or HSDP partial gradients live.
-                for _ in range(2):
-                    set_policy(False)
-                    inputs = torch.randn(8, 8, device=device)
-                    labels = torch.randint(16, (8,), device=device)
-                    loss, _ = loss_fn(model(inputs), labels, count)
-                    loss.backward()
-                set_policy(True)
-                inputs = torch.randn(8, 8, device=device)
-                labels = torch.randint(16, (8,), device=device)
-                hidden = model(inputs)
-                expected_policies = _policies(model.lm_head)
-                real_loss = loss_fn.loss_fn
-                chunks = 0
-
-                def fail_second_chunk(*args, **kwargs):
-                    nonlocal chunks
-                    chunks += 1
-                    if chunks == 2:
-                        raise RuntimeError("controlled chunk failure")
-                    return real_loss(*args, **kwargs)
-
-                loss_fn.loss_fn = fail_second_chunk
-                try:
-                    loss_fn(hidden, labels, count)
-                except RuntimeError as error:
-                    if str(error) != "controlled chunk failure":
-                        raise
-                else:
-                    raise RuntimeError("The controlled chunk failure did not execute")
-                if _policies(model.lm_head) != expected_policies:
-                    raise RuntimeError(
-                        "A failed chunk changed the caller's FSDP policy"
-                    )
-                del hidden
-                model.reset_iter_state()
-                if _policies(model.lm_head) != expected_policies:
-                    raise RuntimeError("FSDP reset changed the caller's policy")
-                loss_fn.loss_fn = real_loss
+                _recover_from_chunk_failure(model, loss_fn, count, set_policy, device)
 
                 for step in range(3):
                     optimizer.zero_grad(set_to_none=True)
@@ -163,11 +191,19 @@ class TestChunkedLossFSDP(DTensorTestBase):
                             torch.manual_seed(
                                 1000 + 100 * step + 10 * self.rank + microbatch
                             )
-                            inputs = torch.randn(8, 8, device=device)
+                            inputs = model.sample_inputs(device)
                             labels = torch.randint(16, (8,), device=device)
                             hidden = model(inputs)
                             expected_policies = _policies(model.lm_head)
+                            decoder_prefetch = _decoder_prefetch(model.lm_head)
                             loss, _ = loss_fn(hidden, labels, count)
+                            if (
+                                not frozen
+                                and _decoder_prefetch(model.lm_head) != decoder_prefetch
+                            ):
+                                raise RuntimeError(
+                                    "Chunk backward cleared decoder prefetch state"
+                                )
                             if _policies(model.lm_head) != expected_policies:
                                 raise RuntimeError(
                                     "Chunked loss changed the caller's FSDP policy"
@@ -184,7 +220,9 @@ class TestChunkedLossFSDP(DTensorTestBase):
                             expected_loss.backward()
                             _compare(loss.detach(), expected_loss.detach(), "loss")
                     if deferred:
-                        expected_reductions = 1 if frozen else (2 if grouped else 3)
+                        expected_reductions = (
+                            1 if frozen else (3 if layout == "separate" else 2)
+                        )
                         if reduce_scatter.call_count != expected_reductions:
                             raise RuntimeError(
                                 f"Expected {expected_reductions} reductions after accumulation, "
