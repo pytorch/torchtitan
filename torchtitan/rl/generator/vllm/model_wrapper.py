@@ -334,10 +334,13 @@ def _direct_load_groups(
     keys_by_module: dict[FSDPModule, list[tuple[str, Any]]] = {
         module: [] for module in group_modules.values()
     }
+    buffers = {id(buffer) for buffer in model.buffers()}
     other_keys = []
     for key, value in model.state_dict(keep_vars=True).items():
         group = sharded_param_to_group.get(id(value))
         if group is None:
+            # A parameter here would be loaded outside the reshard/unshard sequence.
+            assert id(value) in buffers, f"{key} is neither FSDP-sharded nor a buffer"
             other_keys.append(key)
             continue
         module, fsdp_param = group
@@ -462,9 +465,9 @@ class VLLMModelWrapper(Module):
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
 
-        # Build pinned CPU receive buffers for model state dict loads while the model
-        # is still sharded. Bind first so first-touch places them on the
-        # NUMA node local to this rank's GPU.
+        # Without direct loads, build pinned CPU receive buffers for model state
+        # dict loads while the model is still sharded. Bind first so first-touch
+        # places them on the NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
         self._prefetched_model_state_dict: dict[str, torch.Tensor] | None = None
         if direct_rdma_model_state_dict:
