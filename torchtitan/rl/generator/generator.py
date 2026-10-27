@@ -67,6 +67,8 @@ class Generator(Configurable):
     `prefetch_model_state_dict` runs on the caller's event loop and writes the staging buffers the
     engine loop reads on a load: the router awaits it before `load_model_state_dict`, and the
     controller awaits that load before the trainer's next push, so the two never overlap.
+    With `direct_rdma_model_state_dict`, the prefetch is a no-op and the load reads the
+    trainer's buffers directly into the engine's weights.
 
     Args:
         config: Generator-specific configuration, including its model.
@@ -163,7 +165,8 @@ class Generator(Configurable):
         Saves generator host memory (one full copy of the weights) on hosts with
         little CPU memory, e.g. GB300. The transfer then happens inside the
         model state dict load, while the engine is paused, instead of
-        overlapping generation."""
+        overlapping generation; without hot_swap, the generator is drained
+        for the whole transfer."""
 
         def __post_init__(self):
             # The generator runs full expert parallelism: the engine forms the EP
@@ -485,7 +488,10 @@ class Generator(Configurable):
         Called on the engine loop thread during a load; the read runs on the TorchStore
         client's event loop.
         """
-        assert self._torchstore_loop is not None
+        if self._torchstore_loop is None:
+            raise RuntimeError(
+                "direct_rdma_model_state_dict requires initialize_torchstore_client"
+            )
         await asyncio.wrap_future(
             asyncio.run_coroutine_threadsafe(
                 ts.get_state_dict(

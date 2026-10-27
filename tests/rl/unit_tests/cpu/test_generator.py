@@ -563,6 +563,14 @@ def test_load_model_state_dict_direct_fetches_into_the_model(reset_kv_cache: boo
     assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
 
 
+def test_direct_fetch_requires_torchstore_client():
+    generator = Generator.__new__(Generator)
+    generator._torchstore_loop = None
+
+    with pytest.raises(RuntimeError, match="initialize_torchstore_client"):
+        asyncio.run(generator._fetch_model_state_dict({}))
+
+
 def test_sampling_config_rejects_top_p_below_one():
     with pytest.raises(ValueError, match="top_p must be 1.0, got 0.95"):
         SamplingConfig(top_p=0.95)
