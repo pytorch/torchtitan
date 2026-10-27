@@ -48,6 +48,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_projector_sharding_config,
     vision_rowwise_sharding_config,
 )
 from torchtitan.models.deepseek_v3.flavors import build_mla_moe_layers
@@ -55,7 +56,6 @@ from .model import KimiK25Model
 from .qk_clip import QKClipFlexInnerAttention
 from .sharding import (
     moonvit_encoder_sharding_config,
-    moonvit_projector_sharding_config,
     moonvit_rotary_sharding_config,
     sequence_parallel_first_layer_sharding_config,
 )
@@ -249,7 +249,7 @@ def _vision_encoder_config(
                 merged_dim, merged_dim, sharding_config=vision_colwise_sharding_config()
             ),
             linear_2=_vision_row_parallel_linear(merged_dim, text_hidden_size),
-            sharding_config=moonvit_projector_sharding_config(),
+            sharding_config=vision_projector_sharding_config(),
         ),
         sharding_config=moonvit_encoder_sharding_config(),
     )

@@ -36,25 +36,6 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
-def transformer_block_sharding_config(
-    *, enable_sp: bool, after_vision_scatter: bool
-) -> ShardingConfig:
-    """Transformer block boundary in the residual layout.
-
-    The first block after the vision scatter takes a Replicate input and
-    restores the decoder layout.
-    """
-    layer_layout = residual_activation_placement(enable_sp=enable_sp)
-    input_layout = (
-        replicated_activation_placement() if after_vision_scatter else layer_layout
-    )
-    return ShardingConfig(
-        in_src_shardings={"x_TD": input_layout},
-        in_dst_shardings={"x_TD": layer_layout},
-        out_src_shardings=layer_layout,
-    )
-
-
 def decoder_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Pre-attention norm: Replicate weight, residual-layout activations."""
     activation_layout = residual_activation_placement(enable_sp=enable_sp)
@@ -172,14 +153,6 @@ def vision_encoder_sharding_config() -> ShardingConfig:
         state_shardings={"pos_embed": SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})},
         out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
         out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R}),
-    )
-
-
-def vision_merger_sharding_config() -> ShardingConfig:
-    """The merger owns the TP boundary; the encoder output owns the CP boundary."""
-    return ShardingConfig(
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
     )
 
 

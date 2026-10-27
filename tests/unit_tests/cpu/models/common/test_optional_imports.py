@@ -61,7 +61,7 @@ for kernel in (
 
 for model_name in (
     "llama3", "qwen3", "deepseek_v3", "deepseek_v4", "gpt_oss",
-    "muse_glimmer", "qwen3_5", "kimi_k2_7", "kimi_k3",
+    "muse_glimmer", "qwen3_5", "kimi_k2_7", "kimi_k3", "minimax_m3",
 ):
     model = importlib.import_module(f"torchtitan.models.{model_name}")
     model.build_model_config(
@@ -305,7 +305,7 @@ for kernel in (
 
 for model_name in (
     "llama3", "qwen3", "deepseek_v3", "deepseek_v4", "gpt_oss",
-    "muse_glimmer", "qwen3_5", "kimi_k2_7", "kimi_k3",
+    "muse_glimmer", "qwen3_5", "kimi_k2_7", "kimi_k3", "minimax_m3",
 ):
     model = importlib.import_module(f"torchtitan.models.{model_name}")
     model.build_model_config(

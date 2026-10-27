@@ -17,7 +17,7 @@ from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.common.decoder_sharding import head_norm_sharding_config
-from torchtitan.models.qwen3_5.model import OffsetRMSNorm
+from torchtitan.models.common.norm import OffsetRMSNorm
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")

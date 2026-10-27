@@ -38,13 +38,19 @@ _MODELS = [
     "gpt_oss",
     "kimi_k2_7",
     "kimi_k3",
+    "minimax_m3",
     "muse_glimmer",
     "flux",
 ]
 
 
 @pytest.mark.parametrize(
-    "model", [name for name in _MODELS if name not in ("deepseek_v4", "kimi_k2_7")]
+    "model",
+    [
+        name
+        for name in _MODELS
+        if name not in ("deepseek_v4", "kimi_k2_7", "minimax_m3")
+    ],
 )
 def test_model_defaults_to_varlen(model):
     module = importlib.import_module(f"torchtitan.models.{model}")

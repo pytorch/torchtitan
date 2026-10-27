@@ -166,9 +166,42 @@ class RoPE(Module):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary embeddings to query and optional key tensors."""
+        """Apply rotary embeddings to query and optional key tensors.
+
+        Inputs wider than ``dim`` rotate their first ``dim`` channels and pass the
+        rest through unchanged (partial RoPE).
+        """
+        if query.shape[-1] > self.config.dim:
+            return self._partial_forward(query, key, positions, inverse=inverse)
         reshaped_cache = self._reshape_cache(query, positions)
         return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
+
+    @local_compile("partial_rope", batch_invariant=True)
+    def _partial_forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        positions: torch.Tensor | None,
+        *,
+        inverse: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        rotary_dim = self.config.dim
+        query_rotary, query_pass = query[..., :rotary_dim], query[..., rotary_dim:]
+        reshaped_cache = self._reshape_cache(query_rotary, positions)
+        if key is None:
+            query_rotary = self.apply_rotary_emb(
+                query_rotary, None, reshaped_cache, inverse=inverse
+            )
+            assert isinstance(query_rotary, torch.Tensor)
+            return torch.cat([query_rotary, query_pass], dim=-1)
+        key_rotary, key_pass = key[..., :rotary_dim], key[..., rotary_dim:]
+        query_rotary, key_rotary = self.apply_rotary_emb(
+            query_rotary, key_rotary, reshaped_cache, inverse=inverse
+        )
+        return (
+            torch.cat([query_rotary, query_pass], dim=-1),
+            torch.cat([key_rotary, key_pass], dim=-1),
+        )
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device

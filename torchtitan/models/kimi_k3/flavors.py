@@ -72,11 +72,11 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_projector_sharding_config,
     vision_rowwise_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.sharding import (
     moonvit_encoder_sharding_config,
-    moonvit_projector_sharding_config,
     moonvit_rotary_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
@@ -532,7 +532,7 @@ def _vision_encoder_config(
                 sharding_config=invariant_norm_sharding_config(),
             ),
             activation=GELU.Config(),
-            sharding_config=moonvit_projector_sharding_config(),
+            sharding_config=vision_projector_sharding_config(),
         ),
         param_init=_POS_EMBED_INIT,
         sharding_config=moonvit_encoder_sharding_config(),
