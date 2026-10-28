@@ -21,6 +21,7 @@ import math
 import os
 import shutil
 import tempfile
+import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -155,6 +156,7 @@ def test_initialize_torchstore_client_uses_requester_index():
             await generator.initialize_torchstore_client(requester_index=3)
 
         client.assert_awaited_once_with(role=RankRole.REQUESTER, group=3)
+        assert generator._torchstore_loop is asyncio.get_running_loop()
 
     asyncio.run(main())
 
@@ -571,6 +573,44 @@ def test_direct_fetch_requires_torchstore_client():
         asyncio.run(generator._fetch_model_state_dict({}))
 
 
+def test_direct_fetch_runs_on_torchstore_loop():
+    torchstore_loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=torchstore_loop.run_forever)
+    thread.start()
+    generator = Generator.__new__(Generator)
+    generator._torchstore_loop = torchstore_loop
+    state_dict = {"weight": torch.zeros(2)}
+    calls = []
+
+    async def get_state_dict(*args, **kwargs):
+        calls.append((asyncio.get_running_loop(), args, kwargs))
+
+    try:
+        with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
+            asyncio.run(generator._fetch_model_state_dict(state_dict))
+    finally:
+        torchstore_loop.call_soon_threadsafe(torchstore_loop.stop)
+        thread.join()
+        torchstore_loop.close()
+
+    ((loop, args, kwargs),) = calls
+    assert loop is torchstore_loop
+    assert args == ("model_state_dict",)
+    assert kwargs["user_state_dict"] is state_dict
+    assert kwargs["direct_rdma"] is True
+
+
+def test_prefetch_model_state_dict_is_noop_with_direct_rdma():
+    generator = Generator.__new__(Generator)
+    generator.config = SimpleNamespace(direct_rdma_model_state_dict=True)
+    get_state_dict = AsyncMock()
+
+    with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
+        asyncio.run(generator.prefetch_model_state_dict())
+
+    get_state_dict.assert_not_awaited()
+
+
 def test_sampling_config_rejects_top_p_below_one():
     with pytest.raises(ValueError, match="top_p must be 1.0, got 0.95"):
         SamplingConfig(top_p=0.95)
@@ -694,7 +734,12 @@ def test_qwen36_27b_perf_config():
 # --- vLLM engine kwargs (what VLLMEngine passes to EngineArgs) ---
 
 
-def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dict:
+def _build_engine_kwargs(
+    monkeypatch,
+    tmp_path,
+    config: Generator.Config,
+    direct_rdma_model_state_dict: bool = False,
+) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
     ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
     engine_args = Mock()
@@ -714,7 +759,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         dist_moe_runtime=None,
         debug=config.debug,
         reset_kv_cache_on_model_state_dict_load=False,
-        direct_rdma_model_state_dict=False,
+        direct_rdma_model_state_dict=direct_rdma_model_state_dict,
         rank=0,
         generator_name="generator",
         output_dir=str(tmp_path),
@@ -724,6 +769,20 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
 
 def test_generator_defaults_to_the_vllm_engine():
     assert isinstance(Generator.Config(model=_MODEL_CONFIG).engine, VLLMEngine.Config)
+
+
+@pytest.mark.parametrize("direct_rdma", [False, True])
+def test_direct_rdma_model_state_dict_reaches_model_registration(
+    monkeypatch, tmp_path, direct_rdma: bool
+):
+    _build_engine_kwargs(
+        monkeypatch,
+        tmp_path,
+        Generator.Config(model=_MODEL_CONFIG),
+        direct_rdma_model_state_dict=direct_rdma,
+    )
+    register = cast(Mock, vllm_engine_module.register_to_vllm)
+    assert register.call_args.kwargs["direct_rdma_model_state_dict"] is direct_rdma
 
 
 def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
