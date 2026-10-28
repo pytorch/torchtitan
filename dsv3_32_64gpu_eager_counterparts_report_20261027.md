@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T09:35:47.674531+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T09:41:24.881917+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -125,7 +125,7 @@ All rows below use Full recomputation, BS6/GA8 and 64 GPUs. The native head poli
 | Configuration ID | BS / GA | CPU activation quota GiB | Graph outcome | Graph allocated / reserved peak GiB | Graph tokens/s/GPU | Graph MFU % | Native outcome | Native allocated / reserved peak GiB | Native tokens/s/GPU | Native MFU % | Graph / native throughput | MAST jobs | Profiles, update 16 rank 0 |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
 | `native_fit_full_recompute_bs6` | 6 / 8 | Disabled | PASS, all 32 x 17 (reference) | 231.15 / 233.09 | 4,541.68 | 26.51 | PASS, all 32 x 17 | 259.95 / 268.83 | 4,336.73 | 25.31 | 1.047x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b6-full-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ga8-17u-20261027-fit1-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_54cdf4b4-4ae6-424b-a407-fa4245913f2b_rank0_trace.json.gz) / [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_b6ba5d08-ec4c-4089-979b-e2eae1702912_rank0_trace.json.gz) |
-| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 6 / 8 | 24 | RUNNING; updates 13-13 / 17 across ranks | - | - | - | PASS, all 32 x 17 | 235.95 / 243.87 | 4,155.38 | 24.26 | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b6-full-ao24-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ao24-ga8-17u-20261027-fit1-ivankobzarev) | [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_fa3658b0-3638-4db2-baac-50c430103064_rank0_trace.json.gz) |
+| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 6 / 8 | 24 | PASS, all 32 x 17 (reference) | 218.68 / 221.06 | 4,515.63 | 26.36 | PASS, all 32 x 17 | 235.95 / 243.87 | 4,155.38 | 24.26 | 1.087x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b6-full-ao24-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ao24-ga8-17u-20261027-fit1-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_603d9bab-28aa-4886-8d71-5580a362b25e_rank0_trace.json.gz) / [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_fa3658b0-3638-4db2-baac-50c430103064_rank0_trace.json.gz) |
 
 Both engines use the same BS6/GA8 batch geometry, FP32 GPU masters and gradients, FP32 CPU Adam moments, and the stated activation-offload quota. New graph runs clone the original 32-GPU definitions and immutable payload, changing only the batch from 8 to 6 and the job identity. Ratios are filled only after all-rank measurement verification.
 
@@ -144,6 +144,7 @@ Maximum recorded allocated/reserved CUDA peaks across every rank through update1
 | Matched native configuration | Graph allocated / reserved GiB | Native allocated / reserved GiB |
 | --- | ---: | ---: |
 | `native_fit_full_recompute_bs6` | 231.15 / 233.09 | 259.95 / 268.83 |
+| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 218.68 / 221.06 | 235.95 / 243.87 |
 
 ## Smaller-batch native 32 GPU baselines
 
@@ -237,6 +238,7 @@ These are outside-timer samples after updates 1, 2, 5 and 15 on every rank. Avai
 | `native_fit_full_recompute_bs6` | 128 | 185.50 | 166.95 | 159.90 |
 | `native_fit_full_recompute_cpuoffload_bs6_ao24` | 128 | 81.83 | 192.38 | 185.34 |
 | `graph_full_recompute_bs6_fp32_cpu_moments` | 128 | 172.18 | 168.86 | 159.93 |
+| `graph_full_recompute_cpuoffload_bs6_ao24_fp32_cpu_moments` | 128 | 121.40 | 181.36 | 172.40 |
 | `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 128 | 52.51 | 209.03 | 206.97 |
 
 ### BS8/AO40 host-memory failure
@@ -279,6 +281,7 @@ All counts below are rank-0 GPU kernel slices from the separately profiled updat
 | `native_fit_full_recompute_cpuoffload_bs6_ao24` | 47.31 | 90.55 | 1048 | 520 | 42.25 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_fa3658b0-3638-4db2-baac-50c430103064_rank0_trace.json.gz) |
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 76.74 | 91.79 | 1048 | 520 | 17.41 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_e7eadb26-d623-4c6d-a955-c05444f72815_rank0_trace.json.gz) |
 | `graph_full_recompute_bs6_fp32_cpu_moments` | 43.29 | 45.94 | 1024 | 640 | 0.72 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_54cdf4b4-4ae6-424b-a407-fa4245913f2b_rank0_trace.json.gz) |
+| `graph_full_recompute_cpuoffload_bs6_ao24_fp32_cpu_moments` | 43.54 | 46.86 | 1024 | 640 | 1.01 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_603d9bab-28aa-4886-8d71-5580a362b25e_rank0_trace.json.gz) |
 
 ## Native failure locations
 
