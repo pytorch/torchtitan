@@ -167,7 +167,8 @@ class Generator(Configurable):
         little CPU memory, e.g. GB300. The transfer then happens inside the
         model state dict load, while the engine is paused, instead of
         overlapping generation; without hot_swap, the generator is drained
-        for the whole transfer."""
+        for the whole transfer. A failed transfer leaves the weights partially
+        loaded, so it stops the engine loop on every generator rank."""
 
         def __post_init__(self):
             # The generator runs full expert parallelism: the engine forms the EP
@@ -493,7 +494,7 @@ class Generator(Configurable):
             raise RuntimeError(
                 "direct_rdma_model_state_dict requires initialize_torchstore_client"
             )
-        await asyncio.wrap_future(
+        read = asyncio.wrap_future(
             asyncio.run_coroutine_threadsafe(
                 ts.get_state_dict(
                     "model_state_dict",
@@ -504,6 +505,13 @@ class Generator(Configurable):
                 self._torchstore_loop,
             )
         )
+        try:
+            await asyncio.shield(read)
+        except asyncio.CancelledError:
+            # The read keeps writing into state_dict; wait for it before the caller
+            # frees that storage.
+            await asyncio.wait([read])
+            raise
 
     async def close(self) -> None:
         """Stop the engine loop, which releases the dispatcher and the engine on exit."""
