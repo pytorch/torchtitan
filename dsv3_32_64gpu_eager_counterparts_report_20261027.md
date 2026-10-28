@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T07:48:15.489806+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T08:14:45.403571+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -13,6 +13,8 @@ This report pairs the existing graph trainer presentation configurations with na
 - Requested eager counterparts: 8 passed, 12 CUDA OOM, 0 remaining. Supplemental runs are listed separately.
 - Main 64-GPU Full recompute BS6 pair: graph trainer has 4.9% higher throughput and uses 31.58 GiB less reserved memory. Native SAC BS6 and Full recompute BS10 run out of memory; their graph references pass.
 - All four requested 32-GPU native configurations run out of memory with FP32 GPU masters/gradients and CPU FP32 Adam moments. Three of their graph references pass; Full recompute BS10 without activation offload also fails in graph trainer.
+- Native 64-GPU Full recompute BS10 is rescued by CPU activation offload: 208.44 GiB reserved, 4,270 tokens/s/GPU, 24.92% MFU, and 79.98 GiB actual CPU activation storage per rank.
+- Both native 32-GPU BS6/GA8 baselines pass with GPU FP32 masters/gradients and CPU FP32 Adam moments. Their matching original-payload graph BS6 runs are included in the matched table.
 - Strict native Full versus Full + offload and fused Every versus First gathering match all 17 recorded losses and gradient norms bitwise on all 64 ranks. Cross-engine scalar histories differ; see the numerical comparison section.
 - Native WGrad fusion changes throughput by 0.32% in the single non-deterministic trials. This small difference does not establish a meaningful speed gain; fused and unfused scalar histories also differ.
 
@@ -131,17 +133,18 @@ These supplement the matched presentation tables with smaller-batch native train
 
 | ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
-| `native_boundary_full_recompute_bs7` | 7 / 8 | 1792 | Disabled | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b7-full-ga8-17u-20261028-bound1-ivankobzarev) | Not yet produced |
+| `native_boundary_full_recompute_bs7` | 7 / 8 | 1792 | Disabled | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b7-full-ga8-17u-20261028-bound1-ivankobzarev) | Not yet produced |
 
 ## Native 64 GPU activation-offload rescue configurations
 
-These add an 80 GiB/rank CPU activation quota to two failed native configurations: SAC BS6 and Full recompute BS10. They retain the primary native optimizer precision, placement, GA8 and communication settings. They have no existing matched graph reference, so cross-engine throughput ratios are omitted.
+These add CPU activation offload to failed native configurations: SAC BS6 and Full recompute BS10. The initial quota is 80 GiB/rank; a Full recompute BS10 run with 24 GiB/rank tests a smaller budget. A separate SAC run adds failure telemetry. All retain the primary native optimizer precision, placement, GA8 and communication settings. They have no existing matched graph reference, so cross-engine throughput ratios are omitted.
 
 | ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
 | `native_rescue_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | OOM; 64 ranks logged | 267.59 / 268.70 at failure; +0.33 requested | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-ga8-17u-20261028-res1-ivankobzarev) | OOM before profiling |
-| `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 10 / 8 | 5120 | 80 | RUNNING; updates 4-4 / 17 across ranks | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao80-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
+| `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 10 / 8 | 5120 | 80 | PASS, all 64 x 17 | 202.94 / 208.44 | 4,269.97 | 24.92 | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao80-ga8-17u-20261028-res1-ivankobzarev) | [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_e7eadb26-d623-4c6d-a955-c05444f72815_rank0_trace.json.gz) |
 | `native_diagnostic_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-diag-ga8-17u-20261028-ivankobzarev) | Not yet produced |
+| `native_full_recompute_cpuoffload_bs10_ao24` | 10 / 8 | 5120 | 24 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao24-ga8-17u-20261028-swp1-ivankobzarev) | Not yet produced |
 
 ## Native 32 GPU activation-offload rescue configuration
 
@@ -149,7 +152,7 @@ This increases the CPU activation quota from 24 to 40 GiB/rank at the original B
 
 | ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
-| `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 8 / 8 | 2048 | 40 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
+| `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 8 / 8 | 2048 | 40 | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
 
 ## Native startup observations
 
@@ -192,12 +195,15 @@ Counters cover all 17 updates. Peak live bytes and copy count are maximums over 
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `native_eager_full_recompute_cpuoffload_bs6_det42` | 80 | 48.74 | 48824 | 0 | 0 |
 | `native_fit_full_recompute_cpuoffload_bs6_ao24` | 24 | 24.00 | 24752 | 0 | 0 |
+| `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 80 | 79.98 | 56168 | 0 | 0 |
 
 ## Native SAC offload diagnosis
 
 A reduced real FSDP2/EP2, MTP1, GA8 native SAC run completed all 17 updates with a 0.25 GiB CPU activation quota. Each rank made 3128 CPU copies, reached 0.249 GiB peak live activation storage, and recorded zero host-pressure skips. Prepared FSDP weight wrappers remained on GPU. This verifies that the SAC hook path makes CPU copies locally; it does not measure offload use in the failed 671B jobs.
 
 The supplemental SAC BS6/AO80 diagnostic uses the same native configuration and pack/unpack decisions, with top-level forward counters and an exception logger added to the experiment adapter. It records actual quota use on OOM. The earlier failed runs have no completed-update offload sidecar, so their actual offload use remains unknown.
+
+The diagnostic adapter matched its original native SAC/offload control on real FSDP2/EP2: all 17 scalar readings and all 88 first-update weight and pre-clipping gradient tensors were bitwise equal on both ranks. CPU copy counts, peak quota use and remaining-live counters also matched exactly.
 
 ## 32 GPU CPU memory observations
 
@@ -238,6 +244,7 @@ All counts below are rank-0 GPU kernel slices from the separately profiled updat
 | `native_eager_full_recompute_bs6_first_gather_legacy_fused` | 53.34 | 83.45 | 64 | 64 | 40.73 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_1a01ea5f-16ac-4e7e-9078-33e3336c5817_rank0_trace.json.gz) |
 | `native_fit_full_recompute_bs6` | 45.34 | 86.95 | 1048 | 520 | 42.11 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_b6ba5d08-ec4c-4089-979b-e2eae1702912_rank0_trace.json.gz) |
 | `native_fit_full_recompute_cpuoffload_bs6_ao24` | 47.31 | 90.55 | 1048 | 520 | 42.25 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_fa3658b0-3638-4db2-baac-50c430103064_rank0_trace.json.gz) |
+| `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 76.74 | 91.79 | 1048 | 520 | 17.41 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_e7eadb26-d623-4c6d-a955-c05444f72815_rank0_trace.json.gz) |
 
 ## Native failure locations
 
@@ -331,6 +338,7 @@ The main twelve counterparts use uncaptured native execution with seed 14536, de
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 | `native_rescue_full_recompute_cpuoffload_bs8_ao40` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 | `native_diagnostic_sac_cpuoffload_bs6_ao80` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
+| `native_full_recompute_cpuoffload_bs10_ao24` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 
 ## Native MTP checkpoint qualification
 
