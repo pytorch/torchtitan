@@ -10,8 +10,8 @@
   torchrun --standalone --nproc-per-node=4 scripts/repro_collective_order.py --separate-group
 
 After matching warmup, rank 0 submits A2A then AG; peers submit AG then A2A.
-Shared groups should time out. A dedicated group removes that aliasing, but
-reversed cross-communicator order is not a supported NCCL ordering contract.
+Shared groups should time out. Separate groups remove the matching conflict.
+This reversed-order schedule is diagnostic, not a supported application pattern.
 This is an intentional ordering-fault test, not a natural FSDP prefetch repro.
 Run each case separately with an external deadline; a timeout can abort CUDA.
 """
