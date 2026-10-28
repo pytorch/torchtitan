@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T08:46:57.972848+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T08:53:39.461241+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -104,7 +104,7 @@ MFU uses the same model-FLOP estimate, excluding recompute, and 5 PFLOP/s dense 
 | Configuration ID | BS / GA | CPU activation quota GiB | Graph outcome | Graph allocated / reserved peak GiB | Graph tokens/s/GPU | Graph MFU % | Native outcome | Native allocated / reserved peak GiB | Native tokens/s/GPU | Native MFU % | Graph / native throughput | MAST jobs | Profiles, update 16 rank 0 |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
 | `native_cuda_graphs_32g_full_bs8` | 8 / 8 | Disabled | PASS, all 32 x 17 (reference) | 254.82 / 258.39 | 4,582.42 | 26.75 | OOM; 32 ranks logged | 266.10 / 267.23 at failure; +0.50 requested | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-ep32-b8-full-17u-20261027-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-32g-b8-full-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_98f6fecd-6967-48b5-96c5-3d2354834c2c_dsv3-fp32-32g-ep32-b8-full-17u-20261027-ivankobzarev__update16_rank0_compacted.json.gz) |
-| `native_cuda_graphs_32g_full_bs10` | 10 / 8 | Disabled | OOM | ~272.95 projected / - | - | - | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-ep32-b10-full-17u-20261027-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-32g-b10-full-ga8-17u-20261027-ivankobzarev) | Not yet produced |
+| `native_cuda_graphs_32g_full_bs10` | 10 / 8 | Disabled | OOM | ~272.95 projected / - | - | - | RUNNING | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-ep32-b10-full-17u-20261027-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-32g-b10-full-ga8-17u-20261027-ivankobzarev) | Not yet produced |
 
 ## Additional native scheduling settings
 
@@ -152,7 +152,7 @@ This increases the CPU activation quota from 24 to 40 GiB/rank at the original B
 
 | ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
-| `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 8 / 8 | 2048 | 40 | RUNNING; updates 15-15 / 17 across ranks | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
+| `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 8 / 8 | 2048 | 40 | DEAD | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
 
 ## Native startup observations
 
@@ -175,6 +175,7 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `64g_sac-ao_bs10_ao60` | 64 | 48.19 | 64 | 558.02 |
 | `64g_sac-ao_bs10_ao80` | 64 | 46.69 | 64 | 545.64 |
 | `native_cuda_graphs_32g_full_bs8` | 32 | 44.07 | 32 | 570.24 |
+| `native_cuda_graphs_32g_full_bs10` | 32 | 47.67 | 0 | - |
 | `native_eager_sac_bs6_det42` | 64 | 44.74 | 64 | 534.34 |
 | `native_eager_full_recompute_bs6_det42` | 64 | 45.02 | 64 | 532.81 |
 | `native_eager_full_recompute_cpuoffload_bs6_det42` | 64 | 46.54 | 64 | 542.62 |
@@ -264,6 +265,7 @@ All counts below are rank-0 GPU kernel slices from the separately profiled updat
 - `32g_full-ao_bs10_ao48`: Forward native chunked cross-entropy. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `64g_sac-ao_bs10_ao60`: Forward fused MLA key/RoPE. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `64g_sac-ao_bs10_ao80`: Forward MTP MXFP8 attention projection (scaled_mm). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
+- `native_cuda_graphs_32g_full_bs8`: Native CUDA graph warmup on its capture stream: forward MTP attention MXFP8 quantization; graph capture had not started. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `native_eager_sac_bs6_det42`: Forward fused MLA query/RoPE output allocation (_fused_mla_q_rope_out_op). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `native_rescue_sac_cpuoffload_bs6_ao80`: Forward MTP attention MXFP8 projection (scaled_mm). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `native_boundary_full_recompute_bs7`: Forward native chunked cross-entropy, FP32 intermediate (BS7). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
