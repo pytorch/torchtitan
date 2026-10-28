@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T02:39:00.877971+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T02:51:07.650118+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -39,6 +39,8 @@ The model, input stream, batch geometry, optimizer settings, checkpoint, kernels
 | SAC or Full + CPU activation offload | Same native remat policy with budgeted pinned CPU copies through saved-tensor hooks |
 
 These SAC/Full labels describe the native implementations; they do not imply identical saved-tensor sets or recompute communication counts. The adapter applies the policy to the MTP transformer block as well as the main decoder blocks.
+
+Chunked LM-head communication also differs. The native default coalesces head gradients across loss chunks; the graph path reduces individual head contributions. The original GraphTrainer last-reduction profiles show 16 ReduceScatter kernel slices in each early microbatch and 80 in the last: the body reduction is deferred while head reductions remain earlier. The qualified native scheduling controls defer the head reduction to finalization as well. Use the within-engine Every/First pairs for gather-cadence comparisons; cross-engine schedule labels do not imply identical head communication.
 
 CPU activation offload quotas are binary GiB per rank and cap live selected activation copies. Parameter and prepared-weight storage is excluded. Copies and restores use the current CUDA stream; graph trainer has its own prefetch/defer scheduling. The native adapter records actual selected bytes and skips additional copies if host available RAM falls below 8 GiB. This guard is needed because the measured 32 GPU FP32-moment baseline leaves less than 4 x 48 GiB available per host. A configured quota is not a guarantee that the full quota is used.
 
@@ -124,6 +126,7 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `64g_sac-ao_bs10_ao60` | 64 | 48.19 | 64 | 558.02 |
 | `64g_sac-ao_bs10_ao80` | 64 | 46.69 | 64 | 545.64 |
 | `native_eager_full_recompute_bs6_det42` | 64 | 45.02 | 64 | 532.81 |
+| `native_eager_full_recompute_cpuoffload_bs6_det42` | 64 | 46.54 | 64 | 542.62 |
 
 ## Full recompute BS6 profile interpretation
 
@@ -166,6 +169,17 @@ The completed Full recompute BS6 performance pair uses seed 14536 with determini
 | `grad_norm` | 45.760014 / 1.684176 | 45.345272 / 1.677615 | 9.343822 at update 13 |
 
 Strict seed-42 Full recompute and Full + offload counterparts are prioritized after the main 32 GPU comparisons and budget sweep. The local MTP annotation and native offload qualification still match bitwise against their native controls; that does not establish equivalence across native and graph engines.
+
+## Reduced-model gradient localization
+
+A real FSDP2/EP2 DSv3 + MTP1 comparison uses GA8, strict seed 42 and the production BF16 GPU Adam settings. Snapshots are taken before first-update gradient clipping and optimizer execution. All 88 initial parameter tensors match bitwise on both ranks. Of 88 first-update parameter gradients, 87 match bitwise; only `lm_head.weight` differs.
+
+| Rank | LM-head gradient relative L2 difference | Maximum absolute gradient difference |
+| --- | ---: | ---: |
+| 0 | 0.0038652 | 0.00005198 |
+| 1 | 0.0035316 | 0.00000156 |
+
+This localizes the initial reduced-model discrepancy before Adam runs. Native head coalescing and graph head reduction order differ; a separate per-chunk native synchronization control is being evaluated. This reduced-model observation does not establish the full-model cause or convergence.
 
 ## Strict hardware scalar comparisons
 
