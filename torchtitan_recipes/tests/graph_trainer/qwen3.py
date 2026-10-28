@@ -34,5 +34,5 @@ def graph_trainer_qwen3_debugmodel_moe() -> GraphTrainer.Config:
     )
     config.dataloader.max_num_documents = None
     config.compile = GraphTrainerCompileConfig()
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config

@@ -26,7 +26,7 @@ from torchtitan_recipes.tests.models.muse_spark import (
 def test_fake_scale_recipe_tokenizer(recipe):
     # Keep Dist-MoE kernels and CUDA-graph checks outside this tokenizer test.
     def configure_dist_moe(config, **kwargs):
-        config.training.disable_cuda_graphs = False
+        config.training.disable_accelerator_graphs = False
         return config
 
     with (

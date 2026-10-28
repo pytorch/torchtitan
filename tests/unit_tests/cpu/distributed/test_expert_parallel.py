@@ -41,7 +41,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             model=model_config,
             training=TrainingConfig(
                 max_context_length=model_config.max_context_length,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
             parallelism=parallelism,
         )
@@ -66,7 +66,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
                 model=model_config,
                 training=TrainingConfig(
                     max_context_length=model_config.max_context_length,
-                    disable_cuda_graphs=True,
+                    disable_accelerator_graphs=True,
                 ),
                 parallelism=ParallelismConfig(expert_parallel_degree=8),
             )
@@ -94,7 +94,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             model=model_config,
             training=TrainingConfig(
                 max_context_length=model_config.max_context_length,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
             parallelism=ParallelismConfig(tensor_parallel_degree=2),
         )

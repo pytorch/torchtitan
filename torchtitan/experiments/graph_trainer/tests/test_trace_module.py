@@ -190,7 +190,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             profiler=Profiler.Config(),
             sdc_replayer=None,
             training=SimpleNamespace(
-                disable_cuda_graphs=False,
+                disable_accelerator_graphs=False,
                 num_tokens_per_microbatch_per_dp_rank=1,
                 num_tokens_per_train_step=2,
             ),

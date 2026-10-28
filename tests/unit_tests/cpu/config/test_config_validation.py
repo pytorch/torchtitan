@@ -45,23 +45,23 @@ def test_training_token_counts_are_positive() -> None:
         TrainingConfig(max_context_length=0)
 
 
-def test_per_group_cuda_graph_config_restrictions() -> None:
-    with pytest.raises(ValueError, match="require CUDA graphs to be enabled"):
+def test_per_group_accelerator_graph_config_restrictions() -> None:
+    with pytest.raises(ValueError, match="require accelerator graphs to be enabled"):
         TrainingEngine.Config(
             training=TrainingConfig(
-                cuda_graph_per_microbatch_group=True,
-                disable_cuda_graphs=True,
+                accelerator_graph_per_microbatch_group=True,
+                disable_accelerator_graphs=True,
             )
         )
     with pytest.raises(ValueError, match="fsdp_defer_gradient_reduction=False"):
         TrainingEngine.Config(
-            training=TrainingConfig(cuda_graph_per_microbatch_group=True),
+            training=TrainingConfig(accelerator_graph_per_microbatch_group=True),
             parallelism=ParallelismConfig(fsdp_defer_gradient_reduction=True),
         )
     with pytest.raises(ValueError, match="do not support SDC replay"):
         TrainingEngine.Config(
             training=TrainingConfig(
-                cuda_graph_per_microbatch_group=True,
+                accelerator_graph_per_microbatch_group=True,
                 num_tokens_per_microbatch_per_dp_rank=1,
                 num_tokens_per_train_step=3,
             ),
@@ -69,48 +69,52 @@ def test_per_group_cuda_graph_config_restrictions() -> None:
         )
 
     TrainingEngine.Config(
-        training=TrainingConfig(cuda_graph_per_microbatch_group=True),
+        training=TrainingConfig(accelerator_graph_per_microbatch_group=True),
         parallelism=ParallelismConfig(pipeline_parallel_degree=2),
     )
 
 
 def test_lazy_preprocessing_config_restrictions() -> None:
-    with pytest.raises(ValueError, match="requires training.disable_cuda_graphs=True"):
+    with pytest.raises(
+        ValueError, match="requires training.disable_accelerator_graphs=True"
+    ):
         TrainingEngine.Config(
             training=TrainingConfig(preprocess_microbatch_groups_lazily=True)
         )
     with pytest.raises(ValueError, match="does not support SDC replay"):
         TrainingEngine.Config(
             training=TrainingConfig(
-                preprocess_microbatch_groups_lazily=True, disable_cuda_graphs=True
+                preprocess_microbatch_groups_lazily=True,
+                disable_accelerator_graphs=True,
             ),
             sdc_replayer=SDCReplayer.Config(),
         )
 
     TrainingEngine.Config(
         training=TrainingConfig(
-            preprocess_microbatch_groups_lazily=True, disable_cuda_graphs=True
+            preprocess_microbatch_groups_lazily=True, disable_accelerator_graphs=True
         )
     )
 
 
-def test_graph_trainer_rejects_per_group_cuda_graphs() -> None:
+def test_graph_trainer_rejects_per_group_accelerator_graphs() -> None:
     config = llama3_debugmodel(attn_backend="flex")
     with pytest.raises(ValueError, match="not supported with GraphTrainer"):
         GraphTrainer.Config(
             model=config.model,
-            training=TrainingConfig(cuda_graph_per_microbatch_group=True),
+            training=TrainingConfig(accelerator_graph_per_microbatch_group=True),
         )
     with pytest.raises(ValueError, match="lazily is not supported with GraphTrainer"):
         GraphTrainer.Config(
             model=config.model,
             training=TrainingConfig(
-                preprocess_microbatch_groups_lazily=True, disable_cuda_graphs=True
+                preprocess_microbatch_groups_lazily=True,
+                disable_accelerator_graphs=True,
             ),
         )
 
 
-def test_cuda_graphs_allow_pipeline_validation() -> None:
+def test_accelerator_graphs_allow_pipeline_validation() -> None:
     config = llama3_debugmodel()
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.pipeline_parallel_schedule = "1F1B"
@@ -120,7 +124,7 @@ def test_cuda_graphs_allow_pipeline_validation() -> None:
         config.__post_init__()
 
 
-def test_cuda_graphs_reject_synchronizing_ep_dispatcher() -> None:
+def test_accelerator_graphs_reject_synchronizing_ep_dispatcher() -> None:
     config = deepseek_v3_debugmodel()
     config.parallelism.expert_parallel_degree = 2
 
@@ -130,7 +134,7 @@ def test_cuda_graphs_reject_synchronizing_ep_dispatcher() -> None:
         config.__post_init__()
 
 
-def test_cuda_graphs_allow_nonblocking_hybrid_ep() -> None:
+def test_accelerator_graphs_allow_nonblocking_hybrid_ep() -> None:
     config = deepseek_v3_debugmodel_hybridep()
     config.parallelism.expert_parallel_degree = 2
 
@@ -138,7 +142,7 @@ def test_cuda_graphs_allow_nonblocking_hybrid_ep() -> None:
         config.__post_init__()
 
 
-def test_cuda_graphs_reject_blocking_hybrid_ep() -> None:
+def test_accelerator_graphs_reject_blocking_hybrid_ep() -> None:
     config = deepseek_v3_debugmodel_hybridep()
     for _, dispatcher, _, _ in config.model.traverse(HybridEPTokenDispatcher.Config):
         dispatcher.non_blocking_capacity_factor = None
@@ -152,7 +156,7 @@ def test_cuda_graphs_reject_blocking_hybrid_ep() -> None:
 
 def test_sdc_replay_requires_strict_determinism() -> None:
     config = llama3_debugmodel()
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.sdc_replayer = SDCReplayer.Config()
 
     with pytest.raises(ValueError, match="debug.deterministic=True"):
@@ -164,7 +168,7 @@ def test_sdc_replay_requires_strict_determinism() -> None:
         TrainingEngine.Config.__post_init__(config)
 
 
-def test_sdc_replay_count_respects_cuda_graph_support() -> None:
+def test_sdc_replay_count_respects_accelerator_graph_support() -> None:
     config = llama3_debugmodel()
     config.debug.deterministic = True
     config.sdc_replayer = SDCReplayer.Config(num_replays=2)
@@ -196,12 +200,12 @@ def test_spmd_typechecking_rejects_pipeline_parallelism() -> None:
     with pytest.raises(ValueError, match="SPMD typechecking"):
         TrainingEngine.Config(
             debug=DebugConfig(spmd_typechecking=True),
-            training=TrainingConfig(disable_cuda_graphs=True),
+            training=TrainingConfig(disable_accelerator_graphs=True),
             parallelism=ParallelismConfig(pipeline_parallel_degree=2),
         )
 
 
-def test_varlen_cuda_graphs_require_document_bound() -> None:
+def test_varlen_accelerator_graphs_require_document_bound() -> None:
     config = llama3_debugmodel_varlen_attn()
     config.dataloader.max_num_documents = None
 

@@ -66,7 +66,7 @@ def _configure_fsdp_numerics(config: Trainer.Config) -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 1
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -77,7 +77,7 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
@@ -109,7 +109,7 @@ def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -121,7 +121,7 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2() -> Trainer.Config:
     )
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -135,7 +135,7 @@ def deepseek_v3_debugmodel_mtp_cp2(
     config.parallelism.context_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
@@ -177,7 +177,7 @@ def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
@@ -201,7 +201,7 @@ def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
@@ -221,7 +221,7 @@ def deepseek_v3_debugmodel_hsdp2x2_ep2() -> Trainer.Config:
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.data_parallel_shard_degree = 2
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -238,7 +238,7 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 1
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -254,7 +254,7 @@ def deepseek_v3_debugmodel_fused_mla_swiglu_fsdp4_ep2() -> Trainer.Config:
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
     config.parallelism.data_parallel_shard_degree = 4
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -270,7 +270,7 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
@@ -325,7 +325,7 @@ def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4
     _set_spmd_typechecking(config, typechecking=False)
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -342,7 +342,7 @@ def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
         config.training.max_context_length
     )
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -355,7 +355,7 @@ def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.activation_remat = DefaultActivationRematConfig()
     _set_spmd_typechecking(config, typechecking=False)
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -370,7 +370,7 @@ def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -407,7 +407,7 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.training.num_tokens_per_microbatch_per_dp_rank = 1024
     config.activation_remat = DefaultActivationRematConfig()
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.steps = 10
     return apply_transforms(
         config,
@@ -436,7 +436,7 @@ def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.activation_remat = DefaultActivationRematConfig()
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -459,7 +459,7 @@ def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
     # Four microbatches match the four virtual pipeline stages.
     config.parallelism.num_pp_microbatches = 4
     config.training.steps = 1
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -472,7 +472,7 @@ def kimi_k2_5_debugmodel_muon_fsdp8_ep8() -> Trainer.Config:
     )
     config.parallelism.data_parallel_shard_degree = 8
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -505,7 +505,7 @@ def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
         config.training.max_context_length
     )
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
@@ -528,7 +528,7 @@ def muse_glimmer_debugmodel_mm_fsdp2_tp2() -> Trainer.Config:
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -547,7 +547,7 @@ def muse_glimmer_debugmodel_mm_tp2_cp2_pp2() -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 2
     config.parallelism.pipeline_parallel_schedule = "1F1B"
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [

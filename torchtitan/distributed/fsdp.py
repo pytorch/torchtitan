@@ -30,7 +30,7 @@ __all__ = [
     "apply_fsdp_to_multimodal_encoder",
     "disable_fsdp_gradient_division",
     "enable_fsdp_symm_mem",
-    "post_validate_fsdp_for_cuda_graph",
+    "post_validate_fsdp_for_accelerator_graph",
     "get_fsdp_reshard_after_forward_policy",
     "linear_param_shard_placements",
     "resolve_fsdp_mesh",
@@ -40,7 +40,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def post_validate_fsdp_for_cuda_graph(model_parts: list[nn.Module]) -> None:
+def post_validate_fsdp_for_accelerator_graph(model_parts: list[nn.Module]) -> None:
     """Finish grouped forwards and release full parameters for pool reuse.
 
     Eager and captured validation use the same cleanup. With ChunkedLossWrapper,

@@ -41,9 +41,9 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.max_num_documents = None
         trainer.preprocess_inputs_kwargs = {}
         trainer.config = MagicMock()
-        trainer.config.training.disable_cuda_graphs = True
+        trainer.config.training.disable_accelerator_graphs = True
         trainer.sdc_replayer = None
-        trainer._cuda_graph_per_microbatch_group_enabled = False
+        trainer._accelerator_graph_per_microbatch_group_enabled = False
         trainer.config.training.preprocess_microbatch_groups_lazily = False
         trainer.device = torch.device("cpu")
         trainer.num_completed_steps = 1

@@ -74,7 +74,7 @@ def deepseek_v4_debugmodel(
         training=TrainingConfig(
             # The stock all-to-all EP dispatcher syncs with the CPU, so it
             # cannot run under CUDA graphs.
-            disable_cuda_graphs=parallelism.expert_parallel_degree > 1,
+            disable_accelerator_graphs=parallelism.expert_parallel_degree > 1,
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
@@ -95,7 +95,7 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
     )
     config.training.steps = 1
     config.metrics.log_freq = 1
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 

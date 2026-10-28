@@ -271,7 +271,7 @@ def _run_pp_cache_lifecycle(
         dist.destroy_process_group()
 
 
-def _run_cuda_graph_cache_lifecycle(
+def _run_accelerator_graph_cache_lifecycle(
     rank: int,
     world_size: int,
     port: int,
@@ -471,7 +471,7 @@ def _run_simple_fsdp(
     [
         _run_reshard_after_forward,
         _run_pp_cache_lifecycle,
-        _run_cuda_graph_cache_lifecycle,
+        _run_accelerator_graph_cache_lifecycle,
         _run_simple_fsdp,
     ],
     ids=[

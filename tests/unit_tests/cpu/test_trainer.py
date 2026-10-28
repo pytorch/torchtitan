@@ -441,7 +441,7 @@ def test_forward_backward_runs_whole_accumulation(
             fsdp_reshard_after_forward="default",
         ),
         training=SimpleNamespace(
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
             max_context_length=2048,
             num_tokens_per_microbatch_per_dp_rank=7,
             preprocess_microbatch_groups_lazily=lazily,
@@ -453,7 +453,7 @@ def test_forward_backward_runs_whole_accumulation(
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
-    engine._cuda_graph_per_microbatch_group_enabled = per_group_graph
+    engine._accelerator_graph_per_microbatch_group_enabled = per_group_graph
     engine.sdc_replayer = None
     engine._non_pp_forward_backward_microbatch = forward_backward_body
     engine._run_forward_backward = partial(
@@ -511,7 +511,7 @@ def test_forward_backward_runs_whole_accumulation(
     }
 
 
-def test_cuda_graph_wrapper_returns_graph_owned_output():
+def test_accelerator_graph_wrapper_returns_graph_owned_output():
     class PassthroughAcceleratorGraphWrapper:
         def __init__(
             self,
@@ -565,7 +565,7 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
     torch.testing.assert_close(extra_kwargs["position"], torch.ones(1))
 
 
-def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
+def test_accelerator_graph_wrapper_preserves_structured_args_and_kwargs():
     class PassthroughAcceleratorGraphWrapper:
         def __init__(
             self,
@@ -636,14 +636,14 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
         ),
     ],
 )
-def test_training_engine_configures_gradient_accumulation_cuda_graph(
+def test_training_engine_configures_gradient_accumulation_accelerator_graph(
     profiler: Profiler.Config, annotation_config: dict[str, Any] | None
 ) -> None:
     model = torch.nn.Linear(2, 2)
     eager_forward_backward = MagicMock(
         return_value=ForwardBackwardResult(torch.tensor(1.0), [])
     )
-    cuda_graph_forward_backward = MagicMock(
+    accelerator_graph_forward_backward = MagicMock(
         return_value=ForwardBackwardResult(torch.tensor(2.0), [])
     )
     engine = cast(
@@ -655,8 +655,8 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph(
                 debug=SimpleNamespace(spmd_typechecking=False),
                 profiler=profiler,
                 training=SimpleNamespace(
-                    cuda_graph_per_microbatch_group=False,
-                    disable_cuda_graphs=False,
+                    accelerator_graph_per_microbatch_group=False,
+                    disable_accelerator_graphs=False,
                 ),
                 parallelism=SimpleNamespace(
                     enable_sequence_parallel=False,
@@ -673,7 +673,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph(
     with (
         patch(
             "torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph",
-            return_value=cuda_graph_forward_backward,
+            return_value=accelerator_graph_forward_backward,
         ) as wrap,
         patch(
             "torchtitan.training_engine.accelerator_graphs_supported", return_value=True
@@ -690,11 +690,11 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph(
     assert wrap.call_args.kwargs["num_warmup_iterations"] == 2
     assert tuple(wrap.call_args.kwargs["parameters"]) == tuple(model.parameters())
     assert wrap.call_args.kwargs["annotation_config"] == annotation_config
-    cuda_graph_forward_backward.assert_called_once()
-    assert engine._forward_backward_cuda_graph_enabled
+    accelerator_graph_forward_backward.assert_called_once()
+    assert engine._forward_backward_accelerator_graph_enabled
 
 
-def test_training_engine_replays_one_cuda_graph_per_microbatch_group() -> None:
+def test_training_engine_replays_one_accelerator_graph_per_microbatch_group() -> None:
     graph_loss = torch.tensor(0.0)
     graph_metric = torch.tensor(0.0)
 
@@ -718,8 +718,8 @@ def test_training_engine_replays_one_cuda_graph_per_microbatch_group() -> None:
                 debug=SimpleNamespace(spmd_typechecking=False),
                 profiler=Profiler.Config(),
                 training=SimpleNamespace(
-                    cuda_graph_per_microbatch_group=True,
-                    disable_cuda_graphs=False,
+                    accelerator_graph_per_microbatch_group=True,
+                    disable_accelerator_graphs=False,
                 ),
                 parallelism=SimpleNamespace(
                     fsdp_defer_gradient_reduction=False,
@@ -754,8 +754,8 @@ def test_training_engine_replays_one_cuda_graph_per_microbatch_group() -> None:
         2.0,
         3.0,
     ]
-    assert engine._cuda_graph_per_microbatch_group_enabled
-    assert engine._forward_backward_cuda_graph_enabled
+    assert engine._accelerator_graph_per_microbatch_group_enabled
+    assert engine._forward_backward_accelerator_graph_enabled
     wrap_group.assert_called_once()
     wrap_step.assert_not_called()
     assert [call.args[0] for call in group_runner.call_args_list] == [
@@ -777,8 +777,8 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
-                    cuda_graph_per_microbatch_group=False,
-                    disable_cuda_graphs=False,
+                    accelerator_graph_per_microbatch_group=False,
+                    disable_accelerator_graphs=False,
                     preprocess_microbatch_groups_lazily=False,
                 ),
                 parallelism=SimpleNamespace(
@@ -806,11 +806,11 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
 
     eager_forward_backward.assert_called_once()
     wrap.assert_not_called()
-    assert not engine._forward_backward_cuda_graph_enabled
+    assert not engine._forward_backward_accelerator_graph_enabled
 
 
-def test_graph_training_engine_rejects_optimizer_cuda_graph() -> None:
-    config = SimpleNamespace(optim=SimpleNamespace(enable_cuda_graph=True))
+def test_graph_training_engine_rejects_optimizer_accelerator_graph() -> None:
+    config = SimpleNamespace(optim=SimpleNamespace(enable_accelerator_graph=True))
 
     with (
         patch.object(TrainingEngine, "__init__") as init,
@@ -827,7 +827,7 @@ def test_graph_training_engine_rejects_optimizer_cuda_graph() -> None:
 
 
 def test_graph_training_engine_rejects_local_compile() -> None:
-    config = SimpleNamespace(optim=SimpleNamespace(enable_cuda_graph=False))
+    config = SimpleNamespace(optim=SimpleNamespace(enable_accelerator_graph=False))
 
     with (
         patch.object(TrainingEngine, "__init__") as init,
@@ -960,7 +960,7 @@ def no_registered_aux_losses():
     ),
 )
 @pytest.mark.usefixtures("no_registered_aux_losses")
-def test_trainer_accumulates_reused_cuda_graph_losses(
+def test_trainer_accumulates_reused_accelerator_graph_losses(
     loss_token_counts, routing_token_counts
 ):
     graph_loss = torch.tensor(0.0)
@@ -988,8 +988,8 @@ def test_trainer_accumulates_reused_cuda_graph_losses(
         SimpleNamespace(
             config=SimpleNamespace(
                 training=SimpleNamespace(
-                    cuda_graph_per_microbatch_group=False,
-                    disable_cuda_graphs=False,
+                    accelerator_graph_per_microbatch_group=False,
+                    disable_accelerator_graphs=False,
                 ),
             ),
             optim=SimpleNamespace(
@@ -1054,17 +1054,17 @@ def test_trainer_accumulates_reused_cuda_graph_losses(
     assert trainer.num_completed_steps == 2
 
 
-@pytest.mark.parametrize("disable_cuda_graphs", [False, True])
+@pytest.mark.parametrize("disable_accelerator_graphs", [False, True])
 @pytest.mark.parametrize("per_group", [False, True])
-def test_engine_prepares_pp_metadata_before_cuda_graph(disable_cuda_graphs, per_group):
+def test_engine_prepares_pp_metadata_before_accelerator_graph(disable_accelerator_graphs, per_group):
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
         dist_moe_runtime=None,
         sdc_replayer=None,
         profiler=Profiler.Config(),
         training=SimpleNamespace(
-            disable_cuda_graphs=disable_cuda_graphs,
-            cuda_graph_per_microbatch_group=per_group,
+            disable_accelerator_graphs=disable_accelerator_graphs,
+            accelerator_graph_per_microbatch_group=per_group,
             preprocess_microbatch_groups_lazily=False,
         ),
         parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
@@ -1085,12 +1085,12 @@ def test_engine_prepares_pp_metadata_before_cuda_graph(disable_cuda_graphs, per_
             "torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph"
         ) as wrap_update,
         patch(
-            "torchtitan.training_engine.prepare_pipeline_schedule_for_cuda_graph"
+            "torchtitan.training_engine.prepare_pipeline_schedule_for_accelerator_graph"
         ) as prepare,
     ):
         engine._initialize_forward_backward()
         prepare.assert_not_called()
-        if disable_cuda_graphs:
+        if disable_accelerator_graphs:
             wrap_group.assert_not_called()
             wrap_update.assert_not_called()
             return
@@ -1119,7 +1119,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
         training=SimpleNamespace(
-            disable_cuda_graphs=True, preprocess_microbatch_groups_lazily=False
+            disable_accelerator_graphs=True, preprocess_microbatch_groups_lazily=False
         ),
         parallelism=SimpleNamespace(
             fsdp_defer_gradient_reduction=False,
@@ -1131,7 +1131,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
-    engine._cuda_graph_per_microbatch_group_enabled = False
+    engine._accelerator_graph_per_microbatch_group_enabled = False
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
     engine._preprocess_microbatch_groups = MagicMock(
@@ -1165,7 +1165,7 @@ def test_replay_failure_propagates_from_engine():
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
         training=SimpleNamespace(
-            disable_cuda_graphs=True, preprocess_microbatch_groups_lazily=False
+            disable_accelerator_graphs=True, preprocess_microbatch_groups_lazily=False
         ),
         parallelism=SimpleNamespace(
             fsdp_defer_gradient_reduction=False,
@@ -1177,7 +1177,7 @@ def test_replay_failure_propagates_from_engine():
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
-    engine._cuda_graph_per_microbatch_group_enabled = False
+    engine._accelerator_graph_per_microbatch_group_enabled = False
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
     engine.num_completed_steps = 0
     engine._preprocess_microbatch_groups = MagicMock(
@@ -1312,7 +1312,7 @@ def test_accelerator_graph_wrapper_is_noop_when_unsupported(
     warning.assert_called_once()
 
 
-def test_cuda_graph_accumulation_supports_eager_gradient_reduction() -> None:
+def test_accelerator_graph_accumulation_supports_eager_gradient_reduction() -> None:
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
@@ -1321,8 +1321,8 @@ def test_cuda_graph_accumulation_supports_eager_gradient_reduction() -> None:
                 dist_moe_runtime=None,
                 profiler=Profiler.Config(),
                 training=SimpleNamespace(
-                    cuda_graph_per_microbatch_group=False,
-                    disable_cuda_graphs=False,
+                    accelerator_graph_per_microbatch_group=False,
+                    disable_accelerator_graphs=False,
                 ),
                 sdc_replayer=None,
                 parallelism=SimpleNamespace(
@@ -1369,8 +1369,8 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
             config=SimpleNamespace(
                 dist_moe_runtime=None,
                 training=SimpleNamespace(
-                    cuda_graph_per_microbatch_group=False,
-                    disable_cuda_graphs=True,
+                    accelerator_graph_per_microbatch_group=False,
+                    disable_accelerator_graphs=True,
                     preprocess_microbatch_groups_lazily=lazily,
                 ),
                 parallelism=SimpleNamespace(

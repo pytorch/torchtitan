@@ -25,19 +25,19 @@ from torchtitan_recipes.tests.graph_trainer.muse_glimmer import (
 )
 
 from tests.integration_tests.features import (
-    muse_glimmer_debugmodel_shared_eval_cuda_graph,
+    muse_glimmer_debugmodel_shared_eval_accelerator_graph,
 )
 
 
-def test_shared_eval_cuda_graph_recipe_enables_capture() -> None:
-    config = muse_glimmer_debugmodel_shared_eval_cuda_graph()
-    assert not config.training.disable_cuda_graphs
-    assert config.optim.enable_cuda_graph
+def test_shared_eval_accelerator_graph_recipe_enables_capture() -> None:
+    config = muse_glimmer_debugmodel_shared_eval_accelerator_graph()
+    assert not config.training.disable_accelerator_graphs
+    assert config.optim.enable_accelerator_graph
     assert not hasattr(config.validator, "enable_cuda_graphs")
 
 
 @pytest.fixture(autouse=True)
-def reset_cuda_graph_manager():
+def reset_accelerator_graph_manager():
     accelerator_graph_teardown()
     yield
     accelerator_graph_teardown()
@@ -108,7 +108,7 @@ def test_graph_trainer_preserves_eager_pp_validation(monkeypatch):
 def test_graph_engine_pp_does_not_initialize_eager_schedule():
     config = graph_trainer_muse_glimmer_debugmodel()
     config.parallelism.pipeline_parallel_degree = 2
-    assert not config.training.disable_cuda_graphs
+    assert not config.training.disable_accelerator_graphs
     with patch.object(TrainingEngine, "_initialize_distributed_runtime"):
         engine = GraphTrainingEngine(
             config,
@@ -116,7 +116,7 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
             max_num_documents=None,
             output_dir="",
         )
-    assert not engine._forward_backward_cuda_graph_enabled
+    assert not engine._forward_backward_accelerator_graph_enabled
 
 
 @pytest.mark.parametrize(
@@ -202,7 +202,7 @@ def test_trainer_keeps_scheduled_eval_during_warmup(
     model = torch.nn.Identity()
     validator = object.__new__(Validator)
     validator.config = Validator.Config(steps=1, freq=freq)
-    validator._cuda_graph_enabled = capture_mode == "enabled"
+    validator._accelerator_graph_enabled = capture_mode == "enabled"
     validator._run_eval = None
     validator._cuda_graph_annotation_config = None
     validator.parallelism_context = SimpleNamespace(pp_enabled=False)

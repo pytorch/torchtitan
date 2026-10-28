@@ -30,9 +30,9 @@ from torchtitan.distributed.accelerator_graph import (
     accelerator_graphs_supported,
     wrap_with_accelerator_graph,
 )
-from torchtitan.distributed.fsdp import post_validate_fsdp_for_cuda_graph
+from torchtitan.distributed.fsdp import post_validate_fsdp_for_accelerator_graph
 from torchtitan.distributed.pipeline_parallel import (
-    prepare_pipeline_schedule_for_cuda_graph,
+    prepare_pipeline_schedule_for_accelerator_graph,
 )
 from torchtitan.models.base.model import BaseModel
 from torchtitan.observability import structured_logger as sl
@@ -132,7 +132,7 @@ class Validator(BaseValidator):
         metrics_processor: MetricsProcessor,
         seq_len: int,
         num_tokens_per_microbatch: int,
-        cuda_graph_enabled: bool = False,
+        accelerator_graph_enabled: bool = False,
         cuda_graph_annotation_config: dict[str, Any] | None = None,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
@@ -165,11 +165,13 @@ class Validator(BaseValidator):
         self.pp_has_last_stage = pp_has_last_stage
         self._run_eval = None
         self._cuda_graph_annotation_config = cuda_graph_annotation_config
-        self._cuda_graph_enabled = cuda_graph_enabled and accelerator_graphs_supported()
-        if self._cuda_graph_enabled:
+        self._accelerator_graph_enabled = (
+            accelerator_graph_enabled and accelerator_graphs_supported()
+        )
+        if self._accelerator_graph_enabled:
             # Keep training and optimizer eager until eval captures.
             accelerator_graph_manager.capture_allowed = False
-        elif cuda_graph_enabled:
+        elif accelerator_graph_enabled:
             logger.warning(
                 "Graph capture is unavailable on this accelerator; "
                 "using eager validation."
@@ -178,16 +180,17 @@ class Validator(BaseValidator):
     def should_validate(self, step: int) -> bool:
         """Return whether validation is scheduled or eval capture is pending.
 
-        With eval CUDA graphs enabled, validate after each training update until
+        With eval accelerator graphs enabled, validate after each training update until
         eval captures. These passes warm up eval and capture it before training capture.
         """
         return super().should_validate(step) or (
-            self._cuda_graph_enabled and not accelerator_graph_manager.capture_allowed
+            self._accelerator_graph_enabled
+            and not accelerator_graph_manager.capture_allowed
         )
 
     def _init_validate_fn(self, model_parts):
         evaluate = partial(self._validate_body, model_parts)
-        if not self._cuda_graph_enabled:
+        if not self._accelerator_graph_enabled:
             return evaluate
 
         if self._run_eval is None:
@@ -201,7 +204,7 @@ class Validator(BaseValidator):
                 assert self.pp_schedule is not None
                 inputs, labels, kwargs = prepared[0]
                 with self.parallelism_context.activate_spmd():
-                    prepare_pipeline_schedule_for_cuda_graph(
+                    prepare_pipeline_schedule_for_accelerator_graph(
                         self.pp_schedule,
                         args=(inputs,) if self.pp_has_first_stage else (),
                         kwargs=kwargs,
@@ -260,7 +263,7 @@ class Validator(BaseValidator):
                 predictions = model_parts[0](inputs, **kwargs)
                 loss_sum, _ = self.loss_fn(predictions, labels)
                 del predictions
-            post_validate_fsdp_for_cuda_graph(model_parts)
+            post_validate_fsdp_for_accelerator_graph(model_parts)
         return loss_sum.detach()
 
     @sl.log_trace_span("eval")

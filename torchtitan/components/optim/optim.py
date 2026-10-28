@@ -79,8 +79,8 @@ class Optim(Configurable):
             default_factory=GradientClipper.Config
         )
         """Optimizer-owned gradient clipping implementation."""
-        enable_cuda_graph: bool = False
-        """Capture gradient clipping and optimizer updates in one CUDA graph."""
+        enable_accelerator_graph: bool = False
+        """Capture gradient clipping and optimizer updates in one accelerator graph."""
 
         def __post_init__(self) -> None:
             if self.max_norm < 0:
@@ -110,21 +110,21 @@ class Optim(Configurable):
             for parameter in model_part.parameters()
         ]
         self._is_first_step_call = True
-        enable_cuda_graph = (
-            config.enable_cuda_graph
+        enable_accelerator_graph = (
+            config.enable_accelerator_graph
             and accelerator_graphs_supported()
             and all(
                 parameter.device.type == device_type for parameter in self.parameters
             )
         )
-        if config.enable_cuda_graph and not enable_cuda_graph:
+        if config.enable_accelerator_graph and not enable_accelerator_graph:
             logger.warning(
                 "Optim graph capture is disabled because the runtime or model "
                 "parameter device does not support graph capture."
             )
         self.optimizers = config.optimizer.build(
             model_parts=model_parts,
-            enable_cuda_graph=enable_cuda_graph,
+            enable_accelerator_graph=enable_accelerator_graph,
         )
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
@@ -138,7 +138,7 @@ class Optim(Configurable):
         self.gradient_clipper = config.gradient_clipper.build()
 
         self._run_update = self._update
-        if enable_cuda_graph:
+        if enable_accelerator_graph:
             self._run_update = wrap_with_accelerator_graph(
                 self._update,
                 num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,

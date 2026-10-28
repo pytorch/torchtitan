@@ -108,14 +108,14 @@ def validate_model_training_config(
         if mtp_layers and parallelism.pipeline_parallel_degree > 1:
             raise NotImplementedError("MTP does not support pipeline parallelism yet.")
 
-    if not training.disable_cuda_graphs and accelerator_graphs_supported():
+    if not training.disable_accelerator_graphs and accelerator_graphs_supported():
         if max_num_documents is None:
             for fqn, _, _, _ in model.traverse(VarlenInnerAttention.Config):
                 raise ValueError(
-                    "CUDA graphs require fixed-shape varlen document "
+                    "Accelerator graphs require fixed-shape varlen document "
                     f"metadata for {fqn}, but max_num_documents is unset. "
                     "Configure an upper bound on documents per local token "
-                    "microbatch, or set training.disable_cuda_graphs."
+                    "microbatch, or set training.disable_accelerator_graphs."
                 )
 
         if parallelism.expert_parallel_degree > 1:
@@ -129,10 +129,10 @@ def validate_model_training_config(
                     continue
 
                 raise ValueError(
-                    "CUDA graphs support only expert parallel token dispatcher "
+                    "Accelerator graphs support only expert parallel token dispatcher "
                     "configurations without CPU synchronization. "
                     "Set HybridEP non_blocking_capacity_factor, or set "
-                    "training.disable_cuda_graphs. Unsupported token "
+                    "training.disable_accelerator_graphs. Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
 

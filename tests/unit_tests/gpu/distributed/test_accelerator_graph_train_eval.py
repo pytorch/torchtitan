@@ -34,14 +34,14 @@ from torchtitan.distributed.accelerator_graph import (
     wrap_with_accelerator_graph,
 )
 from torchtitan.distributed.pipeline_parallel import (
-    prepare_pipeline_schedule_for_cuda_graph,
+    prepare_pipeline_schedule_for_accelerator_graph,
 )
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.muse_glimmer import build_model_config
 
 
 @pytest.fixture(autouse=True)
-def reset_cuda_graph_manager():
+def reset_accelerator_graph_manager():
     accelerator_graph_teardown()
     yield
     accelerator_graph_teardown()
@@ -50,7 +50,7 @@ def reset_cuda_graph_manager():
 def _validator(*, schedule=None, first=True, last=True):
     validator = object.__new__(Validator)
     validator.config = SimpleNamespace(steps=1)
-    validator._cuda_graph_enabled = True
+    validator._accelerator_graph_enabled = True
     validator._run_eval = None
     validator._cuda_graph_annotation_config = None
     validator.parallelism = SimpleNamespace(
@@ -506,7 +506,7 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
             return torch.stack(losses).sum() if losses else inputs.new_zeros(())
 
         def prepare_for_capture(inputs, target):
-            prepare_pipeline_schedule_for_cuda_graph(
+            prepare_pipeline_schedule_for_accelerator_graph(
                 schedule,
                 args=(inputs.chunk(4)[0],) if has_first_stage else (),
                 kwargs={},
@@ -604,7 +604,7 @@ def _run_grouped_eval(rank, port):
     dist.init_process_group("nccl", rank=rank, world_size=2)
     try:
         from torchtitan.components.loss import ChunkedLossWrapper
-        from torchtitan.distributed.fsdp import post_validate_fsdp_for_cuda_graph
+        from torchtitan.distributed.fsdp import post_validate_fsdp_for_accelerator_graph
 
         class Model(torch.nn.Module):
             def __init__(self):
@@ -636,7 +636,7 @@ def _run_grouped_eval(rank, port):
         def evaluate(x):
             with torch.no_grad():
                 result, _ = losses[0](model(x), labels)
-                post_validate_fsdp_for_cuda_graph([model])
+                post_validate_fsdp_for_accelerator_graph([model])
                 return result
 
         graph = wrap_with_accelerator_graph(

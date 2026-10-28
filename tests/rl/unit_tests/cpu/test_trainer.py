@@ -53,7 +53,7 @@ def test_mirrored_state_uses_a_fixed_opaque_template() -> None:
 
 
 def test_rl_trainer_uses_training_engine_config_defaults() -> None:
-    assert not Trainer.Config(model=MagicMock()).training.disable_cuda_graphs
+    assert not Trainer.Config(model=MagicMock()).training.disable_accelerator_graphs
 
 
 def test_initialize_torchstore_client_uses_publisher_role() -> None:
@@ -212,7 +212,7 @@ def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
     config = Trainer.Config(
         model=MagicMock(),
         debug=DebugConfig(deterministic=True),
-        training=TrainingConfig(disable_cuda_graphs=True),
+        training=TrainingConfig(disable_accelerator_graphs=True),
         sdc_replayer=SDCReplayer.Config(),
     )
 
@@ -227,7 +227,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization(
 
     model_config = MagicMock()
     config = Trainer.Config(
-        model=model_config, training=TrainingConfig(disable_cuda_graphs=True)
+        model=model_config, training=TrainingConfig(disable_accelerator_graphs=True)
     )
 
     with patch(
@@ -259,7 +259,8 @@ def test_forward_backward_uses_global_token_count() -> None:
         optim=SimpleNamespace(zero_grad=MagicMock()),
         config=SimpleNamespace(
             training=SimpleNamespace(
-                disable_cuda_graphs=True, preprocess_microbatch_groups_lazily=False
+                disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=False,
             ),
             parallelism=SimpleNamespace(
                 fsdp_defer_gradient_reduction=False,
@@ -276,7 +277,7 @@ def test_forward_backward_uses_global_token_count() -> None:
         _run_forward_backward=MagicMock(
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
         ),
-        _cuda_graph_per_microbatch_group_enabled=False,
+        _accelerator_graph_per_microbatch_group_enabled=False,
         sdc_replayer=None,
     )
     microbatch_groups = [[object()], [object()], [object()]]

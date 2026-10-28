@@ -599,12 +599,12 @@ class TestDCPWithParamGroups(unittest.TestCase):
                     f"State mismatch for key {key}",
                 )
 
-    def test_cuda_graph_optimizer_state_round_trip(self):
+    def test_accelerator_graph_optimizer_state_round_trip(self):
         source_model = torch.nn.Linear(2, 2)
         config = OptimizersContainer.Config(
             optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
         )
-        source = config.build(model_parts=[source_model], enable_cuda_graph=True)
+        source = config.build(model_parts=[source_model], enable_accelerator_graph=True)
         source_model(torch.ones(1, 2)).sum().backward()
         source.step()
         old_group = source.optimizers[0].param_groups[0]
@@ -628,7 +628,7 @@ class TestDCPWithParamGroups(unittest.TestCase):
             dcp.load({"optimizer": target}, checkpoint_id=checkpoint_dir, no_dist=True)
             captured_target = config.build(
                 model_parts=[torch.nn.Linear(2, 2)],
-                enable_cuda_graph=True,
+                enable_accelerator_graph=True,
             )
             dcp.load(
                 {"optimizer": captured_target},
@@ -646,7 +646,7 @@ class TestDCPWithParamGroups(unittest.TestCase):
             captured_target.optimizers[0].param_groups[0]["lr"], torch.Tensor
         )
 
-    def test_cuda_graph_setting_controls_capturable(self):
+    def test_accelerator_graph_setting_controls_capturable(self):
         eager = OptimizersContainer.Config(
             optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
         ).build(model_parts=[torch.nn.Linear(2, 2)])
@@ -654,7 +654,7 @@ class TestDCPWithParamGroups(unittest.TestCase):
             optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
         ).build(
             model_parts=[torch.nn.Linear(2, 2)],
-            enable_cuda_graph=True,
+            enable_accelerator_graph=True,
         )
 
         self.assertFalse(eager.optimizers[0].param_groups[0]["capturable"])
@@ -856,7 +856,7 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         model = torch.nn.Linear(2, 2)
         container = OptimizersContainer.Config(
             optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
-        ).build(model_parts=[model], enable_cuda_graph=True)
+        ).build(model_parts=[model], enable_accelerator_graph=True)
         optimizer = container.optimizers[0]
         group = optimizer.param_groups[0]
         lr = group["lr"]
@@ -880,12 +880,12 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         self.assertIs(group["lr"], lr)
         self.assertAlmostEqual(group["lr"].item(), 1e-3 / 3)
 
-    def test_cuda_graph_lr_metrics_stay_on_host(self):
+    def test_accelerator_graph_lr_metrics_stay_on_host(self):
         model = torch.nn.Linear(2, 2)
         config = OptimizersContainer.Config(
             optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
         )
-        optimizers = config.build(model_parts=[model], enable_cuda_graph=True)
+        optimizers = config.build(model_parts=[model], enable_accelerator_graph=True)
         group = optimizers.optimizers[0].param_groups[0]
         lr = group["lr"]
         schedulers = LRSchedulersContainer(
@@ -901,7 +901,7 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         self.assertIsInstance(schedulers.get_host_lrs_per_scheduler()[0][0], float)
         self.assertAlmostEqual(schedulers.get_metrics()["lr/AdamW"], 5e-4)
 
-    def test_cuda_graph_rejects_unsupported_optimizer(self):
+    def test_accelerator_graph_rejects_unsupported_optimizer(self):
         class SGD(torch.optim.SGD, BaseOptimizer):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseOptimizer.Config):
@@ -916,7 +916,7 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "SGD does not support"):
-            config.build(model_parts=[model], enable_cuda_graph=True)
+            config.build(model_parts=[model], enable_accelerator_graph=True)
 
 
 if __name__ == "__main__":

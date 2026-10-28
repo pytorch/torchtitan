@@ -80,11 +80,11 @@ def test_optim_config_rejects_negative_max_norm() -> None:
         Optim.Config(max_norm=-1)
 
 
-@pytest.mark.parametrize("enable_cuda_graph", [False, True])
-def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
+@pytest.mark.parametrize("enable_accelerator_graph", [False, True])
+def test_optim_builds_owned_components(enable_accelerator_graph: bool) -> None:
     model = MagicMock(spec=torch.nn.Module)
     parameter = MagicMock(spec=torch.nn.Parameter)
-    parameter.device = torch.device(device_type if enable_cuda_graph else "cpu")
+    parameter.device = torch.device(device_type if enable_accelerator_graph else "cpu")
     model.parameters.return_value = [parameter]
     optimizers = MagicMock()
     lr_schedulers = MagicMock()
@@ -103,7 +103,7 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
         ema=SimpleNamespace(build=MagicMock(return_value=ema)),
         max_norm=1.0,
         gradient_clipper=gradient_clipper_config,
-        enable_cuda_graph=enable_cuda_graph,
+        enable_accelerator_graph=enable_accelerator_graph,
     )
     wrapped_update = MagicMock()
 
@@ -112,7 +112,7 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
         return_value=wrapped_update,
     ) as wrap, patch(
         "torchtitan.components.optim.optim.accelerator_graphs_supported",
-        return_value=enable_cuda_graph,
+        return_value=enable_accelerator_graph,
     ):
         optim = Optim(
             config,
@@ -124,7 +124,7 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
 
     optimizer_config.build.assert_called_once_with(
         model_parts=[model],
-        enable_cuda_graph=enable_cuda_graph,
+        enable_accelerator_graph=enable_accelerator_graph,
     )
     config.lr_scheduler.build.assert_called_once_with(
         optimizers=optimizers,
@@ -134,7 +134,7 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
     gradient_clipper_config.build.assert_called_once_with()
     assert optim.gradient_clipper is gradient_clipper
     assert optim._is_first_step_call
-    if enable_cuda_graph:
+    if enable_accelerator_graph:
         wrap.assert_called_once_with(
             optim._update,
             num_warmup_iterations=2,
@@ -148,7 +148,7 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
 
 
 @pytest.mark.parametrize("runtime_supported", [False, True])
-def test_optim_cuda_graph_falls_back_for_unsupported_device(
+def test_optim_accelerator_graph_falls_back_for_unsupported_device(
     runtime_supported: bool,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -165,7 +165,7 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
         ema=None,
         max_norm=1.0,
         gradient_clipper=gradient_clipper_config,
-        enable_cuda_graph=True,
+        enable_accelerator_graph=True,
     )
 
     with patch(
@@ -182,7 +182,7 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
 
     optimizer_build.assert_called_once_with(
         model_parts=[model],
-        enable_cuda_graph=False,
+        enable_accelerator_graph=False,
     )
     gradient_clipper_config.build.assert_called_once_with()
     wrap.assert_not_called()
@@ -201,7 +201,7 @@ def test_optim_builds_configured_grad_clip() -> None:
         ema=None,
         max_norm=1.0,
         gradient_clipper=_TestGradientClipper.Config(grad_norm=3.0),
-        enable_cuda_graph=False,
+        enable_accelerator_graph=False,
     )
 
     optim = Optim(

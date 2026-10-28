@@ -63,7 +63,7 @@ class GraphTrainingEngine(TrainingEngine):
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
-        if config.optim.enable_cuda_graph:
+        if config.optim.enable_accelerator_graph:
             raise ValueError("Optim CUDA graphs are not supported with GraphTrainer.")
         if model_config.local_compile.regions:
             raise ValueError(
@@ -194,7 +194,7 @@ class GraphTrainingEngine(TrainingEngine):
             )
 
         if (
-            not self.config.training.disable_cuda_graphs
+            not self.config.training.disable_accelerator_graphs
             and accelerator_graphs_supported()
         ):
             self._run_forward_backward = wrap_fwd_bwd_with_accelerator_graph(
@@ -418,7 +418,7 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
-            if self.training.cuda_graph_per_microbatch_group:
+            if self.training.accelerator_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."
                 )
@@ -447,7 +447,10 @@ class GraphTrainer(Trainer):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        if config.validator is not None and not config.training.disable_cuda_graphs:
+        if (
+            config.validator is not None
+            and not config.training.disable_accelerator_graphs
+        ):
             logger.warning("GraphTrainer validation runs without CUDA graphs.")
         if (
             not self.engine.parallelism_context.pp_enabled
