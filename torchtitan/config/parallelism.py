@@ -69,7 +69,7 @@ class ParallelismConfig:
     experts.
     """
 
-    fsdp_unshard_async_op: bool = False
+    fsdp_unshard_in_current_stream: bool = False
     """
     Issue FSDP pre-forward/pre-backward all-gathers on the current (compute)
     stream instead of on separate all-gather streams, via

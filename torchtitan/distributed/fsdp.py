@@ -270,7 +270,7 @@ def apply_fsdp_to_decoder(
     symm_mem_scope: FSDPSymmMemScope = None,
     *,
     param_dtype_override_fn: Callable[[nn.Parameter], torch.dtype | None] | None = None,
-    unshard_async_op: bool = False,
+    unshard_in_current_stream: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to a decoder-style transformer model.
@@ -280,7 +280,7 @@ def apply_fsdp_to_decoder(
     case: a dense model leaves ``ep_degree=1`` / ``edp_mesh=None`` and has no
     MoE blocks, so every transformer block is sharded as a single
     FSDP unit and the explicit prefetching below is skipped unless
-    ``unshard_async_op`` is set.
+    ``unshard_in_current_stream`` is set.
 
     Args:
         model (Decoder): The model to apply data parallelism to.
@@ -314,7 +314,7 @@ def apply_fsdp_to_decoder(
         symm_mem_scope: Which FSDP modules use symmetric-memory communication.
         param_dtype_override_fn: Optional callback that overrides ``param_dtype``
             for selected parameters.
-        unshard_async_op: Whether to issue pre-forward/pre-backward
+        unshard_in_current_stream: Whether to issue pre-forward/pre-backward
             all-gathers on the current (compute) stream via
             ``FSDPModule.set_unshard_in_current_stream``.
     """
@@ -486,7 +486,7 @@ def apply_fsdp_to_decoder(
     # in EP could interfere with implicit prefetching in FSDP, and when
     # unsharding in the current stream, as all-gathers issued on the compute
     # stream only overlap with compute if they are issued ahead of time
-    if ep_degree == 1 and not unshard_async_op:
+    if ep_degree == 1 and not unshard_in_current_stream:
         return
 
     # set up explicit prefetching for forward
@@ -526,5 +526,5 @@ def apply_fsdp_to_decoder(
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
 
-    if unshard_async_op:
+    if unshard_in_current_stream:
         model.set_unshard_in_current_stream(True)
