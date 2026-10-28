@@ -23,7 +23,7 @@ from torchtitan.rl.actors.monarch.launcher.base import (
     MonarchLauncher,
 )
 from torchtitan.rl.actors.monarch.launcher.slurm import SlurmLauncher
-from torchtitan.rl.actors.monarch.provisioning import HostMeshes
+from torchtitan.rl.actors.monarch.provisioning import _check_gpus_per_host, HostMeshes
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
@@ -72,15 +72,59 @@ def _plan(launcher_config, **kwargs):
     return launcher_config.build().plan(config, ["--module", "m"])
 
 
+# FakeLauncher has 8 GPUs per node. Sizes are (trainer, generator, num_generators).
+_LAYOUT_CASES = {
+    "one_gpu_generators_share_a_node": (
+        (8, 1, 8),
+        {"trainer": 1, "node_0": 1},
+        {
+            "trainer": "trainer",
+            **{f"generator_{i}": "node_0" for i in range(8)},
+        },
+        0,
+    ),
+    "trainer_shares_its_node": (
+        (4, 4, 3),
+        {"node_0": 1, "node_1": 1},
+        {
+            "trainer": "node_0",
+            "generator_0": "node_0",
+            "generator_1": "node_1",
+            "generator_2": "node_1",
+        },
+        0,
+    ),
+    "multi_node_roles": (
+        (16, 8, 2),
+        {"trainer": 2, "generator_0": 1, "generator_1": 1},
+        {
+            "trainer": "trainer",
+            "generator_0": "generator_0",
+            "generator_1": "generator_1",
+        },
+        0,
+    ),
+    "generator_does_not_fit_trainer_node": (
+        (6, 4, 2),
+        {"node_0": 1, "node_1": 1},
+        {"trainer": "node_0", "generator_0": "node_1", "generator_1": "node_1"},
+        2,
+    ),
+    "whole_node_generator_after_small_trainer": (
+        (4, 8, 1),
+        {"node_0": 1, "generator": 1},
+        {"trainer": "node_0", "generator": "generator"},
+        4,
+    ),
+}
+
+
 @pytest.mark.parametrize(
-    "sizes, mesh_nodes",
-    [
-        ((4, 2, 2), {"trainer": 1, "generator_0": 1, "generator_1": 1}),
-        ((16, 8, 1), {"trainer": 2, "generator": 1}),
-        ((16, 16, 2), {"trainer": 2, "generator_0": 2, "generator_1": 2}),
-    ],
+    "sizes, mesh_nodes, role_mesh, idle_gpus",
+    _LAYOUT_CASES.values(),
+    ids=_LAYOUT_CASES.keys(),
 )
-def test_layout(sizes, mesh_nodes):
+def test_layout(sizes, mesh_nodes, role_mesh, idle_gpus, caplog):
     trainer_dp, generator_tp, num_generators = sizes
     layout = _plan(
         FakeLauncher.Config(),
@@ -90,12 +134,37 @@ def test_layout(sizes, mesh_nodes):
     ).layout
 
     assert layout.mesh_nodes == mesh_nodes
-    assert layout.role_mesh == {role: role for role in mesh_nodes}
+    assert layout.role_mesh == role_mesh
+    idle_warnings = [r.getMessage() for r in caplog.records if "idle" in r.getMessage()]
+    if idle_gpus:
+        assert len(idle_warnings) == 1
+        assert idle_warnings[0].startswith(f"{idle_gpus} of ")
+    else:
+        assert idle_warnings == []
 
 
 def test_layout_rejects_partial_multi_node_role():
     with pytest.raises(ValueError, match=r"trainer world size \(12\)"):
         _plan(FakeLauncher.Config(), trainer_dp=12, generator_tp=8)
+
+
+@pytest.mark.parametrize(
+    "sizes", [case[0] for case in _LAYOUT_CASES.values()], ids=_LAYOUT_CASES.keys()
+)
+def test_layout_fits_the_hosts(sizes):
+    trainer_dp, generator_tp, num_generators = sizes
+    layout = _plan(
+        FakeLauncher.Config(),
+        trainer_dp=trainer_dp,
+        generator_tp=generator_tp,
+        num_generators=num_generators,
+    ).layout
+    meshes = {
+        name: [object()] * num_nodes for name, num_nodes in layout.mesh_nodes.items()
+    }
+
+    # Raises if the roles sharing a mesh need more GPUs than its hosts have.
+    _check_gpus_per_host(layout.host_meshes(meshes), trainer_dp, generator_tp)
 
 
 def test_layout_host_meshes_shares_one_object():
@@ -171,7 +240,9 @@ def test_submit_dry_run_does_not_submit(monkeypatch, tmp_path, capsys):
 
     assert _run_submit(monkeypatch, config, ["--dry-run", "--module", "m"]) is None
     assert events == []
-    assert "mesh trainer: 1 node(s), roles trainer" in capsys.readouterr().out
+    assert (
+        "mesh node_0: 1 node(s), roles trainer, generator\n" in capsys.readouterr().out
+    )
 
 
 def test_submit_plans_after_overrides(monkeypatch, tmp_path, capsys):
@@ -185,7 +256,8 @@ def test_submit_plans_after_overrides(monkeypatch, tmp_path, capsys):
 
     _run_submit(monkeypatch, config, ["--dry-run", "--module", "m"])
 
-    assert "mesh generator_1: 1 node(s), roles generator_1" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "mesh node_0: 1 node(s), roles trainer, generator_0, generator_1" in out
 
 
 def test_submit_submits_and_returns_the_job_handle(monkeypatch, tmp_path):
@@ -278,8 +350,8 @@ def test_provision_acquires_and_stop_releases_hosts(spawned, monkeypatch):
     asyncio.run(actor_system.stop())
 
     assert spawned["host_meshes"] == HostMeshes(
-        trainer="hosts[trainer]",
-        generators=["hosts[generator_0]", "hosts[generator_1]"],
+        trainer="hosts[node_0]",
+        generators=["hosts[node_0]", "hosts[node_0]"],
         gpus_per_node=8,
     )
     assert events == ["acquire_hosts", "release_hosts"]

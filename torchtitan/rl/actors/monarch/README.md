@@ -37,12 +37,25 @@ arguments as `torchtitan.rl.train`. Add `--dry-run` to print the planned nodes,
 roles and settings without submitting. To support another scheduler, subclass
 `MonarchLauncher` (`launcher/base.py`) in your own package.
 
-**Layout.** Roles do not share nodes, so a role smaller than a node leaves the
-rest of its node idle.
+**Layout.** The launcher places the trainer first, then the generators, filling
+each node before the next:
 
-TODO: support packing roles onto shared nodes, e.g. with 8-GPU nodes and 4-GPU
-roles, `trainer` and `generator_0` on node 0 and `generator_1` and `generator_2`
-on node 1.
+- A role smaller than a node goes on the node being filled if it fits, else on
+  the next node. It is never split across two nodes.
+- A role using a node or more gets whole nodes to itself. Its world size must be
+  a multiple of the node's GPU count.
+
+Examples with 8-GPU nodes ("generators" is the number of generators x GPUs per
+generator):
+
+| Trainer | Generators | Layout | Idle |
+| --- | --- | --- | --- |
+| 8 GPUs | 8 x 1 GPU | node 0: trainer; node 1: generator_0..7 | 0 |
+| 4 GPUs | 3 x 4 GPUs | node 0: trainer, generator_0; node 1: generator_1, generator_2 | 0 |
+| 16 GPUs | 2 x 8 GPUs | nodes 0-1: trainer; node 2: generator_0; node 3: generator_1 | 0 |
+| 6 GPUs | 2 x 4 GPUs | node 0: trainer; node 1: generator_0, generator_1 | 2 GPUs on node 0 |
+| 4 GPUs | 1 x 8 GPUs | node 0: trainer; node 1: generator | 4 GPUs on node 0 |
+| 12 GPUs | 1 x 4 GPUs | `ValueError`: 12 is not a multiple of 8 | |
 
 ### SLURM
 

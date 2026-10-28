@@ -75,8 +75,7 @@ class Layout:
             )
 
         Example: the same node size, a 4-GPU trainer and three 4-GPU generators
-        packed onto two nodes. ``MonarchLauncher`` does not plan this yet (see the
-        TODO in ``_layout``), but a ``Layout`` can describe it::
+        packed onto two nodes; roles on one node share its mesh::
 
             mesh_nodes = {"node_0": 1, "node_1": 1}
             role_mesh = {
@@ -171,35 +170,53 @@ class MonarchLauncher(Configurable, abc.ABC):
     def _layout(
         self, trainer_world_size: int, generator_world_size: int, num_generators: int
     ) -> Layout:
-        """Each role gets its own nodes."""
-        # TODO: pack roles smaller than a node onto shared nodes, e.g. with 8-GPU
-        # nodes, a 4-GPU trainer and generator_0 on node 0 and generator_1 and
-        # generator_2 on node 1. Layout and spawn_proc_mesh already support roles
-        # sharing a mesh; only this planner is missing.
+        """Place the trainer, then each generator, filling one node before the next.
+
+        Rules and examples: the "Layout" section of
+        ``torchtitan/rl/actors/monarch/README.md``. A role using whole nodes gets a
+        mesh named after the role; a smaller role goes on a one-node mesh
+        ``node_<k>``, which other smaller roles may share.
+        """
         gpus_per_node = self.gpus_per_node()
         role_world_sizes = {
             "trainer": trainer_world_size,
             **dict.fromkeys(generator_role_names(num_generators), generator_world_size),
         }
-        mesh_nodes = {}
+        mesh_nodes: dict[str, int] = {}
+        role_mesh: dict[str, str] = {}
+        # The one-node mesh that smaller roles are filling, and its free GPUs.
+        num_shared_meshes, shared_mesh, free_gpus = 0, "", 0
         for role, world_size in role_world_sizes.items():
-            if world_size < gpus_per_node:
-                logger.warning(
-                    f"{role} uses {world_size} of a node's {gpus_per_node} GPUs; "
-                    "the rest stay idle."
-                )
-                mesh_nodes[role] = 1
-            elif world_size % gpus_per_node == 0:
+            if world_size >= gpus_per_node:
+                # Monarch spawns the same number of procs on every host of a mesh,
+                # and each node belongs to one mesh, so a multi-node role takes
+                # whole nodes.
+                if world_size % gpus_per_node:
+                    raise ValueError(
+                        f"{role} world size ({world_size}) is larger than a node "
+                        f"and not a multiple of gpus_per_node ({gpus_per_node})."
+                    )
                 mesh_nodes[role] = world_size // gpus_per_node
-            else:
-                raise ValueError(
-                    f"{role} world size ({world_size}) is larger than a node and not "
-                    f"a multiple of gpus_per_node ({gpus_per_node})."
-                )
+                role_mesh[role] = role
+                # Roles placed after this one start a new node, so the free GPUs
+                # of the node being filled stay idle.
+                free_gpus = 0
+                continue
+            if world_size > free_gpus:
+                shared_mesh = f"node_{num_shared_meshes}"
+                num_shared_meshes += 1
+                mesh_nodes[shared_mesh] = 1
+                free_gpus = gpus_per_node
+            role_mesh[role] = shared_mesh
+            free_gpus -= world_size
+        total_gpus = sum(mesh_nodes.values()) * gpus_per_node
+        idle_gpus = total_gpus - sum(role_world_sizes.values())
+        if idle_gpus:
+            logger.warning(
+                f"{idle_gpus} of {total_gpus} GPUs stay idle; role -> mesh: {role_mesh}"
+            )
         return Layout(
-            gpus_per_node=gpus_per_node,
-            mesh_nodes=mesh_nodes,
-            role_mesh={role: role for role in role_world_sizes},
+            gpus_per_node=gpus_per_node, mesh_nodes=mesh_nodes, role_mesh=role_mesh
         )
 
     @abc.abstractmethod
