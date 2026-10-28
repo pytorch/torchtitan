@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T12:09:45.436508+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T12:13:58.564206+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -108,7 +108,7 @@ MFU uses the same model-FLOP estimate, excluding recompute, and 5 PFLOP/s dense 
 | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
 | `native_cuda_graphs_32g_full_bs8` | 8 / 8 | Disabled | PASS, all 32 x 17 (reference) | 254.82 / 258.39 | 4,582.42 | 26.75 | OOM; 32 ranks logged | 266.10 / 267.23 at failure; +0.50 requested | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-ep32-b8-full-17u-20261027-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-32g-b8-full-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_98f6fecd-6967-48b5-96c5-3d2354834c2c_dsv3-fp32-32g-ep32-b8-full-17u-20261027-ivankobzarev__update16_rank0_compacted.json.gz) |
 | `native_cuda_graphs_32g_full_bs10` | 10 / 8 | Disabled | OOM | ~272.95 projected / - | - | - | OOM; 32 ranks logged | 263.29 / 264.27 at failure; +1.25 requested | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-ep32-b10-full-17u-20261027-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-32g-b10-full-ga8-17u-20261027-ivankobzarev) | OOM before profiling |
-| `native_cuda_graphs_32g_full_bs6` | 6 / 8 | Disabled | Held for experiment priority | - | - | - | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b6-full-ga8-17u-20261028-repeat-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-32g-b6-full-ga8-17u-20261028-bs6-ivankobzarev) | Not yet produced |
+| `native_cuda_graphs_32g_full_bs6` | 6 / 8 | Disabled | RUNNING | - | - | - | RUNNING | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b6-full-ga8-17u-20261028-repeat-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-32g-b6-full-ga8-17u-20261028-bs6-ivankobzarev) | Not yet produced |
 
 ## Additional native scheduling settings
 
@@ -262,7 +262,20 @@ All three runs use BS6/GA8 on 64 x GB300, FP32 GPU master weights and persistent
 | Native CUDA graphs | 43.123 | 4,559.22 | 26.61 | 213.24 / 218.24 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_ca84b859-52e6-4656-a7f6-dd0827a87917_rank0_trace.json.gz) |
 | GraphTrainer | 41.299 | 4,760.57 | 27.79 | 189.59 / 193.63 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_09c20ce1-2119-412e-ae88-60c97992c1c5_dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev__update16_rank0_original.json.gz) |
 
-Native capture improves throughput by 0.51%, accounting for 0.220 seconds of the 2.044-second eager-to-GraphTrainer gap, or approximately 11%. GraphTrainer remains 4.42% faster than native CUDA graphs. The native profile records one `cudaGraphLaunch` for the whole GA8 forward/backward, confirming actual replay.
+The recorded native capture result improves throughput by 0.51%, accounting for 0.220 seconds of the 2.044-second eager-to-GraphTrainer gap, or approximately 11%. GraphTrainer's recorded throughput is 4.42% higher than native CUDA graphs. The native profile records one `cudaGraphLaunch` for the whole GA8 forward/backward, confirming actual replay. The timing confound below prevents treating the full recorded difference as a model-execution improvement.
+
+### Timing confound: native per-update counter persistence
+
+Independent reconstruction from every rank's 17-update records reproduces all three published throughput values. It also exposes a large difference in rank timing variation.
+
+| Ten measured updates | Native eager | Native CUDA graphs | GraphTrainer |
+| --- | ---: | ---: | ---: |
+| Mean within-update rank-duration spread, seconds | 1.426 | 1.535 | 0.000613 |
+| Standard deviation of slowest-rank update durations, seconds | 0.398 | 0.662 | 0.033 |
+
+The native experiment adapter persists `activation_offload_rankNNN.json` after every update, including runs with activation offload disabled. GraphTrainer does not perform that extra per-update write. Persistence is outside the update timer, but a late rank can make other ranks wait in the next update's token-count collective. The step-5 alignment barrier also precedes the native sidecar write. This is a concrete instrumentation difference consistent with the observed rank skew; its contribution to the speed gap has not yet been measured.
+
+A follow-up BS6 native control moves only counter persistence to training exit. Model computations, optimizer, checkpoint, capture and the 17-update measurement protocol remain the same. It is being qualified and prepared before scheduling. The memory-pool and kernel-count observations below do not depend on interpreting the recorded speed gap as purely model execution.
 
 ### The captured programs execute different amounts of GPU work
 
@@ -274,17 +287,20 @@ The table counts only GPU slices with a nonzero CUDA graph ID, excluding the out
 | `memcpy128` kernel slices | 20,272 | 1,544 |
 | `memcpy32_post` kernel slices | 11,625 | 1,897 |
 | BF16 conversion/copy kernel slices | 12,016 | 4,992 |
+| Gradient bucket `chunk_cat` kernel slices | 992 | 512 |
 | Dense GEMM slices | 15,248 | 14,760 |
 | Attention kernel slices | 1,488 | 1,488 |
 | Dist-MoE GEMM slices | 3,776 | 3,776 |
 | All-gather kernel slices | 1,048 | 1,024 |
 | Reduce-scatter kernel slices | 520 | 640 |
 
-GraphTrainer executes 18.5% fewer captured GPU slices. The reductions are primarily tensor copies, dtype conversions, checks and 488 dense GEMM slices. Whole-graph tracing can eliminate unused computations and temporary materializations; native region replay and FSDP/autograd retain their runtime operations inside capture. The major Dist-MoE GEMMs have essentially identical aggregate kernel time, about 17.14 seconds in both profiles. These observations point to lower auxiliary GPU work, rather than faster expert GEMMs.
+GraphTrainer executes 18.5% fewer captured GPU slices. The reductions are primarily tensor copies, dtype conversions, checks and 488 dense GEMM slices. Whole-graph tracing can eliminate unused computations and temporary materializations; native region replay and FSDP/autograd retain their runtime operations inside capture. The major Dist-MoE GEMMs have essentially identical aggregate kernel time, about 17.14 seconds in both profiles. These observations support lower auxiliary GPU work. The extra native `chunk_cat` materialization contributes approximately 0.286 seconds of aggregate kernel time in this profile.
 
 Communication is not uniformly reduced: GraphTrainer has more reduce-scatter slices because its chunked head reductions differ. The earlier eager trace's 42-second symmetric-memory barrier time is dominated by profiling disturbance; under native capture and GraphTrainer the corresponding unions are 0.72 and 0.75 seconds.
 
-The captured GPU span is 41.60 seconds for native capture and 41.25 seconds for GraphTrainer in this single rank-0 profile. This smaller profile gap cannot assign the entire 1.824-second difference in measured, slowest-rank update times to individual kernels. Rank timing variation and single-trial variance remain limitations. The added 32-GPU native-capture run and original-payload GraphTrainer repeat test the BS6 comparison with FP32 CPU optimizer moments.
+The captured GPU span is 41.60 seconds for native capture and 41.25 seconds for GraphTrainer in this single rank-0 profile. Both execute 74 fused Adam kernels outside capture, with nearly identical aggregate kernel time, 0.07482 seconds. The longer outside-graph work in the native profile is primarily the initial token-count all-reduce: 3.172 seconds versus 1.892 seconds. Profiling starts after unsynchronized step-15 telemetry, so this waiting time is not evidence of faster model communication.
+
+The smaller captured-profile gap cannot assign the entire 1.824-second difference in measured, slowest-rank update times to individual kernels. Instrumentation skew and single-trial variance remain limitations. The added 32-GPU native-capture run and original-payload GraphTrainer repeat test the BS6 comparison with FP32 CPU optimizer moments.
 
 ### The remaining memory advantage is in the graph workspace pool
 
@@ -317,7 +333,7 @@ GraphTrainer's selected activation-transfer set is smaller under the same quota:
 
 The baselines both write 158.94 GiB of FP32 optimizer state back to CPU per update. This confirms the optimizer offload traffic is comparable. The measured BS6 offload pair achieves 4,515.63 tokens/s/GPU in GraphTrainer versus 4,155.38 in eager, with reserved peaks of 221.06 versus 243.87 GiB. Their profile links and job links are in the matched BS6 table.
 
-The strongest supported conclusions are a smaller replay workspace, fewer auxiliary GPU operations, and a more efficient activation-offload selection and schedule. The exact attribution of every saved GiB and every fraction of the speed gap remains open. Cross-engine numerical differences described elsewhere in this report also remain.
+The strongest supported conclusions are a smaller replay workspace, fewer auxiliary GPU operations, and fewer activation transfers with more compute overlap. The exact attribution of every saved GiB and the speed gap remains open, with the native per-update persistence control needed before interpreting the full throughput difference. Cross-engine numerical differences described elsewhere in this report also remain.
 
 
 
