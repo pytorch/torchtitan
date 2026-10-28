@@ -600,7 +600,8 @@ def test_direct_fetch_runs_on_torchstore_loop():
     assert kwargs["direct_rdma"] is True
 
 
-def test_cancelled_direct_fetch_waits_for_the_read():
+@pytest.mark.parametrize("num_cancels", [1, 2])
+def test_cancelled_direct_fetch_waits_for_the_read(num_cancels: int):
     torchstore_loop = asyncio.new_event_loop()
     thread = threading.Thread(target=torchstore_loop.run_forever)
     thread.start()
@@ -620,10 +621,14 @@ def test_cancelled_direct_fetch_waits_for_the_read():
     async def run() -> None:
         fetch = asyncio.create_task(generator._fetch_model_state_dict({}))
         assert await asyncio.to_thread(reading.wait, 30)
-        fetch.cancel()
-        # RDMA writes continue after cancel, so the fetch must not return yet.
-        done, _ = await asyncio.wait([fetch], timeout=0.1)
-        assert not done
+        for _ in range(num_cancels):
+            fetch.cancel()
+            # Let the fetch handle the cancellation; it would finish here if it
+            # did not wait for the read.
+            for _ in range(5):
+                await asyncio.sleep(0)
+            # RDMA writes continue after cancel, so the fetch must not return yet.
+            assert not fetch.done()
         released.set()
         with pytest.raises(asyncio.CancelledError):
             await fetch
@@ -649,6 +654,53 @@ def test_prefetch_model_state_dict_is_noop_with_direct_rdma():
         asyncio.run(generator.prefetch_model_state_dict())
 
     get_state_dict.assert_not_awaited()
+
+
+class _InlineEngineLoopThread:
+    """Runs `call`ed functions on the calling thread."""
+
+    event_loop = None
+
+    def __init__(self, name: str):
+        pass
+
+    def call(self, fn):
+        return fn()
+
+
+@pytest.mark.parametrize("direct_rdma", [False, True])
+def test_direct_rdma_model_state_dict_reaches_engine_and_engine_loop(
+    monkeypatch, tmp_path, direct_rdma: bool
+):
+    build = Mock(
+        return_value=SimpleNamespace(
+            data_parallel_size=1,
+            data_parallel_rank=0,
+            prefetched_model_state_dict=None,
+        )
+    )
+    monkeypatch.setattr(VLLMEngine.Config, "build", build)
+    monkeypatch.setattr(generator_module, "EngineLoopThread", _InlineEngineLoopThread)
+    monkeypatch.setattr(generator_module, "EngineLoop", Mock())
+    monkeypatch.setattr(generator_module, "RequestDispatcher", Mock())
+    monkeypatch.setattr(generator_module.dist, "get_rank", Mock(return_value=0))
+    monkeypatch.setattr(generator_module.dist, "new_group", Mock())
+    monkeypatch.setattr(torch.accelerator, "current_device_index", Mock(return_value=0))
+    monkeypatch.setattr(torch.accelerator, "set_device_index", Mock())
+
+    generator = Generator(
+        Generator.Config(model=_MODEL_CONFIG, direct_rdma_model_state_dict=direct_rdma),
+        model_path="unused",
+        max_num_seqs=8,
+        output_dir=str(tmp_path),
+        rank=0,
+    )
+
+    assert build.call_args.kwargs["direct_rdma_model_state_dict"] is direct_rdma
+    engine_loop_kwargs = cast(Mock, generator_module.EngineLoop).call_args.kwargs
+    assert engine_loop_kwargs["fetch_model_state_dict"] == (
+        generator._fetch_model_state_dict if direct_rdma else None
+    )
 
 
 def test_sampling_config_rejects_top_p_below_one():

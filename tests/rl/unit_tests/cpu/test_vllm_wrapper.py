@@ -314,7 +314,7 @@ def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> No
         dist.destroy_process_group()
 
 
-class TestLoadStateDictDirectFetchError(DTensorTestBase):
+class TestLoadStateDictDirectTwoRanks(DTensorTestBase):
     @property
     def world_size(self) -> int:
         return 2
@@ -326,6 +326,52 @@ class TestLoadStateDictDirectFetchError(DTensorTestBase):
     @property
     def device_type(self) -> str:
         return "cpu"
+
+    @with_comms
+    def test_fetches_shards_into_the_unsharded_params(self) -> None:
+        """Load twice; each rank fetches its own (uneven) shards and every rank ends
+        with the full new weights, including the tied group."""
+        model = nn.Module()
+        model.tok_embeddings = nn.Embedding(15, 16)
+        model.layers = nn.ModuleList(nn.Linear(16, 15) for _ in range(2))
+        model.lm_head = nn.Linear(16, 15, bias=False)
+        model.lm_head.weight = model.tok_embeddings.weight
+        model.register_buffer("scale", torch.zeros(4))
+        mesh = init_device_mesh("cpu", (self.world_size,))
+        fully_shard(
+            [model.tok_embeddings, model.lm_head],
+            mesh=mesh,
+            reshard_after_forward=False,
+        )
+        for block in model.layers:
+            fully_shard(block, mesh=mesh, reshard_after_forward=False)
+        fully_shard(model, mesh=mesh, reshard_after_forward=False)
+        model.set_keep_unsharded_storage(True)
+        initial_state_dict = {
+            k: v.detach().clone() for k, v in model.state_dict().items()
+        }
+        wrapper = _Wrapper(model)
+        (
+            wrapper._direct_load_groups,
+            wrapper._direct_load_other_keys,
+        ) = model_wrapper._direct_load_groups(model)
+        for module in model.modules():  # as after the initial load
+            if isinstance(module, FSDPModule):
+                model_wrapper._unshard_and_free_sharded_params(module)
+
+        for version in (1, 2):
+            new_state_dict = {k: v + version for k, v in initial_state_dict.items()}
+
+            async def fetch(state_dict: dict[str, torch.Tensor]) -> None:
+                with torch.no_grad():
+                    for key, tensor in state_dict.items():
+                        tensor.copy_(new_state_dict[key])
+
+            asyncio.run(wrapper.load_state_dict_direct(fetch))
+
+            for name, param in model.named_parameters(remove_duplicate=False):
+                self.assertEqual(param, new_state_dict[name].full_tensor(), msg=name)
+            self.assertEqual(model.scale, new_state_dict["scale"])
 
     @with_comms
     def test_unshards_every_group_after_fetch_error(self) -> None:

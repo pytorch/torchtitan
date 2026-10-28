@@ -508,9 +508,13 @@ class Generator(Configurable):
         try:
             await asyncio.shield(read)
         except asyncio.CancelledError:
-            # The read keeps writing into state_dict; wait for it before the caller
-            # frees that storage.
-            await asyncio.wait([read])
+            # The read keeps writing into state_dict; wait for it, even if cancelled
+            # again, before the caller frees that storage.
+            while not read.done():
+                try:
+                    await asyncio.wait([read])
+                except asyncio.CancelledError:
+                    pass
             raise
 
     async def close(self) -> None:
