@@ -68,7 +68,8 @@ class Generator(Configurable):
     engine loop reads on a load: the router awaits it before `load_model_state_dict`, and the
     controller awaits that load before the trainer's next push, so the two never overlap.
     With `direct_rdma_model_state_dict`, the prefetch is a no-op and the load reads the
-    trainer's buffers directly into the engine's weights.
+    trainer's buffers directly into the engine's weights; it resolves only after every rank
+    finishes reading, so the trainer's next push cannot overwrite buffers mid-read.
 
     Args:
         config: Generator-specific configuration, including its model.

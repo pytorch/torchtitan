@@ -494,21 +494,39 @@ class EngineLoop:
 
     @sl.log_trace_span("load_model_state_dict_copy")
     async def _load_model_state_dict(self, version: int) -> None:
-        """ALL RANKS: collectively load the prefetched model state dict and bump the policy
-        version.
+        """ALL RANKS: collectively load the model state dict and bump the policy version.
 
-        The model state dict was already fetched into the engine's pinned CPU buffers; this
-        performs the local CPU-to-GPU copy. With `fetch_model_state_dict`, this fetches the
-        model state dict straight into the engine's weights instead.
+        By default the model state dict was already prefetched into the engine's pinned CPU
+        buffers and this performs the local CPU-to-GPU copy. With `fetch_model_state_dict`,
+        this fetches the model state dict straight into the engine's weights instead.
         """
         if self._fetch_model_state_dict is not None:
-            await self._engine.load_model_state_dict_direct(
-                self._fetch_model_state_dict
-            )
+            await self._load_model_state_dict_direct(self._fetch_model_state_dict)
         else:
             self._engine.load_prefetched_model_state_dict()
         self.policy_version = version
         gc.collect()
+
+    async def _load_model_state_dict_direct(
+        self, fetch: Callable[[dict[str, torch.Tensor]], Awaitable[None]]
+    ) -> None:
+        """ALL RANKS: fetch the model state dict into the engine's weights, then wait for
+        every rank to finish reading.
+
+        Rank 0 replies to the load right after this returns, and the trainer may then
+        overwrite the buffers the other ranks read from.
+        """
+        error: Exception | None = None
+        try:
+            await self._engine.load_model_state_dict_direct(fetch)
+        except Exception as e:
+            error = e
+        failed = torch.tensor([int(error is not None)])
+        await asyncio.to_thread(dist.all_reduce, failed, group=self._broadcast_group)
+        if error is not None:
+            raise error
+        if failed.item():
+            raise RuntimeError("model state dict load failed on another generator rank")
 
     async def _release_resources(self) -> None:
         """Stop the dispatcher, fail the replies it left unresolved, and drop the engine. No-op
