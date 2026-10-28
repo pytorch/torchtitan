@@ -181,6 +181,24 @@ generators. For a recipe with two trainer and two generator GPUs, setting
 `CUDA_VISIBLE_DEVICES=4,5,6,7` assigns GPUs 4-5 to training and 6-7 to
 generation. Without the variable, allocation starts at GPU 0 as before.
 
+Validation runs before training and after the final optimizer step. To also
+evaluate periodically, set `async_loop.validation.interval_steps` in the recipe:
+
+```python
+async_loop=AsyncLoopConfig(
+    num_training_steps=10,
+    validation=ValidationConfig(steps=20, interval_steps=2),
+)
+```
+
+`steps` is the number of held-out prompts per pass (`-1` uses the whole finite
+validation dataset; `0` disables validation). `interval_steps=0` (the default)
+disables periodic passes. At each interval the trainer waits for the generators
+to load the updated weights and for validation to complete before starting its
+next optimizer step; training rollouts may continue in the background. The
+final step is evaluated once, after training shuts down. Keep the trainer's
+`training.steps` aligned with `num_training_steps` when changing run length.
+
 ## Experiments
 
 ### DAPO Math: reference experiment

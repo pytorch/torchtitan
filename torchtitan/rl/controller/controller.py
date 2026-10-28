@@ -134,16 +134,21 @@ logger = logging.getLogger(__name__)
 
 @dataclass(kw_only=True, slots=True)
 class ValidationConfig:
-    """Held-out validation that runs at the start and end of training"""
-
-    # TODO: enable periodic validation with proper overlapping
+    """Held-out validation before and after training, optionally at intervals."""
 
     steps: int = 20
     """Maximum prompts per pass. -1 consumes one finite source pass; 0 disables."""
 
+    interval_steps: int = 0
+    """Validate after every N optimizer steps; 0 disables periodic validation.
+    Periodic validation blocks the trainer until generators load the new weights
+    and the validation pass completes. The final pass runs after training ends."""
+
     def __post_init__(self) -> None:
         if self.steps < -1:
             raise ValueError("validation steps must be -1 or non-negative")
+        if self.interval_steps < 0:
+            raise ValueError("validation interval_steps must be non-negative")
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1256,6 +1261,18 @@ class Controller(Configurable):
                         ),
                     ],
                 )
+
+            validation = self.config.async_loop.validation
+            if (
+                validation.steps != 0
+                and validation.interval_steps > 0
+                and step % validation.interval_steps == 0
+                and step < num_training_steps
+            ):
+                # Keep the trainer on this policy until every generator has loaded it
+                # and the held-out rollouts finish. run() handles the final pass.
+                await pull_task
+                await self._validate_and_log(step=step)
 
         # Finish the last push and pull so generators hold the final weights for post-validation.
         if push_task is not None:

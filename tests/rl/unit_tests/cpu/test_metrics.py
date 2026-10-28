@@ -788,6 +788,24 @@ class TestIsValidationSwitch:
     def _logger(self, **config_kwargs) -> m.MetricsProcessor:
         return m.MetricsProcessor(m.MetricsProcessor.Config(**config_kwargs))
 
+    def test_default_validation_console_shows_reward(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        logger_inst = self._logger()
+        with caplog.at_level(logging.INFO):
+            logger_inst.log(
+                2,
+                [
+                    m.Metric("validation_reward", m.SummaryStats.from_list([0.0, 1.0])),
+                    m.Metric("timing/validate", m.NoReduce(1.0)),
+                ],
+                is_validation=True,
+            )
+        msg = next(r.getMessage() for r in caplog.records if "Step:" in r.getMessage())
+        assert "Validation | Step:  2" in msg
+        assert "validation_reward/_mean: 0.5" in msg
+        assert "validation_reward/_max: 1.0" in msg
+
     def test_default_uses_train_allow_list(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
