@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T10:12:59.596823+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T10:20:13.124073+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -16,6 +16,7 @@ This report pairs the existing graph trainer presentation configurations with na
 - Native 64-GPU Full recompute BS10 is rescued by CPU activation offload: 208.44 GiB reserved, 4,270 tokens/s/GPU, 24.92% MFU, and 79.98 GiB actual CPU activation storage per rank.
 - Both native 32-GPU BS6/GA8 baselines pass with GPU FP32 masters/gradients and CPU FP32 Adam moments. Their matching original-payload graph BS6 runs are included in the matched table.
 - Matched 32-GPU Full recompute BS6 pair: graph trainer has 4.7% higher throughput and uses 35.74 GiB less reserved memory; both keep FP32 CPU Adam moments.
+- Matched 32-GPU BS8/AO40 pair passes in both engines: graph trainer has 12.0% higher throughput and uses 23.02 GiB less reserved memory. The native retry resolves a host OOM by reducing profiling to rank 0 without shape recording; the measured training settings are unchanged.
 - Strict native Full versus Full + offload and fused Every versus First gathering match all 17 recorded losses and gradient norms bitwise on all 64 ranks. Cross-engine scalar histories differ; see the numerical comparison section.
 - Native WGrad fusion changes throughput by 0.32% in the single non-deterministic trials. This small difference does not establish a meaningful speed gain; fused and unfused scalar histories also differ.
 
@@ -133,7 +134,7 @@ Both engines use the same BS6/GA8 batch geometry, FP32 GPU masters and gradients
 
 | Configuration ID | BS / GA | CPU activation quota GiB | Graph outcome | Graph allocated / reserved peak GiB | Graph tokens/s/GPU | Graph MFU % | Native outcome | Native allocated / reserved peak GiB | Native tokens/s/GPU | Native MFU % | Graph / native throughput | MAST jobs | Profiles, update 16 rank 0 |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
-| `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 8 / 8 | 40 | RUNNING; updates 13-13 / 17 across ranks | - | - | - | PASS, all 32 x 17 | 251.32 / 259.49 | 4,071.72 | 23.77 | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b8-full-ao40-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-prof0-ga8-17u-20261028-r3-ivankobzarev) | [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_4540b13b-1016-4488-8daf-6a3cf089bc76_rank0_trace.json.gz) |
+| `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 8 / 8 | 40 | PASS, all 32 x 17 (reference) | 234.01 / 236.47 | 4,558.31 | 26.61 | PASS, all 32 x 17 | 251.32 / 259.49 | 4,071.72 | 23.77 | 1.120x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b8-full-ao40-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-prof0-ga8-17u-20261028-r3-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_09e640ff-877d-4e12-b7a4-5f91fa59969e_rank0_trace.json.gz) / [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_4540b13b-1016-4488-8daf-6a3cf089bc76_rank0_trace.json.gz) |
 
 Both engines use BS8/GA8, GPU FP32 master weights and gradients, CPU FP32 Adam moments, and a 40 GiB/rank activation quota. The graph run clones the original BS8/AO24 definition and payload, changing only the activation quota and job identity. The native retry profiles rank 0 without shape recording to stay within task RAM; the graph run retains the original all-rank profiling. These differences occur after the measured updates 6-15 and are declared when comparing full-run memory peaks.
 
@@ -145,6 +146,7 @@ Maximum recorded allocated/reserved CUDA peaks across every rank through update 
 | --- | ---: | ---: |
 | `native_fit_full_recompute_bs6` | 231.15 / 233.09 | 259.95 / 268.83 |
 | `native_fit_full_recompute_cpuoffload_bs6_ao24` | 218.68 / 221.06 | 235.95 / 243.87 |
+| `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 234.01 / 236.47 | 251.32 / 259.49 |
 
 ## Smaller-batch native 32 GPU baselines
 
@@ -242,6 +244,7 @@ These are outside-timer samples after updates 1, 2, 5 and 15 on every rank. Avai
 | `graph_full_recompute_cpuoffload_bs6_ao24_fp32_cpu_moments` | 128 | 121.40 | 181.36 | 172.40 |
 | `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 128 | 52.51 | 209.03 | 206.97 |
 | `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 128 | 52.37 | 207.55 | 206.97 |
+| `graph_full_recompute_cpuoffload_bs8_ao40_fp32_cpu_moments` | 128 | 88.50 | 189.70 | 180.74 |
 
 ### BS8/AO40 host-memory failure
 
@@ -285,6 +288,7 @@ All counts below are rank-0 GPU kernel slices from the separately profiled updat
 | `graph_full_recompute_bs6_fp32_cpu_moments` | 43.29 | 45.94 | 1024 | 640 | 0.72 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_54cdf4b4-4ae6-424b-a407-fa4245913f2b_rank0_trace.json.gz) |
 | `graph_full_recompute_cpuoffload_bs6_ao24_fp32_cpu_moments` | 43.54 | 46.86 | 1024 | 640 | 1.01 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_603d9bab-28aa-4886-8d71-5580a362b25e_rank0_trace.json.gz) |
 | `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 64.38 | 62.18 | 1048 | 520 | 1.62 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_4540b13b-1016-4488-8daf-6a3cf089bc76_rank0_trace.json.gz) |
+| `graph_full_recompute_cpuoffload_bs8_ao40_fp32_cpu_moments` | 57.51 | 60.87 | 1024 | 640 | 0.85 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_09e640ff-877d-4e12-b7a4-5f91fa59969e_rank0_trace.json.gz) |
 
 ## Native failure locations
 
