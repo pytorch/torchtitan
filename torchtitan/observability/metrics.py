@@ -170,12 +170,15 @@ class WandBLogger(BaseLogger):
         log_dir: str,
         config_dict: dict[str, Any] | None = None,
         tag: str | None = None,
+        *,
+        step_metric: str | None = None,
     ):
         # Import wandb here to avoid startup import
         import wandb
 
         self.wandb = wandb
         self.tag = tag
+        self.step_metric = step_metric
 
         # Create logging directory
         os.makedirs(log_dir, exist_ok=True)
@@ -199,6 +202,11 @@ class WandBLogger(BaseLogger):
             dir=log_dir,
             config=config_dict,
         )
+        if step_metric is not None:
+            # Validation may follow training at the same model step; W&B's
+            # internal commit index must still advance between those logs.
+            self.wandb.define_metric(step_metric)
+            self.wandb.define_metric("*", step_metric=step_metric)
         logger.info("WandB logging enabled")
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
@@ -206,7 +214,10 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        self.wandb.log(wandb_metrics, step=step, commit=True)
+        if self.step_metric is None:
+            self.wandb.log(wandb_metrics, step=step, commit=True)
+        else:
+            self.wandb.log({**wandb_metrics, self.step_metric: step}, commit=True)
 
     def close(self) -> None:
         if self.wandb.run is not None:

@@ -694,10 +694,14 @@ class TestMetricsProcessorBuild:
         # `wandb.init` was called with our log_dir + config_dict.
         assert captured.get("dir") == log_dir
         assert captured.get("config") == config_dict
+        fake_wandb.define_metric.assert_any_call("trainer/step")
+        fake_wandb.define_metric.assert_any_call("*", step_metric="trainer/step")
 
         # `log` forwards to the stub.
         logger_inst.log(3, [m.Metric("k", m.NoReduce(1.0))])
-        fake_wandb.log.assert_called_once_with({"k": 1.0}, step=3, commit=True)
+        fake_wandb.log.assert_called_once_with(
+            {"k": 1.0, "trainer/step": 3}, commit=True
+        )
 
         # `close` calls `wandb.finish` when there's a run.
         fake_wandb.run = MagicMock()
