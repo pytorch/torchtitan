@@ -16,7 +16,6 @@ import os
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 from monarch.actor import HostMesh
 
@@ -26,13 +25,13 @@ from torchtitan.rl.actors.monarch.provisioning import (
     compute_trainer_world_size,
     HostMeshes,
 )
-
-if TYPE_CHECKING:
-    from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.controller import Controller
 
 logger = logging.getLogger(__name__)
 
 SUBMIT_COMMAND = "python -m torchtitan.rl.actors.monarch.launcher.submit"
+# The module a submitted job runs, with the arguments given to ``submit``.
+JOB_MODULE = "torchtitan.rl.actors.monarch.launcher.job"
 
 # Carries the layout computed by ``plan`` on the submit host to the job.
 LAYOUT_ENV = "TORCHTITAN_RL_LAUNCH_LAYOUT"
@@ -121,7 +120,7 @@ class LaunchPlan:
     job_name: str
     layout: Layout
     controller_args: list[str]
-    """Arguments for ``python -m torchtitan.rl.train`` inside the job."""
+    """Arguments for ``python -m JOB_MODULE`` inside the job."""
     env: dict[str, str]
     """Set on every host of the job."""
     dump_folder: str
@@ -141,7 +140,9 @@ class MonarchLauncher(Configurable, abc.ABC):
         """Prefix of the unique job name."""
 
         env: dict[str, str] = field(default_factory=dict)
-        """Environment variables set on every host of the job."""
+        """Environment variables set on every host of the job. They are part of
+        the config the controller may log and save, so keep secrets out; set
+        those in the submit shell, which the job inherits."""
 
         def __post_init__(self) -> None:
             if not re.fullmatch(r"[A-Za-z0-9_-]+", self.job_name):
@@ -226,17 +227,38 @@ class MonarchLauncher(Configurable, abc.ABC):
     @abc.abstractmethod
     def submit(self, plan: LaunchPlan) -> str:
         """Submit a job that sets ``plan.env`` on every host and runs
-        ``python -m torchtitan.rl.train`` with ``plan.controller_args``; return
-        its job handle."""
-
-    @abc.abstractmethod
-    def in_job(self) -> bool:
-        """Whether this process is the controller of a submitted job."""
+        ``python -m JOB_MODULE`` with ``plan.controller_args``; return its job
+        handle."""
 
     @abc.abstractmethod
     async def acquire_hosts(self, layout: Layout) -> dict[str, HostMesh]:
-        """Attach to the job's hosts, keyed by ``layout.mesh_nodes`` names."""
+        """Inside the job, attach to its hosts, keyed by ``layout.mesh_nodes``
+        names. The scheduler ends the workers when the controller exits."""
 
-    async def release_hosts(self, meshes: dict[str, HostMesh]) -> None:
-        """Called by ``MonarchActorSystem.stop``. No-op for schedulers that end the
-        workers when the controller exits."""
+
+@dataclass(kw_only=True, slots=True)
+class MonarchLaunchConfig(Controller.Config):
+    """A launch recipe: an RL recipe plus the launcher that runs it on a cluster.
+
+    ``Controller.Config`` knows nothing about launchers; this subclass adds one at
+    the root, so ``--override`` and the other ``torchtitan.rl.train`` arguments
+    work unchanged. ``build()`` still builds a ``Controller``. Example::
+
+        def my_rl_slurm() -> MonarchLaunchConfig:
+            return MonarchLaunchConfig.from_controller_config(
+                my_rl(), launcher=SlurmLauncher.Config(gpus_per_node=8)
+            )
+    """
+
+    launcher: MonarchLauncher.Config
+    """The scheduler launcher, e.g. ``SlurmLauncher.Config``."""
+
+    @classmethod
+    def from_controller_config(
+        cls, config: Controller.Config, *, launcher: MonarchLauncher.Config
+    ) -> MonarchLaunchConfig:
+        """Wrap ``config``; its field values are shared, not copied."""
+        return cls(
+            **{f.name: getattr(config, f.name) for f in dataclasses.fields(config)},
+            launcher=launcher,
+        )

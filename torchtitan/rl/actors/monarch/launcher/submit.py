@@ -4,13 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Submit an RL recipe that sets ``config.actor_system.launcher`` to its scheduler.
+"""Submit a launch recipe (a ``MonarchLaunchConfig``) to its launcher's scheduler.
 
     python -m torchtitan.rl.actors.monarch.launcher.submit [--dry-run] \
         --module MODULE --config CONFIG [other torchtitan.rl.train options]
 
-The job runs ``python -m torchtitan.rl.train`` with the same arguments.
-``--dry-run`` prints the plan without submitting.
+The job runs ``python -m torchtitan.rl.actors.monarch.launcher.job`` with the same
+arguments. ``--dry-run`` prints the plan without submitting.
 """
 
 from __future__ import annotations
@@ -19,28 +19,17 @@ import sys
 
 from torchtitan.config import ConfigLoader
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.actors.monarch.launcher.base import LaunchPlan, MonarchLauncher
-from torchtitan.rl.actors.monarch.system import MonarchActorSystem
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.actors.monarch.launcher.base import (
+    LaunchPlan,
+    MonarchLaunchConfig,
+    MonarchLauncher,
+)
 
 
 def _split_args(argv: list[str]) -> tuple[bool, list[str]]:
     """Return whether ``--dry-run`` is set, and the other arguments verbatim."""
     forwarded = [arg for arg in argv if arg != "--dry-run"]
     return len(forwarded) != len(argv), forwarded
-
-
-def _build_launcher(config: Controller.Config) -> MonarchLauncher:
-    actor_system = config.actor_system
-    if (
-        not isinstance(actor_system, MonarchActorSystem.Config)
-        or actor_system.launcher is None
-    ):
-        raise ValueError(
-            "The recipe does not set config.actor_system.launcher; run it with "
-            "python -m torchtitan.rl.train instead."
-        )
-    return actor_system.launcher.build()
 
 
 def _launcher_settings(launcher: MonarchLauncher) -> dict:
@@ -70,11 +59,15 @@ def main(argv: list[str] | None = None) -> str | None:
     init_logger()
     dry_run, controller_args = _split_args(argv)
     config = ConfigLoader().load(controller_args)
-    if not isinstance(config, Controller.Config):
-        raise ValueError(f"Expected a Controller.Config, got {type(config).__name__}.")
+    if not isinstance(config, MonarchLaunchConfig):
+        raise ValueError(
+            f"Expected a MonarchLaunchConfig, got {type(config).__qualname__}. Run a "
+            "plain RL recipe with python -m torchtitan.rl.train, or wrap it with "
+            "MonarchLaunchConfig.from_controller_config."
+        )
     # Plan from the config the job will run, including the launcher settings.
     config.resolve_overrides()
-    launcher = _build_launcher(config)
+    launcher = config.launcher.build()
     plan = launcher.plan(config, controller_args)
     print(_format_plan(launcher, plan), flush=True)
     if dry_run:

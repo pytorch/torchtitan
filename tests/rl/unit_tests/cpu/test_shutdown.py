@@ -32,8 +32,9 @@ class _FakeController:
         self.actor_system = None
         self.instances.append(self)
 
-    async def setup_async(self):
+    async def setup_async(self, *, actor_system=None):
         self.events.append("setup")
+        self.actor_system = actor_system
         if getattr(self.config, "fail_setup", False):
             raise RuntimeError("setup failed")
 
@@ -167,6 +168,24 @@ def test_main_shuts_down_after_success(monkeypatch):
 
     trainer = _FakeController.instances[0]
     assert trainer.events == ["setup", "train", "close"]
+
+
+def test_main_sets_up_with_the_built_actor_system(monkeypatch):
+    config = _FakeConfig()
+    _FakeConfigLoader.config = config
+    _FakeController.instances = []
+    monkeypatch.setattr(train, "ConfigLoader", _FakeConfigLoader)
+    built = []
+
+    async def build_actor_system(config):
+        built.append(config)
+        return "actor-system"
+
+    assert asyncio.run(train.main(build_actor_system=build_actor_system)) == (
+        "actor-system"
+    )
+    assert built == [config]
+    assert _FakeController.instances[0].events == ["setup", "train", "close"]
 
 
 def test_main_shuts_down_after_train_failure(monkeypatch):

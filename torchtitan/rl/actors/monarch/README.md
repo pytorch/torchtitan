@@ -7,8 +7,8 @@ the controller builds from `Controller.Config.actor_system` (default
 `MonarchActorSystem.Config()`) and spawns every service through. A launcher that
 allocates its own hosts builds `MonarchActorSystem` with `host_meshes` (and
 optionally `generator_env`) and passes it to `Controller.setup_async(actor_system=...)`.
-To get hosts from a cluster scheduler, set `MonarchActorSystem.Config.launcher`
-(see [Launchers](#launchers)).
+To get hosts from a cluster scheduler, use a launch recipe (see
+[Launchers](#launchers)).
 
 Each adapter is a thin Monarch `Actor` subclass of a service with no Monarch
 dependency of its own: it declares the service's methods as
@@ -26,16 +26,21 @@ dependency of its own: it declares the service's methods as
 | `rollout_worker.py` | `RolloutWorkerActor`, a rollout worker in the controller-host CPU pool. |
 | `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), and the Monarch client's `shutdown`. |
 | `torch_elastic.py` | Sets the torch-elastic env vars (`RANK`, `MASTER_PORT`, ...) on a proc mesh before `init_process_group`; rank 0 keeps its rendezvous store port open so no other socket takes it. |
-| `launcher/` | Scheduler launchers: `MonarchLauncher` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), and the submit command (`submit.py`). |
+| `launcher/` | Scheduler launchers: `MonarchLauncher`, `MonarchLaunchConfig` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), the submit command (`submit.py`), and the job's controller entry point (`job.py`). |
 
 ## Launchers
 
-A launcher gets the job's hosts from a cluster scheduler. Set it on
-`MonarchActorSystem.Config.launcher` in your recipe, then submit the recipe with
-`python -m torchtitan.rl.actors.monarch.launcher.submit`, which takes the same
-arguments as `torchtitan.rl.train`. Add `--dry-run` to print the planned nodes,
-roles and settings without submitting. To support another scheduler, subclass
-`MonarchLauncher` (`launcher/base.py`) in your own package.
+A launcher gets the job's hosts from a cluster scheduler. A launch recipe returns
+a `MonarchLaunchConfig`: an RL recipe plus the launcher that runs it on one
+cluster, built with `MonarchLaunchConfig.from_controller_config(config,
+launcher=...)`. `Controller.Config` itself has no launcher settings. Submit the
+launch recipe with `python -m torchtitan.rl.actors.monarch.launcher.submit`,
+which takes the same arguments as `torchtitan.rl.train`; the job runs
+`python -m torchtitan.rl.actors.monarch.launcher.job` with them, which attaches
+to the job's hosts and passes them to `MonarchActorSystem` as `host_meshes`. Add
+`--dry-run` to print the planned nodes, roles and settings without submitting.
+To support another scheduler, subclass `MonarchLauncher` (`launcher/base.py`) in
+your own package.
 
 **Layout.** The launcher places the trainer first, then the generators, filling
 each node before the next:
@@ -75,20 +80,24 @@ python -m torchtitan.rl.actors.monarch.launcher.submit \
 ```
 
 Site settings such as the account and partition go in `slurm_args`, in your own
-recipe:
+launch recipe:
 
 ```python
 def my_rl_slurm():
     config = rl_grpo_qwen3_0_6b_flex_slurm()
-    config.actor_system.launcher.slurm_args += ["--account=my-account", "--partition=gpu"]
+    config.launcher.slurm_args += ["--account=my-account", "--partition=gpu"]
     return config
 ```
+
+The launcher's `env` values are part of the config, which the controller may log
+and save (`print_config`, `save_config_file`), so don't put secrets there; set them
+in the submit shell, which the job inherits.
 
 ## Outside this package
 
 No module outside this package imports Monarch or this package, except the
-controller's default for `Controller.Config.actor_system` and recipes that set a
-launcher, which import them lazily. The controller, the rollouter and `train.py` use
+controller's default for `Controller.Config.actor_system` and launch recipes,
+which import them lazily. The controller, the rollouter and `train.py` use
 the abstract `ActorSystem`.
 
 What remains outside is the call convention on the handles an actor system

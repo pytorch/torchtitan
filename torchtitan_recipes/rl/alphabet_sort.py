@@ -13,6 +13,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 
 import dataclasses
 import os
+from typing import TYPE_CHECKING
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
 
@@ -59,6 +60,9 @@ from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
+
+if TYPE_CHECKING:
+    from torchtitan.rl.actors.monarch.launcher.base import MonarchLaunchConfig
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
@@ -251,14 +255,14 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_flex_slurm() -> Controller.Config:
+def rl_grpo_qwen3_0_6b_flex_slurm() -> "MonarchLaunchConfig":
     """Example of running a recipe on SLURM with ``SlurmLauncher``: one trainer node
     and two generator nodes, with the cluster's default account and partition. The
     Launchers section of ``torchtitan/rl/actors/monarch/README.md`` uses it as its
     example, so keep it."""
     # Imported lazily so this module loads without Monarch.
+    from torchtitan.rl.actors.monarch.launcher.base import MonarchLaunchConfig
     from torchtitan.rl.actors.monarch.launcher.slurm import SlurmLauncher
-    from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 
     config = rl_grpo_qwen3_0_6b_flex()
     config.num_generators = 2
@@ -277,8 +281,7 @@ def rl_grpo_qwen3_0_6b_flex_slurm() -> Controller.Config:
             "FLASHINFER_WORKSPACE_BASE": f"{cache_root}/flashinfer",
         },
     )
-    config.actor_system = MonarchActorSystem.Config(launcher=launcher)
-    return config
+    return MonarchLaunchConfig.from_controller_config(config, launcher=launcher)
 
 
 def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:

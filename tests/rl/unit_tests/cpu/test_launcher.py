@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import dataclasses
 import os
 import shlex
 import sys
@@ -15,11 +16,12 @@ import pytest
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.rl.actors.monarch import system as monarch_system
-from torchtitan.rl.actors.monarch.launcher import submit
+from torchtitan.rl.actors.monarch.launcher import job, submit
 from torchtitan.rl.actors.monarch.launcher.base import (
     LaunchPlan,
     Layout,
     LAYOUT_ENV,
+    MonarchLaunchConfig,
     MonarchLauncher,
 )
 from torchtitan.rl.actors.monarch.launcher.slurm import SlurmLauncher
@@ -31,7 +33,6 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 class FakeLauncher(MonarchLauncher):
     @dataclass(kw_only=True, slots=True)
     class Config(MonarchLauncher.Config):
-        in_job: bool = True
         events: list = field(default_factory=list)
 
     def gpus_per_node(self) -> int:
@@ -41,16 +42,9 @@ class FakeLauncher(MonarchLauncher):
         self.config.events.append("submit")
         return "job-123"
 
-    def in_job(self) -> bool:
-        return self.config.in_job
-
     async def acquire_hosts(self, layout: Layout) -> dict:
         self.config.events.append("acquire_hosts")
         return {name: f"hosts[{name}]" for name in layout.mesh_nodes}
-
-    async def release_hosts(self, meshes: dict) -> None:
-        self.config.events.append("release_hosts")
-        raise RuntimeError("release failed")
 
 
 def _rl_config(*, trainer_dp=4, generator_tp=2, num_generators=1, **kwargs):
@@ -222,16 +216,13 @@ def test_split_args():
 
 def _run_submit(monkeypatch, config, argv):
     monkeypatch.setattr(submit.ConfigLoader, "load", lambda self, args: config)
-    # The fake config stands in for a Controller.Config.
-    monkeypatch.setattr(submit, "Controller", SimpleNamespace(Config=SimpleNamespace))
+    # The fake config stands in for a MonarchLaunchConfig.
+    monkeypatch.setattr(submit, "MonarchLaunchConfig", SimpleNamespace)
     return submit.main(argv)
 
 
 def _with_launcher(tmp_path, launcher):
-    return _rl_config(
-        dump_folder=str(tmp_path),
-        actor_system=MonarchActorSystem.Config(launcher=launcher),
-    )
+    return _rl_config(dump_folder=str(tmp_path), launcher=launcher)
 
 
 def test_submit_dry_run_does_not_submit(monkeypatch, tmp_path, capsys):
@@ -268,9 +259,30 @@ def test_submit_submits_and_returns_the_job_handle(monkeypatch, tmp_path):
     assert events == ["submit"]
 
 
-def test_submit_requires_a_launcher(monkeypatch, tmp_path):
-    with pytest.raises(ValueError, match="does not set"):
-        _run_submit(monkeypatch, _with_launcher(tmp_path, None), ["--module", "m"])
+def test_submit_requires_a_launch_config(monkeypatch, tmp_path):
+    config = _with_launcher(tmp_path, FakeLauncher.Config())
+    monkeypatch.setattr(submit.ConfigLoader, "load", lambda self, args: config)
+
+    with pytest.raises(ValueError, match="Expected a MonarchLaunchConfig"):
+        submit.main(["--module", "m"])
+
+
+def test_launch_config_wraps_a_controller_config():
+    from torchtitan.rl.controller.controller import Controller
+    from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_0_6b_flex
+
+    config = rl_grpo_qwen3_0_6b_flex()
+    launcher = FakeLauncher.Config()
+
+    launch_config = MonarchLaunchConfig.from_controller_config(
+        config, launcher=launcher
+    )
+
+    assert launch_config.launcher is launcher
+    for f in dataclasses.fields(config):
+        assert getattr(launch_config, f.name) is getattr(config, f.name)
+    # build() constructs the controller.
+    assert launch_config._owner is Controller
 
 
 async def _stop_ok():
@@ -318,12 +330,6 @@ def test_provision_without_launcher_runs_on_this_host(spawned):
     assert spawned["host_meshes"] is None
 
 
-def test_provision_raises_outside_the_job(spawned):
-    launcher = FakeLauncher.Config(in_job=False)
-    with pytest.raises(ValueError, match="launcher.submit"):
-        _provision(MonarchActorSystem.Config(launcher=launcher).build())
-
-
 def test_layout_round_trips_through_env(monkeypatch):
     plan = _plan(FakeLauncher.Config(), num_generators=2)
     monkeypatch.setenv(LAYOUT_ENV, plan.env[LAYOUT_ENV])
@@ -331,35 +337,39 @@ def test_layout_round_trips_through_env(monkeypatch):
     assert Layout.from_env() == plan.layout
 
 
-def test_provision_requires_layout_env(spawned, monkeypatch):
+def test_job_requires_layout_env(monkeypatch):
     monkeypatch.delenv(LAYOUT_ENV, raising=False)
+    config = SimpleNamespace(launcher=FakeLauncher.Config())
     with pytest.raises(ValueError, match=LAYOUT_ENV):
-        _provision(MonarchActorSystem.Config(launcher=FakeLauncher.Config()).build())
+        asyncio.run(job.build_actor_system(config))
 
 
-def test_provision_acquires_and_stop_releases_hosts(spawned, monkeypatch):
+def test_job_builds_the_actor_system_on_acquired_hosts(spawned, monkeypatch):
     plan = _plan(FakeLauncher.Config(), num_generators=2)
     monkeypatch.setenv(LAYOUT_ENV, plan.env[LAYOUT_ENV])
     events = []
-    launcher = FakeLauncher.Config(events=events)
-    actor_system = MonarchActorSystem.Config(launcher=launcher).build()
+    config = SimpleNamespace(
+        launcher=FakeLauncher.Config(events=events),
+        actor_system=MonarchActorSystem.Config(),
+    )
 
+    actor_system = asyncio.run(job.build_actor_system(config))
     _provision(actor_system)
-    # The CPU meshes fail to stop and release_hosts raises; stop logs both.
-    asyncio.run(actor_system.stop())
+    # The CPU meshes fail to stop; stop logs it and goes on.
     asyncio.run(actor_system.stop())
 
-    assert spawned["host_meshes"] == HostMeshes(
+    assert events == ["acquire_hosts"]
+    host_meshes = HostMeshes(
         trainer="hosts[node_0]",
         generators=["hosts[node_0]", "hosts[node_0]"],
         gpus_per_node=8,
     )
-    assert events == ["acquire_hosts", "release_hosts"]
+    assert actor_system._host_meshes == host_meshes
+    assert spawned["host_meshes"] == host_meshes
 
 
-def test_passed_host_meshes_take_precedence(spawned):
-    launcher = FakeLauncher.Config(in_job=False)
-    _provision(MonarchActorSystem.Config(launcher=launcher).build(host_meshes="mine"))
+def test_provision_uses_passed_host_meshes(spawned):
+    _provision(MonarchActorSystem.Config().build(host_meshes="mine"))
     assert spawned["host_meshes"] == "mine"
 
 
@@ -421,7 +431,7 @@ def test_slurm_submit_builds_the_job(tmp_path, slurm_job):
     assert shlex.split(slurm_job["client_script"]) == [
         "/venv/python",
         "-m",
-        "torchtitan.rl.train",
+        "torchtitan.rl.actors.monarch.launcher.job",
         "--module",
         "my recipes",
     ]
@@ -456,7 +466,7 @@ def test_slurm_submit_rejects_sbatch_export_from_launcher_env(tmp_path, slurm_jo
         SlurmLauncher.Config().build().submit(plan)
 
 
-def test_slurm_acquire_hosts_and_in_job(monkeypatch):
+def test_slurm_acquire_hosts(monkeypatch):
     import monarch.job
 
     state = SimpleNamespace(trainer="t", generator="g")
@@ -477,10 +487,6 @@ def test_slurm_acquire_hosts_and_in_job(monkeypatch):
         "trainer": "t",
         "generator": "g",
     }
-    monkeypatch.setenv("MONARCH_BATCH_JOB", "1")
-    assert launcher.in_job()
-    monkeypatch.delenv("MONARCH_BATCH_JOB")
-    assert not launcher.in_job()
 
 
 @pytest.mark.parametrize(
@@ -509,6 +515,6 @@ def test_slurm_recipe_plans_a_node_per_role():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_0_6b_flex_slurm
 
     config = rl_grpo_qwen3_0_6b_flex_slurm()
-    plan = config.actor_system.launcher.build().plan(config, [])
+    plan = config.launcher.build().plan(config, [])
 
     assert plan.layout.mesh_nodes == {"trainer": 1, "generator_0": 1, "generator_1": 1}
