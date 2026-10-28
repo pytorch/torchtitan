@@ -77,6 +77,12 @@ class ParallelismConfig:
     inter-stream fragmentation. All-gathers still overlap with compute via
     explicit forward/backward prefetching, but the pre-all-gather copy-in and
     dtype cast no longer overlap with compute.
+
+    Supported for decoders whose FSDP units run in the order
+    ``tok_embeddings -> layers -> norm/lm_head``, which is the chain the
+    explicit prefetching follows. Raises for models with MTP layers and for
+    Flux. Multimodal encoder all-gathers are not prefetched, so they do not
+    overlap with compute.
     """
 
     tensor_parallel_degree: int = 1

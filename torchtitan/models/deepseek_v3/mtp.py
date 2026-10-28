@@ -243,6 +243,7 @@ class MTPDecoder(Decoder):
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            unshard_async_op=parallelism.fsdp_unshard_async_op,
         )
 
     def preprocess_inputs(
@@ -463,7 +464,16 @@ def apply_fsdp_to_mtp_decoder(
     dp_mesh_dims: DataParallelMeshDims | None = None,
     edp_mesh_dims: DataParallelMeshDims | None = None,
     symm_mem_scope: FSDPSymmMemScope = None,
+    *,
+    unshard_async_op: bool = False,
 ) -> None:
+    if unshard_async_op and model.mtp_layers is not None:
+        # tok_embeddings runs once per MTP depth, which the explicit
+        # prefetching chain in apply_fsdp_to_decoder does not model.
+        raise ValueError(
+            "parallelism.fsdp_unshard_async_op is not supported for models "
+            "with MTP layers."
+        )
     mtp_layer_keys = []
     try:
         if model.mtp_layers is not None:
@@ -486,6 +496,7 @@ def apply_fsdp_to_mtp_decoder(
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=symm_mem_scope,
+            unshard_async_op=unshard_async_op,
         )
     finally:
         for key in mtp_layer_keys:

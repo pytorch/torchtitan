@@ -279,7 +279,8 @@ def apply_fsdp_to_decoder(
     gpt_oss, qwen3_vl, ...). The MoE handling is a strict superset of the dense
     case: a dense model leaves ``ep_degree=1`` / ``edp_mesh=None`` and has no
     MoE blocks, so every transformer block is sharded as a single
-    FSDP unit.
+    FSDP unit and the explicit prefetching below is skipped unless
+    ``unshard_async_op`` is set.
 
     Args:
         model (Decoder): The model to apply data parallelism to.
@@ -480,10 +481,12 @@ def apply_fsdp_to_decoder(
     if cpu_offload:
         logger.info("Applied CPU Offloading to the model")
 
-    # NOTE: always use explicit prefetching. Implicit prefetching relies on
-    # the CPU running ahead of the GPU, which D2H syncs (e.g. in EP) break,
-    # and all-gathers issued on the compute stream with async_op=True only
-    # overlap with compute if they are issued ahead of time.
+    # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
+    # in EP could interfere with implicit prefetching in FSDP, and when
+    # unsharding with async_op=True, as all-gathers issued on the compute
+    # stream only overlap with compute if they are issued ahead of time
+    if ep_degree == 1 and not unshard_async_op:
+        return
 
     # set up explicit prefetching for forward
     transformer_blocks = list(model.layers.values())

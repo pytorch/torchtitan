@@ -167,6 +167,7 @@ class DeepSeekV4Model(Decoder):
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            unshard_async_op=parallelism.fsdp_unshard_async_op,
         )
 
     @dataclass(kw_only=True, slots=True)

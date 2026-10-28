@@ -276,6 +276,11 @@ class FluxModel(BaseModel):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
     ) -> None:
+        if parallelism.fsdp_unshard_async_op:
+            raise ValueError(
+                "parallelism.fsdp_unshard_async_op is not supported for Flux."
+            )
+
         from torch.distributed.fsdp import (
             CPUOffloadPolicy,
             fully_shard,
