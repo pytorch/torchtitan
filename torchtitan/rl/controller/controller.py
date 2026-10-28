@@ -1079,6 +1079,7 @@ class Controller(Configurable):
             Controller: start push N -> pull N -> release groups, in the background
                           |-> Trainer: stage policy N, TorchStore put_state_dict
                           |-> Generators: prefetch policy N into pinned CPU memory, then load it
+                                          (direct RDMA: read it straight into the weights)
                           |-> Group buffer: admit the next rollout groups
             Trainer:    forward/backward N+1 (does not mutate persistent model state)
 

@@ -441,7 +441,8 @@ class Trainer(Configurable):
           forward/backward blocks this actor's event loop.
         - The controller awaits this push before the next optimizer step mutates
           the model, and awaits the generators' pull of it before the next push
-          reuses the staging buffers and TorchStore key.
+          reuses the staging buffers and TorchStore key. With direct RDMA, a
+          generator's pull resolves only after all of its ranks finish reading.
         """
 
         model_state_dict = self._model_state_dict()
