@@ -122,7 +122,6 @@ class Optim(Configurable):
             )
         self.optimizers = config.optimizer.build(
             model_parts=model_parts,
-            parallelism_context=parallelism_context,
             enable_cuda_graph=enable_cuda_graph,
         )
         self.lr_schedulers = config.lr_scheduler.build(
