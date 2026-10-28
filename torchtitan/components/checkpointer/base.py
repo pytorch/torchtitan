@@ -24,7 +24,7 @@ import torch.nn as nn
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import Configurable, Function
+from torchtitan.config import CallableFunction, Configurable
 from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
@@ -580,7 +580,7 @@ class BaseCheckpointManager(Configurable, ABC):
         keep_latest_k: int = 10
         """Number of recent checkpoints to retain, or zero to retain all."""
 
-        purge_exempt: Function.Config | None = None
+        purge_exempt: CallableFunction.Config | None = None
         """Optional predicate that exempts checkpoint steps from purging."""
 
         load_step: int = -1

@@ -14,7 +14,7 @@ TORCH_DTYPE_MAP = {
 
 from .configs import CommConfig, DebugConfig, TrainingConfig
 from .configurable import Configurable
-from .function import Function
+from .function import CallableFunction, Function
 from .loader import ConfigLoader
 from .override import (
     apply_overrides,
@@ -29,6 +29,7 @@ from .parallelism import FSDPSymmMemScope, ParallelismConfig
 __all__ = [
     "ConfigLoader",
     "Configurable",
+    "CallableFunction",
     "Function",
     "TORCH_DTYPE_MAP",
     # Config dataclasses

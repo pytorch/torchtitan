@@ -15,7 +15,6 @@ import torch_remat as remat
 from torch import nn
 
 from torchtitan.config import TrainingConfig
-from torchtitan.config.configurable import Configurable
 from torchtitan.config.function import Function
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -70,7 +69,7 @@ class AttentionResidual(Function[torch.Tensor]):
     """Configurable callable for Kimi K3 attention residual aggregation."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+    class Config(Function.Config):
         pass
 
     def __init__(self, config: Config) -> None:
