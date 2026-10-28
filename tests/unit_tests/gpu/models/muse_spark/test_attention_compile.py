@@ -7,7 +7,7 @@
 import pytest
 import torch
 
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.muse_spark import build_model_config
 
 
@@ -54,13 +54,13 @@ def test_attention_region_matches_eager(region, layer_id):
         inputs_ = (query_TNH, gate_TO)
 
     try:
-        apply_local_compile([])
+        LocalCompileConfig().apply()
         reference = _run(fn, [t.float() for t in inputs_])
         expected = _run(fn, inputs_)
-        apply_local_compile([region])
+        LocalCompileConfig(regions=[region]).apply()
         actual = _run(fn, inputs_)
     finally:
-        apply_local_compile([])
+        LocalCompileConfig().apply()
 
     # The compiled region rounds to bf16 once at the end, eager rounds between ops,
     # so the two differ by a few bf16 ulps. Check the compiled path is at least as
@@ -80,7 +80,7 @@ def test_rmsnorm_region_matches_eager():
     stream_TD = torch.randn(64, norm.normalized_shape[0], device="cuda")
 
     def norm_and_weight_grad(regions):
-        apply_local_compile(regions)
+        LocalCompileConfig(regions=regions).apply()
         norm.weight.grad = None
         return [*_run(norm, (stream_TD,)), norm.weight.grad]
 
@@ -88,7 +88,7 @@ def test_rmsnorm_region_matches_eager():
         expected = norm_and_weight_grad([])
         actual = norm_and_weight_grad(["muse_spark_rmsnorm"])
     finally:
-        apply_local_compile([])
+        LocalCompileConfig().apply()
 
     for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
         torch.testing.assert_close(actual_tensor, expected_tensor, atol=2e-2, rtol=2e-2)

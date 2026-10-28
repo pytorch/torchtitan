@@ -65,11 +65,11 @@ class GraphTrainingEngine(TrainingEngine):
     ) -> None:
         if config.optim.enable_cuda_graph:
             raise ValueError("Optim CUDA graphs are not supported with GraphTrainer.")
-        if model_config.local_compile_regions:
+        if model_config.local_compile.regions:
             raise ValueError(
                 "GraphTrainer traces the whole step into one graph; set "
-                "model.local_compile_regions = [] "
-                f"(got {model_config.local_compile_regions})."
+                "model.local_compile.regions = [] "
+                f"(got {model_config.local_compile.regions})."
             )
         if config.parallelism.fsdp_symm_mem_scope is not None:
             raise ValueError(
@@ -88,7 +88,7 @@ class GraphTrainingEngine(TrainingEngine):
     def _parallelize_compile_kwargs(self) -> dict[str, Any]:
         """Return the compile kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
 
-        Regular models expect ``local_compile_regions`` (compiled regions); GraphTrainer overrides this to
+        Regular models expect ``local_compile`` (compiled regions); GraphTrainer overrides this to
         return ``compile_config`` (whole-step compile).
         """
         # TODO: apply local compile outside parallelize/pipeline (#5026 review). That needs
@@ -232,8 +232,7 @@ class GraphTrainingEngine(TrainingEngine):
             for microbatch in microbatch_group
         ):
             raise ValueError(
-                "Per-microbatch loss arguments are not supported with "
-                "GraphRuntime yet."
+                "Per-microbatch loss arguments are not supported with GraphRuntime yet."
             )
         if self.parallelism_context.pp_enabled:
             pp_microbatch_groups = super()._preprocess_microbatch_groups(
@@ -409,7 +408,10 @@ class GraphTrainer(Trainer):
         compile: GraphTrainerCompileConfig = field(
             default_factory=GraphTrainerCompileConfig
         )
-        """Whole-step compile. GraphTrainer requires ``model.local_compile_regions`` to be empty."""
+        """Whole-step compile.
+
+        GraphTrainer requires ``model.local_compile.regions`` to be empty.
+        """
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)

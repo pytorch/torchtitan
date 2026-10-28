@@ -811,16 +811,18 @@ def test_graph_training_engine_rejects_optimizer_cuda_graph() -> None:
     init.assert_not_called()
 
 
-def test_graph_training_engine_rejects_local_compile_regions() -> None:
+def test_graph_training_engine_rejects_local_compile() -> None:
     config = SimpleNamespace(optim=SimpleNamespace(enable_cuda_graph=False))
 
     with (
         patch.object(TrainingEngine, "__init__") as init,
-        pytest.raises(ValueError, match="local_compile_regions"),
+        pytest.raises(ValueError, match="local_compile"),
     ):
         GraphTrainingEngine(
             config,
-            model_config=SimpleNamespace(local_compile_regions=["loss"]),
+            model_config=SimpleNamespace(
+                local_compile=SimpleNamespace(regions=["loss"])
+            ),
             max_num_documents=None,
             output_dir="",
         )

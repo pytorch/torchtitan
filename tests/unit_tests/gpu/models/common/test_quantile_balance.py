@@ -164,7 +164,7 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
                 input_TD,
                 topk_scores_TK,
                 topk_expert_ids_TK,
-                routing_map_TE.sum(dim=0),
+                routing_map_TE,
             )
             self.assertEqual(routed_input_RD.shape, (8, 4))
 

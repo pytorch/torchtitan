@@ -52,7 +52,7 @@ def test_spmd_typechecking_config_disables_local_compile() -> None:
     config = llama3_debugmodel_default()
 
     assert config.debug.spmd_typechecking
-    assert config.model.local_compile_regions == []
+    assert config.model.local_compile.regions == []
     config.__post_init__()
 
 

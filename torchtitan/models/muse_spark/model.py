@@ -17,7 +17,7 @@ import torch_remat as remat
 from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.local_compile import local_compile
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -437,19 +437,21 @@ class MuseSparkModel(MultimodalModel):
         encoder weights needed for a later multimodal fine-tune.
         """
 
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "fused_binary_activation",
-                "fp32_to_bf16_split",
-                "rope",
-                "muse_spark_attention_output",
-                "muse_spark_attention_qk",
-                "muse_spark_input_scaled_rmsnorm",
-                "muse_spark_logit_postprocess",
-                "muse_spark_residual",
-                "muse_spark_rmsnorm",
-            ]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "fp32_to_bf16_split",
+                    "rope",
+                    "muse_spark_attention_output",
+                    "muse_spark_attention_qk",
+                    "muse_spark_input_scaled_rmsnorm",
+                    "muse_spark_logit_postprocess",
+                    "muse_spark_residual",
+                    "muse_spark_rmsnorm",
+                ]
+            )
         )
         # pyrefly: ignore [bad-override]
         tok_embeddings: MuseSparkEmbeddingWithNorm.Config

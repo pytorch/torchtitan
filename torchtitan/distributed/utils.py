@@ -169,15 +169,6 @@ def set_determinism(
             # no options) so the regional-inductor scoop configs are preserved.
             FlexInnerAttention.inductor_configs["max_autotune"] = False
             FlexInnerAttention.inductor_configs["coordinate_descent_tuning"] = False
-            # Same fullgraph and recompile_limit as the default compile; only autotuning differs.
-            # pyrefly: ignore [no-matching-overload]
-            FlexInnerAttention._compiled_flex_attn = torch.compile(
-                flex_attention,
-                fullgraph=True,
-                options=FlexInnerAttention.inductor_configs,
-                recompile_limit=16,
-            )
-
     if debug_config.detect_anomaly:
         logger.warning(
             "Anomaly detection enabled. This incurs significant overhead "

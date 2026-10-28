@@ -301,7 +301,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     model_config = build_model_config(
         "0.8B", seq_len=256, attn_backend="varlen", parallelism=ParallelismConfig()
     )
-    model_config.local_compile_regions = []
+    model_config.local_compile.regions = []
     registry.register_to_vllm(
         model_config,
         parallelism=registry.InferenceParallelismConfig(tensor_parallel_degree=1),
