@@ -21,7 +21,10 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import Shard
 
 from torchtitan.config.parallelism import FSDPSymmMemScope
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import (
+    dedicated_pg_backend_override,
+    ParallelismContext,
+)
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import MoE
 
@@ -128,9 +131,29 @@ def resolve_fsdp_mesh(
     shard_axes = ["dp_shard"]
     if parallelism_context.cp_enabled and shard_on_cp_axis:
         shard_axes.append("cp")
-    shard: str | tuple[str, ...] = (
-        tuple(shard_axes) if len(shard_axes) > 1 else shard_axes[0]
-    )
+
+    shard: str
+    if len(shard_axes) > 1:
+        # Flatten eagerly with a dedicated communicator instead of leaving it
+        # to FSDP2's own ``DataParallelMeshDims`` flattening. ``dp_shard`` *
+        # ``cp`` spans every rank whenever ``dp_shard == 1`` (the common
+        # CP-only case); left unflattened here, FSDP2 would flatten it with no
+        # backend override and ``DeviceMesh`` would silently reuse the
+        # default/WORLD process group -- the same group CP's own ``cp`` axis
+        # reuses in that case (see ``dedicated_pg_backend_override``). FSDP's
+        # all-gather/reduce-scatter run on FSDP's own CUDA streams while CP's
+        # collectives run on the default/compute stream, so with a shared
+        # communicator the two can be enqueued in different orders across
+        # ranks and NCCL deadlocks instead of merely serializing.
+        shard = "_".join(shard_axes)
+        storage_mesh[tuple(shard_axes)]._flatten(
+            shard,
+            backend_override=dedicated_pg_backend_override(
+                parallelism_context.world_mesh
+            ),
+        )
+    else:
+        shard = shard_axes[0]
     replicate = "dp_replicate" if parallelism_context.dp_replicate_enabled else None
 
     return storage_mesh, DataParallelMeshDims(shard=shard, replicate=replicate)

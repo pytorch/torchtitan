@@ -35,11 +35,12 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = [
-    "MeshAxisName",
     "DistributedTopology",
+    "MeshAxisName",
     "ParallelismContext",
-    "unfold_dp_axis",
+    "dedicated_pg_backend_override",
     "unfold_dp_axes",
+    "unfold_dp_axis",
 ]
 
 
@@ -64,6 +65,46 @@ class MeshAxisName(StrEnum):
     PP = "pp"
     EP = "ep"
     EDP_SHARD = "edp_shard"
+
+
+# Axes that FSDP/HSDP can use as a complete shard or replicate group on their
+# own (i.e. without being combined with another axis first). When one of these
+# spans every rank -- most commonly ``dp_replicate`` under pure DDP, or
+# ``edp_shard`` when EP leaves no other sparse-region parallelism -- it must
+# not be allowed to collapse onto the default/WORLD process group the way
+# ``DeviceMesh._init_one_process_group`` does for any full-world dimension by
+# default. See ``dedicated_pg_backend_override`` for why.
+_FSDP_SINGLE_AXIS_NAMES = (
+    MeshAxisName.DP_REPLICATE.value,
+    MeshAxisName.EDP_SHARD.value,
+)
+
+
+def dedicated_pg_backend_override(world_mesh: DeviceMesh):
+    """Backend override that opts a mesh axis out of full-world PG reuse.
+
+    ``DeviceMesh._init_one_process_group`` returns the default (WORLD) process
+    group -- not a new communicator -- for any mesh dimension (including one
+    produced by ``DeviceMesh._flatten``) whose ranks happen to span every rank,
+    as long as no explicit ``backend_override`` was given. FSDP's shard/replicate
+    axes can span every rank (e.g. ``dp_replicate`` alone under pure DDP, or
+    ``dp_shard * cp`` when ``dp_shard == 1``), and so can CP's own ``cp`` axis
+    when ``dp_shard == tp == pp == dp_replicate == 1``. Left alone, both would
+    reuse WORLD and share one NCCL communicator.
+
+    FSDP issues its all-gather/reduce-scatter from its own dedicated CUDA
+    streams, while CP's collectives run on the default/compute stream. Nothing
+    orders those two streams against each other, so the two collectives can be
+    enqueued in different host-side orders across ranks. Two collectives
+    sharing one communicator must be posted in the same order by every rank,
+    so a mismatched order deadlocks NCCL instead of merely serializing.
+
+    Passing any explicit ``backend_override`` makes ``DeviceMesh`` create a
+    dedicated communicator instead of reusing WORLD. We pass the world mesh's
+    own backend config (e.g. real NCCL/Gloo, or "fake" under fake-mesh tests)
+    so this only changes communicator *identity*, not which backend is used.
+    """
+    return dist.get_backend_config(world_mesh.get_group())
 
 
 @dataclass(frozen=True)
@@ -284,12 +325,18 @@ class ParallelismContext:
             """Unflatten the world mesh to create the required mesh axes.
 
             Uses the fake backend for inactive axes to avoid unnecessary
-            process-group creation.
+            process-group creation. FSDP single-axis groups (see
+            ``_FSDP_SINGLE_AXIS_NAMES``) get an explicit backend override so
+            they never silently alias the default/WORLD process group that
+            CP's own axis (and anything else left on the default group) can
+            also land on -- see ``dedicated_pg_backend_override``.
             """
             backend_override = {}
             for axis, degree in zip(axis_names, axis_degrees, strict=True):
                 if not self._axis_is_active(axis, degree):
                     backend_override[axis] = "fake"
+                elif axis in _FSDP_SINGLE_AXIS_NAMES:
+                    backend_override[axis] = dedicated_pg_backend_override(world_mesh)
 
             return world_mesh._unflatten(
                 0,

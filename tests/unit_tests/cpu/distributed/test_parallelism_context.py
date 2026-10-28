@@ -26,7 +26,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
 from torchtitan.distributed.parallelism_context import (
     DistributedTopology,
     MeshAxisName,
@@ -1044,6 +1044,95 @@ class TestParallelismContextWorld8MeshOperations(DTensorTestBase):
             self.assertEqual(
                 parallelism_context.seq_len_divisor, 4
             )  # tp * (cp * 2) = 2 * (1 * 2) = 2 * 2
+
+
+class TestFsdpCpCommunicatorIsolation(DTensorTestBase):
+    """Regression test for the CP/FSDP shared-communicator deadlock.
+
+    ``DeviceMesh._init_one_process_group`` reuses the default/WORLD process
+    group -- instead of creating a dedicated communicator -- for any mesh
+    dimension (including a flattened one) whose ranks span every rank, unless
+    an explicit ``backend_override`` is given. When ``dp_shard == 1``, CP's own
+    ``cp`` axis spans every rank, and so does the ``dp_shard * cp`` axis FSDP
+    shards parameters on, so both would silently collapse onto the same NCCL
+    communicator.
+
+    That matters because FSDP issues its all-gather/reduce-scatter from its
+    own dedicated CUDA streams, while CP's collectives run on the
+    default/compute stream. Nothing orders those two streams against each
+    other, so the two collectives can be enqueued in different host-side
+    orders across ranks -- and two collectives sharing one communicator must
+    be posted in the same order by every rank, so a mismatched order
+    deadlocks NCCL instead of merely serializing.
+
+    This guards ``resolve_fsdp_mesh`` and ``ParallelismContext.build_mesh``'s
+    fix: forcing a dedicated process group for FSDP's shard/replicate axes
+    whenever they could otherwise alias the default group.
+    """
+
+    @property
+    def world_size(self):
+        return 4
+
+    @with_comms
+    def test_pure_cp_fsdp_group_is_not_shared_with_cp_group(self):
+        """dp_shard=1, cp=world_size: the historically-buggy configuration."""
+        with patch(
+            "torchtitan.distributed.parallelism_context.device_type", self.device_type
+        ):
+            pd = ParallelismContext(
+                dp_replicate=1,
+                dp_shard=1,
+                cp=4,
+                tp=1,
+                pp=1,
+                ep=1,
+                world_size=4,
+                enable_sequence_parallel=False,
+            )
+            pd.build_mesh()
+
+            cp_group_name = pd.get_mesh("cp").get_group().group_name
+
+            storage_mesh, dp_mesh_dims = resolve_fsdp_mesh(pd)
+            assert dp_mesh_dims is not None
+            # Re-flatten the same (dp_shard, cp) axes `resolve_fsdp_mesh` just
+            # flattened: DeviceMesh caches identical flattens by name, so this
+            # returns the same mesh/process group it already created, without
+            # relying on the deprecated flattened-name `mesh[name]` lookup.
+            fsdp_mesh = storage_mesh[("dp_shard", "cp")]._flatten(dp_mesh_dims.shard)
+            fsdp_group_name = fsdp_mesh.get_group().group_name
+
+            self.assertNotEqual(
+                cp_group_name,
+                fsdp_group_name,
+                "CP and FSDP must not share a process group/communicator: "
+                "FSDP issues collectives on its own CUDA streams while CP "
+                "issues on the default/compute stream, so a shared "
+                "communicator can deadlock under cross-rank scheduling races.",
+            )
+
+    @with_comms
+    def test_pure_ddp_dp_replicate_group_is_dedicated(self):
+        """dp_replicate=world_size (pure DDP) must not alias the default group."""
+        with patch(
+            "torchtitan.distributed.parallelism_context.device_type", self.device_type
+        ):
+            pd = ParallelismContext(
+                dp_replicate=4,
+                dp_shard=1,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=1,
+                world_size=4,
+                enable_sequence_parallel=False,
+            )
+            pd.build_mesh()
+
+            default_group_name = dist.distributed_c10d._get_default_group().group_name
+            dp_replicate_group_name = pd.get_mesh("dp_replicate").get_group().group_name
+            self.assertNotEqual(default_group_name, dp_replicate_group_name)
 
 
 class _CausalAttentionReference(InnerAttention):
