@@ -38,7 +38,6 @@ from torchtitan.tools import utils
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -58,6 +57,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             raise ValueError("Optim CUDA graphs are not supported with TorchFT.")
         # The base constructor invokes the distributed-runtime hook.
         self.fault_tolerance = fault_tolerance
+        self.last_words = None
         super().__init__(
             config,
             model_config=model_config,
@@ -153,6 +153,54 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             ft_manager=self.ft_manager,
         )
 
+    def optim_step(self):
+        if self.last_words is None:
+            return super().optim_step()
+        current_step = self.num_completed_steps + 1
+        self.checkpointer.maybe_wait_for_staging()
+        grad_norm = self.optim.step(self.loss, current_step=current_step)
+        if self.optim.update_committed:
+            self.num_completed_steps = current_step
+            self.last_words.update_completed()
+        return grad_norm
+
+    def state_dict(self):
+        state = super().state_dict()
+        if self.last_words is not None:
+            state["last_words_num_updates"] = self.last_words.num_updates
+        return state
+
+    def load_state_dict(self, state):
+        super().load_state_dict(state)
+        if self.last_words is not None:
+            self.last_words.restored_train_state(state)
+
+    def synchronize_last_words_device(self):
+        if torch.accelerator.is_available():
+            utils.device_module.synchronize()
+
+    def begin_last_words_attempt(self):
+        """Backends may reset their recovery attempt before native quorum work."""
+
+    def request_last_words_device_stop(self):
+        """Backends with interruptible work may override this CPU-thread hook."""
+
+    def bind_last_words_device_hooks(self, coordinator):
+        """Backends may connect work cancellation to the application coordinator."""
+
+    def recover_last_words_attempt(self, error):
+        for part in self.model_parts:
+            for parameter in part.parameters():
+                parameter.grad = None
+        self.synchronize_last_words_device()
+
+    def close(self):
+        try:
+            return super().close()
+        finally:
+            if self.last_words is not None:
+                self.last_words.close()
+
 
 class FaultTolerantTrainer(Configurable):
     @dataclass(kw_only=True, slots=True)
@@ -165,6 +213,21 @@ class FaultTolerantTrainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
+        if config.fault_tolerance.last_words.enable:
+            from torchtitan.config import derive
+            from torchtitan.last_words.checkpoint import LastWordsCheckpointManager
+
+            if (
+                config.checkpointer is None
+                or not config.checkpointer.enable_ft_dataloader_checkpoints
+            ):
+                raise ValueError(
+                    "Last words requires full and replica-local cursor checkpointing"
+                )
+            if not isinstance(config.checkpointer, LastWordsCheckpointManager.Config):
+                config.checkpointer = derive(
+                    config.checkpointer, LastWordsCheckpointManager.Config
+                )
         config.model = copy.deepcopy(config.model)
         if config.override.imports:
             apply_overrides(config.override, config)
@@ -261,6 +324,11 @@ class FaultTolerantTrainer(Configurable):
             create_seed_checkpoint=config.create_seed_checkpoint,
         )
 
+        if config.fault_tolerance.last_words.enable:
+            from torchtitan.last_words.training import LastWordsTrainingCoordinator
+
+            engine.last_words = LastWordsTrainingCoordinator(self)
+
         if parallelism_context.pp_enabled:
             ensure_pp_loss_visible(
                 parallelism_context=parallelism_context,
@@ -343,6 +411,11 @@ class FaultTolerantTrainer(Configurable):
             yield microbatch
 
     def train_step(self, data_iterator: Iterator[TrainingMicrobatch]):
+        if self.engine.last_words is not None:
+            return self.engine.last_words.run_step(self._train_step, data_iterator)
+        return self._train_step(data_iterator)
+
+    def _train_step(self, data_iterator: Iterator[TrainingMicrobatch]):
         engine = self.engine
         current_step = engine.num_completed_steps + 1
         # Save the current step learning rate for logging

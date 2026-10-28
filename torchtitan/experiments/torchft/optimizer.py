@@ -50,6 +50,8 @@ class TorchFTOptimizersContainer(OptimizersContainer):
             init_optim_state(optim)
         self.cache_state_dict: dict[str, Any] = {}
         self._quorum_manager = None
+        self.last_words_prepared = False
+        self.last_words_pre_authorized = False
 
     def configure_fault_tolerance(self, ft_manager: "TorchFTManager") -> None:
         """Configure quorum handling after the optimizer is built."""
@@ -84,6 +86,7 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         assert closure is None, "OptimizersContainer does not support closures"
         if (
             self._quorum_manager is not None
+            and not self.last_words_pre_authorized
             and not self._quorum_manager.should_commit()
         ):
             return None
@@ -93,8 +96,9 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         return None
 
     def zero_grad(self, set_to_none: bool = True) -> None:
-        if self._quorum_manager is not None:
+        if self._quorum_manager is not None and not self.last_words_prepared:
             self._quorum_manager.start_quorum()
+        self.last_words_prepared = False
         super().zero_grad(set_to_none=set_to_none)
 
 
@@ -114,6 +118,8 @@ class TorchFTOptim(Optim):
         super().__init__(config, **kwargs)
         self._quorum_manager = None
         self._consecutive_non_finite_steps = 0
+        self.last_words = None
+        self.update_committed = False
 
     def configure_fault_tolerance(self, ft_manager: "TorchFTManager") -> None:
         """Configure quorum handling after the optimizer is built."""
@@ -121,6 +127,19 @@ class TorchFTOptim(Optim):
         self._quorum_manager = (
             ft_manager.manager if ft_manager.use_async_quorum else None
         )
+
+    def step(self, loss: torch.Tensor, *, current_step: int) -> torch.Tensor:
+        if self.last_words is None:
+            return super().step(loss, current_step=current_step)
+        from torchtitan.last_words.training import CommitRejectedError
+
+        self.update_committed = False
+        try:
+            grad_norm = super().step(loss, current_step=current_step)
+        except CommitRejectedError as rejected:
+            return rejected.grad_norm
+        self.update_committed = True
+        return grad_norm
 
     def _update(self, loss: torch.Tensor) -> torch.Tensor:
         if self._quorum_manager is None:
@@ -169,6 +188,19 @@ class TorchFTOptim(Optim):
             self._quorum_manager.report_error(
                 RuntimeError("Loss or gradient norm is not finite.")
             )
-        # should_commit() in the container step returns False after report_error.
-        self.optimizers.step()
+        if self.last_words is not None:
+            from torchtitan.last_words.training import CommitRejectedError
+
+            # Authorization must precede every container pre-hook, which can
+            # update persistent MoE bias before the optimizer method's body.
+            if not self._quorum_manager.should_commit():
+                raise CommitRejectedError(grad_norm)
+            self.last_words.before_optimizer_update()
+            self.optimizers.last_words_pre_authorized = True
+            try:
+                self.optimizers.step()
+            finally:
+                self.optimizers.last_words_pre_authorized = False
+        else:
+            self.optimizers.step()
         return grad_norm

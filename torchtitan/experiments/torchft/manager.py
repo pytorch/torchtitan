@@ -10,7 +10,7 @@ import importlib.util
 import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import cast, Literal, TYPE_CHECKING
 
@@ -36,9 +36,16 @@ else:
     has_torchft = False
 
 
+from torchtitan.last_words.control import LastWordsConfig
+
+
 class TorchFTManager(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
+        last_words: LastWordsConfig = field(default_factory=LastWordsConfig)
+        enable_elastic: bool = True
+        elastic_recovery_timeout_seconds: int = 180
+        max_consecutive_recoveries: int = 3
         enable: bool = False
         """
         Enable TorchFT integration. When TorchFT is enabled, HSDP will be used.
@@ -106,12 +113,53 @@ class TorchFTManager(Configurable):
         self,
         config: Config,
     ) -> None:
+        config.last_words.validate()
+        if config.last_words.enable:
+            if (
+                not config.enable
+                or config.semi_sync_method is not None
+                or config.use_async_quorum
+            ):
+                raise ValueError(
+                    "Last words requires enabled synchronous TorchFT without semi-sync training"
+                )
+            if (
+                config.group_size < 2
+                or not 1 <= config.min_replica_size <= config.group_size
+            ):
+                raise ValueError(
+                    "Last words requires at least two configured logical replica slots"
+                )
+            if (
+                not config.enable_elastic
+                and config.min_replica_size != config.group_size
+            ):
+                raise ValueError(
+                    "Fixed last words requires min_replica_size == group_size"
+                )
+            if (
+                config.enable_elastic
+                and config.last_words.coordination_backend != "service"
+            ):
+                raise ValueError("Elastic last words requires service coordination")
+            if (
+                config.elastic_recovery_timeout_seconds <= 0
+                or config.max_consecutive_recoveries <= 0
+            ):
+                raise ValueError("Last-words recovery limits must be positive")
         if not config.enable:
             self._manager = None
             return
 
         if not has_torchft:
             raise ImportError("torchft is not installed. Please install it.")
+
+        manager_type = torchft.Manager
+        if config.last_words.enable:
+            # Resolve the paired API before creating a process group.
+            from torchft.last_words import LastWordsManager
+
+            manager_type = LastWordsManager
 
         process_group_timeout = timedelta(milliseconds=config.process_group_timeout_ms)
         if config.process_group == "gloo":
@@ -136,7 +184,7 @@ class TorchFTManager(Configurable):
         # If the training method is specific, then the quorum should be synchronous
         self.use_async_quorum = config.semi_sync_method is None
 
-        self._manager = torchft.Manager(
+        self._manager = manager_type(
             pg=pg,
             min_replica_size=config.min_replica_size,
             load_state_dict=None,
