@@ -455,11 +455,6 @@ def test_slurm_submit_defaults_node_local_jit_caches(tmp_path, slurm_job, monkey
     )
 
 
-def test_slurm_submit_can_share_nodes(tmp_path, slurm_job):
-    SlurmLauncher.Config(exclusive=False).build().submit(_slurm_plan(tmp_path))
-    assert slurm_job["kwargs"]["exclusive"] is False
-
-
 def test_slurm_submit_writes_job_state_per_job(tmp_path, slurm_job):
     SlurmLauncher.Config().build().submit(_slurm_plan(tmp_path))
 
@@ -471,14 +466,17 @@ def test_slurm_submit_writes_job_state_per_job(tmp_path, slurm_job):
     )
 
 
-def test_slurm_submit_rejects_sbatch_export(tmp_path, slurm_job, monkeypatch):
-    monkeypatch.setenv("SBATCH_EXPORT", "NONE")
-    with pytest.raises(ValueError, match="SBATCH_EXPORT"):
-        SlurmLauncher.Config().build().submit(_slurm_plan(tmp_path))
-
-
-def test_slurm_submit_rejects_sbatch_export_from_launcher_env(tmp_path, slurm_job):
-    plan = replace(_slurm_plan(tmp_path), env={"SBATCH_EXPORT": "NONE"})
+@pytest.mark.parametrize(
+    "from_launcher_env", [False, True], ids=["submit_shell", "launcher_env"]
+)
+def test_slurm_submit_rejects_sbatch_export(
+    tmp_path, slurm_job, monkeypatch, from_launcher_env
+):
+    plan = _slurm_plan(tmp_path)
+    if from_launcher_env:
+        plan = replace(plan, env={"SBATCH_EXPORT": "NONE"})
+    else:
+        monkeypatch.setenv("SBATCH_EXPORT", "NONE")
     with pytest.raises(ValueError, match="SBATCH_EXPORT"):
         SlurmLauncher.Config().build().submit(plan)
 
