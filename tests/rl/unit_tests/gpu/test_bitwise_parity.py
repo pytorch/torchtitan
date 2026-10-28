@@ -931,24 +931,59 @@ class TestBitwiseParityQwen35DebugVarlenDirect(TestBitwiseParityQwen35DebugVarle
 
     def test_reload_after_generate(self):
         """Reload changed weights after generation has replayed the captured graphs."""
-        vllm_generate(self.engine, self.prompt_ids, self.MAX_GEN_TOKENS)
-        before_lps = vllm_prefill(self.engine, self.prompt_ids)
+        engine = self.engine
+
+        def reload() -> None:
+            _sync_trainer_weights_to_vllm(self.model, engine, direct=True)
+            # As the generator does after a load: drop KV computed with the old weights.
+            engine.reset_prefix_cache(reset_running_requests=True)
+
+        vllm_generate(engine, self.prompt_ids, self.MAX_GEN_TOKENS)
+        before_lps = vllm_prefill(engine, self.prompt_ids)
         params = list(self.model.parameters())
         originals = [p.detach().clone() for p in params]
+        # Every rank runs every collective before rank 0 asserts, so a mismatch
+        # fails instead of hanging the other rank.
         try:
             with torch.no_grad():
                 for p in params:
                     p.mul_(0.5)
-            _sync_trainer_weights_to_vllm(self.model, self.engine, direct=True)
-            self.test_trainer_vs_vllm_prefill()
-            after_lps = vllm_prefill(self.engine, self.prompt_ids)
-            if dist.get_rank() == 0:
-                self.assertNotEqual(before_lps[0], after_lps[0])
+            reload()
+            with type(self).parallelism_context.activate_spmd(), torch.no_grad():
+                trainer_lps = compute_trainer_prefill_logprobs(
+                    self.model,
+                    self.prompt_ids,
+                    self.device,
+                    attn_backend=self.attn_backend,
+                )
+            vllm_lps = vllm_prefill(engine, self.prompt_ids)
+            gen_ids, decode_lps = vllm_generate(
+                engine, self.prompt_ids, self.MAX_GEN_TOKENS
+            )
+            prefill_2nd_lps = vllm_2nd_pass_prefill(engine, self.prompt_ids, gen_ids)
         finally:
             with torch.no_grad():
                 for p, original in zip(params, originals):
                     p.copy_(original)
-            _sync_trainer_weights_to_vllm(self.model, self.engine, direct=True)
+            reload()
+
+        if dist.get_rank() == 0:
+            self.assertNotEqual(before_lps[0], vllm_lps[0])
+            for i in range(len(self.prompt_ids)):
+                self._assert_logprobs_equal(
+                    f"seq {i}: Trainer prefill vs vLLM prefill after reload",
+                    trainer_lps[i],
+                    vllm_lps[i],
+                    "Trainer",
+                    "vLLM",
+                )
+                self._assert_logprobs_equal(
+                    f"seq {i}: vLLM decode vs 2nd-pass prefill after reload",
+                    decode_lps[i],
+                    prefill_2nd_lps[i],
+                    "Decode",
+                    "2ndPrefill",
+                )
 
 
 @unittest.skipUnless(
