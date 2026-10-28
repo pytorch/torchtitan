@@ -1072,16 +1072,16 @@ class Controller(Configurable):
         The push and pull of policy N overlap forward/backward N+1:
 
             Trainer:    forward/backward N
-            Controller: await push N-1     (optimizer N must not mutate weights push N-1 stages)
+            Controller: await push N-1     (optimizer N must not mutate weights push N-1 reads)
             Trainer:    optimizer N -> policy N
             Controller: await pull N-1     (push N must not overwrite the TorchStore key mid-pull)
             Controller: start push N -> pull N -> release groups, in the background
-                          |-> Trainer: stage policy N, TorchStore put_state_dict
+                          |-> Trainer: TorchStore put_state_dict of policy N
                           |-> Generators: prefetch policy N into pinned CPU memory, then load it
                           |-> Group buffer: admit the next rollout groups
             Trainer:    forward/backward N+1 (does not mutate persistent model state)
 
-        See `Trainer.push_model_state_dict` for why staging can overlap forward/backward, and
+        See `Trainer.push_model_state_dict` for why the push can overlap forward/backward, and
         `Generator.load_model_state_dict` for how a generator applies the load between steps.
 
         Impact on off-policiness: no sample is born stale, because the buffer admits new rollout
