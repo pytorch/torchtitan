@@ -81,7 +81,6 @@ def test_push_model_state_dict_reuses_final_dtype_cpu_staging_buffers() -> None:
         )
         trainer._transfer_dtype = torch.bfloat16
         trainer._staging_model_state_dict_stream = None
-        trainer._direct_rdma_model_state_dict = False
 
         empty_like = torch.empty_like
         pin_memory_requests = []
@@ -129,11 +128,9 @@ def test_push_model_state_dict_reuses_final_dtype_cpu_staging_buffers() -> None:
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("direct_rdma", [False, True])
-def test_push_model_state_dict_stages_on_dedicated_stream(direct_rdma: bool) -> None:
+def test_push_model_state_dict_stages_on_dedicated_stream() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
-        trainer._direct_rdma_model_state_dict = direct_rdma
         trainer._staging_state_dict = {"weight": torch.empty(4)}
         trainer._staging_model_state_dict_stream = MagicMock()
         source = torch.arange(4, dtype=torch.float32)
@@ -174,7 +171,7 @@ def test_push_model_state_dict_stages_on_dedicated_stream(direct_rdma: bool) -> 
         put.assert_awaited_once_with(
             trainer._staging_state_dict,
             "model_state_dict",
-            direct_rdma=direct_rdma,
+            direct_rdma=False,
         )
         assert len(worker_thread_ids) == 2
         assert worker_thread_ids[0] == worker_thread_ids[1]
@@ -252,35 +249,6 @@ def test_rl_trainer_validates_model_training_config_before_initialization(
         activation_remat=config.activation_remat,
         max_num_documents=None,
     )
-
-
-@pytest.mark.parametrize("direct_rdma", [False, True])
-def test_rl_trainer_keeps_direct_rdma_model_state_dict(
-    tmp_path, direct_rdma: bool
-) -> None:
-    engine = MagicMock(device=torch.device("cpu"))
-    engine.model_device_mem_stats.max_reserved_gib = 0.0
-    engine.model_device_mem_stats.max_reserved_pct = 0.0
-    engine.parallelism_context.get_optional_mesh.return_value = None
-    module = "torchtitan.rl.trainer.trainer"
-    with (
-        patch(f"{module}.validate_model_training_config"),
-        patch(f"{module}.TrainingEngine", return_value=engine),
-        patch(f"{module}.maybe_apply_numa_binding"),
-        patch(f"{module}.utils.get_peak_flops", return_value=1.0),
-        patch.object(Trainer, "_setup_staging_model_state_dict"),
-    ):
-        trainer = Trainer(
-            Trainer.Config(
-                model=MagicMock(), training=TrainingConfig(disable_cuda_graphs=True)
-            ),
-            max_num_documents=None,
-            direct_rdma_model_state_dict=direct_rdma,
-            output_dir=str(tmp_path),
-        )
-
-    # Drives put_state_dict(direct_rdma=...) in push_model_state_dict.
-    assert trainer._direct_rdma_model_state_dict is direct_rdma
 
 
 def test_forward_backward_uses_global_token_count() -> None:

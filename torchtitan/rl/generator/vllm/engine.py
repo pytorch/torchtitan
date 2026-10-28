@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -128,7 +128,7 @@ class VLLMEngine(GenerationEngine):
         dist_moe_runtime: DistMoeRuntime.Config | None,
         debug: DebugConfig,
         reset_kv_cache_on_model_state_dict_load: bool,
-        direct_rdma_model_state_dict: bool,
+        fetch_model_state_dict_to_gpu: bool,
         rank: int,
         generator_name: str,
         output_dir: str,
@@ -151,7 +151,7 @@ class VLLMEngine(GenerationEngine):
             checkpointer=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             batch_invariant=debug.batch_invariant,
-            direct_rdma_model_state_dict=direct_rdma_model_state_dict,
+            fetch_model_state_dict_to_gpu=fetch_model_state_dict_to_gpu,
         )
         engine_args = self._build_engine_args(
             model,
@@ -195,7 +195,7 @@ class VLLMEngine(GenerationEngine):
         checkpointer: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         batch_invariant: bool,
-        direct_rdma_model_state_dict: bool,
+        fetch_model_state_dict_to_gpu: bool,
     ) -> None:
         """Process-wide vLLM setup before the engine build: register the TorchTitan model
         and config parser with vLLM, and select vLLM's model runner."""
@@ -204,7 +204,7 @@ class VLLMEngine(GenerationEngine):
             parallelism=parallelism,
             checkpointer_config=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
-            direct_rdma_model_state_dict=direct_rdma_model_state_dict,
+            fetch_model_state_dict_to_gpu=fetch_model_state_dict_to_gpu,
         )
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         if batch_invariant:
@@ -338,7 +338,7 @@ class VLLMEngine(GenerationEngine):
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
         ``load_prefetched_model_state_dict``. Safe to fill from any thread while no load runs.
-        None with ``direct_rdma_model_state_dict``."""
+        None with ``fetch_model_state_dict_to_gpu``."""
         return self._get_model()._prefetched_model_state_dict
 
     def add_requests(
@@ -415,8 +415,8 @@ class VLLMEngine(GenerationEngine):
         model.load_state_dict(model._prefetched_model_state_dict)
         self._maybe_reset_kv_cache()
 
-    async def load_model_state_dict_direct(
-        self, fetch: Callable[[dict[str, torch.Tensor]], Awaitable[None]]
+    def load_model_state_dict_direct(
+        self, fetch: Callable[[dict[str, torch.Tensor]], None]
     ) -> None:
         """Fetch the model state dict straight into the model's weights, one FSDP group at a
         time, and reset the KV cache when configured.
@@ -425,7 +425,7 @@ class VLLMEngine(GenerationEngine):
             fetch: Fills each tensor of the given subset of the model state dict in place
                 with the new weights.
         """
-        await self._get_model().load_state_dict_direct(fetch)
+        self._get_model().load_state_dict_direct(fetch)
         self._maybe_reset_kv_cache()
 
     def _maybe_reset_kv_cache(self) -> None:

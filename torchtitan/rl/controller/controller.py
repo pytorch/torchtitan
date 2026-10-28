@@ -623,9 +623,6 @@ class Controller(Configurable):
                 dp_degree=self.trainer_dp_degree,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
-                direct_rdma_model_state_dict=(
-                    config.generator.direct_rdma_model_state_dict
-                ),
                 max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
             )
@@ -1081,7 +1078,6 @@ class Controller(Configurable):
             Controller: start push N -> pull N -> release groups, in the background
                           |-> Trainer: stage policy N, TorchStore put_state_dict
                           |-> Generators: prefetch policy N into pinned CPU memory, then load it
-                                          (direct RDMA: read it straight into the weights)
                           |-> Group buffer: admit the next rollout groups
             Trainer:    forward/backward N+1 (does not mutate persistent model state)
 

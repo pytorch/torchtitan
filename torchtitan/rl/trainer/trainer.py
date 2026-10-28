@@ -61,10 +61,6 @@ class Trainer(Configurable):
             Shared with the generator (both load from the same HF checkpoint).
         generator_dtype: Generator dtype (e.g. "bfloat16"). Needed to cast weights to generator dtype
             if generator dtype differs from training dtype. If None, no cast is performed.
-        direct_rdma_model_state_dict: Publish the pinned CPU staging buffers for
-            generators to read directly over RDMA instead of copying them into
-            TorchStore storage volumes. See
-            ``Generator.Config.direct_rdma_model_state_dict``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -81,7 +77,6 @@ class Trainer(Configurable):
         max_num_documents: int | None,
         hf_assets_path: str = "",
         generator_dtype: str = "",
-        direct_rdma_model_state_dict: bool = False,
         output_dir: str,
     ):
         init_logger()
@@ -120,7 +115,6 @@ class Trainer(Configurable):
         training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
         gen_dtype = TORCH_DTYPE_MAP[generator_dtype] if generator_dtype else None
         self._transfer_dtype = gen_dtype if gen_dtype != training_dtype else None
-        self._direct_rdma_model_state_dict = direct_rdma_model_state_dict
 
         self.gpu_peak_flops = utils.get_peak_flops(
             engine.device_memory_monitor.device_name
@@ -420,8 +414,7 @@ class Trainer(Configurable):
           forward/backward blocks this actor's event loop.
         - The controller awaits this push before the next optimizer step mutates
           the model, and awaits the generators' pull of it before the next push
-          reuses the staging buffers and TorchStore key. With direct RDMA, a
-          generator's pull resolves only after all of its ranks finish reading.
+          reuses the staging buffers and TorchStore key.
         """
 
         model_state_dict = self._model_state_dict()
@@ -468,7 +461,7 @@ class Trainer(Configurable):
             ts.put_state_dict(
                 self._staging_state_dict,
                 "model_state_dict",
-                direct_rdma=self._direct_rdma_model_state_dict,
+                direct_rdma=False,
             )
         )
 

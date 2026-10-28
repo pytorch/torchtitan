@@ -55,49 +55,6 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     assert saved_config["trainer"]["training"]["max_context_length"] == 128
 
 
-@pytest.mark.parametrize("direct_rdma", [False, True])
-def test_setup_async_passes_direct_rdma_model_state_dict_to_the_trainer(
-    direct_rdma: bool,
-) -> None:
-    """The trainer must publish the way the generators read, or their reads time out."""
-
-    class TrainerSpawnedError(Exception):
-        pass
-
-    controller = Controller.__new__(Controller)
-    controller.config = SimpleNamespace(
-        async_loop=SimpleNamespace(
-            max_active_rollout_groups=1,
-            num_samples_per_prompt=1,
-            validation=SimpleNamespace(steps=0),
-            batcher=SimpleNamespace(max_num_documents=None),
-        ),
-        trainer=SimpleNamespace(
-            parallelism=SimpleNamespace(
-                data_parallel_shard_degree=1, data_parallel_replicate_degree=1
-            )
-        ),
-        generator=SimpleNamespace(
-            parallelism=SimpleNamespace(data_parallel_degree=1),
-            model_dtype="bfloat16",
-            direct_rdma_model_state_dict=direct_rdma,
-        ),
-        num_generators=1,
-        hf_assets_path="",
-        dump_folder="",
-    )
-    controller._rollouter = SimpleNamespace(get_validation_samples=lambda steps: [])
-    actor_system = SimpleNamespace(
-        provision=AsyncMock(), spawn_trainer=AsyncMock(side_effect=TrainerSpawnedError)
-    )
-
-    with pytest.raises(TrainerSpawnedError):
-        asyncio.run(controller.setup_async(actor_system=actor_system))
-
-    kwargs = actor_system.spawn_trainer.call_args.kwargs
-    assert kwargs["direct_rdma_model_state_dict"] is direct_rdma
-
-
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
     return TrainingSample(
         min_policy_version=0,

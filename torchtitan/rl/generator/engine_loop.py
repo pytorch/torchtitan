@@ -14,7 +14,7 @@ import enum
 import gc
 import logging
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TypeVar
 
@@ -139,9 +139,7 @@ class EngineLoop:
         broadcast_group: dist.ProcessGroup,
         max_engine_steps_between_decisions: int,
         reset_kv_cache_on_model_state_dict_load: bool,
-        fetch_model_state_dict: (
-            Callable[[dict[str, torch.Tensor]], Awaitable[None]] | None
-        ) = None,
+        fetch_model_state_dict: Callable[[dict[str, torch.Tensor]], None] | None = None,
     ):
         self._engine: GenerationEngine | None = engine
         self._fetch_model_state_dict = fetch_model_state_dict
@@ -500,27 +498,28 @@ class EngineLoop:
         buffers and this performs the local CPU-to-GPU copy. With `fetch_model_state_dict`,
         this fetches the model state dict straight into the engine's weights instead.
         """
-        if self._fetch_model_state_dict is not None:
-            await self._load_model_state_dict_direct(self._fetch_model_state_dict)
-        else:
+        if self._fetch_model_state_dict is None:
             self._engine.load_prefetched_model_state_dict()
+        else:
+            await self._load_model_state_dict_direct(self._fetch_model_state_dict)
         self.policy_version = version
         gc.collect()
 
     async def _load_model_state_dict_direct(
-        self, fetch: Callable[[dict[str, torch.Tensor]], Awaitable[None]]
+        self, fetch: Callable[[dict[str, torch.Tensor]], None]
     ) -> None:
         """ALL RANKS: fetch the model state dict into the engine's weights, then wait for
         every rank to finish reading.
 
         Rank 0 replies to the load right after this returns, and the trainer may then
-        overwrite the buffers the other ranks read from.
+        overwrite the StorageVolume snapshot the other ranks read from.
         """
-        # BaseException: a cancelled rank must still join the all_reduce.
-        error: BaseException | None = None
+        error: Exception | None = None
         try:
-            await self._engine.load_model_state_dict_direct(fetch)
-        except BaseException as e:
+            self._engine.load_model_state_dict_direct(fetch)
+        except Exception as e:
+            # Log now: peers may be stuck in a collective until it times out.
+            logger.exception("Direct model state dict load failed")
             error = e
         failed = torch.tensor([int(error is not None)])
         await asyncio.to_thread(dist.all_reduce, failed, group=self._broadcast_group)

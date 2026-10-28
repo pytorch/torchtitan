@@ -14,7 +14,7 @@ TorchTitan models for vLLM.
 import copy
 import dataclasses
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, cast
 
 import spmd_types as spmd
@@ -379,7 +379,7 @@ def _direct_load_groups(
             for fsdp_param in param_group.fsdp_params:
                 if isinstance(fsdp_param._sharded_param_data, _ShardedFSDPTensor):
                     raise ValueError(
-                        "direct_rdma_model_state_dict does not support quantized "
+                        "fetch_model_state_dict_to_gpu does not support quantized "
                         f"parameters ({fsdp_param._module_info.param_name} in "
                         f"{type(module).__name__})"
                     )
@@ -440,7 +440,7 @@ class VLLMModelWrapper(Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         dist_moe_runtime: DistMoeRuntime.Config | None = None,
-        direct_rdma_model_state_dict: bool = False,
+        fetch_model_state_dict_to_gpu: bool = False,
     ):
         super().__init__()
 
@@ -527,7 +527,7 @@ class VLLMModelWrapper(Module):
         # places them on the NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
         self._prefetched_model_state_dict: dict[str, torch.Tensor] | None = None
-        if direct_rdma_model_state_dict:
+        if fetch_model_state_dict_to_gpu:
             # Direct loads fetch into the sharded parameters instead.
             (
                 self._direct_load_groups,
@@ -595,21 +595,22 @@ class VLLMModelWrapper(Module):
             handle.remove()
         return incompatible_keys
 
-    async def load_state_dict_direct(
-        self, fetch: Callable[[dict[str, torch.Tensor]], Awaitable[None]]
+    def load_state_dict_direct(
+        self, fetch: Callable[[dict[str, torch.Tensor]], None]
     ) -> None:
         """Fetch new weights straight into `self.model`, one FSDP group at a time.
 
         Follows the same allocate -> copy -> unshard and free sequence per group as
         `load_state_dict`, but `fetch` writes the group's sharded parameters in place
         (e.g. over RDMA), so no full CPU copy of the weights is needed. Requires
-        `direct_rdma_model_state_dict=True` at construction.
+        `fetch_model_state_dict_to_gpu=True` at construction.
 
         Args:
             fetch: Fills each tensor of the given subset of `self.model.state_dict()`
                 in place with the new weights. Each group's sharded storage is
                 reallocated just before its fetch, so a fetch writing outside the
-                current stream (e.g. RDMA) must first wait for queued device work.
+                current stream (e.g. RDMA) must first wait for queued device work,
+                and must finish writing before it returns.
         """
         error = None
         for module, keyed_params in self._direct_load_groups:
@@ -621,24 +622,24 @@ class VLLMModelWrapper(Module):
             # all-gathers across the FSDP group and the other ranks are still loading.
             if error is None:
                 try:
-                    await fetch(
+                    fetch(
                         {
                             key: fsdp_param.sharded_param
                             for key, fsdp_param in keyed_params
                         }
                     )
-                except BaseException as e:
+                except Exception as e:
                     error = e
             _unshard_and_free_sharded_params(module)
         if error is not None:
             raise error
-        if not self._direct_load_other_keys:
-            return
-        other_tensors = {}
-        for key in self._direct_load_other_keys:
-            module_path, _, name = key.rpartition(".")
-            other_tensors[key] = getattr(self.model.get_submodule(module_path), name)
-        await fetch(other_tensors)
+        if self._direct_load_other_keys:
+            fetch(
+                {
+                    key: self.model.get_buffer(key)
+                    for key in self._direct_load_other_keys
+                }
+            )
 
     def set_num_valid_tokens(self, num_valid_tokens: int) -> None:
         """Publish how many of this step's tokens are real, for the padding mask.
