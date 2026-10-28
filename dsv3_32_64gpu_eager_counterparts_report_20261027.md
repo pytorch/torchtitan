@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T01:48:11.017443+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T01:54:00.349797+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -197,7 +197,11 @@ The No AC attempt 0 was preempted during checkpoint loading on borrowed capacity
 
 Native `EAGER_INITIALIZATION_END` times trainer/model construction. Checkpoint restoration happens later and has separate existing `Loading the checkpoint` / `Finished loading the checkpoint in ... seconds` log markers. The constructor sidecar scope text incorrectly includes checkpoint load; do not use that sidecar as total preparation time.
 
-The queued scheduling counterparts remain held while qualifying the native chunked head. Its existing chunked-loss wrapper unconditionally re-enables gradient synchronization and reshards the head after each microbatch, overriding the requested whole-update accumulation and retention policies. Earlier reduced-model gather comparisons matched 17 scalar histories but did not prove the head followed the requested cadence. An experiment-only wrapper correction is being checked with explicit head-state instrumentation and per-op numeric capture before these jobs are released. Native fusion enables model `inplace_wgrad_accum` flags; graph fusion is expressed in transformed backward graphs. Fused versus unfused arithmetic has different BF16 rounding and is not claimed to match bitwise. The archived legacy graph First configuration has backward regathers, as explained in the original graph report.
+The native chunked-loss wrapper originally re-enabled gradient synchronization and resharded the head after each microbatch, overriding whole-update accumulation and retention policies. The scheduling counterparts use an experiment-only subclass that preserves the incoming FSDP synchronization and reshard settings while reusing the original chunk loop. Core TorchTitan source is unchanged by this head correction. Their original frozen payloads never ran; MAST required terminating those versions before accepting the corrected definitions as version 1. All five replacement definitions were read back and verified.
+
+Head qualification completed 17 updates with real FSDP2/EP2, MTP1, GA8, strict seed 42 and FP32 CPU Adam moments. Corrected every-microbatch execution matches the original native control bitwise. Every-gather versus First-gather pairs with last-update reduction match all 17 average losses, maximum losses and gradient norms, in both fused and unfused execution. Explicit FSDP head instrumentation verifies one reducing backward and one finalization per update; First gather requires one unshard transition per update. Head-only per-op captures cover all eight microbatches of update 2 on both ranks: matched operator/phase/shape summaries and output norm hashes agree. These rounded per-op summaries supplement the full-precision scalar checks. Whole-model DebugMode capture was incompatible with storage-free remat placeholders, so the numeric capture is scoped to the corrected head loop.
+
+Both fused gather arms recorded 6069 uses per rank of an existing MXFP8 running gradient. Native fusion enables model `inplace_wgrad_accum` flags; graph fusion is expressed in transformed backward graphs. Fused versus unfused arithmetic has different BF16 rounding and is not claimed to match bitwise. The native First gather configuration retains parameters across the update; the archived legacy graph First configuration has backward regathers, as explained in the original graph report. These local checks qualify execution semantics, not 671B capacity, convergence, or cross-engine equivalence.
 
 ## Evidence and reproducibility
 
@@ -213,4 +217,5 @@ The queued scheduling counterparts remain held while qualifying the native chunk
 | 64 GPU No AC control | `1457497a35d2fd7570b87566a8af0b3fd22b7538` | `torchtitan_workspace:d36df3dd6514412ebf3aa3a66efefacf` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
 | 64 GPU native main, strict and capture controls | `1457497a35d2fd7570b87566a8af0b3fd22b7538` + MTP annotation patch | `torchtitan_workspace:302fe6d01e964cdd9076676a027fbde3` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
 | 32 GPU native counterparts | `f66c0e6cd7aa3d5356d918e7b8d6a2a6f1fd1c65` + MTP annotation patch | `torchtitan_workspace:aa3efdac1f8d413da72d4f5ac8f94b37` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
-| 64 GPU native scheduling counterparts | `2eb747d1b479616880b27e21c068578d4cb333e6` + MTP annotation patch | `torchtitan_workspace:34c5271cac874defb21c29c02c1d5a89` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
+| 64 GPU scheduling payload before head qualification (held, superseded) | `2eb747d1b479616880b27e21c068578d4cb333e6` + MTP annotation patch | `torchtitan_workspace:34c5271cac874defb21c29c02c1d5a89` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
+| 64 GPU native scheduling with qualified head policy | `2eb747d1b479616880b27e21c068578d4cb333e6` + MTP annotation patch | `torchtitan_workspace:6b7c7969487b435b85105645768736d9` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
