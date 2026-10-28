@@ -18,7 +18,7 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.function import Function
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.distributed.local_compile import apply_local_compile, local_compile
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -226,14 +226,16 @@ class KimiK3Model(MultimodalModel):
         attention_residual: AttentionResidual.Config = field(
             default_factory=AttentionResidual.Config
         )
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "gated_rmsnorm",
-                "fused_binary_activation",
-                "fp32_to_bf16_split",
-                "attention_residual",
-            ]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "gated_rmsnorm",
+                    "fused_binary_activation",
+                    "fp32_to_bf16_split",
+                    "attention_residual",
+                ]
+            )
         )
 
         def get_nparams_and_flops(
@@ -293,12 +295,12 @@ class KimiK3Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> KimiK3Model:
         # Bind local implementations early; torch.compile traces on first use.
-        apply_local_compile(local_compile_regions)
+        local_compile.apply()
         with parallelism_context.activate_spmd():
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)

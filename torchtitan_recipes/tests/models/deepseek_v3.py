@@ -481,7 +481,7 @@ def deepseek_v3_debugmodel_nvfp4_ffn_mxfp8_attn(
             ),
         ],
     )
-    config.model.local_compile_regions = ["loss"]
+    config.model.local_compile.regions = ["loss"]
     return config
 
 
@@ -530,5 +530,5 @@ def deepseek_v3_16b_nvfp4_ffn_mxfp8_attn(
             )
         ],
     )
-    config.model.local_compile_regions = ["loss"]
+    config.model.local_compile.regions = ["loss"]
     return config

@@ -18,7 +18,7 @@ import torch_remat as remat
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.distributed.local_compile import local_compile
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -300,13 +300,15 @@ class MuseGlimmerModel(MultimodalModel):
     class Config(Decoder.Config):
         dim: int = 6656
         vocab_size: int = 202048
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "fused_binary_activation",
-                "rope",
-                "muse_glimmer_logit_postprocess",
-            ]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "rope",
+                    "muse_glimmer_logit_postprocess",
+                ]
+            )
         )
         # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
         # bundled embedding+norm unit whose .embedding/.norm children carry the sharding.
@@ -385,7 +387,7 @@ class MuseGlimmerModel(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> MuseGlimmerModel:
@@ -402,7 +404,7 @@ class MuseGlimmerModel(MultimodalModel):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            local_compile_regions=local_compile_regions,
+            local_compile=local_compile,
             activation_remat=activation_remat,
             dump_folder=dump_folder,
         )

@@ -71,7 +71,7 @@ def _mxfp8_generator_config() -> Controller.Config:
     # Batch-invariant mode is process-wide and cannot be turned off, so an
     # earlier test in this process (e.g. Kimi K3 parity) may have enabled it.
     # Local compile regions reject that mode and this test does not need them.
-    generator_model.local_compile_regions = []
+    generator_model.local_compile.regions = []
     config.generator.model = generator_model
     config.generator.parallelism = generator_parallelism
     config.generator.gpu_memory_limit = 0.1
