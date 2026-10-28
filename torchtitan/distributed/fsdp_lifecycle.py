@@ -45,7 +45,8 @@ def chunked_loss_fsdp(
 
     The final head chunk reduces with the caller's policy unless earlier full
     or HSDP partial gradients require coalescing with the decoder backward.
-    The decoder owns finalization whenever its backward still follows.
+    Manual finalization retains full gradients for deferred replica reduction.
+    The decoder owns automatic finalization whenever its backward still follows.
     """
     if not isinstance(lm_head, FSDPModule):
         yield None
@@ -71,14 +72,25 @@ def chunked_loss_fsdp(
         for owner in states
         for group in owner._fsdp_param_groups
     ]
-    defer_head_to_decoder = decoder_requires_grad and any(
-        policy.group._post_backward_pending
-        or policy.group._partial_reduce_output is not None
-        for policy in policies
+    defer_head_reduction = (
+        (
+            state_ctx.manual_backward_finalization
+            and any(
+                not policy.all_reduce_grads
+                for policy in policies
+                if policy.group in head_groups
+            )
+        )
+        or decoder_requires_grad
+        and any(
+            policy.group._post_backward_pending
+            or policy.group._partial_reduce_output is not None
+            for policy in policies
+        )
     )
 
     def before_last_chunk() -> None:
-        if not defer_head_to_decoder:
+        if not defer_head_reduction:
             for policy in policies:
                 if policy.group in head_groups:
                     policy.group.reduce_grads = policy.reduce_grads

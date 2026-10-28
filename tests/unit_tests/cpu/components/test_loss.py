@@ -815,7 +815,9 @@ class _RecordingFSDPLinear(nn.Linear):
             ],
         )
         self._state._state_ctx = SimpleNamespace(
-            is_last_backward=True, all_states=[self._state]
+            is_last_backward=True,
+            manual_backward_finalization=False,
+            all_states=[self._state],
         )
 
     def _get_fsdp_state(self):

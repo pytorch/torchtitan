@@ -6,17 +6,21 @@
 
 import copy
 import itertools
+from functools import partial
 from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
+from torch.distributed.pipelining import PipelineStage
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 from torchtitan.components.loss import ChunkedLossWrapper
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.pipeline_parallel import _build_pipeline_schedule
 
 
 class _Decoder(torch.nn.Module):
@@ -119,6 +123,84 @@ def _recover_from_chunk_failure(model, loss_fn, count, set_policy, device):
     if _policies(model.lm_head) != expected_policies:
         raise RuntimeError("FSDP reset changed the caller's policy")
     loss_fn.loss_fn = real_loss
+
+
+def _exercise_pipeline_accumulation(rank, world_size, device):
+    # A singleton PP group per rank exercises real schedule finalization while
+    # all four ranks participate in HSDP's sharding and replica collectives.
+    pipeline_groups = [dist.new_group([index]) for index in range(world_size)]
+    mesh = init_device_mesh(
+        device.type, (2, 2), mesh_dim_names=("dp_replicate", "dp_shard")
+    )
+    for schedule_name, deferred, frozen, tied in itertools.product(
+        ("GPipe", "1F1B"), (False, True), (False, True), (False, True)
+    ):
+        torch.manual_seed(42)
+        model = _Decoder(tied=tied, frozen=frozen).to(device)
+        reference = copy.deepcopy(model)
+        fully_shard(model.projection, mesh=mesh)
+        modules = [model.norm, model.lm_head]
+        if tied:
+            modules.insert(0, model.tok_embeddings)
+        fully_shard(modules, mesh=mesh, reshard_after_forward=False)
+        fully_shard(model, mesh=mesh)
+        loss_fn = ChunkedLossWrapper.Config(num_chunks=4).build()
+        loss_fn.set_lm_head(model.lm_head)
+        count = torch.tensor(48, device=device)
+        stage = PipelineStage(model, 0, 1, device, group=pipeline_groups[rank])
+        schedule = _build_pipeline_schedule(
+            parallelism=ParallelismConfig(pipeline_parallel_schedule=schedule_name),
+            num_microbatches=3,
+            stages=[stage],
+            loss_fn=partial(loss_fn, global_loss_token_counts=count),
+        )
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+        reference_optimizer = torch.optim.SGD(
+            reference.parameters(), lr=0.01, momentum=0.9
+        )
+        label = f"{schedule_name}/{deferred=}/{frozen=}/{tied=}"
+        for step in range(3):
+            optimizer.zero_grad(set_to_none=True)
+            reference_optimizer.zero_grad(set_to_none=True)
+            for accumulation in range(2):
+                torch.manual_seed(1000 + 100 * step + 10 * rank + accumulation)
+                inputs = [model.sample_inputs(device) for _ in range(3)]
+                targets = [torch.randint(16, (8,), device=device) for _ in range(3)]
+                model.set_requires_all_reduce(accumulation == 1)
+                losses = []
+                schedule.step(
+                    arg_mbs=[(value,) for value in inputs],
+                    target_mbs=targets,
+                    losses=losses,
+                    return_outputs=False,
+                    finalize_gradients=not deferred or accumulation == 1,
+                )
+                for value, target, loss in zip(inputs, targets, losses, strict=True):
+                    expected_loss = (
+                        torch.nn.functional.cross_entropy(
+                            reference.lm_head(reference(value)), target, reduction="sum"
+                        )
+                        / count
+                    )
+                    expected_loss.backward()
+                    _compare(loss.detach(), expected_loss.detach(), f"{label}/loss")
+            for (name, parameter), (_, expected) in zip(
+                model.named_parameters(), reference.named_parameters(), strict=True
+            ):
+                if parameter.requires_grad:
+                    dist.all_reduce(expected.grad)
+                    expected.grad.div_(world_size)
+                    _compare(
+                        parameter.grad.full_tensor(),
+                        expected.grad,
+                        f"{label}/{name}/gradient",
+                    )
+            optimizer.step()
+            reference_optimizer.step()
+            for (name, parameter), (_, expected) in zip(
+                model.named_parameters(), reference.named_parameters(), strict=True
+            ):
+                _compare(parameter.full_tensor(), expected, f"{label}/{name}/updated")
 
 
 class TestChunkedLossFSDP(DTensorTestBase):
@@ -249,3 +331,5 @@ class TestChunkedLossFSDP(DTensorTestBase):
                         strict=True,
                     ):
                         _compare(parameter.full_tensor(), expected, f"{name}/updated")
+
+        _exercise_pipeline_accumulation(self.rank, self.world_size, device)

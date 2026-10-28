@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
@@ -512,6 +513,14 @@ def _build_pipeline_schedule(
             "and _PipelineScheduleRuntime support csv schedules"
         )
         schedule._load_csv(pp_schedule_csv)
+
+    # Metadata inference runs a real backward. Discard its unreduced FSDP
+    # gradients as well as the sharded gradients cleared by the stage.
+    for stage in stages:
+        if isinstance(stage.submod, FSDPModule):
+            schedule.register_post_metadata_inference_cleanup(
+                stage.submod.reset_iter_state
+            )
 
     return schedule
 

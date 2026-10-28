@@ -585,7 +585,8 @@ class ChunkedLossWrapper(Loss[LossInput]):
         pending microbatch gradients, the decoder backward's group hooks or
         root callback reduce the head instead, keeping each group's gradients
         together. Inner backwards preserve the decoder's prefetch and
-        finalization state. Frozen decoders finish through the head backward.
+        finalization state. Frozen decoders finish through the head backward
+        or the caller's manual finalization.
 
     TP / SP composability:
         The root decoder norm emits hidden states that are replicated on the
