@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from torchtitan.rl.actors.system import TrainerHandle
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.controller import Controller, ValidationConfig
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
 GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"
@@ -50,9 +50,11 @@ class _Endpoint:
         return await self.call(*args, **kwargs)
 
 
-def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
+def _controller(
+    events: list[str], *, on_push=None, on_pull=None, start_step: int = 0
+) -> Controller:
     """A controller with only the state `_trainer_loop` reads; each actor call appends to `events`."""
-    version = 0
+    version = start_step
 
     async def forward_backward(*args):
         events.append(f"fwd_bwd {version + 1}")
@@ -84,10 +86,11 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
             target_offpolicy_steps=1,
             max_offpolicy_steps=None,
             num_prompts_per_train_step=5,
+            validation=ValidationConfig(),
         )
     )
-    controller.start_step = 0
-    controller._trainer_policy_version = 0
+    controller.start_step = start_step
+    controller._trainer_policy_version = start_step
     trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
         forward_backward=_Endpoint(forward_backward),
@@ -217,6 +220,71 @@ def test_push_and_pull_times_are_logged_one_step_late() -> None:
     # Step 2 logs step 1's push and pull, which have run by then.
     assert second[TRAINER_PUSH_KEY].value.value > 0.0
     assert second[GENERATOR_PULL_KEY].value.value > 0.0
+
+
+@pytest.mark.parametrize("interval_steps", [-1, -2])
+def test_validation_interval_must_be_non_negative(interval_steps: int) -> None:
+    with pytest.raises(
+        ValueError, match="validation interval_steps must be non-negative"
+    ):
+        ValidationConfig(interval_steps=interval_steps)
+
+
+def test_periodic_validation_waits_for_pull_and_blocks_next_step() -> None:
+    events: list[str] = []
+    controller = _controller(events)
+    controller.config.async_loop.validation.interval_steps = 2
+
+    async def validate_and_log(*, step: int) -> dict[str, float]:
+        events.append(f"validation {step} start")
+        await asyncio.sleep(0)
+        events.append(f"validation {step} end")
+        return {}
+
+    controller._validate_and_log = validate_and_log
+    _run(controller, num_training_steps=10)
+
+    for step in (2, 4, 6, 8):
+        assert events.index(
+            f"release 5 trained", events.index(f"pull {step}")
+        ) < events.index(f"validation {step} start")
+        assert events.index(f"validation {step} end") < events.index(
+            f"fwd_bwd {step + 1}"
+        )
+    assert [event for event in events if event.startswith("validation ")] == [
+        f"validation {step} {phase}"
+        for step in (2, 4, 6, 8)
+        for phase in ("start", "end")
+    ]
+
+
+def test_periodic_validation_uses_absolute_steps_after_resume() -> None:
+    events: list[str] = []
+    controller = _controller(events, start_step=3)
+    controller.config.async_loop.validation.interval_steps = 2
+
+    async def validate_and_log(*, step: int) -> dict[str, float]:
+        events.append(f"validation {step}")
+        return {}
+
+    controller._validate_and_log = validate_and_log
+    _run(controller, num_training_steps=7)
+
+    assert [event for event in events if event.startswith("validation ")] == [
+        "validation 4",
+        "validation 6",
+    ]
+
+
+@pytest.mark.parametrize("validation_steps,interval_steps", [(20, 0), (0, 2)])
+def test_periodic_validation_disabled(
+    validation_steps: int, interval_steps: int
+) -> None:
+    controller = _controller([])
+    controller.config.async_loop.validation = ValidationConfig(
+        steps=validation_steps, interval_steps=interval_steps
+    )
+    _run(controller, num_training_steps=2)
 
 
 def test_push_failure_fails_the_loop() -> None:
