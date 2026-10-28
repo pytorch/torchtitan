@@ -85,12 +85,7 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import derive, override
 from torchtitan.distributed.context_parallel import cp_all_gather_tensors
-from torchtitan.models.common.attention import (
-    FlexInnerAttention,
-    MLAAttention,
-    VarlenAttentionMetadata,
-    VarlenInnerAttention,
-)
+from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 from torchtitan.models.common.attention.cp_mla import (
     AllGatherKVMLAFlexAttention,
@@ -886,12 +881,12 @@ class _FusedMLAKV(torch.autograd.Function):
         rope_cache_real: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-        # K shares KV's token layout, while its positional tail and position IDs
-        # are shared across heads. This also covers CP-sharded heads in Ulysses.
+        # CP gathers tokens; Ulysses also shards heads. Infer the resulting layout.
         kv_type = spmd.rules.einsum("bthp,btr,bt->bthp", kv, k_pe, positions)
         spmd.assert_type(rope_cache_real, spmd.R)
-        for output in outputs:
-            spmd.assert_type_like(output, kv_type)
+        k, v = outputs
+        spmd.assert_type_like(k, kv_type)
+        spmd.assert_type_like(v, kv_type)
 
     @staticmethod
     def forward(
@@ -984,7 +979,7 @@ def fused_mla_kv(
     )
 
 
-def _materialize_cp_mla_kv(
+def _materialize_fused_mla_kv(
     q_THK: torch.Tensor,
     kv_THP: torch.Tensor,
     k_shared_TR: torch.Tensor,
@@ -992,7 +987,7 @@ def _materialize_cp_mla_kv(
     rope_cache: torch.Tensor,
     positions_T: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fuse shared-key RoPE and KV assembly in the post-communication layout."""
+    """Adapt packed MLA inputs to the fused shared-key RoPE and KV assembly."""
     k_1THK, v_1THV = fused_mla_kv(
         kv_THP.unsqueeze(0),
         k_shared_TR.unsqueeze(0),
@@ -1079,64 +1074,25 @@ class FusedMLAAttention(DeepSeekMLAAttention):
         # kv_norm and the fused kernel read the wkv_a projection output with bare ops.
         remat.recompute_needs_tensor(kv_down)
 
+        positions_T = _resolve_positions(positions, k_pe.unsqueeze(0)).squeeze(0)
         if isinstance(self.inner_attention, CPInnerAttention):
             # Gather positions in the same rank/token order as the shared key,
             # including packed documents and CP load-balancing permutations.
-            positions_T = _resolve_positions(positions, k_pe.unsqueeze(0)).squeeze(0)
             (positions_T,) = cp_all_gather_tensors(
                 (positions_T,), reduce_dtype=positions_T.dtype
             )
-            output = self.inner_attention(
-                q,
-                self.kv_norm(kv_latent),
-                k_pe,
-                materialize_kv=partial(
-                    _materialize_cp_mla_kv,
-                    rope_cache=self.rope.cache,
-                    positions_T=positions_T,
-                ),
-                attention_metadata=attention_metadata,
-                scale=self.softmax_scale,
-            )
-        else:
-            kv = self.inner_attention.wkv_b(self.kv_norm(kv_latent))
-            with spmd.local():
-                kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
-                # The fused kernel reads the wkv_b projection output outside any region.
-                remat.recompute_needs_tensor(kv)
-                k, v = fused_mla_kv(
-                    kv.unsqueeze(0),
-                    k_pe.unsqueeze(0),
-                    self.rope.cache,
-                    positions,
-                    self.qk_nope_head_dim,
-                )
-                k, v = k.squeeze(0), v.squeeze(0)
-                if spmd.is_type_checking() and not torch.compiler.is_compiling():
-                    for tensor in (k, v):
-                        spmd.assert_type(
-                            tensor,
-                            spmd.V,
-                            spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                        )
-
-            inner_attention = self.inner_attention
-            assert isinstance(inner_attention, MLAAttention)
-            # fused_mla_kv already materialized K/V, so bypass the compact MLA
-            # forward and call its underlying Q/K/V backend directly.
-            qkv_attention = inner_attention.inner_attention
-            assert isinstance(qkv_attention, (FlexInnerAttention, VarlenInnerAttention))
-            output = remat.region(
-                qkv_attention,
-                self.remat_region_name("inner_attention"),
-                recompute=self.remat_should_recompute("inner_attention"),
-            )(
-                q,
-                k,
-                v,
-                attention_metadata=attention_metadata,
-                scale=self.softmax_scale,
-            )
+        output = self.inner_attention(
+            q,
+            self.kv_norm(kv_latent),
+            k_pe,
+            materialize_kv=partial(
+                _materialize_fused_mla_kv,
+                rope_cache=self.rope.cache,
+                positions_T=positions_T,
+            ),
+            attention_metadata=attention_metadata,
+            scale=self.softmax_scale,
+        )
 
         # The copy below reads the MLA attention output with bare ops.
         remat.recompute_needs_tensor(output)
