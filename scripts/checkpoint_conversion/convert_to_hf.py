@@ -12,7 +12,6 @@ import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.observability.logging import init_logger
 
 if __package__:
     from scripts.checkpoint_conversion.utils import build_model_config_for_conversion
@@ -58,7 +57,7 @@ def convert_to_hf(
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
         save_distributed=True,
-        fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping_for(hf_state_dict),
+        fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping_for_save(hf_state_dict),
         enable_consolidation=True,
         thread_count_consolidation=5,
     )
@@ -75,8 +74,6 @@ def convert_to_hf(
 
 
 if __name__ == "__main__":
-    init_logger()
-
     parser = argparse.ArgumentParser(description="Convert DCP weights to HF format.")
     parser.add_argument(
         "input_dir", type=Path, help="Input directory with DCP weights."

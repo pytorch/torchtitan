@@ -368,7 +368,7 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
                 expected[f"{mtp_layer}.eh_proj.weight"] = 2
             with self.subTest(num_mtp_layers=num_mtp_layers):
                 self.assertEqual(
-                    adapter.fqn_to_index_mapping_for(hf_state_dict), expected
+                    adapter.fqn_to_index_mapping_for_save(hf_state_dict), expected
                 )
 
     def test_mtp_layers_save_independent_embedding_and_head_copies(self) -> None:
@@ -629,7 +629,7 @@ class KimiK3StateDictAdapterTest(unittest.TestCase):
             hf_state_dict = adapter.to_hf(config.build().state_dict())
 
         self.assertEqual(
-            adapter.fqn_to_index_mapping_for(hf_state_dict),
+            adapter.fqn_to_index_mapping_for_save(hf_state_dict),
             {
                 f"{experts}.w1.weight": 1,
                 "language_model.model.norm.weight": 2,
@@ -664,7 +664,7 @@ class KimiK3StateDictAdapterTest(unittest.TestCase):
                     enable_consolidation=False,
                 ),
             )
-            fqn_to_index_mapping = adapter.fqn_to_index_mapping_for(exported)
+            fqn_to_index_mapping = adapter.fqn_to_index_mapping_for_save(exported)
             consolidate_safetensors_files_on_every_rank(
                 input_dir=sharded_dir,
                 output_dir=checkpoint_dir,
@@ -975,7 +975,7 @@ class GptOssStateDictAdapterTest(unittest.TestCase):
             hf_state_dict = adapter.to_hf(config.build().state_dict())
 
         self.assertEqual(
-            adapter.fqn_to_index_mapping_for(hf_state_dict),
+            adapter.fqn_to_index_mapping_for_save(hf_state_dict),
             {
                 f"{experts}.gate_up_proj": 1,
                 f"{experts}.gate_up_proj_bias": 1,

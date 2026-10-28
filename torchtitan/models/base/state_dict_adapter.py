@@ -137,7 +137,7 @@ class BaseStateDictAdapter(ABC):
         """
         pass
 
-    def fqn_to_index_mapping_for(
+    def fqn_to_index_mapping_for_save(
         self, hf_fqns: Collection[str]
     ) -> dict[Any, int] | None:
         """Restrict ``fqn_to_index_mapping`` to the tensors an HF save writes.
@@ -158,7 +158,7 @@ class BaseStateDictAdapter(ABC):
             return None
         skipped = sorted(self.fqn_to_index_mapping.keys() - hf_fqns)
         if skipped:
-            logger.info(
+            logger.warning(
                 f"Skipping {len(skipped)} tensors listed in "
                 f"model.safetensors.index.json but missing from the HF state "
                 f"dict: {skipped[:20]}"

@@ -342,7 +342,7 @@ class CheckpointManager(BaseCheckpointManager):
             # Each rank's to_hf output holds only its own PP stage and experts;
             # the save's global metadata lists the tensors of every rank.
             assert self.sd_adapter is not None and isinstance(ret, Metadata)
-            fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping_for(
+            fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping_for_save(
                 ret.state_dict_metadata
             )
             assert fqn_to_index_mapping is not None
