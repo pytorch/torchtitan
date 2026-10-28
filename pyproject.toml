@@ -22,6 +22,7 @@ Issues = "https://github.com/pytorch/torchtitan/issues"
 version = {file = "assets/version.txt"}
 dependencies = {file = ["requirements.txt"]}
 optional-dependencies.dev = {file = ["requirements-dev.txt"]}
+optional-dependencies.mlflow = {file = ["requirements-mlflow.txt"]}
 optional-dependencies.rl = {file = [".ci/docker/requirements-rl.txt"]}
 optional-dependencies.vlm = {file = [".ci/docker/requirements-vlm.txt"]}
 optional-dependencies.flux = {file = [".ci/docker/requirements-flux.txt"]}

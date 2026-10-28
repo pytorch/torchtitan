@@ -1,0 +1,1 @@
+mlflow-skinny>=2.18,<4
