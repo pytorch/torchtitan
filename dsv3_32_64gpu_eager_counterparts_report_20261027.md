@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T12:49:52.042715+00:00. Original autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T12:56:16.868268+00:00. Original autonomous experiment window ended 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
