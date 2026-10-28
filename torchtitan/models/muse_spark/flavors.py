@@ -24,6 +24,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     QKVLinear,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import (
@@ -372,13 +373,16 @@ def _attention_config(
             inner_attention = SlidingWindowFlexInnerAttention.Config(
                 block_size=inner_attention.block_size,
                 kernel_options=inner_attention.kernel_options,
-                window_size=window_size,
+                sliding_window_size=window_size,
                 sharding_config=inner_attention_local_spmd_sharding_config(),
             )
         elif isinstance(inner_attention, VarlenInnerAttention.Config):
-            inner_attention = dataclasses.replace(
-                inner_attention,
-                window_size=(window_size - 1, 0),
+            inner_attention = SlidingWindowVarlenInnerAttention.Config(
+                **{
+                    f.name: getattr(inner_attention, f.name)
+                    for f in dataclasses.fields(inner_attention)
+                },
+                sliding_window_size=window_size,
             )
     return MuseSparkAttention.Config(
         n_heads=num_heads,

@@ -8,24 +8,201 @@
 #   T = packed tokens, H = attention heads, K = query/key head dimension,
 #   V = value head dimension, D = model dimension
 
+import importlib
 import unittest
+from contextlib import nullcontext
+from dataclasses import replace
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
+
+import pytest
 
 import spmd_types as spmd
 import torch
+from torch.nn.attention import SDPBackend
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform.base import convert_config_type
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     GQAttention,
     QKVLinear,
+    SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
+from torchtitan.models.common.attention.cp_attention import (
+    UlyssesSlidingWindowVarlenInnerAttention,
+    UlyssesVarlenInnerAttention,
+)
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import ComplexRoPE
+
+
+@pytest.mark.parametrize(
+    "config, kernel_window_size, is_full",
+    [
+        (VarlenInnerAttention.Config(), (-1, 0), True),
+        (
+            SlidingWindowVarlenInnerAttention.Config(sliding_window_size=1),
+            (0, 0),
+            False,
+        ),
+        (
+            SlidingWindowVarlenInnerAttention.Config(sliding_window_size=4),
+            (3, 0),
+            False,
+        ),
+    ],
+)
+def test_window_metadata_and_kernel(config, kernel_window_size, is_full):
+    positions_T = torch.tensor([0, 1, 2, 0, 1, 2, 3])
+    metadata = config.build_attention_metadata(
+        positions_T, max_num_documents=3, max_context_length=4
+    )
+    assert metadata.window_size == kernel_window_size
+    assert config.is_full_attention == is_full
+    torch.testing.assert_close(
+        metadata.cu_seq_q, torch.tensor([0, 3, 7, 7], dtype=torch.int32)
+    )
+    attention = config.build()
+    q_THK = torch.randn(7, 2, 8, dtype=torch.bfloat16)
+    with patch(
+        "torchtitan.models.common.attention.attention._varlen_attn",
+        return_value=q_THK,
+    ) as kernel:
+        attention(q_THK, q_THK, q_THK, attention_metadata=metadata)
+    assert kernel.call_args.kwargs["window_size"] == kernel_window_size
+
+
+@pytest.mark.parametrize("sliding_window_size", [0, (3, 0)])
+def test_sliding_window_requires_positive_integer(sliding_window_size):
+    with pytest.raises(ValueError, match="sliding_window_size must be an integer >= 1"):
+        SlidingWindowVarlenInnerAttention.Config(
+            sliding_window_size=sliding_window_size
+        )
+
+
+def test_decoder_shares_metadata_by_backend():
+    from torchtitan.models.llama3 import build_model_config
+
+    config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+    configs = [
+        VarlenInnerAttention.Config(),
+        SlidingWindowVarlenInnerAttention.Config(sliding_window_size=4),
+        SlidingWindowVarlenInnerAttention.Config(sliding_window_size=4),
+    ]
+    template = config.layers[0]
+    config = replace(
+        config,
+        layers=[
+            replace(
+                template, attention=replace(template.attention, inner_attention=inner)
+            )
+            for inner in configs
+        ],
+    )
+    with patch(
+        "torchtitan.models.common.attention.attention."
+        "create_varlen_metadata_for_document",
+        wraps=create_varlen_metadata_for_document,
+    ) as build_metadata:
+        metadata = Decoder._get_attention_metadata(
+            cast(Decoder, SimpleNamespace(config=config)), torch.arange(8)
+        )
+    assert build_metadata.call_count == 2
+    assert set(metadata) == {VarlenInnerAttention, SlidingWindowVarlenInnerAttention}
+    for backend, window_size in (
+        (VarlenInnerAttention, (-1, 0)),
+        (SlidingWindowVarlenInnerAttention, (3, 0)),
+    ):
+        backend_metadata = metadata[backend]
+        assert isinstance(backend_metadata, VarlenAttentionMetadata)
+        assert backend_metadata.window_size == window_size
+
+
+@pytest.mark.parametrize(
+    "backends",
+    [
+        (SlidingWindowFlexInnerAttention, SlidingWindowFlexInnerAttention),
+        (SlidingWindowVarlenInnerAttention, SlidingWindowVarlenInnerAttention),
+        (SlidingWindowFlexInnerAttention, SlidingWindowVarlenInnerAttention),
+    ],
+)
+@pytest.mark.parametrize("model", ["llama3", "muse_spark"])
+def test_decoder_validates_shared_window_sizes(backends, model):
+    module = importlib.import_module(f"torchtitan.models.{model}")
+    config = module.build_model_config("debugmodel", parallelism=ParallelismConfig())
+    template = config.layers[0]
+    layers = [
+        replace(
+            template,
+            attention=replace(
+                template.attention,
+                inner_attention=backend.Config(sliding_window_size=window_size),
+            ),
+        )
+        for backend, window_size in zip(backends, (4, 8))
+    ]
+    expected = (
+        pytest.raises(ValueError, match="must use the same sliding_window_size")
+        if backends[0] is backends[1]
+        else nullcontext()
+    )
+    with expected:
+        replace(config, layers=layers)
+
+    if backends[0] is backends[1]:
+        config.layers = layers
+        with pytest.raises(ValueError, match="must use the same sliding_window_size"):
+            config.build()
+
+
+@pytest.mark.parametrize("model", ["gpt_oss", "muse_glimmer", "muse_spark"])
+def test_sliding_varlen_preserves_backend_options(model):
+    flavors = importlib.import_module(f"torchtitan.models.{model}.flavors")
+    with patch.object(
+        flavors,
+        "get_attention_config",
+        side_effect=lambda _backend: VarlenInnerAttention.Config(
+            sdpa_backends=[SDPBackend.FLASH_ATTENTION]
+        ),
+    ):
+        config = flavors.build_model_config(
+            "debugmodel", seq_len=128, parallelism=ParallelismConfig()
+        )
+    inner_configs = [layer.attention.inner_attention for layer in config.layers]
+    assert {type(inner) for inner in inner_configs} == {
+        VarlenInnerAttention.Config,
+        SlidingWindowVarlenInnerAttention.Config,
+    }
+    for inner in inner_configs:
+        assert inner.sdpa_backends == [SDPBackend.FLASH_ATTENTION]
+
+
+@pytest.mark.parametrize(
+    "config, cp_backend, kernel_window_size",
+    [
+        (VarlenInnerAttention.Config(), UlyssesVarlenInnerAttention, (-1, 0)),
+        (
+            SlidingWindowVarlenInnerAttention.Config(sliding_window_size=4),
+            UlyssesSlidingWindowVarlenInnerAttention,
+            (3, 0),
+        ),
+    ],
+)
+def test_cp_conversion_preserves_varlen_options(config, cp_backend, kernel_window_size):
+    config.sdpa_backends = [SDPBackend.FLASH_ATTENTION]
+    converted = convert_config_type(config, cp_backend)
+    assert type(converted) is cp_backend.Config
+    assert converted.sdpa_backends == config.sdpa_backends
+    metadata = converted.build_attention_metadata(torch.arange(8))
+    assert metadata.window_size == kernel_window_size
 
 
 class TestPackedVarlenAttentionMetadata(unittest.TestCase):
@@ -39,6 +216,7 @@ class TestPackedVarlenAttentionMetadata(unittest.TestCase):
         expected_type = spmd.SpmdType(
             {
                 MeshAxisName.DP: spmd.V,
+                MeshAxisName.CP: spmd.R,
                 MeshAxisName.TP: spmd.R,
             },
             partition_spec=spmd.PartitionSpec(MeshAxisName.DP),

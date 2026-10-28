@@ -17,7 +17,7 @@ import torch_remat as remat
 from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.local_compile import local_compile
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -324,6 +324,10 @@ class MuseSparkLMHead(HiMidLoLinear):
         self.output_multiplier = config.output_multiplier
         self.output_soft_cap_temp = config.output_soft_cap_temp
 
+    # TODO(ruisizhang123): the compiled bwd still computes
+    # dz * temp * (1 - tanh^2) * (1/temp) * mult (4 fp32 roundings). A custom
+    # autograd.Function bwd (recompute tanh from the saved fp32 logits) can cancel
+    # temp * (1/temp) into dz * mult * (1 - tanh^2) (2 roundings).
     @local_compile("muse_spark_logit_postprocess", batch_invariant=True)
     def postprocess_logits(self, logits_TV: torch.Tensor) -> torch.Tensor:
         """Apply Muse Spark Open's output scaling and smooth logit cap."""
@@ -433,19 +437,21 @@ class MuseSparkModel(MultimodalModel):
         encoder weights needed for a later multimodal fine-tune.
         """
 
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "fused_binary_activation",
-                "fp32_to_bf16_split",
-                "rope",
-                "muse_spark_attention_output",
-                "muse_spark_attention_qk",
-                "muse_spark_input_scaled_rmsnorm",
-                "muse_spark_logit_postprocess",
-                "muse_spark_residual",
-                "muse_spark_rmsnorm",
-            ]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "fp32_to_bf16_split",
+                    "rope",
+                    "muse_spark_attention_output",
+                    "muse_spark_attention_qk",
+                    "muse_spark_input_scaled_rmsnorm",
+                    "muse_spark_logit_postprocess",
+                    "muse_spark_residual",
+                    "muse_spark_rmsnorm",
+                ]
+            )
         )
         # pyrefly: ignore [bad-override]
         tok_embeddings: MuseSparkEmbeddingWithNorm.Config
@@ -460,6 +466,7 @@ class MuseSparkModel(MultimodalModel):
         perception_emb_norm: MuseSparkRMSNorm.Config | None = None
 
         def __post_init__(self) -> None:
+            MultimodalModel.Config.__post_init__(self)
             if self.enable_weight_tying:
                 raise ValueError(
                     "Muse Spark does not support token embedding weight tying"

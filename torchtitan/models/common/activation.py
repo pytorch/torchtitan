@@ -12,7 +12,6 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from torchtitan.config.configurable import Configurable
 from torchtitan.config.function import Function
 from torchtitan.distributed.local_compile import local_compile
 
@@ -25,7 +24,7 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+    class Config(Function.Config):
         pass
 
     # recompile_limit=16: ~3 graphs per static F; DeepSeek-V3 at TP8 needs 10 (default 8).
@@ -75,7 +74,7 @@ class UnaryActivationFn(Function[torch.Tensor], ABC):
     """Base class for configurable one-input activation functions."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+    class Config(Function.Config):
         pass
 
     @abstractmethod

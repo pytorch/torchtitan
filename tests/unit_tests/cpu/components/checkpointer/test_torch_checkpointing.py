@@ -28,7 +28,7 @@ from torch_checkpointing.checkpoint_layout import SafetensorsSerialization
 from torch_checkpointing.checkpoint_manager import (
     CheckpointManager as BackendCheckpointManager,
 )
-from torch_checkpointing.checkpoint_writer import CheckpointWriterConfig
+from torch_checkpointing.checkpoint_writer import CallbackArgs, CheckpointWriterConfig
 from torch_checkpointing.config import (
     AsyncCheckpointSaverConfig,
     SyncCheckpointSaverConfig,
@@ -54,7 +54,7 @@ from torchtitan.components.checkpointer.torch_checkpointing import (
     _default_backend_config,
     TorchCheckpointingManager,
 )
-from torchtitan.config import Function
+from torchtitan.config import CallableFunction
 
 
 class _BackendManager:
@@ -163,7 +163,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         config = TorchCheckpointingManager.Config(
             keep_latest_k=0,
             initial_load_model_only=False,
-            purge_exempt=Function.Config(fn=lambda step: step % 2 == 0),
+            purge_exempt=CallableFunction.Config(fn=lambda step: step % 2 == 0),
         )
 
         manager, backend_manager = self._build_manager(config)
@@ -624,12 +624,12 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         consolidate from it verbatim.
         """
 
-        def _pre_finalize_callback_ensure_nonempty_dir(path, _logger) -> None:
-            self.assertTrue(os.path.isdir(path))
+        def _pre_finalize_callback_ensure_nonempty_dir(args: CallbackArgs) -> None:
+            self.assertTrue(os.path.isdir(args.path))
             self.assertGreater(
-                len(os.listdir(path)),
+                len(os.listdir(args.path)),
                 0,
-                msg=f"callback was handed {path!r}, which holds no shards",
+                msg=f"callback was handed {args.path!r}, which holds no shards",
             )
 
         with tempfile.TemporaryDirectory() as root:
@@ -805,7 +805,13 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         save_path = Path(sync_manager.save_calls[0][0])
         prefix = sync_config.save.writer_config.temp_dir_prefix
         staged = save_path.parent / f"{prefix}{save_path.name}"
-        sync_config.pre_finalize_callback(str(staged), mock.Mock())
+        sync_config.pre_finalize_callback(
+            CallbackArgs(
+                path=str(staged),
+                storage=mock.Mock(),
+                event_logger=mock.Mock(),
+            )
+        )
         consolidate.assert_called_once_with(
             "/tmp/checkpoint/step-5/tmp_sharded",
             output_dir="/tmp/checkpoint/step-5",

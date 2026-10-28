@@ -70,8 +70,7 @@ def validate_model_training_config(
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
             if num_heads % tp != 0:
                 raise ValueError(
-                    f"tensor_parallel_degree ({tp}) must divide "
-                    f"n_heads ({num_heads})."
+                    f"tensor_parallel_degree ({tp}) must divide n_heads ({num_heads})."
                 )
             # Fused QKV projections shard whole KV-head groups. Attention with
             # separate K/V projections may instead shard each head's features.
@@ -137,11 +136,12 @@ def validate_model_training_config(
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
 
-    if debug.spmd_typechecking and model.local_compile_regions:
+    if debug.spmd_typechecking and model.local_compile.regions:
         # TODO: Remove this once Dynamo supports tracing SPMD typechecking.
         raise ValueError(
             "Local compilation is not supported with SPMD typechecking. "
-            "Set model.local_compile_regions=[] or disable debug.spmd_typechecking."
+            "Set model.local_compile.regions=[] or disable "
+            "debug.spmd_typechecking."
         )
 
     validate_context_parallel(model, parallelism)
@@ -153,13 +153,14 @@ def validate_context_parallel(
     """Validate CP inner attentions, load balancers, and Ulysses head sharding."""
     from torchtitan.distributed.context_parallel import supports_cp_inner_attention
     from torchtitan.models.common.attention.cp_attention import (
+        AllGatherKVVarlen,
         CPInnerAttention,
         Ulysses,
     )
+    from torchtitan.models.common.attention.gdn import GDN
     from torchtitan.models.common.decoder import Decoder
 
     cp = parallelism.context_parallel_degree
-
     for fqn, traversed, _, _ in model.traverse(Attention.Config):
         attention = traversed
         inner_attention = attention.inner_attention
@@ -187,6 +188,8 @@ def validate_context_parallel(
             head_shard_degree = parallelism.tensor_parallel_degree * cp
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
+            if isinstance(attention, GDN.Config):
+                n_kv_heads = attention.in_proj_q.out_features // attention.key_head_dim
             for name, count in (("n_heads", n_heads), ("n_kv_heads", n_kv_heads)):
                 if count % head_shard_degree != 0:
                     raise ValueError(
@@ -196,13 +199,19 @@ def validate_context_parallel(
                     )
 
         load_balancer_config = parallelism.context_parallel_load_balancer
-        # Linear attention routes recurrent states using the shared permutation;
-        # it does not constrain which attention load balancer creates it.
+        # Linear attention either routes states or restores token order using
+        # the shared permutation; the full-attention backend selects the balancer.
         if isinstance(attention, LinearAttention.Config):
             continue
         if load_balancer_config is None:
             continue
-        if isinstance(model, Decoder.Config) and model.first_full_attention is None:
+        # Decoder ignores load balancers without full attention.
+        # And Varlen rejects PTRR.
+        if (
+            isinstance(model, Decoder.Config)
+            and model.first_full_attention is None
+            and not issubclass(cp_inner_attention, AllGatherKVVarlen)
+        ):
             continue
         if issubclass(cp_inner_attention, Ulysses):
             raise ValueError(

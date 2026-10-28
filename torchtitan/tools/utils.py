@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import importlib.util
 import logging
 import os
 import subprocess
@@ -13,7 +14,6 @@ from types import ModuleType
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
-
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +46,21 @@ def get_cuda_flash_attention_impl() -> str | None:
     # torch.compile there, so Hopper (sm90) stays on FA3.
     # https://github.com/pytorch/torchtitan/pull/4413
     if has_cuda_capability(10, 0):
-        return "FA4"
-    if has_cuda_capability(9, 0):
-        return "FA3"
-    return None
+        impl, module = "FA4", "flash_attn.cute"
+    elif has_cuda_capability(9, 0):
+        impl, module = "FA3", "flash_attn_interface"
+    else:
+        return None
+    try:
+        found = importlib.util.find_spec(module) is not None
+    except ModuleNotFoundError:  # Parent package `flash_attn` missing.
+        found = False
+    if not found:
+        raise ValueError(
+            f"{impl} is required for Varlen attention, but '{module}' is not installed. "
+            f"Install a compatible {impl} wheel or explicitly select another attention backend."
+        )
+    return impl
 
 
 def has_rocm_capability(major: int, minor: int) -> bool:

@@ -59,7 +59,7 @@ It is the contributor’s responsibility to justify the change. The requirements
 
 #### Loss
 
-- If a change does not impact computation results, one should see identical loss before vs. after, with fixed random seeds (`training.seed`) and deterministic algorithms (`training.deterministic`). An example is activation checkpointing.
+- If a change does not impact computation results, one should see identical loss before vs. after, with fixed random seeds (`config.debug.seed`) and deterministic algorithms (`config.debug.deterministic`). An example is activation checkpointing.
 - If a change is expected to impact computation results, loss converging should be verified via end-to-end training on representable datasets (e.g. Llama 3 models on the C4 dataset). Please refer to the recommended practices in [debugging.md](docs/debugging.md#validating-a-distributed-training-technique).
 
 #### Performance

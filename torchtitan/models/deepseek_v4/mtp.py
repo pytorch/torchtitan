@@ -11,7 +11,7 @@ import torch
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
+from torchtitan.models.deepseek_v3.mtp import MTPCrossEntropyLoss, roll_mtp_sequence
 
 from .model import DeepSeekV4TransformerBlock
 
@@ -84,4 +84,4 @@ class MTPBlock(DeepSeekV4TransformerBlock):
         return next_hc_hidden, prediction_hidden
 
 
-__all__ = ["MTPBlock", "MTPLoss", "roll_mtp_sequence"]
+__all__ = ["MTPBlock", "MTPCrossEntropyLoss", "roll_mtp_sequence"]

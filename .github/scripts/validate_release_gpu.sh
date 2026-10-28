@@ -11,9 +11,11 @@ required_env_vars=(
   VALIDATION_SUITE
   TORCH_VERSION
   TORCHVISION_VERSION
-  TORCHAO_VERSION
   PYTORCH_INDEX_URL
 )
+if [[ "${VALIDATION_SUITE:-}" != rl* ]]; then
+  required_env_vars+=(TORCHAO_INDEX_URL)
+fi
 for var in "${required_env_vars[@]}"; do
   if [[ -z "${!var:-}" ]]; then
     echo "Missing required environment variable: ${var}"
@@ -23,21 +25,26 @@ done
 
 case "${VALIDATION_SUITE}" in
   core|graph-trainer|graph-trainer-h100|h100|b200|torchft|transformers-modeling-backend) ;;
+  rl-unit|rl|rl-b200)
+    : "${VLLM_VERSION:?Set VLLM_VERSION to an exact version compatible with the release torch}"
+    export VLLM_VERSION
+    ;;
   *)
     echo "Unknown validation suite: ${VALIDATION_SUITE}" >&2
     exit 1
     ;;
 esac
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+# Resolve from this script so B200 archive checkouts work without a .git directory.
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 RC_VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/assets/version.txt")"
 if [[ "${RC_VERSION}" != *rc* ]]; then
   echo "Expected an RC version, got: ${RC_VERSION}"
   exit 1
 fi
-export RC_VERSION VALIDATION_SUITE TORCH_VERSION TORCHVISION_VERSION TORCHAO_VERSION
+export RC_VERSION VALIDATION_SUITE TORCH_VERSION TORCHVISION_VERSION
 
-if [[ "${VALIDATION_SUITE}" == "b200" ]]; then
+if [[ "${VALIDATION_SUITE}" == "b200" || "${VALIDATION_SUITE}" == "rl-b200" ]]; then
   # The B200 CUDA container has no Conda environment.
   uv venv --seed --python 3.12 "${RUNNER_TEMP}/validate-release-b200-venv"
   source "${RUNNER_TEMP}/validate-release-b200-venv/bin/activate"
@@ -56,11 +63,24 @@ nvidia-smi
 
 python -m pip uninstall -y torch torchvision torchao torchtitan
 
-USE_CPP=0 PIP_EXTRA_INDEX_URL='' python -m pip install --pre \
+PIP_EXTRA_INDEX_URL='' python -m pip install --pre \
   --index-url "${PYTORCH_INDEX_URL}" \
   "torch==${TORCH_VERSION}" \
-  "torchvision==${TORCHVISION_VERSION}" \
-  "torchao==${TORCHAO_VERSION}"
+  "torchvision==${TORCHVISION_VERSION}"
+# RL CI does not explicitly install torchao; quantization CI installs it separately.
+if [[ "${VALIDATION_SUITE}" != rl* ]]; then
+  USE_CPP=0 PIP_EXTRA_INDEX_URL='' python -m pip install --pre \
+    --index-url "${TORCHAO_INDEX_URL}" torchao
+fi
+
+RC_PACKAGE="torchtitan"
+if [[ "${VALIDATION_SUITE}" == rl* ]]; then
+  RC_PACKAGE="torchtitan[rl]"
+  # RL dependencies must not replace the release wheels with their own torch.
+  export PIP_CONSTRAINT="${RUNNER_TEMP}/release-rl-constraints.txt"
+  python -m pip list --format=freeze | grep -E '^(torch|torchvision|triton)==' > "${PIP_CONSTRAINT}"
+  printf 'torchtitan==%s\nvllm==%s\n' "${RC_VERSION}" "${VLLM_VERSION}" >> "${PIP_CONSTRAINT}"
+fi
 
 install_release_candidate() {
   for attempt in {1..5}; do
@@ -68,7 +88,7 @@ install_release_candidate() {
     if python -m pip install \
       --index-url https://test.pypi.org/simple/ \
       --extra-index-url https://pypi.org/simple/ \
-      "torchtitan==${RC_VERSION}"; then
+      "${RC_PACKAGE}==${RC_VERSION}"; then
       return 0
     fi
     if [[ "${attempt}" -lt 5 ]]; then
@@ -80,6 +100,36 @@ install_release_candidate() {
   return 1
 }
 install_release_candidate
+
+if [[ "${VALIDATION_SUITE}" == rl* ]]; then
+  python -m pip install "pytest==7.3.2" "expecttest>=0.2.0" uv
+  vllm_requirement="vllm==${VLLM_VERSION}"
+  if [[ "${TORCH_VERSION}" == "2.15.0" && \
+        "${VLLM_VERSION}" == "1.0.0.dev20261005+cu132" && \
+        "${PYTORCH_INDEX_URL}" == "https://download.pytorch.org/whl/test/cu132" ]]; then
+    # Use the RC in place of this wheel's torch nightly dependency.
+    export UV_OVERRIDE="${RUNNER_TEMP}/release-vllm-torch-override.txt"
+    grep '^torch==' "${PIP_CONSTRAINT}" > "${UV_OVERRIDE}"
+    vllm_requirement="vllm @ https://download.pytorch.org/whl/nightly/cu132/vllm-1.0.0.dev20261005%2Bcu132-cp38-abi3-manylinux_2_28_x86_64.whl"
+  fi
+  uv pip install --constraint "${PIP_CONSTRAINT}" \
+    --extra-index-url "${PYTORCH_INDEX_URL}" \
+    --index-strategy unsafe-best-match "${vllm_requirement}"
+  python -m pip install --no-deps \
+    "git+https://github.com/meta-pytorch/torchstore.git@main" \
+    "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
+  # Match RL CI's Attention Gym kernels instead of the optional tilelang path.
+  python -m pip uninstall -y tilelang
+  if [[ "${VALIDATION_SUITE}" != "rl-b200" ]]; then
+    python -m pip install "nvidia-cuda-nvcc==13.2.*"
+  fi
+  if [[ "${VALIDATION_SUITE}" == "rl-b200" ]]; then
+    python -m pip install "flash-attn-4[cu13]>=4.0.0b34"
+  fi
+  if [[ "${VALIDATION_SUITE}" == "rl-b200" ]]; then
+    python -m pip install "git+https://github.com/meta-pytorch/dist_moe.git@main"
+  fi
+fi
 
 if [[ "${VALIDATION_SUITE}" == "b200" ]]; then
   python -m pip install \
@@ -100,6 +150,11 @@ mkdir -p \
 # subprocesses must import the installed TestPyPI RC rather than the checkout.
 cp "${REPO_ROOT}/run_train.sh" "${VALIDATION_ROOT}/run_train.sh"
 cp "${REPO_ROOT}/scripts/loss_compare.py" "${VALIDATION_ROOT}/scripts/loss_compare.py"
+cp "${REPO_ROOT}/scripts/_checkpoint_test_config.py" "${VALIDATION_ROOT}/scripts/_checkpoint_test_config.py"
+if [[ "${VALIDATION_SUITE}" == rl* ]]; then
+  mkdir -p "${VALIDATION_ROOT}/scripts/rl"
+  cp "${REPO_ROOT}/scripts/rl/loss_compare.py" "${VALIDATION_ROOT}/scripts/rl/loss_compare.py"
+fi
 cp -R "${REPO_ROOT}/tests" "${VALIDATION_ROOT}/tests"
 cp "${REPO_ROOT}/pyproject.toml" "${VALIDATION_ROOT}/pyproject.toml"
 cp \
@@ -109,6 +164,19 @@ cp \
   "${REPO_ROOT}/torchtitan/experiments/graph_trainer/run_train_precompile.sh" \
   "${VALIDATION_ROOT}/torchtitan/experiments/graph_trainer/run_train_precompile.sh"
 
+# Installed test recipes resolve repository-local assets relative to
+# site-packages. Link that location to the staged source-test assets.
+SITE_PACKAGES="$(python - <<'PY'
+import sysconfig
+
+print(sysconfig.get_path("purelib"))
+PY
+)"
+mkdir -p "${SITE_PACKAGES}/tests/assets"
+ln -s \
+  "${VALIDATION_ROOT}/tests/assets/synthetic_multimodal" \
+  "${SITE_PACKAGES}/tests/assets/synthetic_multimodal"
+
 cd "${VALIDATION_ROOT}"
 unset PYTHONPATH
 
@@ -116,7 +184,6 @@ python - <<'PY'
 import os
 
 import torch
-import torchao
 import torchtitan
 import torchvision
 import triton
@@ -125,20 +192,39 @@ assert torchtitan.__version__ == os.environ["RC_VERSION"]
 assert "site-packages" in torchtitan.__file__
 assert torch.__version__.split("+")[0] == os.environ["TORCH_VERSION"]
 assert torchvision.__version__.split("+")[0] == os.environ["TORCHVISION_VERSION"]
-assert torchao.__version__.split("+")[0] == os.environ["TORCHAO_VERSION"]
-assert torch.version.cuda == "13.0"
+expected_cuda = "13.2" if os.environ["VALIDATION_SUITE"].startswith("rl") else "13.0"
+assert torch.version.cuda == expected_cuda
 assert torch.cuda.is_available()
 assert torch.cuda.device_count() >= 8
-if os.environ["VALIDATION_SUITE"] == "b200":
+if os.environ["VALIDATION_SUITE"] in ("b200", "rl-b200"):
     capability = torch.cuda.get_device_capability()
     if capability not in ((10, 0), (10, 3)):
         raise ValueError(
             f"B200 validation requires SM100 or SM103, got SM{capability[0]}{capability[1]}"
         )
+if os.environ["VALIDATION_SUITE"].startswith("rl"):
+    from importlib.metadata import version
+
+    import batch_invariant_ops
+    import monarch
+    import torchstore
+    import vllm
+    from packaging.version import Version
+
+    import torchtitan_recipes
+
+    assert Version(version("vllm")) == Version(os.environ["VLLM_VERSION"])
+    assert "site-packages" in torchtitan_recipes.__file__
+    for name in ("vllm", "torchmonarch", "torchstore", "batch_invariant_ops"):
+        print(f"{name}={version(name)}")
+else:
+    import torchao
+
+    assert ".dev" in torchao.__version__.split("+")[0]
+    print(f"torchao={torchao.__version__}")
 print(f"torchtitan={torchtitan.__version__} ({torchtitan.__file__})")
 print(f"torch={torch.__version__} ({torch.version.git_version})")
 print(f"torchvision={torchvision.__version__}")
-print(f"torchao={torchao.__version__}")
 print(f"triton={triton.__version__}")
 print(f"num_cuda_devices={torch.cuda.device_count()}")
 PY
@@ -152,7 +238,52 @@ print(Path(torchtitan.__file__).parent)
 PY
 )"
 
+run_gpu_training_smoke_test() {
+  CUDA_VISIBLE_DEVICES=0 python - <<'PY'
+import torch
+import torch.nn.functional as F
+
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.llama3 import build_model_config
+
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+torch.compiler.set_stance("force_eager")
+device = torch.device("cuda")
+model_config = build_model_config(
+    "debugmodel",
+    parallelism=ParallelismConfig(),
+    seq_len=16,
+    attn_backend="flex",
+)
+model = model_config.build()
+model.init_states(buffer_device=device)
+model.to(device)
+model.train()
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+tokens_T = torch.randint(0, 2048, (16,), device=device)
+positions_T = torch.arange(16, device=device)
+attention_metadata = model._get_attention_metadata(positions_T)
+losses = []
+
+for _ in range(3):
+    optimizer.zero_grad(set_to_none=True)
+    logits_TV = model(tokens_T, positions_T, attention_metadata)
+    loss = F.cross_entropy(logits_TV[:-1], tokens_T[1:])
+    assert torch.isfinite(loss), loss
+    loss.backward()
+    optimizer.step()
+    losses.append(loss.item())
+
+assert losses[-1] < losses[0], losses
+assert all(parameter.grad is not None for parameter in model.parameters())
+print(f"losses={losses}")
+PY
+}
+
 run_core_tests() {
+  run_gpu_training_smoke_test
+
   CUDA_VISIBLE_DEVICES=0 python -m pytest tests/unit_tests/gpu \
     -m "not multi_gpu" \
     --strict-markers \
@@ -327,6 +458,99 @@ run_b200_tests() {
     --ngpu 8
 }
 
+download_rl_model() {
+  python - <<'PY'
+from huggingface_hub import snapshot_download
+
+print(snapshot_download("Qwen/Qwen3-0.6B"))
+PY
+}
+
+run_rl_unit_tests() {
+  local tokenizer_path gdn_model_path model_path
+  tokenizer_path="$(python - <<'PY'
+from huggingface_hub import snapshot_download
+
+print(snapshot_download("meta-models/Muse-Glimmer-30B", allow_patterns=[
+    "config.json", "tokenizer*.json", "chat_template.jinja",
+]))
+PY
+)"
+  export MUSE_GLIMMER_TOKENIZER="${tokenizer_path}"
+  python -m pip install -r "${REPO_ROOT}/torchtitan/rl/examples/dapo_math/requirements.txt"
+  CUDA_VISIBLE_DEVICES='' python -m pytest tests/rl/unit_tests/cpu \
+    --strict-markers --durations=20 -vv
+
+  gdn_model_path="$(python - <<'PY'
+from huggingface_hub import snapshot_download
+
+print(snapshot_download("Qwen/Qwen3.5-0.8B"))
+PY
+)"
+  export TORCHTITAN_QWEN3_5_0_8B_HF_PATH="${gdn_model_path}"
+  CUDA_VISIBLE_DEVICES=0 python -m pytest tests/rl/unit_tests/gpu \
+    -m "not multi_gpu" --strict-markers --durations=20 -vv
+
+  model_path="$(download_rl_model)"
+  export RL_TEST_DUMP_FOLDER="${ARTIFACTS}/rl_unit"
+  local test_class
+  for test_class in TestBitwiseParityVarlen TestBitwiseParityFlex; do
+    HF_ASSETS_PATH="${model_path}" python -m torch.distributed.run \
+      --standalone --nproc-per-node=2 -m pytest \
+      "tests/rl/unit_tests/gpu/test_bitwise_parity.py::${test_class}" -v
+  done
+  python -m torch.distributed.run --standalone --nproc-per-node=2 -m pytest \
+    tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen \
+    -v
+  python -m torch.distributed.run --standalone --nproc-per-node=4 -m pytest \
+    tests/rl/unit_tests/gpu/test_generator_uneven_decode.py -v
+
+  # As in RL CPU CI, test Verifiers last: it constrains mcp differently from
+  # vLLM. Keep the release wheels fixed while resolving the optional extra.
+  uv pip install --constraint "${PIP_CONSTRAINT}" \
+    --extra-index-url "${PYTORCH_INDEX_URL}" \
+    --index-strategy unsafe-best-match \
+    -r "${REPO_ROOT}/torchtitan/rl/examples/verifiers/dapo_math/requirements.txt"
+  CUDA_VISIBLE_DEVICES='' python -m pytest \
+    tests/rl/unit_tests/cpu/test_verifiers.py \
+    tests/rl/unit_tests/cpu/test_verifiers_example.py \
+    "tests/rl/unit_tests/cpu/test_verifiers_terminal_bench.py::test_env_server_workers_skip_the_trainer_imports" \
+    "tests/rl/unit_tests/cpu/test_model_defaults.py::test_rl_recipes_get_model_defaults" \
+    --strict-markers --durations=20 -vv
+}
+
+run_rl_tests() {
+  local model_path
+  model_path="$(download_rl_model)"
+  # Run the A10G golden first, before other RL tests can leave live processes.
+  python -m scripts.rl.loss_compare \
+    --hf-assets-path "${model_path}" \
+    --dump-folder "${ARTIFACTS}/rl_loss_guard" \
+    --module torchtitan_recipes.rl.alphabet_sort \
+    --config rl_grpo_qwen3_0_6b_varlen_batch_invariant \
+    --import-result tests/assets/losses/rl_grpo_cuda.txt \
+    --assert-equal
+  python -m tests.integration_tests.run_tests "${ARTIFACTS}/rl/integration" \
+    --test_suite rl --execution_mode real_pg --gpu_arch_type cuda \
+    --ngpu 8 --hf_assets_path "${model_path}"
+}
+
+run_rl_b200_tests() {
+  local status=0
+  if ! RL_TEST_DUMP_FOLDER="${ARTIFACTS}/rl_b200" \
+    python -m torch.distributed.run --standalone --nproc-per-node=1 -m pytest \
+    tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen \
+    tests/rl/unit_tests/cpu/test_rl_dist_moe_recipe.py -v; then
+    status=1
+  fi
+  if ! python -m tests.integration_tests.run_tests "${ARTIFACTS}/rl_b200/integration" \
+    --test_suite rl_b200 --execution_mode real_pg --gpu_arch_type cuda \
+    --gpu_arch b200 --ngpu 8; then
+    status=1
+  fi
+  return "${status}"
+}
+
 # Run the selected suite without letting `set -e` abort the script on
 # failure: we still need to prune checkpoint directories from the artifacts
 # below and report the correct exit code afterwards. The subshell re-enables
@@ -345,6 +569,9 @@ set +e
     b200) run_b200_tests ;;
     torchft) run_torchft_tests ;;
     transformers-modeling-backend) run_transformers_modeling_backend_tests ;;
+    rl-unit) run_rl_unit_tests ;;
+    rl) run_rl_tests ;;
+    rl-b200) run_rl_b200_tests ;;
   esac
 )
 suite_status=$?

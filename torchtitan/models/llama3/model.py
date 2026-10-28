@@ -12,6 +12,7 @@ import torch
 import torch_remat as remat
 from torch import nn
 
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
@@ -84,8 +85,10 @@ class Llama3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 4096
         vocab_size: int = 128256
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "fused_binary_activation", "rope"]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=["loss", "fused_binary_activation", "rope"]
+            )
         )
 
         def get_nparams_and_flops(

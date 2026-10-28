@@ -17,6 +17,7 @@ from torch import nn
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import (
     Attention,
@@ -174,8 +175,7 @@ class GptOssTransformerBlock(TransformerBlock):
 
         Args:
             x (torch.Tensor): Input tensor of shape (num_tokens, dim).
-            attention_metadata: Flex metadata selected for this layer's inner
-                attention, or the shared ``VarlenAttentionMetadata``.
+            attention_metadata: Metadata selected for this layer's inner attention.
             positions: Optional position indices.
 
         Returns:
@@ -219,13 +219,15 @@ class GptOssModel(Decoder):
     class Config(Decoder.Config):
         dim: int = 2880
         vocab_size: int = 201088
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "fused_binary_activation",
-                "rope",
-                "fp32_to_bf16_split",
-            ]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "rope",
+                    "fp32_to_bf16_split",
+                ]
+            )
         )
 
         def get_nparams_and_flops(
@@ -253,7 +255,7 @@ class GptOssModel(Decoder):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> GptOssModel:
@@ -270,7 +272,7 @@ class GptOssModel(Decoder):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            local_compile_regions=local_compile_regions,
+            local_compile=local_compile,
             activation_remat=activation_remat,
             dump_folder=dump_folder,
         )

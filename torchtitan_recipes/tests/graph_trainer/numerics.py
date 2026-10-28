@@ -55,7 +55,7 @@ def _without_inplace_wgrad_accum(config):
 def llama3_eager_numerics():
     config = llama3_debugmodel(seq_len=2048)
     # Match GraphTrainer, which captures model and loss in one eager FX graph.
-    config.model.local_compile_regions = []
+    config.model.local_compile.regions = []
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.data_parallel_shard_degree = 4
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
@@ -73,7 +73,7 @@ def llama3_graph_numerics():
 def llama3_eager_hsdp_gradient_accumulation_numerics():
     config = llama3_debugmodel(seq_len=2048)
     # Match GraphTrainer, which captures model and loss in one eager FX graph.
-    config.model.local_compile_regions = []
+    config.model.local_compile.regions = []
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.data_parallel_shard_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 8192
@@ -103,7 +103,7 @@ def _llama3_hsdp_pp_numerics(config):
 
 def llama3_eager_hsdp_pp_numerics():
     config = llama3_debugmodel(seq_len=2048)
-    config.model.local_compile_regions = []
+    config.model.local_compile.regions = []
     return _without_inplace_wgrad_accum(_llama3_hsdp_pp_numerics(config))
 
 
@@ -214,7 +214,7 @@ def _deepseek_v3_dist_moe_pp_numerics(
     runtime_config.pp_activation_slot_policy = slot_policy
     for _, experts, _, _ in config.model.traverse(DistMoeRoutedExperts.Config):
         experts.inplace_wgrad_accum = False
-    config.model.local_compile_regions = []
+    config.model.local_compile.regions = []
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.num_pp_microbatches = 8
@@ -251,7 +251,7 @@ def deepseek_v3_dist_moe_graph_pp_stage_microbatch_numerics():
 def qwen3_eager_numerics():
     config = qwen3_debugmodel(seq_len=2048)
     # Match GraphTrainer, which captures model and loss in one eager FX graph.
-    config.model.local_compile_regions = []
+    config.model.local_compile.regions = []
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.data_parallel_shard_degree = 4
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
@@ -278,7 +278,7 @@ def qwen3_moe_eager_numerics():
     )
     config.dataloader.max_num_documents = None
     # Match GraphTrainer, which captures model and loss in one eager FX graph.
-    config.model.local_compile_regions = []
+    config.model.local_compile.regions = []
     config.training.disable_cuda_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     return _without_inplace_wgrad_accum(config)

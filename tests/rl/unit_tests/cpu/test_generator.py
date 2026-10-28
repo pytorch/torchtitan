@@ -647,8 +647,8 @@ def test_qwen36_27b_perf_config():
     config = rl_grpo_qwen3_6_27b_varlen_perf()
 
     assert config.hf_assets_path.endswith("Qwen3.6-27B")
-    assert "offset_rmsnorm" in config.trainer.model.local_compile_regions
-    assert "offset_rmsnorm" in config.generator.model.local_compile_regions
+    assert "offset_rmsnorm" in config.trainer.model.local_compile.regions
+    assert "offset_rmsnorm" in config.generator.model.local_compile.regions
     assert config.trainer.parallelism.data_parallel_shard_degree == 2
     assert config.trainer.parallelism.tensor_parallel_degree == 2
     assert config.generator.parallelism.tensor_parallel_degree == 4

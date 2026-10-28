@@ -240,8 +240,19 @@ def test_optim_update_uses_configured_grad_clip() -> None:
     optim.optimizers.step.assert_called_once_with()
 
 
-@pytest.mark.parametrize("device_initialized", [False, True])
-def test_optim_step_keeps_eager_state_outside_update(device_initialized: bool) -> None:
+@pytest.mark.parametrize(
+    "device_initialized, first_step",
+    [
+        (False, []),
+        (True, ["synchronize"]),
+        # Device modules without is_initialized(), such as torch.mps.
+        (None, ["synchronize"]),
+    ],
+)
+def test_optim_step_keeps_eager_state_outside_update(
+    device_initialized: bool | None,
+    first_step: list[str],
+) -> None:
     events = []
     optim = object.__new__(Optim)
     optim._is_first_step_call = True
@@ -254,7 +265,10 @@ def test_optim_step_keeps_eager_state_outside_update(device_initialized: bool) -
     optim.ema = SimpleNamespace(step=lambda step: events.append(f"ema_{step}"))
 
     device_module = MagicMock()
-    device_module.is_initialized.return_value = device_initialized
+    if device_initialized is None:
+        del device_module.is_initialized
+    else:
+        device_module.is_initialized.return_value = device_initialized
     device_module.synchronize.side_effect = lambda: events.append("synchronize")
     device_module.empty_cache.side_effect = lambda: events.append("empty_cache")
 
@@ -271,7 +285,7 @@ def test_optim_step_keeps_eager_state_outside_update(device_initialized: bool) -
     device_module.empty_cache.assert_called_once_with()
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
-    assert events == (["synchronize"] if device_initialized else []) + [
+    assert events == first_step + [
         "empty_cache",
         "update",
         "lr_scheduler",

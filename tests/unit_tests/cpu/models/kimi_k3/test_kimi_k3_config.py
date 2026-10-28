@@ -13,7 +13,7 @@ from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
 
 
 _TRITON_ATTENTION_RESIDUAL = (
-    "torchtitan_recipes.overrides.kimi_attention_residual." "triton_attention_residual"
+    "torchtitan_recipes.overrides.kimi_attention_residual.triton_attention_residual"
 )
 
 
@@ -21,7 +21,7 @@ def test_kimi_k3_enables_attention_residual_local_compile() -> None:
     config = kimi_k3_debugmodel()
     model_config = cast(KimiK3Model.Config, config.model)
 
-    assert model_config.local_compile_regions == [
+    assert model_config.local_compile.regions == [
         "loss",
         "gated_rmsnorm",
         "fused_binary_activation",

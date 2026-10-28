@@ -719,7 +719,7 @@ def _235b_a22b(
             rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=seq_len,
-                theta=5000000.0,
+                theta=1000000.0,
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
