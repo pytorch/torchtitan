@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T07:19:22.126259+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T07:34:50.662809+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -139,8 +139,8 @@ These add an 80 GiB/rank CPU activation quota to two failed native configuration
 
 | ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
-| `native_rescue_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
-| `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 10 / 8 | 5120 | 80 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao80-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
+| `native_rescue_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | OOM; 64 ranks logged | 267.59 / 268.70 at failure; +0.33 requested | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-ga8-17u-20261028-res1-ivankobzarev) | OOM before profiling |
+| `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 10 / 8 | 5120 | 80 | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao80-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
 
 ## Native 32 GPU activation-offload rescue configuration
 
@@ -180,7 +180,8 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `native_eager_full_recompute_bs6_first_gather_legacy_fused` | 64 | 43.13 | 64 | 529.75 |
 | `native_fit_full_recompute_bs6` | 32 | 43.92 | 32 | 571.10 |
 | `native_fit_full_recompute_cpuoffload_bs6_ao24` | 32 | 44.24 | 32 | 542.62 |
-| `native_rescue_sac_cpuoffload_bs6_ao80` | 64 | 45.27 | 0 | - |
+| `native_rescue_sac_cpuoffload_bs6_ao80` | 64 | 45.27 | 64 | 532.60 |
+| `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 64 | 47.09 | 0 | - |
 
 ## Native activation offload actually used
 
@@ -190,6 +191,21 @@ Counters cover all 17 updates. Peak live bytes and copy count are maximums over 
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `native_eager_full_recompute_cpuoffload_bs6_det42` | 80 | 48.74 | 48824 | 0 | 0 |
 | `native_fit_full_recompute_cpuoffload_bs6_ao24` | 24 | 24.00 | 24752 | 0 | 0 |
+
+## Native SAC offload diagnosis
+
+A reduced real FSDP2/EP2, MTP1, GA8 native SAC run completed all 17 updates with a 0.25 GiB CPU activation quota. Each rank made 3128 CPU copies, reached 0.249 GiB peak live activation storage, and recorded zero host-pressure skips. Prepared FSDP weight wrappers remained on GPU. This verifies that the SAC hook path makes CPU copies locally; it does not measure offload use in the failed 671B jobs.
+
+The supplemental SAC BS6/AO80 diagnostic uses the same native configuration and pack/unpack decisions, with top-level forward counters and an exception logger added to the experiment adapter. It records actual quota use on OOM. The earlier failed runs have no completed-update offload sidecar, so their actual offload use remains unknown.
+
+## 32 GPU CPU memory observations
+
+These are outside-timer samples after updates 1, 2, 5 and 15 on every rank. Available RAM is per four-GPU host; RSS and pinned allocation are per worker. They are point observations, not continuous host-memory peaks. Pinned allocations include CPU optimizer states and cached activation buffers, so they are not activation-only bytes.
+
+| ID | Samples | Minimum observed host available GiB | Maximum observed worker RSS GiB | Maximum observed pinned allocation peak GiB/worker |
+| --- | ---: | ---: | ---: | ---: |
+| `native_fit_full_recompute_bs6` | 128 | 185.50 | 166.95 | 159.90 |
+| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 128 | 81.83 | 192.38 | 185.34 |
 
 ## Full recompute BS6 profile interpretation
 
@@ -238,6 +254,7 @@ All counts below are rank-0 GPU kernel slices from the separately profiled updat
 - `64g_sac-ao_bs10_ao60`: Forward fused MLA key/RoPE. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `64g_sac-ao_bs10_ao80`: Forward MTP MXFP8 attention projection (scaled_mm). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `native_eager_sac_bs6_det42`: Forward fused MLA query/RoPE output allocation (_fused_mla_q_rope_out_op). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
+- `native_rescue_sac_cpuoffload_bs6_ao80`: Forward MTP attention MXFP8 projection (scaled_mm). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 
 ## Cross-engine scalar observations
 
