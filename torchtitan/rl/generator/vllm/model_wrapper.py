@@ -48,6 +48,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.tools.utils import device_type
 
 
 logger = init_logger(__name__)
@@ -419,7 +420,7 @@ class VLLMModelWrapper(Module):
         # Build pinned CPU receive buffers for model state dict loads while the model
         # is still sharded. Bind first so first-touch places them on the
         # NUMA node local to this rank's GPU.
-        maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
+        maybe_apply_numa_binding(torch.accelerator.current_device_index(), device_type)
         with torch.device("cpu"):
             self._prefetched_model_state_dict = _create_cpu_state_dict(
                 self.model.state_dict(), pin_memory=True
@@ -716,7 +717,7 @@ class VLLMModelWrapper(Module):
         # caching allocator, so the later CUDA-graph capture (which needs its own private
         # pool) has room. Without this, large models (e.g. 235B) OOM capture even though
         # the live weights fit.
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     def load_weights(self, weights_iter):
         """

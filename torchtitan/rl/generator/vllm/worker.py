@@ -22,6 +22,8 @@ from torchtitan.rl.generator.vllm.linear_attention import (
     TorchTitanLinearAttentionBackend,
 )
 
+from torchtitan.tools.utils import device_type
+
 
 class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
     """Keep native FULL descriptors distinct for packed linear attention and fused decode.
@@ -121,8 +123,8 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         return num_scheduled_tokens
 
 
-class TorchTitanGPUWorker(GPUWorker):
-    """V1 worker that constructs :class:`TorchTitanGPUModelRunner`."""
+class TorchTitanWeightsOnlyMemoryPoolMixin:
+    """Keep only model weights in vLLM's memory pool; shared by every worker."""
 
     def _maybe_get_memory_pool_context(self, tag: str):
         # vLLM uses CuMem for model weights and the KV cache.
@@ -133,6 +135,10 @@ class TorchTitanGPUWorker(GPUWorker):
         if tag == "weights":
             return super()._maybe_get_memory_pool_context(tag)
         return nullcontext()
+
+
+class TorchTitanGPUWorker(TorchTitanWeightsOnlyMemoryPoolMixin, GPUWorker):
+    """V1 worker that constructs :class:`TorchTitanGPUModelRunner`."""
 
     def init_device(self):
         if self.use_v2_model_runner:
@@ -148,3 +154,22 @@ class TorchTitanGPUWorker(GPUWorker):
             super().init_device()
         finally:
             vllm_gpu_model_runner.GPUModelRunner = original_runner_cls
+
+
+if device_type == "xpu":
+    # vLLM's CUDA Worker rejects XPU devices; CUDA installs never import these.
+    from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+    from vllm.v1.worker.xpu_worker import XPUWorker
+
+    class TorchTitanXPUModelRunner(TorchTitanGPUModelRunner, XPUModelRunner):
+        """:class:`TorchTitanGPUModelRunner` overrides on vLLM's XPU runner."""
+
+    class TorchTitanXPUWorker(TorchTitanWeightsOnlyMemoryPoolMixin, XPUWorker):
+        """V1 XPU worker that constructs :class:`TorchTitanXPUModelRunner`."""
+
+        def _make_model_runner(self):
+            if self.use_v2_model_runner:
+                raise ValueError(
+                    "TorchTitan's vLLM integration requires the V1 model runner"
+                )
+            return TorchTitanXPUModelRunner(self.vllm_config, self.device)
