@@ -393,15 +393,49 @@ class Controller(Configurable):
             # e.g. rollout max length cannot be larger than the model max_seq_len
             # or the packing len, etc.
 
+            self._validate_batch_invariance()
+
+        def _validate_batch_invariance(self) -> None:
+            if (
+                self.trainer.debug.batch_invariant
+                != self.generator.debug.batch_invariant
+            ):
+                raise ValueError(
+                    "trainer and generator must use the same batch_invariant setting"
+                )
+
             if self.trainer.debug.batch_invariant:
                 if torch.version.hip is not None:
-                    raise ValueError(
-                        "batch_invariant mode is not supported on ROCm: the varlen "
-                        "attention path cannot force num_splits=1 (rejected by ROCm), "
-                        "so split-k reductions are non-deterministic."
+                    from torchtitan.models.common.attention import (
+                        Attention,
+                        FlexInnerAttention,
                     )
-                if not self.trainer.debug.deterministic:
-                    raise ValueError("batch_invariant requires deterministic=True")
+
+                    attention_configs = tuple(
+                        attention
+                        for model in (self.trainer.model, self.generator.model)
+                        for _, attention, _, _ in model.traverse(Attention.Config)
+                    )
+                    if not attention_configs or any(
+                        not isinstance(
+                            attention.inner_attention, FlexInnerAttention.Config
+                        )
+                        for attention in attention_configs
+                    ):
+                        raise ValueError(
+                            "batch_invariant mode on ROCm requires FlexAttention "
+                            "for every trainer and generator attention layer; "
+                            "other ROCm attention paths have not been validated "
+                            "for deterministic trainer-vLLM parity."
+                        )
+                if not (
+                    self.trainer.debug.deterministic
+                    and self.generator.debug.deterministic
+                ):
+                    raise ValueError(
+                        "batch_invariant requires deterministic=True for both "
+                        "trainer and generator"
+                    )
                 # The trainer forward must compute in bf16 to match the bf16
                 # generator, via FSDP mixed precision. The trainer always wraps
                 # the model in FSDP (even at data_parallel_shard_degree=1, where
@@ -437,6 +471,8 @@ class Controller(Configurable):
         config.generator.model = copy.deepcopy(config.generator.model)
         if config.override.imports:
             apply_overrides(config.override, config)
+        # Recipes and overrides may mutate an already-constructed config.
+        config._validate_batch_invariance()
         config.maybe_log()
         self.actor_system: ActorSystem | None = None
         self.trainer: TrainerHandle | None = None
