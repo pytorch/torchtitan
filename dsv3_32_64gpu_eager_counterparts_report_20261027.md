@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T09:29:00.195646+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T09:35:47.674531+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -15,6 +15,7 @@ This report pairs the existing graph trainer presentation configurations with na
 - All four requested 32-GPU native configurations run out of memory with FP32 GPU masters/gradients and CPU FP32 Adam moments. Three of their graph references pass; Full recompute BS10 without activation offload also fails in graph trainer.
 - Native 64-GPU Full recompute BS10 is rescued by CPU activation offload: 208.44 GiB reserved, 4,270 tokens/s/GPU, 24.92% MFU, and 79.98 GiB actual CPU activation storage per rank.
 - Both native 32-GPU BS6/GA8 baselines pass with GPU FP32 masters/gradients and CPU FP32 Adam moments. Their matching original-payload graph BS6 runs are included in the matched table.
+- Matched 32-GPU Full recompute BS6 pair: graph trainer has 4.7% higher throughput and uses 35.74 GiB less reserved memory; both keep FP32 CPU Adam moments.
 - Strict native Full versus Full + offload and fused Every versus First gathering match all 17 recorded losses and gradient norms bitwise on all 64 ranks. Cross-engine scalar histories differ; see the numerical comparison section.
 - Native WGrad fusion changes throughput by 0.32% in the single non-deterministic trials. This small difference does not establish a meaningful speed gain; fused and unfused scalar histories also differ.
 
@@ -124,7 +125,7 @@ All rows below use Full recomputation, BS6/GA8 and 64 GPUs. The native head poli
 | Configuration ID | BS / GA | CPU activation quota GiB | Graph outcome | Graph allocated / reserved peak GiB | Graph tokens/s/GPU | Graph MFU % | Native outcome | Native allocated / reserved peak GiB | Native tokens/s/GPU | Native MFU % | Graph / native throughput | MAST jobs | Profiles, update 16 rank 0 |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
 | `native_fit_full_recompute_bs6` | 6 / 8 | Disabled | PASS, all 32 x 17 (reference) | 231.15 / 233.09 | 4,541.68 | 26.51 | PASS, all 32 x 17 | 259.95 / 268.83 | 4,336.73 | 25.31 | 1.047x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b6-full-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ga8-17u-20261027-fit1-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_54cdf4b4-4ae6-424b-a407-fa4245913f2b_rank0_trace.json.gz) / [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_b6ba5d08-ec4c-4089-979b-e2eae1702912_rank0_trace.json.gz) |
-| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 6 / 8 | 24 | RUNNING; updates 4-4 / 17 across ranks | - | - | - | PASS, all 32 x 17 | 235.95 / 243.87 | 4,155.38 | 24.26 | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b6-full-ao24-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ao24-ga8-17u-20261027-fit1-ivankobzarev) | [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_fa3658b0-3638-4db2-baac-50c430103064_rank0_trace.json.gz) |
+| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 6 / 8 | 24 | RUNNING; updates 13-13 / 17 across ranks | - | - | - | PASS, all 32 x 17 | 235.95 / 243.87 | 4,155.38 | 24.26 | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b6-full-ao24-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ao24-ga8-17u-20261027-fit1-ivankobzarev) | [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_fa3658b0-3638-4db2-baac-50c430103064_rank0_trace.json.gz) |
 
 Both engines use the same BS6/GA8 batch geometry, FP32 GPU masters and gradients, FP32 CPU Adam moments, and the stated activation-offload quota. New graph runs clone the original 32-GPU definitions and immutable payload, changing only the batch from 8 to 6 and the job identity. Ratios are filled only after all-rank measurement verification.
 
@@ -132,9 +133,17 @@ Both engines use the same BS6/GA8 batch geometry, FP32 GPU masters and gradients
 
 | Configuration ID | BS / GA | CPU activation quota GiB | Graph outcome | Graph allocated / reserved peak GiB | Graph tokens/s/GPU | Graph MFU % | Native outcome | Native allocated / reserved peak GiB | Native tokens/s/GPU | Native MFU % | Graph / native throughput | MAST jobs | Profiles, update 16 rank 0 |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
-| `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 8 / 8 | 40 | Held for experiment priority | - | - | - | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b8-full-ao40-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-prof0-ga8-17u-20261028-r3-ivankobzarev) | Not yet produced |
+| `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 8 / 8 | 40 | Held for experiment priority | - | - | - | RUNNING | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b8-full-ao40-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-prof0-ga8-17u-20261028-r3-ivankobzarev) | Not yet produced |
 
 Both engines use BS8/GA8, GPU FP32 master weights and gradients, CPU FP32 Adam moments, and a40GiB/rank activation quota. The graph run clones the original BS8/AO24 definition and payload, changing only the activation quota and job identity. The native retry profiles rank0 without shape recording to stay within task RAM; the graph run retains the original all-rank profiling. These differences occur after the measured updates6-15 and are declared when comparing full-run memory peaks.
+
+### CUDA memory before profiling
+
+Maximum recorded allocated/reserved CUDA peaks across every rank through update15. This excludes the trace and memory snapshot updates, providing the same observation window even when profile coverage differs. Main tables retain the established full17-update memory scope.
+
+| Matched native configuration | Graph allocated / reserved GiB | Native allocated / reserved GiB |
+| --- | ---: | ---: |
+| `native_fit_full_recompute_bs6` | 231.15 / 233.09 | 259.95 / 268.83 |
 
 ## Smaller-batch native 32 GPU baselines
 
@@ -199,6 +208,7 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 64 | 47.09 | 64 | 541.78 |
 | `native_boundary_full_recompute_bs7` | 32 | 45.06 | 32 | 559.00 |
 | `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 32 | 46.73 | 32 | 578.01 |
+| `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 32 | 45.34 | 0 | - |
 
 ## Native activation offload actually used
 
@@ -234,6 +244,8 @@ These are outside-timer samples after updates 1, 2, 5 and 15 on every rank. Avai
 The first native BS8/AO40 run completed 16 updates on all32 ranks, including the ten measured updates, but OOMD killed a task during profiler shutdown (exit137, signal9). Actual CPU activation quota use reached 40.00GiB/rank with zero host-pressure skips. The maximum pinned allocator peak was 206.97GiB/worker before profiling; four workers share an845GiB task RAM allocation. At update15 the hosts still had at least 53.49GiB physically available.
 
 The final benchmark/scalar files are written after training returns and were absent for this killed run. Its clean synchronized throughput cannot be reconstructed from those files, so no tokens/s or MFU result is reported. A never-started retry requested896GiB but MAST normalized it back to845GiB; readback caught the mismatch and that definition was cancelled. The profiler-only retry preserves training math and measurement steps, and explicitly changes profile coverage to rank0 with shape recording disabled.
+
+The profiler-only adapter completed 17 updates with real FSDP2/EP2, MTP1, GA8, CPU FP32 Adam moments, and strict seed42. All17 average losses, maximum losses and gradient norms match the original native Full/offload control bitwise on both ranks. The trace has no input-shape recording, and only rank0 produces the update16 trace and update17 memory snapshot.
 
 ## Full recompute BS6 profile interpretation
 
@@ -284,6 +296,7 @@ All counts below are rank-0 GPU kernel slices from the separately profiled updat
 - `64g_sac-ao_bs10_ao60`: Forward fused MLA key/RoPE. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `64g_sac-ao_bs10_ao80`: Forward MTP MXFP8 attention projection (scaled_mm). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `native_cuda_graphs_32g_full_bs8`: Native CUDA graph warmup on its capture stream: forward MTP attention MXFP8 quantization; graph capture had not started. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
+- `native_cuda_graphs_32g_full_bs10`: Native CUDA graph warmup on its capture stream: forward cuDNN SDPA; graph capture had not started. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `native_eager_sac_bs6_det42`: Forward fused MLA query/RoPE output allocation (_fused_mla_q_rope_out_op). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `native_rescue_sac_cpuoffload_bs6_ao80`: Forward MTP attention MXFP8 projection (scaled_mm). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
 - `native_boundary_full_recompute_bs7`: Forward native chunked cross-entropy, FP32 intermediate (BS7). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
