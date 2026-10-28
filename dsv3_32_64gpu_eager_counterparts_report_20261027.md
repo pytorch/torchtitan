@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T10:36:20.301903+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T11:22:20.688134+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -167,7 +167,9 @@ These add CPU activation offload to failed native configurations: SAC BS6 and Fu
 | `native_rescue_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | 845 | OOM; 64 ranks logged | 267.59 / 268.70 at failure; +0.33 requested | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-ga8-17u-20261028-res1-ivankobzarev) | OOM before profiling |
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 10 / 8 | 5120 | 80 | 845 | PASS, all 64 x 17 | 202.94 / 208.44 | 4,269.97 | 24.92 | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao80-ga8-17u-20261028-res1-ivankobzarev) | [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_e7eadb26-d623-4c6d-a955-c05444f72815_rank0_trace.json.gz) |
 | `native_diagnostic_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | 845 | OOM; 64 ranks logged | 267.59 / 268.70 at failure; +0.33 requested | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-diag-ga8-17u-20261028-ivankobzarev) | OOM before profiling |
-| `native_full_recompute_cpuoffload_bs10_ao24` | 10 / 8 | 5120 | 24 | 845 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao24-ga8-17u-20261028-swp1-ivankobzarev) | Not yet produced |
+| `native_full_recompute_cpuoffload_bs10_ao24` | 10 / 8 | 5120 | 24 | 845 | PASS, all 64 x 17 | 257.83 / 265.10 | 4,536.08 | 26.48 | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao24-ga8-17u-20261028-swp1-ivankobzarev) | [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_104cef00-b208-48be-bc38-5a4c31229da3_rank0_trace.json.gz) |
+
+Within native eager at BS10/GA8, lowering the activation quota from 80 to 24 GiB increases throughput by 6.2% and reserved GPU memory by 56.66 GiB. Both complete all 17 updates; actual peak live CPU copies are 24.00 and 79.98 GiB/rank respectively. The configuration with offload disabled failed after one warmup update. These single trials illustrate the memory/throughput tradeoff; their non-deterministic scalar comparison is reported below.
 
 ## Native 32 GPU activation-offload rescue configuration
 
@@ -214,6 +216,7 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `native_boundary_full_recompute_bs7` | 32 | 45.06 | 32 | 559.00 |
 | `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 32 | 46.73 | 32 | 578.01 |
 | `native_diagnostic_sac_cpuoffload_bs6_ao80` | 64 | 44.17 | 64 | 544.15 |
+| `native_full_recompute_cpuoffload_bs10_ao24` | 64 | 45.81 | 64 | 542.15 |
 | `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 32 | 45.34 | 32 | 578.13 |
 
 ## Native activation offload actually used
@@ -225,6 +228,7 @@ Counters cover all 17 updates. Peak live bytes and copy count are maximums over 
 | `native_eager_full_recompute_cpuoffload_bs6_det42` | 80 | 48.74 | 48824 | 0 | 0 |
 | `native_fit_full_recompute_cpuoffload_bs6_ao24` | 24 | 24.00 | 24752 | 0 | 0 |
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 80 | 79.98 | 56168 | 0 | 0 |
+| `native_full_recompute_cpuoffload_bs10_ao24` | 24 | 24.00 | 19176 | 0 | 0 |
 | `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 40 | 40.00 | 37128 | 0 | 0 |
 
 ## Native SAC offload diagnosis
@@ -240,6 +244,8 @@ Counters below include the failed update. Forward counts refer to top-level mode
 | ID | Ranks observed | CPU peak min / max GiB/rank | Copies min / max per rank | Host-pressure skips | Forward calls started min / max | Forward calls completed min / max |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `native_diagnostic_sac_cpuoffload_bs6_ao80` | 64 | 80.00 / 80.00 | 174 / 174 | 0 | 1 / 1 | 0 / 0 |
+
+The hardware diagnostic filled the 80 GiB quota on every rank, making 174 CPU copies per rank with zero host-pressure skips. Every rank failed in its first microbatch forward before reaching backward or completing an update. The CUDA failure is in the MTP attention MXFP8 projection. This establishes a first-microbatch capacity failure with active CPU offload; it does not identify which remaining GPU storage would need a different policy.
 
 ## 32 GPU CPU memory observations
 
@@ -296,30 +302,33 @@ All counts below are rank-0 GPU kernel slices from the separately profiled updat
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 76.74 | 91.79 | 1048 | 520 | 17.41 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_e7eadb26-d623-4c6d-a955-c05444f72815_rank0_trace.json.gz) |
 | `graph_full_recompute_bs6_fp32_cpu_moments` | 43.29 | 45.94 | 1024 | 640 | 0.72 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_54cdf4b4-4ae6-424b-a407-fa4245913f2b_rank0_trace.json.gz) |
 | `graph_full_recompute_cpuoffload_bs6_ao24_fp32_cpu_moments` | 43.54 | 46.86 | 1024 | 640 | 1.01 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_603d9bab-28aa-4886-8d71-5580a362b25e_rank0_trace.json.gz) |
+| `native_full_recompute_cpuoffload_bs10_ao24` | 72.24 | 89.44 | 1048 | 520 | 18.27 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_104cef00-b208-48be-bc38-5a4c31229da3_rank0_trace.json.gz) |
 | `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 64.38 | 62.18 | 1048 | 520 | 1.62 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_4540b13b-1016-4488-8daf-6a3cf089bc76_rank0_trace.json.gz) |
 | `graph_full_recompute_cpuoffload_bs8_ao40_fp32_cpu_moments` | 57.51 | 60.87 | 1024 | 640 | 0.85 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_09e640ff-877d-4e12-b7a4-5f91fa59969e_rank0_trace.json.gz) |
 
 ## Native failure locations
 
-- `64g_sac_bs6`: Native forward in MTP transformer attention projection, torch.nn.functional.scaled_mm; no optimizer update completed. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `64g_full_bs10`: Second optimizer update forward in native fused MLA key/RoPE preparation (_fused_mla_k_rope_op); one warmup update completed. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `64g_sac-ao_bs10_ao100`: Native forward in attention projection (torch.nn.functional.scaled_mm); no optimizer update completed with configured 100 GiB/rank CPU activation quota. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
+- `64g_sac_bs6`: Native forward in MTP transformer attention projection, torch.nn.functional.scaled_mm; no optimizer update completed. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `64g_full_bs10`: Second optimizer update forward in native fused MLA key/RoPE preparation (_fused_mla_k_rope_op); one warmup update completed. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `64g_sac-ao_bs10_ao100`: Native forward in attention projection (torch.nn.functional.scaled_mm); no optimizer update completed with configured 100 GiB/rank CPU activation quota. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
   No after-update sidecar was emitted because the first update failed; actual copied bytes are unavailable for this attempt.
-- `64g_noac_bs6`: Native forward in fused MLA key/RoPE preparation (_fused_mla_k_rope_op); no optimizer update completed. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `64g_sac_bs10`: Native forward in fused MLA key/RoPE preparation (_fused_mla_k_rope_op); no optimizer update completed. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `32g_full_bs8`: Native forward in ReportDenseAttention scaled-dot-product attention under Full remat; no optimizer update completed. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `32g_full-ao_bs8_ao24`: Native cuDNN scaled-dot-product attention backward (_cudnn_attention_backward) with configured 24 GiB/rank CPU activation quota; no optimizer update completed. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
+- `64g_noac_bs6`: Native forward in fused MLA key/RoPE preparation (_fused_mla_k_rope_op); no optimizer update completed. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `64g_sac_bs10`: Native forward in fused MLA key/RoPE preparation (_fused_mla_k_rope_op); no optimizer update completed. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `32g_full_bs8`: Native forward in ReportDenseAttention scaled-dot-product attention under Full remat; no optimizer update completed. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `32g_full-ao_bs8_ao24`: Native cuDNN scaled-dot-product attention backward (_cudnn_attention_backward) with configured 24 GiB/rank CPU activation quota; no optimizer update completed. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
   No after-update sidecar was emitted because the first update failed; actual copied bytes are unavailable for this attempt.
-- `32g_full_bs10`: Forward MXFP8 quantization. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `32g_full-ao_bs10_ao48`: Forward native chunked cross-entropy. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `64g_sac-ao_bs10_ao60`: Forward fused MLA key/RoPE. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `64g_sac-ao_bs10_ao80`: Forward MTP MXFP8 attention projection (scaled_mm). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `native_cuda_graphs_32g_full_bs8`: Native CUDA graph warmup on its capture stream: forward MTP attention MXFP8 quantization; graph capture had not started. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `native_cuda_graphs_32g_full_bs10`: Native CUDA graph warmup on its capture stream: forward cuDNN SDPA; graph capture had not started. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `native_eager_sac_bs6_det42`: Forward fused MLA query/RoPE output allocation (_fused_mla_q_rope_out_op). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `native_rescue_sac_cpuoffload_bs6_ao80`: Forward MTP attention MXFP8 projection (scaled_mm). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `native_boundary_full_recompute_bs7`: Forward native chunked cross-entropy, FP32 intermediate (BS7). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
-- `native_rescue_full_recompute_cpuoffload_bs8_ao40`: Profiler shutdown after update16: host-memory OOMD kill (exit137, signal9). All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
+- `32g_full_bs10`: Forward MXFP8 quantization. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `32g_full-ao_bs10_ao48`: Forward native chunked cross-entropy. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `64g_sac-ao_bs10_ao60`: Forward fused MLA key/RoPE. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `64g_sac-ao_bs10_ao80`: Forward MTP MXFP8 attention projection (scaled_mm). GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `native_cuda_graphs_32g_full_bs8`: Native CUDA graph warmup on its capture stream: forward MTP attention MXFP8 quantization; graph capture had not started. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `native_cuda_graphs_32g_full_bs10`: Native CUDA graph warmup on its capture stream: forward cuDNN SDPA; graph capture had not started. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `native_eager_sac_bs6_det42`: Forward fused MLA query/RoPE output allocation (_fused_mla_q_rope_out_op). GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `native_rescue_sac_cpuoffload_bs6_ao80`: Forward MTP attention MXFP8 projection (scaled_mm). GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `native_boundary_full_recompute_bs7`: Forward native chunked cross-entropy, FP32 intermediate (BS7). GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+- `native_rescue_full_recompute_cpuoffload_bs8_ao40`: Profiler shutdown after update 16: host-memory OOMD kill (exit 137, signal 9).
+- `native_diagnostic_sac_cpuoffload_bs6_ao80`: First microbatch forward, MTP attention MXFP8 scaled_mm; all 64 ranks started one model forward and completed none. GPU memory in OOM rows is measured at the failed allocation; it is not a successful training peak or an exact capacity forecast.
+  Failure telemetry on all 64 ranks records 80.00 GiB peak live CPU activations, 174 copies per rank and zero host-pressure skips.
 
 ## Cross-engine scalar observations
 
@@ -371,6 +380,7 @@ These pairs use the primary performance settings. They completed 17 finite updat
 | `schedule_reduce_last_unfused` versus `schedule_reduce_last_fused` | 64 x 17 | 0.0914626 (update 8) | 6.2225356 (update 14) |
 | `schedule_reduce_last_fused` versus `schedule_first_legacy_fused` | 64 x 17 | 0.0579176 (update 16) | 170.5535989 (update 15) |
 | `fit_32g_full_bs6` versus `fit_32g_full-ao_bs6_ao24` | 32 x 17 | 0.0471563 (update 16) | 4.5601285 (update 15) |
+| `sweep_64g_full_bs10_ao24` versus `rescue_64g_full_bs10_ao80` | 64 x 17 | 0.1042328 (update 16) | 9.6117245 (update 17) |
 
 ## Additional execution controls
 
@@ -434,4 +444,4 @@ Both fused gather arms recorded 6069 uses per rank of an existing MXFP8 running 
 | 64 GPU native scheduling with qualified head policy | `2eb747d1b479616880b27e21c068578d4cb333e6` + MTP annotation patch | `torchtitan_workspace:6b7c7969487b435b85105645768736d9` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
 | 64 GPU native SAC with failure telemetry | `1457497a35d2fd7570b87566a8af0b3fd22b7538` + MTP annotation patch | `torchtitan_workspace:185df65145ea45478b3322c3bcfd172b` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
 | 32 GPU native AO40 with rank 0 profiling, no shapes | `f66c0e6cd7aa3d5356d918e7b8d6a2a6f1fd1c65` + MTP annotation patch | `torchtitan_workspace:128996753322495ab5172acfb58000a7` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
-| Original 32 GPU graph payload reused for matched BS6 controls | `f66c0e6cd7aa3d5356d918e7b8d6a2a6f1fd1c65` | `torchtitan_workspace:f426b59d31f74b749092f6d9ace965ad` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
+| Original 32 GPU graph payload reused for matched BS6 and BS8/AO40 controls | `f66c0e6cd7aa3d5356d918e7b8d6a2a6f1fd1c65` | `torchtitan_workspace:f426b59d31f74b749092f6d9ace965ad` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
