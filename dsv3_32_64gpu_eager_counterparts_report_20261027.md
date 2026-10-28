@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T07:17:51.381772+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T07:19:22.126259+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -125,6 +125,14 @@ All rows below use Full recomputation, BS6/GA8 and 64 GPUs. The native head poli
 
 Both engines use the same BS6/GA8 batch geometry, FP32 GPU masters and gradients, FP32 CPU Adam moments, and the stated activation-offload quota. New graph runs clone the original 32-GPU definitions and immutable payload, changing only the batch from 8 to 6 and the job identity. Ratios are filled only after all-rank measurement verification.
 
+## Smaller-batch native 32 GPU baselines
+
+These supplement the matched presentation tables with smaller-batch native training baselines. They retain FP32 master weights and gradients on GPU, FP32 Adam moments on CPU, and GA8. Their batch geometry differs from the presentation runs, so matched throughput ratios are omitted.
+
+| ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
+| `native_boundary_full_recompute_bs7` | 7 / 8 | 1792 | Disabled | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b7-full-ga8-17u-20261028-bound1-ivankobzarev) | Not yet produced |
+
 ## Native 64 GPU activation-offload rescue configurations
 
 These add an 80 GiB/rank CPU activation quota to two failed native configurations: SAC BS6 and Full recompute BS10. They retain the primary native optimizer precision, placement, GA8 and communication settings. They have no existing matched graph reference, so cross-engine throughput ratios are omitted.
@@ -133,6 +141,14 @@ These add an 80 GiB/rank CPU activation quota to two failed native configuration
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
 | `native_rescue_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 10 / 8 | 5120 | 80 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao80-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
+
+## Native 32 GPU activation-offload rescue configuration
+
+This increases the CPU activation quota from 24 to 40 GiB/rank at the original BS8/GA8 geometry while retaining GPU FP32 master weights and gradients, CPU FP32 Adam moments, and the 512 MiB staging cap per optimizer instance. It is a supplemental capacity experiment, with no matched graph throughput ratio.
+
+| ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
+| `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 8 / 8 | 2048 | 40 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
 
 ## Native startup observations
 
@@ -295,6 +311,7 @@ The main twelve counterparts use uncaptured native execution with seed 14536, de
 | `native_eager_full_recompute_bs6_first_gather_legacy_fused` | Native eager | first_microbatch / last_microbatch | enabled | 14536 / False |
 | `native_rescue_sac_cpuoffload_bs6_ao80` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
+| `native_rescue_full_recompute_cpuoffload_bs8_ao40` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 
 ## Native MTP checkpoint qualification
 
