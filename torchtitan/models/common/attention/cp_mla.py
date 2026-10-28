@@ -6,6 +6,7 @@
 
 """Context-parallel execution for compact multi-head latent attention."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -20,7 +21,7 @@ from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from .attention import FlexInnerAttention
 from .cp_attention import AllGatherKVFlex, Ulysses
-from .mla import materialize_mla_kv, MLAAttention, MLAKVMaterializer
+from .mla import materialize_mla_kv, MLAAttention
 
 __all__ = [
     "AllGatherKVMLAFlexAttention",
@@ -89,7 +90,10 @@ class UlyssesMLAAttention(Ulysses, MLAAttention):
         kv_c_normed_TL: torch.Tensor,
         k_shared_TR: torch.Tensor,
         *,
-        materialize_kv: MLAKVMaterializer = materialize_mla_kv,
+        materialize_kv: Callable[
+            [torch.Tensor, torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor],
+        ] = materialize_mla_kv,
         **kwargs,
     ) -> torch.Tensor:
         cp_group = spmd_mesh_group(MeshAxisName.CP)

@@ -21,10 +21,6 @@ from .attention import InnerAttention
 if TYPE_CHECKING:
     from . import AttentionMetadata
 
-MLAKVMaterializer = Callable[
-    [torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
-]
-
 __all__ = [
     "MLAAttention",
     "materialize_mla_kv",
@@ -114,7 +110,10 @@ class MLAAttention(InnerAttention):
         kv_c_normed_TL: torch.Tensor,
         k_shared_TR: torch.Tensor,
         *,
-        materialize_kv: MLAKVMaterializer = materialize_mla_kv,
+        materialize_kv: Callable[
+            [torch.Tensor, torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor],
+        ] = materialize_mla_kv,
         **kwargs,
     ) -> torch.Tensor:
         """Project and run attention, optionally fusing local K/V materialization.

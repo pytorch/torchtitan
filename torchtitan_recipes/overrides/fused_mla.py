@@ -19,8 +19,9 @@ its packed MLA Q/KV projection layout. It is not a generic RoPE fusion and does
 not apply to non-MLA models such as Qwen3, Qwen3.5, or GPT-OSS.
 
 AllGather and Ulysses MLA context parallelism retain their compact communication.
-With CP, shared-key RoPE runs before communication and the fused KV assembly
-runs afterward, preserving the order of gradient reduction and inverse RoPE.
+With CP, the unrotated shared key and its position IDs are gathered in the same
+token order. The fused kernel applies RoPE while assembling K after communication.
+Backward inverse-rotates each rank's contribution before CP gradient reduction.
 
 The kernels implement TorchTitan ``ComplexRoPE`` and require its complex-valued
 cache. They do not support ``CosSinRoPE`` or ``MRoPE``, whose real cos/sin cache
@@ -73,6 +74,7 @@ No Megatron-Core or TransformerEngine dependency is required.
 """
 
 from dataclasses import dataclass
+from functools import partial
 
 import spmd_types as spmd
 import torch
@@ -82,6 +84,7 @@ import triton.language as tl
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import derive, override
+from torchtitan.distributed.context_parallel import cp_all_gather_tensors
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     MLAAttention,
@@ -335,7 +338,6 @@ def _fused_k_rope_kernel(
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_PAIRS: tl.constexpr,
-    APPLY_ROPE: tl.constexpr,
 ) -> None:
     num_head_blocks: tl.constexpr = (N_HEADS + BLOCK_H - 1) // BLOCK_H
     program = tl.program_id(0).to(tl.int64)
@@ -375,23 +377,20 @@ def _fused_k_rope_kernel(
     kpe_even = kpe_even.to(tl.float32)
     kpe_odd = kpe_odd.to(tl.float32)
 
-    if APPLY_ROPE:
-        position = tl.load(positions + batch * POS_STRIDE_B + seq * POS_STRIDE_L)
-        cache_base = position * CACHE_STRIDE_M + pair * CACHE_STRIDE_P
-        cos = tl.load(
-            rope_cache + cache_base,
-            mask=pair_mask,
-            other=0.0,
-        ).to(tl.float32)
-        sin = tl.load(
-            rope_cache + cache_base + CACHE_STRIDE_R,
-            mask=pair_mask,
-            other=0.0,
-        ).to(tl.float32)
-        out_even = kpe_even * cos - kpe_odd * sin
-        out_odd = kpe_even * sin + kpe_odd * cos
-    else:
-        out_even, out_odd = kpe_even, kpe_odd
+    position = tl.load(positions + batch * POS_STRIDE_B + seq * POS_STRIDE_L)
+    cache_base = position * CACHE_STRIDE_M + pair * CACHE_STRIDE_P
+    cos = tl.load(
+        rope_cache + cache_base,
+        mask=pair_mask,
+        other=0.0,
+    ).to(tl.float32)
+    sin = tl.load(
+        rope_cache + cache_base + CACHE_STRIDE_R,
+        mask=pair_mask,
+        other=0.0,
+    ).to(tl.float32)
+    out_even = kpe_even * cos - kpe_odd * sin
+    out_odd = kpe_even * sin + kpe_odd * cos
 
     rope_base = k_base + Q_NOPE_DIM * K_STRIDE_D
     rope_mask = head_mask & lane_mask[None, :]
@@ -449,7 +448,6 @@ def _fused_kv_backward_kernel(
     BLOCK_PAIRS: tl.constexpr,
     ROUND_BF16_SUM: tl.constexpr,
     ROUND_FP16_SUM: tl.constexpr,
-    APPLY_ROPE: tl.constexpr,
 ) -> None:
     token = tl.program_id(0).to(tl.int64)
     seq = token % SEQ_LEN
@@ -518,23 +516,20 @@ def _fused_kv_backward_kernel(
 
     pair_1d = tl.arange(0, BLOCK_PAIRS)
     pair_mask_1d = pair_1d < ROPE_DIM // 2
-    if APPLY_ROPE:
-        position = tl.load(positions + batch * POS_STRIDE_B + seq * POS_STRIDE_L)
-        cache_base = position * CACHE_STRIDE_M + pair_1d * CACHE_STRIDE_P
-        cos = tl.load(
-            rope_cache + cache_base,
-            mask=pair_mask_1d,
-            other=0.0,
-        ).to(tl.float32)
-        sin = tl.load(
-            rope_cache + cache_base + CACHE_STRIDE_R,
-            mask=pair_mask_1d,
-            other=0.0,
-        ).to(tl.float32)
-        out_even = grad_pos_even * cos + grad_pos_odd * sin
-        out_odd = grad_pos_odd * cos - grad_pos_even * sin
-    else:
-        out_even, out_odd = grad_pos_even, grad_pos_odd
+    position = tl.load(positions + batch * POS_STRIDE_B + seq * POS_STRIDE_L)
+    cache_base = position * CACHE_STRIDE_M + pair_1d * CACHE_STRIDE_P
+    cos = tl.load(
+        rope_cache + cache_base,
+        mask=pair_mask_1d,
+        other=0.0,
+    ).to(tl.float32)
+    sin = tl.load(
+        rope_cache + cache_base + CACHE_STRIDE_R,
+        mask=pair_mask_1d,
+        other=0.0,
+    ).to(tl.float32)
+    out_even = grad_pos_even * cos + grad_pos_odd * sin
+    out_odd = grad_pos_odd * cos - grad_pos_even * sin
 
     gkpe_base = batch * GKPE_STRIDE_B + seq * GKPE_STRIDE_L
     lane_1d = tl.arange(0, 2 * BLOCK_PAIRS)
@@ -675,8 +670,8 @@ def _fused_mla_q_rope_out_op_fake(
 def _fused_mla_k_rope_op(
     kv: torch.Tensor,
     k_pe: torch.Tensor,
-    rope_cache_real: torch.Tensor | None,
-    positions: torch.Tensor | None,
+    rope_cache_real: torch.Tensor,
+    positions: torch.Tensor,
     q_nope_dim: int,
 ) -> torch.Tensor:
     batch, seq_len, n_heads, _ = kv.shape
@@ -701,11 +696,11 @@ def _fused_mla_k_rope_op(
         KPE_STRIDE_B=k_pe.stride(0),
         KPE_STRIDE_L=k_pe.stride(1),
         KPE_STRIDE_D=k_pe.stride(2),
-        CACHE_STRIDE_M=rope_cache_real.stride(0) if rope_cache_real is not None else 0,
-        CACHE_STRIDE_P=rope_cache_real.stride(1) if rope_cache_real is not None else 0,
-        CACHE_STRIDE_R=rope_cache_real.stride(2) if rope_cache_real is not None else 0,
-        POS_STRIDE_B=positions.stride(0) if positions is not None else 0,
-        POS_STRIDE_L=positions.stride(1) if positions is not None else 0,
+        CACHE_STRIDE_M=rope_cache_real.stride(0),
+        CACHE_STRIDE_P=rope_cache_real.stride(1),
+        CACHE_STRIDE_R=rope_cache_real.stride(2),
+        POS_STRIDE_B=positions.stride(0),
+        POS_STRIDE_L=positions.stride(1),
         K_STRIDE_B=k.stride(0),
         K_STRIDE_L=k.stride(1),
         K_STRIDE_H=k.stride(2),
@@ -716,7 +711,6 @@ def _fused_mla_k_rope_op(
         ROPE_DIM=rope_dim,
         BLOCK_D=triton.next_power_of_2(q_nope_dim),
         BLOCK_PAIRS=triton.next_power_of_2(rope_dim // 2),
-        APPLY_ROPE=rope_cache_real is not None,
     )
     return k
 
@@ -725,8 +719,8 @@ def _fused_mla_k_rope_op(
 def _fused_mla_k_rope_op_fake(
     kv: torch.Tensor,
     k_pe: torch.Tensor,
-    rope_cache_real: torch.Tensor | None,
-    positions: torch.Tensor | None,
+    rope_cache_real: torch.Tensor,
+    positions: torch.Tensor,
     q_nope_dim: int,
 ) -> torch.Tensor:
     return torch.empty(
@@ -744,8 +738,8 @@ def _fused_mla_k_rope_op_fake(
 def _fused_mla_kv_backward_op(
     grad_k: torch.Tensor,
     grad_v: torch.Tensor,
-    rope_cache_real: torch.Tensor | None,
-    positions: torch.Tensor | None,
+    rope_cache_real: torch.Tensor,
+    positions: torch.Tensor,
     q_nope_dim: int,
     rope_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -776,11 +770,11 @@ def _fused_mla_kv_backward_op(
         GV_STRIDE_L=grad_v.stride(1),
         GV_STRIDE_H=grad_v.stride(2),
         GV_STRIDE_D=grad_v.stride(3),
-        CACHE_STRIDE_M=rope_cache_real.stride(0) if rope_cache_real is not None else 0,
-        CACHE_STRIDE_P=rope_cache_real.stride(1) if rope_cache_real is not None else 0,
-        CACHE_STRIDE_R=rope_cache_real.stride(2) if rope_cache_real is not None else 0,
-        POS_STRIDE_B=positions.stride(0) if positions is not None else 0,
-        POS_STRIDE_L=positions.stride(1) if positions is not None else 0,
+        CACHE_STRIDE_M=rope_cache_real.stride(0),
+        CACHE_STRIDE_P=rope_cache_real.stride(1),
+        CACHE_STRIDE_R=rope_cache_real.stride(2),
+        POS_STRIDE_B=positions.stride(0),
+        POS_STRIDE_L=positions.stride(1),
         GKV_STRIDE_B=grad_kv.stride(0),
         GKV_STRIDE_L=grad_kv.stride(1),
         GKV_STRIDE_H=grad_kv.stride(2),
@@ -795,7 +789,6 @@ def _fused_mla_kv_backward_op(
         V_DIM=v_dim,
         BLOCK_D=triton.next_power_of_2(max(q_nope_dim, v_dim)),
         BLOCK_PAIRS=triton.next_power_of_2(rope_dim // 2),
-        APPLY_ROPE=rope_cache_real is not None,
         ROUND_BF16_SUM=grad_k.dtype == torch.bfloat16,
         ROUND_FP16_SUM=grad_k.dtype == torch.float16,
     )
@@ -806,8 +799,8 @@ def _fused_mla_kv_backward_op(
 def _fused_mla_kv_backward_op_fake(
     grad_k: torch.Tensor,
     grad_v: torch.Tensor,
-    rope_cache_real: torch.Tensor | None,
-    positions: torch.Tensor | None,
+    rope_cache_real: torch.Tensor,
+    positions: torch.Tensor,
     q_nope_dim: int,
     rope_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -890,38 +883,23 @@ class _FusedMLAKV(torch.autograd.Function):
         *,
         kv: torch.Tensor,
         k_pe: torch.Tensor,
-        rope_cache_real: torch.Tensor | None,
-        positions: torch.Tensor | None,
+        rope_cache_real: torch.Tensor,
+        positions: torch.Tensor,
     ) -> None:
-        if rope_cache_real is None:
-            # CP materialization consumes a head-shared key replicated over CP.
-            kv_type = spmd.rules.einsum("bthp->bthp", kv)
-            spmd.assert_type(
-                k_pe,
-                {"dp": spmd.V, "cp": spmd.R, "tp": spmd.R},
-                spmd.PartitionSpec(None, "dp", None),
-            )
-            for output in outputs:
-                spmd.assert_type_like(output, kv_type)
-            return
-        kv_partition = spmd.PartitionSpec(None, ("dp", "cp"), "tp", None)
-        k_pe_partition = spmd.PartitionSpec(None, ("dp", "cp"), None)
-        positions_partition = spmd.PartitionSpec(None, ("dp", "cp"))
-        spmd.assert_type(kv, spmd.V, kv_partition)
-        spmd.assert_type(k_pe, spmd.V, k_pe_partition)
+        # K shares KV's token layout, while its positional tail and position IDs
+        # are shared across heads. This also covers CP-sharded heads in Ulysses.
+        kv_type = spmd.rules.einsum("bthp,btr,bt->bthp", kv, k_pe, positions)
         spmd.assert_type(rope_cache_real, spmd.R)
-        spmd.assert_type(positions, spmd.V, positions_partition)
-        k, v = outputs
-        spmd.assert_type(k, spmd.V, kv_partition)
-        spmd.assert_type(v, spmd.V, kv_partition)
+        for output in outputs:
+            spmd.assert_type_like(output, kv_type)
 
     @staticmethod
     def forward(
         ctx,
         kv: torch.Tensor,
         k_pe: torch.Tensor,
-        rope_cache_real: torch.Tensor | None,
-        positions: torch.Tensor | None,
+        rope_cache_real: torch.Tensor,
+        positions: torch.Tensor,
         q_nope_dim: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         ctx.q_nope_dim = q_nope_dim
@@ -1010,13 +988,16 @@ def _materialize_cp_mla_kv(
     q_THK: torch.Tensor,
     kv_THP: torch.Tensor,
     k_shared_TR: torch.Tensor,
+    *,
+    rope_cache: torch.Tensor,
+    positions_T: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fuse KV assembly after CP communication of the already-rotated shared key."""
-    k_1THK, v_1THV = _FusedMLAKV.apply(
+    """Fuse shared-key RoPE and KV assembly in the post-communication layout."""
+    k_1THK, v_1THV = fused_mla_kv(
         kv_THP.unsqueeze(0),
         k_shared_TR.unsqueeze(0),
-        None,
-        None,
+        rope_cache,
+        positions_T,
         q_THK.shape[-1] - k_shared_TR.shape[-1],
     )
     return k_1THK.squeeze(0), v_1THV.squeeze(0)
@@ -1099,58 +1080,64 @@ class FusedMLAAttention(DeepSeekMLAAttention):
         remat.recompute_needs_tensor(kv_down)
 
         if isinstance(self.inner_attention, CPInnerAttention):
-            # Keep shared-key RoPE before communication: backward must reduce
-            # the CP contributions before inverse rotation, as in stock MLA.
-            k_shared_TR = self.rope(k_pe.unsqueeze(1), positions=positions).squeeze(1)
+            # Gather positions in the same rank/token order as the shared key,
+            # including packed documents and CP load-balancing permutations.
+            positions_T = _resolve_positions(positions, k_pe.unsqueeze(0)).squeeze(0)
+            (positions_T,) = cp_all_gather_tensors(
+                (positions_T,), reduce_dtype=positions_T.dtype
+            )
             output = self.inner_attention(
                 q,
                 self.kv_norm(kv_latent),
-                k_shared_TR,
-                materialize_kv=_materialize_cp_mla_kv,
+                k_pe,
+                materialize_kv=partial(
+                    _materialize_cp_mla_kv,
+                    rope_cache=self.rope.cache,
+                    positions_T=positions_T,
+                ),
                 attention_metadata=attention_metadata,
                 scale=self.softmax_scale,
             )
-            remat.recompute_needs_tensor(output)
-            return self.wo(output.contiguous().view(num_tokens, -1))
+        else:
+            kv = self.inner_attention.wkv_b(self.kv_norm(kv_latent))
+            with spmd.local():
+                kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
+                # The fused kernel reads the wkv_b projection output outside any region.
+                remat.recompute_needs_tensor(kv)
+                k, v = fused_mla_kv(
+                    kv.unsqueeze(0),
+                    k_pe.unsqueeze(0),
+                    self.rope.cache,
+                    positions,
+                    self.qk_nope_head_dim,
+                )
+                k, v = k.squeeze(0), v.squeeze(0)
+                if spmd.is_type_checking() and not torch.compiler.is_compiling():
+                    for tensor in (k, v):
+                        spmd.assert_type(
+                            tensor,
+                            spmd.V,
+                            spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                        )
 
-        kv = self.inner_attention.wkv_b(self.kv_norm(kv_latent))
-        with spmd.local():
-            kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
-            # The fused kernel reads the wkv_b projection output outside any region.
-            remat.recompute_needs_tensor(kv)
-            k, v = fused_mla_kv(
-                kv.unsqueeze(0),
-                k_pe.unsqueeze(0),
-                self.rope.cache,
-                positions,
-                self.qk_nope_head_dim,
+            inner_attention = self.inner_attention
+            assert isinstance(inner_attention, MLAAttention)
+            # fused_mla_kv already materialized K/V, so bypass the compact MLA
+            # forward and call its underlying Q/K/V backend directly.
+            qkv_attention = inner_attention.inner_attention
+            assert isinstance(qkv_attention, (FlexInnerAttention, VarlenInnerAttention))
+            output = remat.region(
+                qkv_attention,
+                self.remat_region_name("inner_attention"),
+                recompute=self.remat_should_recompute("inner_attention"),
+            )(
+                q,
+                k,
+                v,
+                attention_metadata=attention_metadata,
+                scale=self.softmax_scale,
             )
-            k, v = k.squeeze(0), v.squeeze(0)
-            if spmd.is_type_checking() and not torch.compiler.is_compiling():
-                for tensor in (k, v):
-                    spmd.assert_type(
-                        tensor,
-                        spmd.V,
-                        spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                    )
 
-        inner_attention = self.inner_attention
-        assert isinstance(inner_attention, MLAAttention)
-        # fused_mla_kv already materialized K/V, so bypass the compact MLA
-        # forward and call its underlying Q/K/V backend directly.
-        qkv_attention = inner_attention.inner_attention
-        assert isinstance(qkv_attention, (FlexInnerAttention, VarlenInnerAttention))
-        output = remat.region(
-            qkv_attention,
-            self.remat_region_name("inner_attention"),
-            recompute=self.remat_should_recompute("inner_attention"),
-        )(
-            q,
-            k,
-            v,
-            attention_metadata=attention_metadata,
-            scale=self.softmax_scale,
-        )
         # The copy below reads the MLA attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
