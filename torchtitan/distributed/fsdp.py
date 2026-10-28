@@ -315,7 +315,8 @@ def apply_fsdp_to_decoder(
         param_dtype_override_fn: Optional callback that overrides ``param_dtype``
             for selected parameters.
         unshard_async_op: Whether to issue pre-forward/pre-backward
-            all-gathers with ``async_op=True`` from the compute stream.
+            all-gathers on the current (compute) stream via
+            ``FSDPModule.set_unshard_in_current_stream``.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -483,7 +484,7 @@ def apply_fsdp_to_decoder(
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
     # in EP could interfere with implicit prefetching in FSDP, and when
-    # unsharding with async_op=True, as all-gathers issued on the compute
+    # unsharding in the current stream, as all-gathers issued on the compute
     # stream only overlap with compute if they are issued ahead of time
     if ep_degree == 1 and not unshard_async_op:
         return
@@ -526,4 +527,4 @@ def apply_fsdp_to_decoder(
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
 
     if unshard_async_op:
-        model._set_unshard_async_op(True)
+        model.set_unshard_in_current_stream(True)
