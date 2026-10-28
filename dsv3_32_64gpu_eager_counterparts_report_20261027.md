@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T02:51:07.650118+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T03:13:17.496831+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -74,7 +74,7 @@ MFU uses the same model-FLOP estimate, excluding recompute, and 5 PFLOP/s dense 
 | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
 | `native_eager_sac_bs6_det42` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 236.48 / 244.53 | 4,839.45 | 28.25 | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-sac-det42-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-d42-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-sac-det42-20261026-ivankobzarev/v_0/attempt_0/profiling/traces/iteration_16/rank0_trace.json.gz) |
 | `native_eager_full_recompute_bs6_det42` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 189.60 / 193.61 | 4,661.34 | 27.21 | PASS, all 64 x 17 | 219.10 / 225.21 | 4,421.89 | 25.81 | 1.054x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-full-det42-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-d42-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-full-det42-20261026-ivankobzarev/v_0/attempt_0/profiling/traces/iteration_16/rank0_trace.json.gz) / [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_f2de370f-8cde-41ad-a32f-684fc6e1034c_rank0_trace.json.gz) |
-| `native_eager_full_recompute_cpuoffload_bs6_det42` | 6 / 8 | 80 | PASS, all 64 x 17 (reference) | 163.82 / 167.91 | 4,587.43 | 26.78 | RUNNING | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-fullao-det42-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-fullao80-d42-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-fullao-det42-20261026-ivankobzarev/v_0/attempt_0/profiling/traces/iteration_16/rank0_trace.json.gz) |
+| `native_eager_full_recompute_cpuoffload_bs6_det42` | 6 / 8 | 80 | PASS, all 64 x 17 (reference) | 163.82 / 167.91 | 4,587.43 | 26.78 | PASS, all 64 x 17 | 172.95 / 177.81 | 4,077.67 | 23.80 | 1.125x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-fullao-det42-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-fullao80-d42-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-fullao-det42-20261026-ivankobzarev/v_0/attempt_0/profiling/traces/iteration_16/rank0_trace.json.gz) / [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_cb145ed0-d3ce-4c2e-b627-a13caf5827ba_rank0_trace.json.gz) |
 | `native_eager_full_recompute_bs6_gather_every` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 213.35 / 221.66 | 4,726.74 | 27.59 | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-gather-every-det42-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-ge-f-d42-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-gather-every-det42-20261026-ivankobzarev/v_0/attempt_0/profiling/traces/iteration_16/rank0_trace.json.gz) |
 | `native_eager_full_recompute_bs6_gather_first` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 240.74 / 248.53 | 4,827.56 | 28.18 | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-gather-first-det42-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-gf-f-d42-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-gather-first-det42-20261026-ivankobzarev/v_0/attempt_0/profiling/traces/iteration_16/rank0_trace.json.gz) |
 | `native_eager_full_recompute_bs6_reduce_last_unfused` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 213.33 / 223.84 | 4,822.62 | 28.15 | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-full-last-u-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-ge-u-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-full-last-u-20261026-ivankobzarev/v_0/attempt_1/profiling/traces/iteration_16/rank0_trace.json.gz) |
@@ -128,6 +128,14 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `native_eager_full_recompute_bs6_det42` | 64 | 45.02 | 64 | 532.81 |
 | `native_eager_full_recompute_cpuoffload_bs6_det42` | 64 | 46.54 | 64 | 542.62 |
 
+## Native activation offload actually used
+
+Counters cover all 17 updates. Peak live bytes and copy count are maximums over ranks; host-pressure skips are summed over ranks. A zero remaining-live count verifies that all activation payloads were released.
+
+| ID | Quota GiB/rank | Peak live CPU GiB/rank | Maximum copies/rank | Host-pressure skips, all ranks | Maximum remaining live bytes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `native_eager_full_recompute_cpuoffload_bs6_det42` | 80 | 48.74 | 48824 | 0 | 0 |
+
 ## Full recompute BS6 profile interpretation
 
 The synchronized measured update averages are 41.30 seconds for graph trainer and 43.34 seconds for native eager. Update 16 is separately profiled and excluded from those averages.
@@ -179,7 +187,9 @@ A real FSDP2/EP2 DSv3 + MTP1 comparison uses GA8, strict seed 42 and the product
 | 0 | 0.0038652 | 0.00005198 |
 | 1 | 0.0035316 | 0.00000156 |
 
-This localizes the initial reduced-model discrepancy before Adam runs. Native head coalescing and graph head reduction order differ; a separate per-chunk native synchronization control is being evaluated. This reduced-model observation does not establish the full-model cause or convergence.
+This localizes the initial reduced-model discrepancy before Adam runs. Native head coalescing and graph head reduction order differ. This reduced-model observation does not establish the full-model cause or convergence.
+
+A separate native control synchronizes the head after every chunk while preserving every-microbatch body reduction. It also completed 17 updates; 87 of 88 first-update gradients still match, and the head relative L2 differences are 0.0029796, 0.0024435. The maximum average-loss difference is 0.0006638. Per-chunk synchronization narrows the discrepancy but does not make the engines bitwise equivalent. The recorded presentation jobs retain their original native chunk loop.
 
 ## Strict hardware scalar comparisons
 
@@ -188,6 +198,11 @@ Only completed, all-rank-verified 17-update runs are included. These are recorde
 | Native counterpart ID | Graph / native average loss at update 1 | Maximum average-loss difference | Maximum gradient-norm difference |
 | --- | ---: | ---: | ---: |
 | `strict_64g_full_bs6` | 8.4076576 / 8.4076576 | 0.0257945 (update 5) | 12.8320246 (update 3) |
+| `strict_64g_full-ao_bs6_ao80` | 8.4076576 / 8.4076576 | 0.0257945 (update 5) | 12.8320246 (update 3) |
+
+| Native pair | Ranks x updates checked | All scalar values bitwise equal | Maximum average-loss / gradient-norm difference |
+| --- | ---: | --- | ---: |
+| `strict_64g_full_bs6` versus `strict_64g_full-ao_bs6_ao80` | 64 x 17 | True | 0.0000000 / 0.0000000 |
 
 ## Additional execution controls
 
