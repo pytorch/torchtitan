@@ -1040,6 +1040,26 @@ def test_direct_load_fails_on_every_rank_when_any_rank_fails(
     asyncio.run(run())
 
 
+def test_cancelled_direct_load_still_joins_the_all_reduce(
+    engine_thread, monkeypatch
+) -> None:
+    reduced: list[int] = []
+
+    def all_reduce(tensor, group) -> None:
+        reduced.append(int(tensor.item()))
+
+    async def fetch(weights: dict) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(engine_loop_module.dist, "all_reduce", all_reduce)
+    engine_loop = engine_thread(_DirectLoadEngine())
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(engine_loop._load_model_state_dict_direct(fetch))
+    # Skipping it would hang the other ranks in theirs.
+    assert reduced == [1]
+
+
 def test_loads_queued_during_a_load_are_applied_together_after_it(
     engine_thread, monkeypatch
 ) -> None:

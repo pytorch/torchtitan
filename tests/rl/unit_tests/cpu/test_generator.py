@@ -600,6 +600,46 @@ def test_direct_fetch_runs_on_torchstore_loop():
     assert kwargs["direct_rdma"] is True
 
 
+def test_cancelled_direct_fetch_waits_for_the_read():
+    torchstore_loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=torchstore_loop.run_forever)
+    thread.start()
+    generator = Generator.__new__(Generator)
+    generator._torchstore_loop = torchstore_loop
+    reading, released = threading.Event(), threading.Event()
+    read_cancelled = []
+
+    async def get_state_dict(*args, **kwargs):
+        reading.set()
+        try:
+            await asyncio.to_thread(released.wait, 30)
+        except asyncio.CancelledError:
+            read_cancelled.append(True)
+            raise
+
+    async def run() -> None:
+        fetch = asyncio.create_task(generator._fetch_model_state_dict({}))
+        assert await asyncio.to_thread(reading.wait, 30)
+        fetch.cancel()
+        # RDMA writes continue after cancel, so the fetch must not return yet.
+        done, _ = await asyncio.wait([fetch], timeout=0.1)
+        assert not done
+        released.set()
+        with pytest.raises(asyncio.CancelledError):
+            await fetch
+
+    try:
+        with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
+            asyncio.run(run())
+    finally:
+        released.set()
+        torchstore_loop.call_soon_threadsafe(torchstore_loop.stop)
+        thread.join()
+        torchstore_loop.close()
+
+    assert read_cancelled == []
+
+
 def test_prefetch_model_state_dict_is_noop_with_direct_rdma():
     generator = Generator.__new__(Generator)
     generator.config = SimpleNamespace(direct_rdma_model_state_dict=True)

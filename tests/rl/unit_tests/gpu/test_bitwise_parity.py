@@ -30,6 +30,7 @@ Run each backend in a separate torchrun invocation:
         tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityFlex -v
 """
 
+import asyncio
 import copy
 import dataclasses
 import gc
@@ -270,30 +271,43 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     return LLMEngine.from_engine_args(EngineArgs(**engine_kwargs))
 
 
-def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
-    """Copy the trainer model's weights into the vLLM model in-process."""
+def _sync_trainer_weights_to_vllm(trainer_model, engine, *, direct: bool) -> None:
+    """Copy the trainer model's weights into the vLLM model in-process.
+
+    With ``direct``, load through ``load_state_dict_direct`` with a fetch that copies
+    in place of the torchstore RDMA read.
+    """
 
     wrapper = engine.model_executor.driver_worker.get_model()
     trainer_sd = trainer_model.state_dict()
-    # As a model state dict load: fill the pinned CPU copy, then load it with load_state_dict.
-    vllm_sd = wrapper._prefetched_model_state_dict
-
     missing = []
-    for name, vparam in vllm_sd.items():
-        tparam = trainer_sd.get(name)
-        if tparam is None:
-            missing.append(name)
-            continue
-        full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
-        with torch.inference_mode():
-            if isinstance(vparam, DTensor):
-                vparam.copy_(
-                    distribute_tensor(full, vparam.device_mesh, vparam.placements)
-                )
-            else:
-                vparam.copy_(full)
 
-    wrapper.load_state_dict(vllm_sd)
+    def copy_trainer_weights(state_dict: dict[str, torch.Tensor]) -> None:
+        for name, vparam in state_dict.items():
+            tparam = trainer_sd.get(name)
+            if tparam is None:
+                missing.append(name)
+                continue
+            full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
+            with torch.inference_mode():
+                if isinstance(vparam, DTensor):
+                    vparam.copy_(
+                        distribute_tensor(full, vparam.device_mesh, vparam.placements)
+                    )
+                else:
+                    vparam.copy_(full)
+
+    if direct:
+
+        async def fetch(state_dict: dict[str, torch.Tensor]) -> None:
+            copy_trainer_weights(state_dict)
+
+        asyncio.run(wrapper.load_state_dict_direct(fetch))
+    else:
+        # As a model state dict load: fill the pinned CPU copy, then load it with load_state_dict.
+        vllm_sd = wrapper._prefetched_model_state_dict
+        copy_trainer_weights(vllm_sd)
+        wrapper.load_state_dict(vllm_sd)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -588,6 +602,9 @@ class BitwiseParityTestBase(unittest.TestCase):
     # When True, vLLM skips its own checkpoint load and the trainer model's
     # weights (including attention sinks) are copied into the engine in-process.
     sync_weights_from_trainer: bool = False
+    # With sync_weights_from_trainer, copy into the generator's sharded parameters one
+    # FSDP group at a time (direct_rdma_model_state_dict) instead of a pinned CPU copy.
+    direct_rdma_model_state_dict: bool = False
 
     # Shared across all tests in the class (built once in setUpClass)
     model: torch.nn.Module
@@ -651,6 +668,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             config.generator.model,
             parallelism=config.generator.parallelism,
             checkpointer_config=generator_checkpointer,
+            direct_rdma_model_state_dict=cls.direct_rdma_model_state_dict,
         )
 
         # Test runs trainer and generator in the same process, so limit
@@ -672,7 +690,9 @@ class BitwiseParityTestBase(unittest.TestCase):
 
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
-            _sync_trainer_weights_to_vllm(cls.model, cls.engine)
+            _sync_trainer_weights_to_vllm(
+                cls.model, cls.engine, direct=cls.direct_rdma_model_state_dict
+            )
 
         tokenizer = cls.engine.get_tokenizer()
         cls.prompt_ids = _make_prompt_tokens(
@@ -902,6 +922,12 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
     def test_vllm_prefill_and_decode_batch_invariance(self):
         """vLLM prefill and decode must not depend on batch composition."""
         self._check_vllm_prefill_and_decode_batch_invariance()
+
+
+class TestBitwiseParityQwen35DebugVarlenDirect(TestBitwiseParityQwen35DebugVarlen):
+    """Qwen3.5 parity with weights loaded via direct_rdma_model_state_dict."""
+
+    direct_rdma_model_state_dict = True
 
 
 @unittest.skipUnless(
