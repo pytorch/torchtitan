@@ -412,11 +412,56 @@ def bootstrap_cmd_returns_env(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    ("visible_devices", "expected"),
+    [
+        (None, ["0,1", "2,3"]),
+        ("4,5,6,7", ["4,5", "6,7"]),
+        ("7,5,6,4,3", ["7,5", "6,4"]),
+    ],
+)
+def test_spawn_proc_mesh_uses_controller_visible_gpus(
+    bootstrap_cmd_returns_env, monkeypatch, visible_devices, expected
+):
+    host_mesh = _FakeHostMesh()
+    monkeypatch.setattr(provisioning, "this_host", lambda: host_mesh)
+    if visible_devices is None:
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible_devices)
+
+    provisioning.spawn_proc_mesh(trainer_world_size=2, per_generator_world_size=2)
+
+    assert host_mesh.visible_devices == expected
+
+
+@pytest.mark.parametrize(
+    ("visible_devices", "match"),
+    [
+        ("4,5,6", "need 4"),
+        ("4,4,6,7", "distinct, nonempty"),
+        ("4,,6,7", "distinct, nonempty"),
+    ],
+)
+def test_spawn_proc_mesh_rejects_invalid_visible_gpus_before_spawning(
+    bootstrap_cmd_returns_env, monkeypatch, visible_devices, match
+):
+    host_mesh = _FakeHostMesh()
+    monkeypatch.setattr(provisioning, "this_host", lambda: host_mesh)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible_devices)
+
+    with pytest.raises(ValueError, match=match):
+        provisioning.spawn_proc_mesh(trainer_world_size=2, per_generator_world_size=2)
+
+    assert host_mesh.visible_devices == []
+
+
 def test_spawn_proc_mesh_gives_roles_sharing_a_host_mesh_disjoint_gpus(
-    bootstrap_cmd_returns_env,
+    bootstrap_cmd_returns_env, monkeypatch
 ):
     """Roles on one host mesh get disjoint GPUs; another host mesh starts at GPU 0."""
     mesh_a, mesh_b = _FakeHostMesh(), _FakeHostMesh()
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5,6,7")
 
     provisioning.spawn_proc_mesh(
         trainer_world_size=2,
