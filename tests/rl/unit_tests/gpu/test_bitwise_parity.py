@@ -929,6 +929,27 @@ class TestBitwiseParityQwen35DebugVarlenDirect(TestBitwiseParityQwen35DebugVarle
 
     direct_rdma_model_state_dict = True
 
+    def test_reload_after_generate(self):
+        """Reload changed weights after generation has replayed the captured graphs."""
+        vllm_generate(self.engine, self.prompt_ids, self.MAX_GEN_TOKENS)
+        before_lps = vllm_prefill(self.engine, self.prompt_ids)
+        params = list(self.model.parameters())
+        originals = [p.detach().clone() for p in params]
+        try:
+            with torch.no_grad():
+                for p in params:
+                    p.mul_(0.5)
+            _sync_trainer_weights_to_vllm(self.model, self.engine, direct=True)
+            self.test_trainer_vs_vllm_prefill()
+            after_lps = vllm_prefill(self.engine, self.prompt_ids)
+            if dist.get_rank() == 0:
+                self.assertNotEqual(before_lps[0], after_lps[0])
+        finally:
+            with torch.no_grad():
+                for p, original in zip(params, originals):
+                    p.copy_(original)
+            _sync_trainer_weights_to_vllm(self.model, self.engine, direct=True)
+
 
 @unittest.skipUnless(
     torch.cuda.is_available()
