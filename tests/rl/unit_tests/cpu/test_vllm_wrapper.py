@@ -319,6 +319,68 @@ def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> No
         dist.destroy_process_group()
 
 
+def test_load_state_dict_direct_unshards_every_group_after_fetch_error(
+    tmp_path, monkeypatch
+) -> None:
+    """Unshard every group after a failed fetch, then raise.
+
+    unshard() all-gathers across the FSDP group, so a rank that stops after its
+    fetch fails would hang the ranks still loading.
+    """
+    dist.init_process_group(
+        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
+    )
+    try:
+        model = nn.Module()
+        model.layers = nn.ModuleList(nn.Linear(16, 16) for _ in range(3))
+        model.register_buffer("scale", torch.zeros(4))
+        mesh = init_device_mesh("cpu", (1,))
+        for block in model.layers:
+            fully_shard(block, mesh=mesh, reshard_after_forward=False)
+        fully_shard(model, mesh=mesh, reshard_after_forward=False)
+        model.set_keep_unsharded_storage(True)
+        wrapper = _Wrapper(model)
+        (
+            wrapper._direct_load_groups,
+            wrapper._direct_load_other_keys,
+        ) = model_wrapper._direct_load_groups(model)
+        for module in model.modules():  # as after the initial load
+            if isinstance(module, FSDPModule):
+                model_wrapper._unshard_and_free_sharded_params(module)
+
+        unsharded = []
+        unshard_and_free_sharded_params = model_wrapper._unshard_and_free_sharded_params
+
+        def recording_unshard_and_free_sharded_params(module) -> None:
+            unsharded.append(module)
+            unshard_and_free_sharded_params(module)
+
+        monkeypatch.setattr(
+            model_wrapper,
+            "_unshard_and_free_sharded_params",
+            recording_unshard_and_free_sharded_params,
+        )
+        fetched_keys = []
+
+        async def fetch(state_dict: dict[str, torch.Tensor]) -> None:
+            fetched_keys.append(sorted(state_dict))
+            raise RuntimeError("fetch failed")
+
+        with pytest.raises(RuntimeError, match="fetch failed"):
+            asyncio.run(wrapper.load_state_dict_direct(fetch))
+
+        assert fetched_keys == [["layers.0.bias", "layers.0.weight"]]
+        assert unsharded == list(model.layers)
+        assert all(
+            p._sharded_param_data.untyped_storage().size() == 0
+            for block in model.layers
+            for group in block._get_fsdp_state()._fsdp_param_groups
+            for p in group.fsdp_params
+        )
+    finally:
+        dist.destroy_process_group()
+
+
 def test_direct_load_groups_rejects_quantized_params(tmp_path, monkeypatch) -> None:
     dist.init_process_group(
         "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
