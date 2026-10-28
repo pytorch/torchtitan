@@ -69,10 +69,13 @@ Before you submit, set up the environment, model and dataset per the
 them at the same paths (see the
 [`SlurmLauncher` docstring for more details](./launcher/slurm.py)). Submit from
 the repository root, in the shell where the venv is active and `PYTHONPATH` is
-set.
+set. JIT caches (Triton, vLLM, FlashInfer) default to node-local
+`/tmp/torchtitan-<uid>`; set them in `launcher.env` or the submit shell to
+override.
 
-From a login node, this runs a complete example on three nodes, one for the
-trainer and one for each of two generators:
+From a login node, this runs a complete example on two 4-GPU nodes: the trainer
+on node 0, and four 1-GPU generators sharing node 1 (set `gpus_per_node` in the
+recipe to your nodes' GPU count):
 
 ```bash
 python -m torchtitan.rl.actors.monarch.launcher.submit \

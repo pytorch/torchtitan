@@ -12,7 +12,6 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
-import os
 from typing import TYPE_CHECKING
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
@@ -256,32 +255,37 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
 
 
 def rl_grpo_qwen3_0_6b_flex_slurm() -> "MonarchLaunchConfig":
-    """Example of running a recipe on SLURM with ``SlurmLauncher``: one trainer node
-    and two generator nodes, with the cluster's default account and partition. The
+    """Example of running ``rl_grpo_qwen3_0_6b_flex`` on SLURM with
+    ``SlurmLauncher``, with the cluster's default account and partition. The
     Launchers section of ``torchtitan/rl/actors/monarch/README.md`` uses it as its
-    example, so keep it."""
+    example, so keep it.
+
+    Layout with ``gpus_per_node = 4`` (2 nodes)::
+
+        node | mesh    | roles                          | GPUs
+        -----+---------+--------------------------------+-----
+        0    | trainer | trainer (TP=2 x FSDP=2)        | 4
+        1    | node_0  | generator_0..3 (1 GPU each)    | 4
+    """
     # Imported lazily so this module loads without Monarch.
     from torchtitan.rl.actors.monarch.launcher.base import MonarchLaunchConfig
     from torchtitan.rl.actors.monarch.launcher.slurm import SlurmLauncher
 
+    # Set to your nodes' GPU count; the trainer and generator sizes follow it.
+    gpus_per_node = 4
     config = rl_grpo_qwen3_0_6b_flex()
-    config.num_generators = 2
-    # Node-local JIT caches: the default caches live under the home directory, which
-    # SLURM clusters usually put on a shared network filesystem; nodes compiling
-    # into one shared cache can hang or crash.
-    cache_root = f"/tmp/torchtitan-{os.getuid()}"
-    # The trainer and each generator use 2 GPUs (TP=2), so each gets its own node.
-    # This intentionally uses only 2 GPUs per node, even on nodes with more GPUs:
-    # the recipe only demonstrates the multi-node launcher, not efficient GPU use.
-    launcher = SlurmLauncher.Config(
-        gpus_per_node=2,
-        env={
-            "TRITON_CACHE_DIR": f"{cache_root}/triton",
-            "VLLM_CACHE_ROOT": f"{cache_root}/vllm",
-            "FLASHINFER_WORKSPACE_BASE": f"{cache_root}/flashinfer",
-        },
+    # Qwen3's model configs don't depend on the TP or FSDP degree, so changing
+    # them here needs no model config rebuild.
+    trainer_parallelism = config.trainer.parallelism
+    # Fill node 0: the trainer's world size is TP x FSDP.
+    trainer_parallelism.data_parallel_shard_degree = (
+        gpus_per_node // trainer_parallelism.tensor_parallel_degree
     )
-    return MonarchLaunchConfig.from_controller_config(config, launcher=launcher)
+    config.generator.parallelism.tensor_parallel_degree = 1
+    config.num_generators = gpus_per_node
+    return MonarchLaunchConfig.from_controller_config(
+        config, launcher=SlurmLauncher.Config(gpus_per_node=gpus_per_node)
+    )
 
 
 def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:

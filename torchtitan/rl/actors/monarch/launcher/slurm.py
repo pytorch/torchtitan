@@ -107,6 +107,14 @@ class SlurmLauncher(MonarchLauncher):
         if (sbatch_export or "ALL").split(",")[0] != "ALL":
             raise ValueError("SlurmLauncher needs SBATCH_EXPORT unset or ALL.")
         os.environ.update(plan.env)
+        # Node-local JIT caches: the defaults live under the home directory, which
+        # SLURM clusters usually put on a shared network filesystem, and nodes
+        # compiling into one shared cache can hang or crash. A value from
+        # launcher.env or the submit shell wins.
+        cache_root = f"/tmp/torchtitan-{os.getuid()}"
+        os.environ.setdefault("TRITON_CACHE_DIR", f"{cache_root}/triton")
+        os.environ.setdefault("VLLM_CACHE_ROOT", f"{cache_root}/vllm")
+        os.environ.setdefault("FLASHINFER_WORKSPACE_BASE", f"{cache_root}/flashinfer")
 
         log_dir = os.path.abspath(
             self.config.log_dir or os.path.join(plan.dump_folder, "slurm")

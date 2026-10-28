@@ -392,6 +392,9 @@ def slurm_job(monkeypatch):
 
     monkeypatch.setattr(monarch.job, "SlurmJob", FakeSlurmJob)
     monkeypatch.delenv("SBATCH_EXPORT", raising=False)
+    # submit sets these in os.environ; monkeypatch restores them afterwards.
+    for name in ("TRITON_CACHE_DIR", "VLLM_CACHE_ROOT", "FLASHINFER_WORKSPACE_BASE"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(sys, "executable", "/venv/python")
     return calls
 
@@ -436,6 +439,20 @@ def test_slurm_submit_builds_the_job(tmp_path, slurm_job):
         "my recipes",
     ]
     assert slurm_job["env"]["FROM_PLAN"] == "1"
+
+
+def test_slurm_submit_defaults_node_local_jit_caches(tmp_path, slurm_job, monkeypatch):
+    monkeypatch.setenv("VLLM_CACHE_ROOT", "/from/shell")
+    plan = replace(_slurm_plan(tmp_path), env={"TRITON_CACHE_DIR": "/from/launcher"})
+
+    SlurmLauncher.Config().build().submit(plan)
+
+    env = slurm_job["env"]
+    assert env["TRITON_CACHE_DIR"] == "/from/launcher"
+    assert env["VLLM_CACHE_ROOT"] == "/from/shell"
+    assert env["FLASHINFER_WORKSPACE_BASE"] == (
+        f"/tmp/torchtitan-{os.getuid()}/flashinfer"
+    )
 
 
 def test_slurm_submit_can_share_nodes(tmp_path, slurm_job):
@@ -511,10 +528,14 @@ def test_slurm_config_validation(kwargs):
         SlurmLauncher.Config(**kwargs)
 
 
-def test_slurm_recipe_plans_a_node_per_role():
+def test_slurm_recipe_packs_generators_on_one_node():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_0_6b_flex_slurm
 
     config = rl_grpo_qwen3_0_6b_flex_slurm()
     plan = config.launcher.build().plan(config, [])
 
-    assert plan.layout.mesh_nodes == {"trainer": 1, "generator_0": 1, "generator_1": 1}
+    assert plan.layout.mesh_nodes == {"trainer": 1, "node_0": 1}
+    assert plan.layout.role_mesh == {
+        "trainer": "trainer",
+        **{f"generator_{i}": "node_0" for i in range(4)},
+    }
