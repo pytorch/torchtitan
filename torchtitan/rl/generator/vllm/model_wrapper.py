@@ -573,15 +573,27 @@ class VLLMModelWrapper(Module):
             fetch: Fills each tensor of the given subset of `self.model.state_dict()`
                 in place with the new weights.
         """
+        error = None
         for module, keyed_params in self._direct_load_groups:
             # unshard() is a no-op while the group is unsharded. Resharding registers
             # the sharded parameters and keeps the unsharded storage CUDA graphs read.
             _reshard(module)
             _restore_sharded_params(module)
-            await fetch(
-                {key: fsdp_param.sharded_param for key, fsdp_param in keyed_params}
-            )
+            # After a failed fetch, keep unsharding the remaining groups: unshard()
+            # all-gathers across the FSDP group and the other ranks are still loading.
+            if error is None:
+                try:
+                    await fetch(
+                        {
+                            key: fsdp_param.sharded_param
+                            for key, fsdp_param in keyed_params
+                        }
+                    )
+                except Exception as e:
+                    error = e
             _unshard_and_free_sharded_params(module)
+        if error is not None:
+            raise error
         if not self._direct_load_other_keys:
             return
         other_tensors = {}
