@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T06:35:57.105902+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T07:17:51.381772+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -116,14 +116,14 @@ All rows below use Full recomputation, BS6/GA8 and 64 GPUs. The native head poli
 | `native_eager_full_recompute_bs6_reduce_last_wgrad_fused` | Every microbatch | At finalization after GA8 | enabled | 14536 / False |
 | `native_eager_full_recompute_bs6_first_gather_legacy_fused` | Once at the first microbatch; retain across GA8 | At finalization after GA8 | enabled | 14536 / False |
 
-## Smaller-batch native 32 GPU baselines
+## Matched BS6 32 GPU comparison
 
-These supplement the matched presentation tables with smaller-batch native training baselines. They retain FP32 master weights and gradients on GPU, FP32 Adam moments on CPU, and GA8. Their batch geometry differs from the presentation runs, so matched throughput ratios are omitted.
+| Configuration ID | BS / GA | CPU activation quota GiB | Graph outcome | Graph allocated / reserved peak GiB | Graph tokens/s/GPU | Graph MFU % | Native outcome | Native allocated / reserved peak GiB | Native tokens/s/GPU | Native MFU % | Graph / native throughput | MAST jobs | Profiles, update 16 rank 0 |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| `native_fit_full_recompute_bs6` | 6 / 8 | Disabled | Held for experiment priority | - | - | - | PASS, all 32 x 17 | 259.95 / 268.83 | 4,336.73 | 25.31 | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b6-full-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ga8-17u-20261027-fit1-ivankobzarev) | [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_b6ba5d08-ec4c-4089-979b-e2eae1702912_rank0_trace.json.gz) |
+| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 6 / 8 | 24 | Held for experiment priority | - | - | - | PASS, all 32 x 17 | 235.95 / 243.87 | 4,155.38 | 24.26 | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b6-full-ao24-ga8-17u-20261028-match1-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ao24-ga8-17u-20261027-fit1-ivankobzarev) | [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_fa3658b0-3638-4db2-baac-50c430103064_rank0_trace.json.gz) |
 
-| ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
-| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
-| `native_fit_full_recompute_bs6` | 6 / 8 | 1536 | Disabled | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ga8-17u-20261027-fit1-ivankobzarev) | Not yet produced |
-| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 6 / 8 | 1536 | 24 | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ao24-ga8-17u-20261027-fit1-ivankobzarev) | Not yet produced |
+Both engines use the same BS6/GA8 batch geometry, FP32 GPU masters and gradients, FP32 CPU Adam moments, and the stated activation-offload quota. New graph runs clone the original 32-GPU definitions and immutable payload, changing only the batch from 8 to 6 and the job identity. Ratios are filled only after all-rank measurement verification.
 
 ## Native 64 GPU activation-offload rescue configurations
 
@@ -131,7 +131,7 @@ These add an 80 GiB/rank CPU activation quota to two failed native configuration
 
 | ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
-| `native_rescue_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
+| `native_rescue_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 10 / 8 | 5120 | 80 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao80-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
 
 ## Native startup observations
@@ -162,6 +162,9 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `native_eager_full_recompute_bs6_reduce_last_unfused` | 64 | 45.25 | 64 | 542.10 |
 | `native_eager_full_recompute_bs6_reduce_last_wgrad_fused` | 64 | 43.51 | 64 | 528.88 |
 | `native_eager_full_recompute_bs6_first_gather_legacy_fused` | 64 | 43.13 | 64 | 529.75 |
+| `native_fit_full_recompute_bs6` | 32 | 43.92 | 32 | 571.10 |
+| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 32 | 44.24 | 32 | 542.62 |
+| `native_rescue_sac_cpuoffload_bs6_ao80` | 64 | 45.27 | 0 | - |
 
 ## Native activation offload actually used
 
@@ -170,6 +173,7 @@ Counters cover all 17 updates. Peak live bytes and copy count are maximums over 
 | ID | Quota GiB/rank | Peak live CPU GiB/rank | Maximum copies/rank | Host-pressure skips, all ranks | Maximum remaining live bytes |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `native_eager_full_recompute_cpuoffload_bs6_det42` | 80 | 48.74 | 48824 | 0 | 0 |
+| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 24 | 24.00 | 24752 | 0 | 0 |
 
 ## Full recompute BS6 profile interpretation
 
@@ -185,7 +189,7 @@ The synchronized measured update averages are 41.30 seconds for graph trainer an
 
 The native profiled update has substantial instrumentation disturbance and long symmetric-memory waits. Its trace duration must not replace the measured training time or establish a steady-state communication penalty. GPU slice counts are not logical collective counts, and individual category durations can overlap. Analysis uses the original trace files, not compacted display lanes.
 
-## Native communication observations from original profiles
+## Communication observations from original profiles
 
 All counts below are rank-0 GPU kernel slices from the separately profiled update 16. They verify the executed communication pattern, but are not logical collective counts. The GPU interval union and barrier time are affected by profiling overhead and must not replace synchronized measured update times.
 
@@ -199,6 +203,8 @@ All counts below are rank-0 GPU kernel slices from the separately profiled updat
 | `native_eager_full_recompute_bs6_reduce_last_unfused` | 55.26 | 80.27 | 592 | 64 | 37.03 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_6c9cda47-fe23-4ac0-9749-60514193e813_rank0_trace.json.gz) |
 | `native_eager_full_recompute_bs6_reduce_last_wgrad_fused` | 55.09 | 84.63 | 592 | 64 | 41.70 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_bd35b9ea-4855-4818-84f7-c7e0796edea1_rank0_trace.json.gz) |
 | `native_eager_full_recompute_bs6_first_gather_legacy_fused` | 53.34 | 83.45 | 64 | 64 | 40.73 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_1a01ea5f-16ac-4e7e-9078-33e3336c5817_rank0_trace.json.gz) |
+| `native_fit_full_recompute_bs6` | 45.34 | 86.95 | 1048 | 520 | 42.11 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_b6ba5d08-ec4c-4089-979b-e2eae1702912_rank0_trace.json.gz) |
+| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 47.31 | 90.55 | 1048 | 520 | 42.25 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_fa3658b0-3638-4db2-baac-50c430103064_rank0_trace.json.gz) |
 
 ## Native failure locations
 
@@ -266,6 +272,7 @@ These pairs use the primary performance settings. They completed 17 finite updat
 | --- | ---: | ---: | ---: |
 | `schedule_reduce_last_unfused` versus `schedule_reduce_last_fused` | 64 x 17 | 0.0914626 (update 8) | 6.2225356 (update 14) |
 | `schedule_reduce_last_fused` versus `schedule_first_legacy_fused` | 64 x 17 | 0.0579176 (update 16) | 170.5535989 (update 15) |
+| `fit_32g_full_bs6` versus `fit_32g_full-ao_bs6_ao24` | 32 x 17 | 0.0471563 (update 16) | 4.5601285 (update 15) |
 
 ## Additional execution controls
 
@@ -323,3 +330,4 @@ Both fused gather arms recorded 6069 uses per rank of an existing MXFP8 running 
 | 32 GPU native counterparts | `f66c0e6cd7aa3d5356d918e7b8d6a2a6f1fd1c65` + MTP annotation patch | `torchtitan_workspace:aa3efdac1f8d413da72d4f5ac8f94b37` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
 | 64 GPU scheduling payload before head qualification (held, superseded) | `2eb747d1b479616880b27e21c068578d4cb333e6` + MTP annotation patch | `torchtitan_workspace:34c5271cac874defb21c29c02c1d5a89` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
 | 64 GPU native scheduling with qualified head policy | `2eb747d1b479616880b27e21c068578d4cb333e6` + MTP annotation patch | `torchtitan_workspace:6b7c7969487b435b85105645768736d9` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
+| Original 32 GPU graph payload reused for matched BS6 controls | `f66c0e6cd7aa3d5356d918e7b8d6a2a6f1fd1c65` | `torchtitan_workspace:f426b59d31f74b749092f6d9ace965ad` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
