@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T05:59:05.323862+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T06:35:57.105902+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -10,7 +10,7 @@ This report pairs the existing graph trainer presentation configurations with na
 
 ## Current results
 
-- Requested eager counterparts: 7 passed, 12 CUDA OOM, 1 remaining. Supplemental runs are listed separately.
+- Requested eager counterparts: 8 passed, 12 CUDA OOM, 0 remaining. Supplemental runs are listed separately.
 - Main 64-GPU Full recompute BS6 pair: graph trainer has 4.9% higher throughput and uses 31.58 GiB less reserved memory. Native SAC BS6 and Full recompute BS10 run out of memory; their graph references pass.
 - All four requested 32-GPU native configurations run out of memory with FP32 GPU masters/gradients and CPU FP32 Adam moments. Three of their graph references pass; Full recompute BS10 without activation offload also fails in graph trainer.
 - Strict native Full versus Full + offload and fused Every versus First gathering match all 17 recorded losses and gradient norms bitwise on all 64 ranks. Cross-engine scalar histories differ; see the numerical comparison section.
@@ -87,7 +87,7 @@ MFU uses the same model-FLOP estimate, excluding recompute, and 5 PFLOP/s dense 
 | `native_eager_full_recompute_bs6_gather_first` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 240.74 / 248.53 | 4,827.56 | 28.18 | PASS, all 64 x 17 | 254.39 / 269.03 | 3,624.44 | 21.16 | 1.332x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-gather-first-det42-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-gf-f-d42-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-gather-first-det42-20261026-ivankobzarev/v_0/attempt_0/profiling/traces/iteration_16/rank0_trace.json.gz) / [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_47160686-9f00-4516-9052-220d174f2f70_rank0_trace.json.gz) |
 | `native_eager_full_recompute_bs6_reduce_last_unfused` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 213.33 / 223.84 | 4,822.62 | 28.15 | PASS, all 64 x 17 | 229.95 / 268.97 | 3,557.85 | 20.77 | 1.355x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-full-last-u-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-ge-u-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-full-last-u-20261026-ivankobzarev/v_0/attempt_1/profiling/traces/iteration_16/rank0_trace.json.gz) / [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_6c9cda47-fe23-4ac0-9749-60514193e813_rank0_trace.json.gz) |
 | `native_eager_full_recompute_bs6_reduce_last_wgrad_fused` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 213.33 / 221.68 | 4,833.03 | 28.21 | PASS, all 64 x 17 | 229.95 / 268.99 | 3,569.11 | 20.83 | 1.354x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-full-last-f-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-ge-f-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-full-last-f-20261026-ivankobzarev/v_0/attempt_1/profiling/traces/iteration_16/rank0_trace.json.gz) / [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_bd35b9ea-4855-4818-84f7-c7e0796edea1_rank0_trace.json.gz) |
-| `native_eager_full_recompute_bs6_first_gather_legacy_fused` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 240.80 / 250.17 | 4,798.39 | 28.01 | RUNNING | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-full-first-f-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-gf-f-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-full-first-f-20261026-ivankobzarev/v_0/attempt_1/profiling/traces/iteration_16/rank0_trace.json.gz) |
+| `native_eager_full_recompute_bs6_first_gather_legacy_fused` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 240.80 / 250.17 | 4,798.39 | 28.01 | PASS, all 64 x 17 | 254.38 / 268.95 | 3,686.18 | 21.52 | 1.302x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b6-full-first-f-20261026-ivankobzarev) / [Eager](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-gf-f-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/manifold/explorer/torchtrain_datasets/tree/outputs/dsv3-night-64g-ep64-b6-full-first-f-20261026-ivankobzarev/v_0/attempt_1/profiling/traces/iteration_16/rank0_trace.json.gz) / [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_1a01ea5f-16ac-4e7e-9078-33e3336c5817_rank0_trace.json.gz) |
 
 ## 64 GPU native CUDA graph controls
 
@@ -122,8 +122,8 @@ These supplement the matched presentation tables with smaller-batch native train
 
 | ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
-| `native_fit_full_recompute_bs6` | 6 / 8 | 1536 | Disabled | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ga8-17u-20261027-fit1-ivankobzarev) | Not yet produced |
-| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 6 / 8 | 1536 | 24 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ao24-ga8-17u-20261027-fit1-ivankobzarev) | Not yet produced |
+| `native_fit_full_recompute_bs6` | 6 / 8 | 1536 | Disabled | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ga8-17u-20261027-fit1-ivankobzarev) | Not yet produced |
+| `native_fit_full_recompute_cpuoffload_bs6_ao24` | 6 / 8 | 1536 | 24 | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b6-full-ao24-ga8-17u-20261027-fit1-ivankobzarev) | Not yet produced |
 
 ## Native 64 GPU activation-offload rescue configurations
 
@@ -161,6 +161,7 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `native_eager_full_recompute_bs6_gather_first` | 64 | 43.62 | 64 | 525.82 |
 | `native_eager_full_recompute_bs6_reduce_last_unfused` | 64 | 45.25 | 64 | 542.10 |
 | `native_eager_full_recompute_bs6_reduce_last_wgrad_fused` | 64 | 43.51 | 64 | 528.88 |
+| `native_eager_full_recompute_bs6_first_gather_legacy_fused` | 64 | 43.13 | 64 | 529.75 |
 
 ## Native activation offload actually used
 
@@ -197,6 +198,7 @@ All counts below are rank-0 GPU kernel slices from the separately profiled updat
 | `native_eager_full_recompute_bs6_gather_first` | 54.25 | 80.83 | 64 | 64 | 37.71 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_47160686-9f00-4516-9052-220d174f2f70_rank0_trace.json.gz) |
 | `native_eager_full_recompute_bs6_reduce_last_unfused` | 55.26 | 80.27 | 592 | 64 | 37.03 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_6c9cda47-fe23-4ac0-9749-60514193e813_rank0_trace.json.gz) |
 | `native_eager_full_recompute_bs6_reduce_last_wgrad_fused` | 55.09 | 84.63 | 592 | 64 | 41.70 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_bd35b9ea-4855-4818-84f7-c7e0796edea1_rank0_trace.json.gz) |
+| `native_eager_full_recompute_bs6_first_gather_legacy_fused` | 53.34 | 83.45 | 64 | 64 | 40.73 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_1a01ea5f-16ac-4e7e-9078-33e3336c5817_rank0_trace.json.gz) |
 
 ## Native failure locations
 
@@ -255,6 +257,15 @@ Only completed, all-rank-verified 17-update runs are included. These are recorde
 | --- | ---: | --- | ---: |
 | `strict_64g_full_bs6` versus `strict_64g_full-ao_bs6_ao80` | 64 x 17 | True | 0.0000000 / 0.0000000 |
 | `schedule_gather_every_det42` versus `schedule_gather_first_det42` | 64 x 17 | True | 0.0000000 / 0.0000000 |
+
+## Native scalar comparisons with deterministic algorithms disabled
+
+These pairs use the primary performance settings. They completed 17 finite updates, but their scalar histories differ and are not numerical-equivalence or convergence evidence. The strict seed-42 Every/First gathering pair above is the qualified scheduling comparison.
+
+| Native pair | Ranks x updates checked | Maximum average-loss difference | Maximum gradient-norm difference |
+| --- | ---: | ---: | ---: |
+| `schedule_reduce_last_unfused` versus `schedule_reduce_last_fused` | 64 x 17 | 0.0914626 (update 8) | 6.2225356 (update 14) |
+| `schedule_reduce_last_fused` versus `schedule_first_legacy_fused` | 64 x 17 | 0.0579176 (update 16) | 170.5535989 (update 15) |
 
 ## Additional execution controls
 
