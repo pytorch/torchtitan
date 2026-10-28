@@ -15,6 +15,10 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FSDPModule, fully_shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention, MLAAttention
@@ -319,22 +323,30 @@ def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> No
         dist.destroy_process_group()
 
 
-def test_load_state_dict_direct_unshards_every_group_after_fetch_error(
-    tmp_path, monkeypatch
-) -> None:
-    """Unshard every group after a failed fetch, then raise.
+class TestLoadStateDictDirectFetchError(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
 
-    unshard() all-gathers across the FSDP group, so a rank that stops after its
-    fetch fails would hang the ranks still loading.
-    """
-    dist.init_process_group(
-        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
-    )
-    try:
+    @property
+    def backend(self) -> str:
+        return "gloo"
+
+    @property
+    def device_type(self) -> str:
+        return "cpu"
+
+    @with_comms
+    def test_unshards_every_group_after_fetch_error(self) -> None:
+        """Unshard every group after a failed fetch on one rank, then raise.
+
+        unshard() all-gathers across the FSDP group, so if rank 1 stopped after
+        its fetch failed, rank 0 would hang in the next group's all-gather.
+        """
         model = nn.Module()
         model.layers = nn.ModuleList(nn.Linear(16, 16) for _ in range(3))
         model.register_buffer("scale", torch.zeros(4))
-        mesh = init_device_mesh("cpu", (1,))
+        mesh = init_device_mesh("cpu", (self.world_size,))
         for block in model.layers:
             fully_shard(block, mesh=mesh, reshard_after_forward=False)
         fully_shard(model, mesh=mesh, reshard_after_forward=False)
@@ -347,38 +359,28 @@ def test_load_state_dict_direct_unshards_every_group_after_fetch_error(
         for module in model.modules():  # as after the initial load
             if isinstance(module, FSDPModule):
                 model_wrapper._unshard_and_free_sharded_params(module)
-
-        unsharded = []
-        unshard_and_free_sharded_params = model_wrapper._unshard_and_free_sharded_params
-
-        def recording_unshard_and_free_sharded_params(module) -> None:
-            unsharded.append(module)
-            unshard_and_free_sharded_params(module)
-
-        monkeypatch.setattr(
-            model_wrapper,
-            "_unshard_and_free_sharded_params",
-            recording_unshard_and_free_sharded_params,
-        )
         fetched_keys = []
 
         async def fetch(state_dict: dict[str, torch.Tensor]) -> None:
             fetched_keys.append(sorted(state_dict))
-            raise RuntimeError("fetch failed")
+            if self.rank == 1:
+                raise RuntimeError("fetch failed")
 
-        with pytest.raises(RuntimeError, match="fetch failed"):
+        if self.rank == 1:
+            with self.assertRaisesRegex(RuntimeError, "fetch failed"):
+                asyncio.run(wrapper.load_state_dict_direct(fetch))
+            self.assertEqual(fetched_keys, [["layers.0.bias", "layers.0.weight"]])
+        else:
             asyncio.run(wrapper.load_state_dict_direct(fetch))
-
-        assert fetched_keys == [["layers.0.bias", "layers.0.weight"]]
-        assert unsharded == list(model.layers)
-        assert all(
-            p._sharded_param_data.untyped_storage().size() == 0
-            for block in model.layers
-            for group in block._get_fsdp_state()._fsdp_param_groups
-            for p in group.fsdp_params
+            self.assertEqual(len(fetched_keys), 4)
+        self.assertTrue(
+            all(
+                p._sharded_param_data.untyped_storage().size() == 0
+                for block in model.layers
+                for group in block._get_fsdp_state()._fsdp_param_groups
+                for p in group.fsdp_params
+            )
         )
-    finally:
-        dist.destroy_process_group()
 
 
 def test_direct_load_groups_rejects_quantized_params(tmp_path, monkeypatch) -> None:

@@ -516,10 +516,11 @@ class EngineLoop:
         Rank 0 replies to the load right after this returns, and the trainer may then
         overwrite the buffers the other ranks read from.
         """
-        error: Exception | None = None
+        # BaseException: a cancelled rank must still join the all_reduce.
+        error: BaseException | None = None
         try:
             await self._engine.load_model_state_dict_direct(fetch)
-        except Exception as e:
+        except BaseException as e:
             error = e
         failed = torch.tensor([int(error is not None)])
         await asyncio.to_thread(dist.all_reduce, failed, group=self._broadcast_group)

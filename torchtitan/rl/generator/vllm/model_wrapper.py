@@ -607,7 +607,9 @@ class VLLMModelWrapper(Module):
 
         Args:
             fetch: Fills each tensor of the given subset of `self.model.state_dict()`
-                in place with the new weights.
+                in place with the new weights. Each group's sharded storage is
+                reallocated just before its fetch, so a fetch writing outside the
+                current stream (e.g. RDMA) must first wait for queued device work.
         """
         error = None
         for module, keyed_params in self._direct_load_groups:
@@ -625,7 +627,7 @@ class VLLMModelWrapper(Module):
                             for key, fsdp_param in keyed_params
                         }
                     )
-                except Exception as e:
+                except BaseException as e:
                     error = e
             _unshard_and_free_sharded_params(module)
         if error is not None:
