@@ -196,13 +196,13 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="./assets/hf/Qwen3-0.6B",
         async_loop=AsyncLoopConfig(
-            num_training_steps=10,
+            num_training_steps=1000,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(steps=20),
+            validation=ValidationConfig(steps=20, interval_steps=10),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -219,6 +219,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
+                steps=1000,
                 disable_cuda_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
@@ -248,6 +249,11 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             ),
         ),
     )
+    # vLLM custom all-reduce hangs in MNNVL symmetric-memory setup on this devgpu.
+    # With VLLM_ALLREDUCE_USE_SYMM_MEM=0 and VLLM_ALLREDUCE_USE_FLASHINFER=0,
+    # this selects NCCL for tensor-parallel all-reduce instead.
+    config.generator.engine.extra_engine_args["disable_custom_all_reduce"] = True
+    return config
 
 
 def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:
