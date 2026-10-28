@@ -666,10 +666,11 @@ def _stop_engine_thread(engine_thread: EngineLoopThread) -> None:
 def engine_thread(monkeypatch):
     """Returns a function that builds an engine loop around `engine`, with its engine loop thread
     running; stops those threads afterwards."""
-    # Rank 0 is the only rank, so the decision broadcast is a no-op.
+    # Rank 0 is the only rank, so the decision broadcast and the load's all-reduce are no-ops.
     monkeypatch.setattr(
         engine_loop_module.dist, "broadcast_object_list", lambda *a, **k: None
     )
+    monkeypatch.setattr(engine_loop_module.dist, "all_reduce", lambda *a, **k: None)
     engine_threads: list[EngineLoopThread] = []
 
     def start(engine: _FakeEngine, **kwargs: Any) -> EngineLoop:
@@ -955,6 +956,86 @@ def test_direct_load_reads_torchstore_on_the_actor_loop_during_the_load(
         assert generator.policy_version == 4
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+class _DirectLoadEngine(_FakeEngine):
+    """Loads by fetching straight into its (empty) weights."""
+
+    async def load_model_state_dict_direct(self, fetch) -> None:
+        await fetch({})
+
+
+async def _fetch_nothing(weights: dict) -> None:
+    pass
+
+
+def test_direct_load_replies_only_after_every_rank_finished_reading(
+    engine_thread, monkeypatch
+) -> None:
+    reducing, released = threading.Event(), threading.Event()
+    reduced: list[int] = []
+
+    def all_reduce(tensor, group) -> None:
+        reduced.append(int(tensor.item()))
+        reducing.set()
+        assert released.wait(timeout=_TIMEOUT_S)
+
+    monkeypatch.setattr(engine_loop_module.dist, "all_reduce", all_reduce)
+
+    async def run() -> None:
+        engine_loop = engine_thread(
+            _DirectLoadEngine(), fetch_model_state_dict=_fetch_nothing
+        )
+        engine_loop.start()
+        load = asyncio.create_task(engine_loop.load_model_state_dict(3))
+        assert await asyncio.to_thread(reducing.wait, _TIMEOUT_S)
+
+        # Other ranks may still be reading the trainer's buffers, so the load must not resolve.
+        await _on_engine_loop(engine_loop, lambda: None)
+        assert not load.done()
+        released.set()
+        await asyncio.wait_for(load, _TIMEOUT_S)
+        assert reduced == [0]
+        assert engine_loop.policy_version == 3
+
+        await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failing_rank", ["this", "another"])
+def test_direct_load_fails_on_every_rank_when_any_rank_fails(
+    engine_thread, monkeypatch, failing_rank: str
+) -> None:
+    reduced: list[int] = []
+
+    def all_reduce(tensor, group) -> None:
+        reduced.append(int(tensor.item()))
+        tensor.fill_(1)
+
+    async def fetch(weights: dict) -> None:
+        if failing_rank == "this":
+            raise RuntimeError("TorchStore is down")
+
+    monkeypatch.setattr(engine_loop_module.dist, "all_reduce", all_reduce)
+
+    async def run() -> None:
+        engine_loop = engine_thread(_DirectLoadEngine(), fetch_model_state_dict=fetch)
+        engine_loop.start()
+        error = (
+            "TorchStore is down"
+            if failing_rank == "this"
+            else "failed on another generator rank"
+        )
+        with pytest.raises(RuntimeError, match=error):
+            await asyncio.wait_for(engine_loop.load_model_state_dict(3), _TIMEOUT_S)
+        # A failing rank still joins the all-reduce, so the other ranks don't hang.
+        assert reduced == [int(failing_rank == "this")]
+        assert engine_loop.policy_version != 3
+
+        await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
 
     asyncio.run(run())
 
