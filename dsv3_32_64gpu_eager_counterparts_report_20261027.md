@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T08:56:44.681791+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T08:59:28.557231+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -30,7 +30,7 @@ This report pairs the existing graph trainer presentation configurations with na
 | FSDP parameter / reduction dtype | BF16 / BF16 | BF16 / BF16 |
 | Adam first and second moments | BF16 on GPU | FP32 on CPU |
 | CPU optimizer staging cap | Not applicable | 512 MiB per optimizer instance; two instances |
-| MAST RAM allocation per four-GPU task | 845 GiB | 845 GiB; supplemental AO40 retry requests 896 GiB |
+| MAST RAM allocation per four-GPU task | 845 GiB | 845 GiB |
 | Parameter gathering / gradient reduction | Every microbatch in main table | Every microbatch in main table |
 | WGrad fusion / routing | Disabled / force balanced | Disabled / force balanced |
 | Native expert standalone WGrad | BF16, then standard FP32 persistent gradient storage | BF16, then standard FP32 persistent gradient storage |
@@ -149,12 +149,11 @@ These add CPU activation offload to failed native configurations: SAC BS6 and Fu
 
 ## Native 32 GPU activation-offload rescue configuration
 
-This increases the CPU activation quota from 24 to 40 GiB/rank at the original BS8/GA8 geometry while retaining GPU FP32 master weights and gradients, CPU FP32 Adam moments, and the 512 MiB staging cap per optimizer instance. The first AO40 run completed update16 before a host-memory OOMD kill during profiler shutdown. Its resource-only retry raises the task RAM limit from845 to896GiB, with the same model, training and profiling configuration. These are supplemental capacity experiments, with no matched graph throughput ratio.
+This increases the CPU activation quota from 24 to 40 GiB/rank at the original BS8/GA8 geometry while retaining GPU FP32 master weights and gradients, CPU FP32 Adam moments, and the 512 MiB staging cap per optimizer instance. The first AO40 run completed update16 before a host-memory OOMD kill during profiler shutdown. A retry reduces profiler host memory: rank0 trace without shape recording at update16, rank0 memory snapshot at update17. All ranks retain ten measured updates6-15 and 17 total training updates. These are supplemental capacity experiments, with no matched graph throughput ratio.
 
 | ID | BS / GA | Global batch | CPU activation quota GiB/rank | Task RAM GiB/4 GPUs | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
 | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
 | `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 8 / 8 | 2048 | 40 | 845 | Host OOMD kill after update 16; incomplete benchmark | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-ga8-17u-20261028-res1-ivankobzarev) | Host OOM at profiler shutdown |
-| `native_full_recompute_cpuoffload_bs8_ao40_ram896` | 8 / 8 | 2048 | 40 | 896 | Prepared | - | - | - | Prepared | Not yet produced |
 
 ## Native startup observations
 
@@ -220,6 +219,12 @@ These are outside-timer samples after updates 1, 2, 5 and 15 on every rank. Avai
 | `native_fit_full_recompute_bs6` | 128 | 185.50 | 166.95 | 159.90 |
 | `native_fit_full_recompute_cpuoffload_bs6_ao24` | 128 | 81.83 | 192.38 | 185.34 |
 | `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 128 | 52.51 | 209.03 | 206.97 |
+
+### BS8/AO40 host-memory failure
+
+The first native BS8/AO40 run completed 16 updates on all32 ranks, including the ten measured updates, but OOMD killed a task during profiler shutdown (exit137, signal9). Actual CPU activation quota use reached 40.00GiB/rank with zero host-pressure skips. The maximum pinned allocator peak was 206.97GiB/worker before profiling; four workers share an845GiB task RAM allocation. At update15 the hosts still had at least 53.49GiB physically available.
+
+The final benchmark/scalar files are written after training returns and were absent for this killed run. Its clean synchronized throughput cannot be reconstructed from those files, so no tokens/s or MFU result is reported. A never-started retry requested896GiB but MAST normalized it back to845GiB; readback caught the mismatch and that definition was cancelled. The profiler-only retry preserves training math and measurement steps, and explicitly changes profile coverage to rank0 with shape recording disabled.
 
 ## Full recompute BS6 profile interpretation
 
@@ -349,7 +354,6 @@ The main twelve counterparts use uncaptured native execution with seed 14536, de
 | `native_rescue_full_recompute_cpuoffload_bs8_ao40` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 | `native_diagnostic_sac_cpuoffload_bs6_ao80` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 | `native_full_recompute_cpuoffload_bs10_ao24` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
-| `native_full_recompute_cpuoffload_bs8_ao40_ram896` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 
 ## Native MTP checkpoint qualification
 
