@@ -23,7 +23,7 @@ from torchtitan.models.common.config_utils import (
 )
 
 from torchtitan.models.deepseek_v4 import build_model_config
-from torchtitan.models.deepseek_v4.mtp import MTPLoss
+from torchtitan.models.deepseek_v4.mtp import MTPCrossEntropyLoss
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
@@ -111,7 +111,7 @@ def deepseek_v4_mtp_debugmodel(
         parallelism=parallelism,
     )
     return Trainer.Config(
-        loss=MTPLoss.Config(
+        loss=MTPCrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
         ),
         profiler=Profiler.Config(

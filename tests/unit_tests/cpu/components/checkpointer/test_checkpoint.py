@@ -43,7 +43,7 @@ from torchtitan.components.checkpointer.dcp import (
     CheckpointManager,
 )
 from torchtitan.components.optim import EMA
-from torchtitan.config import Function
+from torchtitan.config import CallableFunction
 from torchtitan.observability import structured_logger as sl
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 
@@ -226,7 +226,7 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertIsNone(checkpointer_field.default)
 
     def test_purge_exempt_is_built_from_config(self):
-        self.trainer_config.checkpointer.purge_exempt = Function.Config(
+        self.trainer_config.checkpointer.purge_exempt = CallableFunction.Config(
             fn=lambda step: step % 2 == 0
         )
         manager = CheckpointManager(
@@ -1601,7 +1601,9 @@ class TestSharedDiscoveryAndRetention(unittest.TestCase):
             keep_latest_k=2,
             entries=["step-1", "step-2", "step-3", "step-4", "step-5"],
         )
-        manager.purge_exempt = Function.Config(fn=lambda step: step % 2 == 0).build()
+        manager.purge_exempt = CallableFunction.Config(
+            fn=lambda step: step % 2 == 0
+        ).build()
 
         manager._purge_stale_checkpoints(saving_step=6)
 

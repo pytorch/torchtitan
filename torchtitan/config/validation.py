@@ -70,8 +70,7 @@ def validate_model_training_config(
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
             if num_heads % tp != 0:
                 raise ValueError(
-                    f"tensor_parallel_degree ({tp}) must divide "
-                    f"n_heads ({num_heads})."
+                    f"tensor_parallel_degree ({tp}) must divide n_heads ({num_heads})."
                 )
             # Fused QKV projections shard whole KV-head groups. Attention with
             # separate K/V projections may instead shard each head's features.
@@ -137,11 +136,12 @@ def validate_model_training_config(
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
 
-    if debug.spmd_typechecking and model.local_compile_regions:
+    if debug.spmd_typechecking and model.local_compile.regions:
         # TODO: Remove this once Dynamo supports tracing SPMD typechecking.
         raise ValueError(
             "Local compilation is not supported with SPMD typechecking. "
-            "Set model.local_compile_regions=[] or disable debug.spmd_typechecking."
+            "Set model.local_compile.regions=[] or disable "
+            "debug.spmd_typechecking."
         )
 
     validate_context_parallel(model, parallelism)

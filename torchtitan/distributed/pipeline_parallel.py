@@ -32,6 +32,7 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.base.module import ModuleDict, ModuleList
 from torchtitan.models.common.decoder import Decoder
@@ -77,7 +78,7 @@ def pipeline_llm(
     parallelism_context: ParallelismContext,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    local_compile_regions: list[str],
+    local_compile: LocalCompileConfig,
     activation_remat: ActivationRematConfig | None,
     dump_folder: str,
     device: torch.device,
@@ -143,7 +144,7 @@ def pipeline_llm(
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            local_compile_regions=local_compile_regions,
+            local_compile=local_compile,
             activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
@@ -327,7 +328,6 @@ def _get_pipeline_metadata(
 
     # Calculate number of virtual stages
     if layers_per_stage is not None:
-
         # Calculate number of virtual stages needed (using ceiling division)
         # This allows for unequal distribution where stages can differ by at most 1 layer
         num_virtual_stages = math.ceil(

@@ -107,7 +107,7 @@ class RoutedExperts(Module):
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,
+        routing_map_TE: torch.Tensor,
         *,
         padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -131,7 +131,7 @@ class RoutedExperts(Module):
             x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
+            routing_map_TE,
         )
         offsets_E = torch.cumsum(
             num_global_tokens_per_local_expert_e,
@@ -809,13 +809,12 @@ class MoE(FeedForward):
             aux_loss_denominator=aux_loss_denominator,
             **router_kwargs,
         )
-        num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
         out_TD = self.routed_experts(
             routed_x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
+            routing_map_TE,
             padding_mask_T=routed_padding_mask_T,
         )
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)

@@ -99,7 +99,7 @@ class LocalTokenDispatcher(Module):
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,
+        routing_map_TE: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
         """Reorder tokens by expert assignment for local expert computation.
 
@@ -107,7 +107,7 @@ class LocalTokenDispatcher(Module):
             x_TD: ``(T, D)`` all input tokens
             topk_scores_TK: ``(T, K)`` routing scores
             topk_expert_ids_TK: ``(T, K)`` expert indices per token
-            num_local_tokens_per_expert_E: ``(E,)`` token counts per expert
+            routing_map_TE: ``(T, E)`` bool, true where a token routes to an expert
 
         Returns:
             routed_input_RD: ``[R = sum(num_local_tokens_per_expert_E), input_dim(D)]``.
@@ -115,12 +115,7 @@ class LocalTokenDispatcher(Module):
             num_local_tokens_per_expert_E: ``(E,)`` token counts per expert
             metadata: LocalDispatchMetadata for combine()
         """
-        if spmd.is_type_checking():
-            spmd.mutate_type(
-                num_local_tokens_per_expert_E,
-                src=spmd.P,
-                dst={"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
-            )
+        num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
         # R = N (no EP all-to-all)
         (
             routed_input_RD,
@@ -211,7 +206,7 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,
+        routing_map_TE: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, object]:
         """Dispatch physically padded local tokens.
 
@@ -371,7 +366,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,
+        routing_map_TE: torch.Tensor,
     ) -> tuple[
         torch.Tensor, torch.Tensor, AllToAllDispatchMetadata | LocalDispatchMetadata
     ]:
@@ -387,8 +382,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             x_TD: ``(T, D)`` local token shard
             topk_scores_TK: ``(T, K)`` routing scores
             topk_expert_ids_TK: ``(T, K)`` expert indices
-            num_local_tokens_per_expert_E: ``(E,)`` token counts for this local
-                token shard
+            routing_map_TE: ``(T, E)`` bool routing map for this local token shard
 
         Returns:
             routed_input_RD: ``[R = sum(num_tokens_per_local_expert_e), input_dim(D)]``.
@@ -403,15 +397,10 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 x_TD,
                 topk_scores_TK,
                 topk_expert_ids_TK,
-                num_local_tokens_per_expert_E,
+                routing_map_TE,
             )
 
-        if spmd.is_type_checking():  # sparse mesh reinterpret
-            spmd.mutate_type(
-                num_local_tokens_per_expert_E,
-                src=spmd.P,
-                dst={"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
-            )
+        num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
         (
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
@@ -695,14 +684,14 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         x_TD,
         topk_scores_TK,
         topk_expert_ids_TK,
-        num_local_tokens_per_expert_E,
+        routing_map_TE,
     ):
         if self.ep_mesh is not None:
             return super().dispatch(
                 x_TD,
                 topk_scores_TK,
                 topk_expert_ids_TK,
-                num_local_tokens_per_expert_E,
+                routing_map_TE,
             )
 
         # EP=1: no all-to-all. Locally reorder tokens to expert-sorted order,
@@ -710,6 +699,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # token groups aligned to pad_multiple. _permute reads ep_size=1 when
         # ep_mesh is None, so num_local_tokens_per_expert_E is already the
         # full per-expert count.
+        num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
         (
             routed_input_ND,
             token_indices_experts_sorted_N,
@@ -898,12 +888,12 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,
+        routing_map_TE: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
         """Dispatch through the preallocated ElasticBuffer."""
-        # Ignore input num_local_tokens_per_expert_E. DeepEP returns the number
+        # Ignore input routing_map_TE. DeepEP returns the number
         # of global routed tokens for every local expert using other inputs.
-        del num_local_tokens_per_expert_E
+        del routing_map_TE
         assert self.ep_mesh is not None, (
             "ep_mesh must be set before dispatch. "
             "ExpertParallel._partition_fn() should set it."
@@ -1031,12 +1021,12 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,
+        routing_map_TE: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
         """Dispatch through the preallocated HybridEP buffer."""
-        # Ignore input num_local_tokens_per_expert_E. HybridEP returns the
+        # Ignore input routing_map_TE. HybridEP returns the
         # number of global routed tokens for every local expert using other inputs.
-        del num_local_tokens_per_expert_E
+        del routing_map_TE
         assert self.ep_mesh is not None, (
             "ep_mesh must be set before dispatch. "
             "ExpertParallel._partition_fn() should set it."

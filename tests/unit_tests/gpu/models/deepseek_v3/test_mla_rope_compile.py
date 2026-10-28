@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.deepseek_v3 import build_model_config
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -16,10 +16,10 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 
 @pytest.fixture(autouse=True)
 def reset_local_compile():
-    apply_local_compile([])
+    LocalCompileConfig().apply()
     torch._dynamo.reset()
     yield
-    apply_local_compile([])
+    LocalCompileConfig().apply()
 
 
 @pytest.mark.parametrize("use_positions", [True, False])
@@ -59,7 +59,7 @@ def test_compiled_bf16_rope_matches_eager(use_positions: bool) -> None:
     results = []
     # Eager, the MLA region (int32 path), and the rope region alone (split path).
     for regions in ([], ["mla_qk"], ["rope"]):
-        apply_local_compile(regions)
+        LocalCompileConfig(regions=regions).apply()
         q_in, kv_in = (t.clone().requires_grad_(True) for t in (q, kv))
         k_pe = kv_in.split(
             [attention.kv_lora_rank, attention.qk_rope_head_dim], dim=-1

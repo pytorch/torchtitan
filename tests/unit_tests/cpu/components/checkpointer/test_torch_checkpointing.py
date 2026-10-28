@@ -54,7 +54,7 @@ from torchtitan.components.checkpointer.torch_checkpointing import (
     _default_backend_config,
     TorchCheckpointingManager,
 )
-from torchtitan.config import Function
+from torchtitan.config import CallableFunction
 
 
 class _BackendManager:
@@ -163,7 +163,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         config = TorchCheckpointingManager.Config(
             keep_latest_k=0,
             initial_load_model_only=False,
-            purge_exempt=Function.Config(fn=lambda step: step % 2 == 0),
+            purge_exempt=CallableFunction.Config(fn=lambda step: step % 2 == 0),
         )
 
         manager, backend_manager = self._build_manager(config)
