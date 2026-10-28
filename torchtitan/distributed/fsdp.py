@@ -60,6 +60,27 @@ def post_validate_fsdp_for_cuda_graph(model_parts: list[nn.Module]) -> None:
             module.reshard()
 
 
+def _fsdp_unit_holds_only_embedding_weights(
+    fsdp_module: FSDPModule, model: nn.Module
+) -> bool:
+    """Whether every parameter managed by ``fsdp_module``'s FSDP unit is an
+    ``nn.Embedding`` weight in ``model``.
+
+    Reads the unit's own parameters rather than ``fsdp_module.parameters()``,
+    so modules grouped into the same ``fully_shard`` call are also covered.
+    """
+    # TODO: Use a public FSDP API to list the parameters of an FSDP unit.
+    unit_params = [
+        fsdp_param.sharded_param
+        for param_group in fsdp_module._get_fsdp_state()._fsdp_param_groups
+        for fsdp_param in param_group.fsdp_params
+    ]
+    embedding_weights = {
+        m.weight for m in model.modules() if isinstance(m, nn.Embedding)
+    }
+    return all(p in embedding_weights for p in unit_params)
+
+
 if TYPE_CHECKING:
     from torchtitan.models.common.decoder import Decoder
 
@@ -353,12 +374,9 @@ def apply_fsdp_to_decoder(
             # the whole FSDP unit, so only set it when the unit holds nothing
             # but embedding weights (e.g. a learned norm weight inside
             # tok_embeddings would be read after being freed).
-            embedding_weights = {
-                m.weight
-                for m in model.tok_embeddings.modules()
-                if isinstance(m, nn.Embedding)
-            }
-            if all(p in embedding_weights for p in model.tok_embeddings.parameters()):
+            if _fsdp_unit_holds_only_embedding_weights(
+                cast(FSDPModule, model.tok_embeddings), model
+            ):
                 model.tok_embeddings.set_unshard_in_backward(False)
         # As an optimization, do not reshard_after_forward the last layers
         # by default since FSDP would prefetch them immediately.
