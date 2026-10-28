@@ -1,18 +1,12 @@
 ## Supported Parallelisms
 
-Coverage below matches the sharding set in [`sharding.py`](./sharding.py),
-[`flavors.py`](./flavors.py), and the DeepSeek-V3 jobs in
-`tests/integration_tests/models.py`.
-
 | Feature | Notes |
 |---------|-------|
-| FSDP / HSDP | Default data-parallel path |
-| Tensor Parallel (TP) | Including sequence parallel (`enable_sequence_parallel`); TP2 exercised together with CP2 and EP2 |
-| Context Parallel (CP) | CP2 exercised with flex attention (`KVAllGatherCPFlexInnerAttention`); composes with FSDP, TP, and EP |
-| Expert Parallel (EP) | EP2/EP8 exercised; composes with FSDP, TP, and CP |
-| Pipeline Parallel (PP) | 1F1B and Interleaved1F1B schedules |
-| Activation checkpointing | Selective (`SelectiveAC`) |
-| `torch.compile` | Via `local_compile_regions` |
+| FSDP / HSDP | |
+| Tensor Parallel (TP) | With sequence parallel |
+| Context Parallel (CP) | |
+| Expert Parallel (EP) | Composes with FSDP, TP, and CP |
+| Pipeline Parallel (PP) | |
 
 ## Download Tokenizer
 
