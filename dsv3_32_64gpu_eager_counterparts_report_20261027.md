@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T10:20:13.124073+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T10:36:20.301903+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -138,6 +138,8 @@ Both engines use the same BS6/GA8 batch geometry, FP32 GPU masters and gradients
 
 Both engines use BS8/GA8, GPU FP32 master weights and gradients, CPU FP32 Adam moments, and a 40 GiB/rank activation quota. The graph run clones the original BS8/AO24 definition and payload, changing only the activation quota and job identity. The native retry profiles rank 0 without shape recording to stay within task RAM; the graph run retains the original all-rank profiling. These differences occur after the measured updates 6-15 and are declared when comparing full-run memory peaks.
 
+Within graph trainer, increasing the BS8 activation quota from 24 to 40 GiB lowers reserved peak memory by 8.63 GiB, from 245.11 to 236.47 GiB. Both runs achieve approximately 4,558 tokens/s/GPU in these single trials. Native eager fails with the 24 GiB quota and completes training with 40 GiB and the declared profiling adjustment.
+
 ### CUDA memory before profiling
 
 Maximum recorded allocated/reserved CUDA peaks across every rank through update 15. This excludes the trace and memory snapshot updates, providing the same observation window even when profile coverage differs. Main tables retain the established full 17-update memory scope.
@@ -164,7 +166,7 @@ These add CPU activation offload to failed native configurations: SAC BS6 and Fu
 | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
 | `native_rescue_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | 845 | OOM; 64 ranks logged | 267.59 / 268.70 at failure; +0.33 requested | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-ga8-17u-20261028-res1-ivankobzarev) | OOM before profiling |
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 10 / 8 | 5120 | 80 | 845 | PASS, all 64 x 17 | 202.94 / 208.44 | 4,269.97 | 24.92 | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao80-ga8-17u-20261028-res1-ivankobzarev) | [Eager](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_e7eadb26-d623-4c6d-a955-c05444f72815_rank0_trace.json.gz) |
-| `native_diagnostic_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | 845 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-diag-ga8-17u-20261028-ivankobzarev) | Not yet produced |
+| `native_diagnostic_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | 845 | OOM; 64 ranks logged | 267.59 / 268.70 at failure; +0.33 requested | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-diag-ga8-17u-20261028-ivankobzarev) | OOM before profiling |
 | `native_full_recompute_cpuoffload_bs10_ao24` | 10 / 8 | 5120 | 24 | 845 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao24-ga8-17u-20261028-swp1-ivankobzarev) | Not yet produced |
 
 ## Native 32 GPU activation-offload rescue configuration
@@ -211,6 +213,7 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 64 | 47.09 | 64 | 541.78 |
 | `native_boundary_full_recompute_bs7` | 32 | 45.06 | 32 | 559.00 |
 | `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 32 | 46.73 | 32 | 578.01 |
+| `native_diagnostic_sac_cpuoffload_bs6_ao80` | 64 | 44.17 | 64 | 544.15 |
 | `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 32 | 45.34 | 32 | 578.13 |
 
 ## Native activation offload actually used
@@ -231,6 +234,12 @@ A reduced real FSDP2/EP2, MTP1, GA8 native SAC run completed all 17 updates with
 The supplemental SAC BS6/AO80 diagnostic uses the same native configuration and pack/unpack decisions, with top-level forward counters and an exception logger added to the experiment adapter. It records actual quota use on OOM. The earlier failed runs have no completed-update offload sidecar, so their actual offload use remains unknown.
 
 The diagnostic adapter matched its original native SAC/offload control on real FSDP2/EP2: all 17 scalar readings and all 88 first-update weight and pre-clipping gradient tensors were bitwise equal on both ranks. CPU copy counts, peak quota use and remaining-live counters also matched exactly.
+
+Counters below include the failed update. Forward counts refer to top-level model calls within that update, with one call per microbatch at PP1. Failed-allocation GPU memory remains in the job result table; memory queried after exception unwinding is not used as that snapshot.
+
+| ID | Ranks observed | CPU peak min / max GiB/rank | Copies min / max per rank | Host-pressure skips | Forward calls started min / max | Forward calls completed min / max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `native_diagnostic_sac_cpuoffload_bs6_ao80` | 64 | 80.00 / 80.00 | 174 / 174 | 0 | 1 / 1 | 0 / 0 |
 
 ## 32 GPU CPU memory observations
 
