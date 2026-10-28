@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T13:20:14.132380+00:00. Original autonomous experiment window ended 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T13:51:51.630847+00:00. Original autonomous experiment window ended 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -11,8 +11,9 @@ This report pairs the existing graph trainer presentation configurations with na
 ## Current results
 
 - Requested eager counterparts: 8 passed, 12 CUDA OOM, 0 remaining. Supplemental runs are listed separately.
-- BS6 analysis found a native per-update counter-persistence difference that may inflate the recorded throughput gap. See [timing controls and GPU-work analysis](#why-graphtrainer-helps-at-bs6); memory and captured-kernel observations remain directly measured.
+- BS6 analysis found that native per-update counter persistence inflated the recorded throughput gap. The completed eager timing control removes much of that gap. See [timing controls and GPU-work analysis](#why-graphtrainer-helps-at-bs6); memory and captured-kernel observations remain directly measured.
 - 64-GPU Full recompute BS6 with native final-only counter persistence: graph trainer has 1.6% higher recorded throughput and uses 31.58 GiB less reserved memory. Native SAC BS6 and Full recompute BS10 run out of memory; their graph references pass.
+- 64-GPU BS6 native CUDA graphs with final-only counter persistence: graph trainer has 0.78% higher recorded throughput and uses 24.61 GiB less reserved memory. See the BS6 analysis for the measured counter-persistence effect.
 - All four requested 32-GPU native configurations run out of memory with FP32 GPU masters/gradients and CPU FP32 Adam moments. Three of their graph references pass; Full recompute BS10 without activation offload also fails in graph trainer.
 - Native 64-GPU Full recompute BS10 is rescued by CPU activation offload: 208.44 GiB reserved, 4,270 tokens/s/GPU, 24.92% MFU, and 79.98 GiB actual CPU activation storage per rank.
 - Both native 32-GPU BS6/GA8 baselines pass with GPU FP32 masters/gradients and CPU FP32 Adam moments. Their matching original-payload graph BS6 runs are included in the matched table.
@@ -103,7 +104,7 @@ MFU uses the same model-FLOP estimate, excluding recompute, and 5 PFLOP/s dense 
 | `native_cuda_graphs_64g_sac_bs6` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 236.47 / 244.55 | 4,948.86 | 28.89 | OOM; 64 ranks logged | 267.62 / 268.71 at failure; +0.33 requested | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nebius-64g-ep64-b6-ga8-sac-17u-20261026-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b6-sac-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_b368a8dd-9f0e-428a-bdf2-f80b28c840f0_dsv3-nebius-64g-ep64-b6-ga8-sac-17u-20261026-ivankobzarev__update16_rank0_compacted.json.gz) |
 | `native_cuda_graphs_64g_full_bs6` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 189.59 / 193.63 | 4,760.57 | 27.79 | PASS, all 64 x 17 | 213.24 / 218.24 | 4,559.22 | 26.61 | 1.044x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b6-full-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_6548b64d-cb41-44a5-8160-34d958e4bb50_dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev__update16_rank0_compacted.json.gz) / [Native CG](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_ca84b859-52e6-4656-a7f6-dd0827a87917_rank0_trace.json.gz) |
 | `native_cuda_graphs_64g_full_bs10` | 10 / 8 | Disabled | PASS, all 64 x 17 (reference) | 235.96 / 240.56 | 4,826.62 | 28.17 | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b10-full64-b10-20261026-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b10-full-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_d9c75545-1623-45fd-bc08-9cfbeca9cb55_dsv3-night-64g-ep64-b10-full64-b10-20261026-ivankobzarev__update16_rank0_compacted.json.gz) |
-| `native_cuda_graphs_64g_full_bs6_final_counters` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 189.59 / 193.63 | 4,760.57 | 27.79 | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b6-full-ga8-17u-20261028-finalctr-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_6548b64d-cb41-44a5-8160-34d958e4bb50_dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev__update16_rank0_compacted.json.gz) |
+| `native_cuda_graphs_64g_full_bs6_final_counters` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 189.59 / 193.63 | 4,760.57 | 27.79 | PASS, all 64 x 17 | 213.24 / 218.24 | 4,723.94 | 27.57 | 1.008x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b6-full-ga8-17u-20261028-finalctr-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_6548b64d-cb41-44a5-8160-34d958e4bb50_dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev__update16_rank0_compacted.json.gz) / [Native CG](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_35794b50-5c3e-4744-bc24-f801b1a84c47_rank0_trace.json.gz) |
 
 ## 32 GPU native CUDA graph controls
 
@@ -227,6 +228,7 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `native_full_recompute_cpuoffload_bs8_ao40_profile0` | 32 | 45.34 | 32 | 578.13 |
 | `native_cuda_graphs_32g_full_bs6` | 32 | 45.11 | 32 | 576.00 |
 | `native_eager_64g_full_bs6_final_counters` | 64 | 45.87 | 64 | 557.29 |
+| `native_cuda_graphs_64g_full_bs6_final_counters` | 64 | 45.67 | 64 | 546.70 |
 
 ## Native activation offload actually used
 
@@ -279,9 +281,11 @@ Independent reconstruction from every rank's 17-update records reproduces all th
 | Mean within-update rank-duration spread, seconds | 1.426 | 1.535 | 0.000613 |
 | Standard deviation of slowest-rank update durations, seconds | 0.398 | 0.662 | 0.033 |
 
-The native experiment adapter persists `activation_offload_rankNNN.json` after every update, including runs with activation offload disabled. GraphTrainer does not perform that extra per-update write. Persistence is outside the update timer, but a late rank can make other ranks wait in the next update's token-count collective. The step-5 alignment barrier also precedes the native sidecar write. This is a concrete instrumentation difference consistent with the observed rank skew; its contribution to the speed gap has not yet been measured.
+The native experiment adapter persists `activation_offload_rankNNN.json` after every update, including runs with activation offload disabled. GraphTrainer does not perform that extra per-update write. Persistence is outside the update timer, but a late rank can make other ranks wait in the next update's token-count collective. The step-5 alignment barrier also precedes the native sidecar write.
 
-Two follow-up 64-GPU BS6 native controls move only counter persistence to training exit. Model computations, optimizer, checkpoint, capture selection and the 17-update measurement protocol remain the same. Local real-FSDP2/EP2 MTP1/GA8 qualification completed 17 updates with FP32 CPU Adam and identical strict loss/gradient-norm records for the original and changed adapters; final counters were preserved. The immutable package was fetched and verified. Both controls are submitted; current states and verified results appear in the control table below:
+The completed eager control confirms a substantial instrumentation effect: moving only persistence to training exit increases native throughput from 4,536.09 to 4,685.23 tokens/s/GPU (+3.29%), reduces the update average from 43.343 to 41.963 seconds, and reduces rank-duration spread from 1.426 seconds to 0.000488 seconds. GPU memory is unchanged at 219.08 / 225.21 GiB. GraphTrainer is 1.61% faster than this corrected eager trial. The 1.380-second change removes approximately 68% of the originally recorded eager-to-GraphTrainer time gap across these separate trials; it is not an exact kernel-by-kernel decomposition. The matching native CUDA graph control is still running.
+
+Two follow-up 64-GPU BS6 native controls move only counter persistence to training exit. Model computations, optimizer, checkpoint, capture selection and the 17-update measurement protocol remain the same. Local real-FSDP2/EP2 MTP1/GA8 qualification completed 17 updates with FP32 CPU Adam and identical strict loss/gradient-norm records for the original and changed adapters; final counters were preserved. The immutable package was fetched and verified. Current states and verified results appear in the control table below:
 
 - [`native_eager_64g_full_bs6_final_counters`](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-ga8-17u-20261028-finalctr-ivankobzarev)
 - [`native_cuda_graphs_64g_full_bs6_final_counters`](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b6-full-ga8-17u-20261028-finalctr-ivankobzarev)
@@ -352,9 +356,9 @@ Both engines use a 24 GiB/rank activation quota and FP32 CPU Adam moments. Traff
 
 GraphTrainer's selected activation-transfer set is smaller under the same quota: approximately 12.47 GiB transferred each direction per microbatch, versus 24.00 GiB for native eager. This is measured traffic, not a GraphTrainer peak-live CPU counter. Its offload pass also prefetches reloads and defers waits; native saved-tensor hooks copy and restore on the current compute stream. The trace shows more transfer/compute overlap for GraphTrainer. Selection and scheduling both contribute to its lower offload cost; this is not an equal-byte transfer-speed comparison.
 
-The baselines both write 158.94 GiB of FP32 optimizer state back to CPU per update. This confirms the optimizer offload traffic is comparable. The measured BS6 offload pair achieves 4,515.63 tokens/s/GPU in GraphTrainer versus 4,155.38 in eager, with reserved peaks of 221.06 versus 243.87 GiB. Their profile links and job links are in the matched BS6 table.
+The baselines both write 158.94 GiB of FP32 optimizer state back to CPU per update. This confirms the optimizer offload traffic is comparable. The recorded BS6 offload pair achieves 4,515.63 tokens/s/GPU in GraphTrainer versus 4,155.38 in eager, with reserved peaks of 221.06 versus 243.87 GiB. The native 32-GPU runs still contain per-update counter persistence; these speed ratios have not been corrected by a 32-GPU persistence control. The transfer-byte, overlap and memory observations are directly measured. Profile links and job links are in the matched BS6 table.
 
-The strongest supported conclusions are a smaller replay workspace, fewer auxiliary GPU operations, and fewer activation transfers with more compute overlap. The exact attribution of every saved GiB and the speed gap remains open, with the native per-update persistence control needed before interpreting the full throughput difference. Cross-engine numerical differences described elsewhere in this report also remain.
+The strongest supported conclusions are a smaller replay workspace, fewer auxiliary GPU operations, and fewer activation transfers with more compute overlap. The eager persistence control removes much of the original recorded speed gap; the matching native capture control is needed to isolate the remaining execution comparison. The exact attribution of every saved GiB and cross-engine numerical differences described elsewhere in this report remain open.
 
 
 
@@ -382,10 +386,14 @@ In the same wave, GraphTrainer's recorded throughput is +3.89% relative to nativ
 | [native_eager_per_update_counters](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-ga8-17u-20261027-r1-ivankobzarev) | PASS, all 64 x 17 | 43.343 | 4,536.09 | 26.48 | 219.08 / 225.21 | 1.425899 | [Profile](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_e49e9518-7a8d-4cc4-947a-c457d96ee662_rank0_trace.json.gz) |
 | [native_cuda_graphs_per_update_counters](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b6-full-ga8-17u-20261027-ivankobzarev) | PASS, all 64 x 17 | 43.123 | 4,559.22 | 26.61 | 213.24 / 218.24 | 1.535318 | [Profile](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_ca84b859-52e6-4656-a7f6-dd0827a87917_rank0_trace.json.gz) |
 | [native_eager_final_counters](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-full-ga8-17u-20261028-finalctr-ivankobzarev) | PASS, all 64 x 17 | 41.963 | 4,685.23 | 27.35 | 219.08 / 225.21 | 0.000488 | [Profile](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_08ccfa68-c54d-4a34-a90f-b0667a5afad2_rank0_trace.json.gz) |
-| [native_cuda_graphs_final_counters](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b6-full-ga8-17u-20261028-finalctr-ivankobzarev) | Held | - | - | - | - | - | - |
+| [native_cuda_graphs_final_counters](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b6-full-ga8-17u-20261028-finalctr-ivankobzarev) | PASS, all 64 x 17 | 41.619 | 4,723.94 | 27.57 | 213.24 / 218.24 | 0.000632 | [Profile](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_35794b50-5c3e-4744-bc24-f801b1a84c47_rank0_trace.json.gz) |
 | [graph_trainer_bs6](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev) | PASS, all 64 x 17 | 41.299 | 4,760.57 | 27.79 | 189.59 / 193.63 | 0.000613 | [Profile](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_6548b64d-cb41-44a5-8160-34d958e4bb50_dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev__update16_rank0_compacted.json.gz) |
 
 Moving native eager counter persistence to training exit changes recorded throughput by +3.29% and reduces the recorded update time by 1.380 seconds. GraphTrainer's throughput is +1.61% relative to this control. Mean rank-duration spread changes from 1.425899 to 0.000488 seconds.
+
+Moving native CUDA graphs counter persistence to training exit changes recorded throughput by +3.61% and reduces the recorded update time by 1.504 seconds. GraphTrainer's throughput is +0.78% relative to this control. Mean rank-duration spread changes from 1.535318 to 0.000632 seconds.
+
+With final-only counter persistence in both native runs, enabling CUDA graphs changes throughput by +0.83% in these single trials. These controls are the appropriate native timing comparison; the original recorded values remain available above.
 
 ## 32 GPU CPU memory observations
 
@@ -451,6 +459,7 @@ All counts below are rank-0 GPU kernel slices from the separately profiled updat
 | `native_cuda_graphs_32g_full_bs6` | 45.00 | 45.30 | 1048 | 520 | 0.93 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_6fc6de85-5426-481c-a541-d035ccdf5cf3_rank0_trace.json.gz) |
 | `graph_full_recompute_bs6_fp32_cpu_moments_repeat` | 43.32 | 45.87 | 1024 | 640 | 0.77 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_a47382a5-fd82-49dc-b3aa-3ba3345a7586_rank0_trace.json.gz) |
 | `native_eager_64g_full_bs6_final_counters` | 41.96 | 86.61 | 1048 | 520 | 42.76 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_08ccfa68-c54d-4a34-a90f-b0667a5afad2_rank0_trace.json.gz) |
+| `native_cuda_graphs_64g_full_bs6_final_counters` | 41.62 | 46.30 | 1048 | 520 | 0.71 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_35794b50-5c3e-4744-bc24-f801b1a84c47_rank0_trace.json.gz) |
 
 ## Native failure locations
 
@@ -528,6 +537,8 @@ These pairs use the primary performance settings. They completed 17 finite updat
 | `fit_32g_full_bs6` versus `native_cg_32g_full_bs6` | 32 x 17 | 0.0084724 (update 10) | 0.8100586 (update 1) |
 | `graph_match_32g_full_bs6` versus `graph_repeat_32g_full_bs6` | 32 x 17 | 0.0279222 (update 7) | 2.4671354 (update 3) |
 | `64g_full_bs6` versus `timing_64g_full_bs6` | 64 x 17 | 0.0470591 (update 12) | 9.2967739 (update 13) |
+| `native_cg_64g_full_bs6` versus `timing_native_cg_64g_full_bs6` | 64 x 17 | 0.0122366 (update 17) | 2.9617996 (update 2) |
+| `timing_64g_full_bs6` versus `timing_native_cg_64g_full_bs6` | 64 x 17 | 0.0672359 (update 17) | 1.1530354 (update 11) |
 | `schedule_reduce_last_unfused` versus `schedule_reduce_last_fused` | 64 x 17 | 0.0914626 (update 8) | 6.2225356 (update 14) |
 | `schedule_reduce_last_fused` versus `schedule_first_legacy_fused` | 64 x 17 | 0.0579176 (update 16) | 170.5535989 (update 15) |
 | `fit_32g_full_bs6` versus `fit_32g_full-ao_bs6_ao24` | 32 x 17 | 0.0471563 (update 16) | 4.5601285 (update 15) |
