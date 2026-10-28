@@ -230,7 +230,11 @@ def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
 
 
 def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> None:
-    """Fetch new weights into the sharded parameters with one FSDP group allocated at a time."""
+    """Fetch new weights into the sharded parameters with one FSDP group allocated at a time.
+
+    Guards that a group left mid-forward (the tied group after a standalone lm_head
+    call) still receives the new weights.
+    """
     dist.init_process_group(
         "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
     )
@@ -242,10 +246,15 @@ def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> No
         model.lm_head.weight = model.tok_embeddings.weight
         model.register_buffer("scale", torch.zeros(4))
         mesh = init_device_mesh("cpu", (1,))
-        fully_shard([model.tok_embeddings, model.lm_head], mesh=mesh)
+        # The generator never reshards after forward.
+        fully_shard(
+            [model.tok_embeddings, model.lm_head],
+            mesh=mesh,
+            reshard_after_forward=False,
+        )
         for block in model.layers:
-            fully_shard(block, mesh=mesh)
-        fully_shard(model, mesh=mesh)
+            fully_shard(block, mesh=mesh, reshard_after_forward=False)
+        fully_shard(model, mesh=mesh, reshard_after_forward=False)
         model.set_keep_unsharded_storage(True)
         new_state_dict = {k: v.detach() + 1.0 for k, v in model.state_dict().items()}
         wrapper = _Wrapper(model)
@@ -268,6 +277,11 @@ def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> No
         for module in model.modules():  # as after the initial load
             if isinstance(module, FSDPModule):
                 model_wrapper._unshard_and_free_sharded_params(module)
+        # As in compute_logits: calling lm_head alone leaves the tied group's forward
+        # incomplete, so module.reshard() would skip it.
+        model._get_fsdp_state()._lazy_init()  # the root's forward would do this
+        with torch.no_grad():
+            model.lm_head(torch.zeros(1, 16))
 
         fetched_keys = []
 

@@ -268,6 +268,17 @@ def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:
             yield sharded_data
 
 
+def _reshard(module: FSDPModule) -> None:
+    """Reshard ``module``'s FSDP group unconditionally, like FSDP's load_state_dict pre-hook.
+
+    ``module.reshard()`` is a no-op for a group left in the FORWARD state with
+    reshard_after_forward=False, e.g. the tied [tok_embeddings, norm, lm_head]
+    group after ``compute_logits`` calls lm_head alone.
+    """
+    for param_group in module._get_fsdp_state()._fsdp_param_groups:
+        param_group._to_sharded()
+
+
 def _restore_sharded_params(module: FSDPModule) -> None:
     """Re-allocate the sharded buffers of `module`'s FSDP group so new weights can be copied in.
 
@@ -555,7 +566,7 @@ class VLLMModelWrapper(Module):
         for module, keyed_params in self._direct_load_groups:
             # unshard() is a no-op while the group is unsharded. Resharding registers
             # the sharded parameters and keeps the unsharded storage CUDA graphs read.
-            module.reshard()
+            _reshard(module)
             _restore_sharded_params(module)
             await fetch(
                 {key: fsdp_param.sharded_param for key, fsdp_param in keyed_params}
