@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T12:20:40.742116+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T12:21:51.632149+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -256,7 +256,7 @@ The hardware diagnostic filled the 80 GiB quota on every rank, making 174 CPU co
 
 ## Why GraphTrainer helps at BS6
 
-### 64 GPU Full recompute: capture alone explains a small part of the speed gap
+### 64 GPU Full recompute: eager, native capture and GraphTrainer
 
 All three runs use BS6/GA8 on 64 x GB300, FP32 GPU master weights and persistent gradients, BF16 GPU Adam moments, and parameter gathering and gradient reduction every microbatch. All 64 ranks completed 17 updates; throughput is reconstructed from the ten measured updates.
 
@@ -327,6 +327,12 @@ Rank-0 update-17 allocator snapshots place almost the entire native-capture-to-G
 The 24.61 GiB difference is workspace reserved for replay. The near-identical outside-pool allocation and retained gradient storage support a buffer-lifetime/materialization explanation; optimizer and gradient precision have not been lowered. Captured temporary addresses remain reserved while the graph exists.
 
 Native eager's reconstructed update-17 peak is 219.0846 GiB, agreeing with its measured 219.0848 GiB peak within allocator rounding. It contains 20.02 GiB from 61 block-sized residual outputs and 27.19 GiB attributed to the retained Dist-MoE region. GraphTrainer Full also forces layer-boundary outputs to be saved, so those 61 residual tensors cannot simply be counted as eliminated memory. History starts after capture and lacks the internal graph-pool allocation stacks; the exact buffer-by-buffer explanation of the 24.61 GiB workspace difference still needs capture-time allocation history or focused ablations.
+
+### SAC BS6 capacity comes from the operator memory policy
+
+On 64 GPUs, GraphTrainer SAC BS6 completes all 17 updates at 236.47 / 244.55 GiB allocated/reserved. Native SAC BS6 OOMs on all ranks at 267.62 / 268.69 GiB, and its native CUDA-graph counterpart OOMs at 267.62 / 268.71 GiB in the first eager warmup forward. Capture never starts in that failed control. Adding an 80 GiB native CPU activation quota also fails during the first forward; failure counters confirm that the quota was filled, with no host-pressure skips.
+
+The policy implementations explain why capture alone cannot reproduce this capacity result. Native SAC saves whole declared regions except routed-expert `w13`; GraphTrainer SAC tags expensive operators for saving and allows other operators to recompute in the joint forward/backward graph. These are different saved-tensor selections. The result demonstrates the flexibility of the graph memory policy, while the Full-recompute and offload comparisons isolate additional buffer and transfer observations. No gradient or optimizer precision change is used to obtain the BS6 capacity result.
 
 ### 32 GPU BS6 offload: fewer bytes transferred and more overlap
 
