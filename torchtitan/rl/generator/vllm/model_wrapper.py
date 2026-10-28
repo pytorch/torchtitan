@@ -325,6 +325,10 @@ def _direct_load_groups(
         ``(groups, other_keys)``: one ``(module, [(key, fsdp_param), ...])`` per FSDP
         group in module order, where ``module`` is the group's first module; and the
         keys outside any group (buffers).
+
+    Raises:
+        ValueError: If a parameter is quantized; direct loads fetch into the
+            sharded parameter itself, not its high-precision ``_tensor``.
     """
     sharded_param_to_group: dict[int, tuple[FSDPModule, Any]] = {}
     group_modules: dict[Any, FSDPModule] = {}
@@ -337,6 +341,12 @@ def _direct_load_groups(
         group_modules[state] = module
         for param_group in state._fsdp_param_groups:
             for fsdp_param in param_group.fsdp_params:
+                if isinstance(fsdp_param._sharded_param_data, _ShardedFSDPTensor):
+                    raise ValueError(
+                        "direct_rdma_model_state_dict does not support quantized "
+                        f"parameters ({fsdp_param._module_info.param_name} in "
+                        f"{type(module).__name__})"
+                    )
                 sharded_param_to_group[id(fsdp_param.sharded_param)] = (
                     module,
                     fsdp_param,

@@ -310,6 +310,21 @@ def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> No
         dist.destroy_process_group()
 
 
+def test_direct_load_groups_rejects_quantized_params(tmp_path, monkeypatch) -> None:
+    dist.init_process_group(
+        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
+    )
+    try:
+        model = nn.Sequential(nn.Linear(16, 16))
+        fully_shard(model, mesh=init_device_mesh("cpu", (1,)))
+        # Treat every sharded parameter as quantized.
+        monkeypatch.setattr(model_wrapper, "_ShardedFSDPTensor", torch.Tensor)
+        with pytest.raises(ValueError, match="does not support quantized parameters"):
+            model_wrapper._direct_load_groups(model)
+    finally:
+        dist.destroy_process_group()
+
+
 @pytest.mark.parametrize(
     ("build_config", "attn_backend"),
     [
