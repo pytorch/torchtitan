@@ -22,8 +22,10 @@ import weakref
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
+import torch
 
 import torchtitan.rl.generator.engine_loop as engine_loop_module
 import torchtitan.rl.generator.generator as generator_module
@@ -889,7 +891,7 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
     async def run() -> None:
         # The generator's endpoints around the engine loop, without building vLLM.
         generator = object.__new__(Generator)
-        generator.config = SimpleNamespace(direct_rdma_model_state_dict=False)
+        generator.config = SimpleNamespace(fetch_model_state_dict_to_gpu=False)
         generator._engine_loop = engine_thread(engine)
         generator._prefetched_model_state_dict = {}
         await generator.start_engine_loop()
@@ -921,20 +923,22 @@ def test_direct_load_reads_torchstore_on_the_actor_loop_during_the_load(
         reads.append(
             (threading.current_thread(), asyncio.get_running_loop(), args, kwargs)
         )
+        return kwargs["user_state_dict"]
 
     monkeypatch.setattr(generator_module.ts, "get_state_dict", get_state_dict)
+    monkeypatch.setattr(torch.cuda, "current_stream", Mock())
     weights = {"weight": object()}
 
     class _DirectEngine(_FakeEngine):
-        async def load_model_state_dict_direct(self, fetch) -> None:
-            await fetch(weights)
+        def load_model_state_dict_direct(self, fetch) -> None:
+            fetch(weights)
 
         def load_prefetched_model_state_dict(self) -> None:
             raise AssertionError("direct loads must not read prefetched buffers")
 
     async def run() -> None:
         generator = object.__new__(Generator)
-        generator.config = SimpleNamespace(direct_rdma_model_state_dict=True)
+        generator.config = SimpleNamespace(fetch_model_state_dict_to_gpu=True)
         generator._torchstore_loop = asyncio.get_running_loop()
         generator._engine_loop = engine_thread(
             _DirectEngine(), fetch_model_state_dict=generator._fetch_model_state_dict
@@ -950,7 +954,7 @@ def test_direct_load_reads_torchstore_on_the_actor_loop_during_the_load(
                 threading.current_thread(),
                 asyncio.get_running_loop(),
                 ("model_state_dict",),
-                {"user_state_dict": weights, "strict": False, "direct_rdma": True},
+                {"user_state_dict": weights, "strict": False, "direct_rdma": False},
             )
         ]
         assert generator.policy_version == 4
@@ -963,11 +967,11 @@ def test_direct_load_reads_torchstore_on_the_actor_loop_during_the_load(
 class _DirectLoadEngine(_FakeEngine):
     """Loads by fetching straight into its (empty) weights."""
 
-    async def load_model_state_dict_direct(self, fetch) -> None:
-        await fetch({})
+    def load_model_state_dict_direct(self, fetch) -> None:
+        fetch({})
 
 
-async def _fetch_nothing(weights: dict) -> None:
+def _fetch_nothing(weights: dict) -> None:
     pass
 
 
@@ -992,7 +996,7 @@ def test_direct_load_replies_only_after_every_rank_finished_reading(
         load = asyncio.create_task(engine_loop.load_model_state_dict(3))
         assert await asyncio.to_thread(reducing.wait, _TIMEOUT_S)
 
-        # Other ranks may still be reading the trainer's buffers, so the load must not resolve.
+        # Other ranks may still be reading the StorageVolume, so the load must not resolve.
         await _on_engine_loop(engine_loop, lambda: None)
         assert not load.done()
         released.set()
@@ -1015,7 +1019,7 @@ def test_direct_load_fails_on_every_rank_when_any_rank_fails(
         reduced.append(int(tensor.item()))
         tensor.fill_(1)
 
-    async def fetch(weights: dict) -> None:
+    def fetch(weights: dict) -> None:
         if failing_rank == "this":
             raise RuntimeError("TorchStore is down")
 
@@ -1033,31 +1037,11 @@ def test_direct_load_fails_on_every_rank_when_any_rank_fails(
             await asyncio.wait_for(engine_loop.load_model_state_dict(3), _TIMEOUT_S)
         # A failing rank still joins the all-reduce, so the other ranks don't hang.
         assert reduced == [int(failing_rank == "this")]
-        assert engine_loop.policy_version != 3
+        assert engine_loop.policy_version == 0
 
         await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
 
     asyncio.run(run())
-
-
-def test_cancelled_direct_load_still_joins_the_all_reduce(
-    engine_thread, monkeypatch
-) -> None:
-    reduced: list[int] = []
-
-    def all_reduce(tensor, group) -> None:
-        reduced.append(int(tensor.item()))
-
-    async def fetch(weights: dict) -> None:
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(engine_loop_module.dist, "all_reduce", all_reduce)
-    engine_loop = engine_thread(_DirectLoadEngine())
-
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(engine_loop._load_model_state_dict_direct(fetch))
-    # Skipping it would hang the other ranks in theirs.
-    assert reduced == [1]
 
 
 def test_loads_queued_during_a_load_are_applied_together_after_it(

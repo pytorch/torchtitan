@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import asyncio
 import dataclasses
 import importlib
 from unittest import mock
@@ -298,7 +297,7 @@ def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> No
 
         fetched_keys = []
 
-        async def fetch(state_dict: dict[str, torch.Tensor]) -> None:
+        def fetch(state_dict: dict[str, torch.Tensor]) -> None:
             fetched_keys.append(sorted(state_dict))
             # Only the fetched group may hold sharded buffers.
             assert sum(map(is_allocated, groups)) <= 1
@@ -306,7 +305,7 @@ def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> No
                 for key, tensor in state_dict.items():
                     tensor.copy_(new_state_dict[key])
 
-        asyncio.run(wrapper.load_state_dict_direct(fetch))
+        wrapper.load_state_dict_direct(fetch)
 
         assert fetched_keys == [
             ["lm_head.weight", "tok_embeddings.weight"],
@@ -371,12 +370,12 @@ class TestLoadStateDictDirectTwoRanks(DTensorTestBase):
         for version in (1, 2):
             new_state_dict = {k: v + version for k, v in initial_state_dict.items()}
 
-            async def fetch(state_dict: dict[str, torch.Tensor]) -> None:
+            def fetch(state_dict: dict[str, torch.Tensor]) -> None:
                 with torch.no_grad():
                     for key, tensor in state_dict.items():
                         tensor.copy_(new_state_dict[key])
 
-            asyncio.run(wrapper.load_state_dict_direct(fetch))
+            wrapper.load_state_dict_direct(fetch)
 
             for name, param in model.named_parameters(remove_duplicate=False):
                 self.assertEqual(param, new_state_dict[name].full_tensor(), msg=name)
@@ -407,17 +406,17 @@ class TestLoadStateDictDirectTwoRanks(DTensorTestBase):
                 model_wrapper._unshard_and_free_sharded_params(module)
         fetched_keys = []
 
-        async def fetch(state_dict: dict[str, torch.Tensor]) -> None:
+        def fetch(state_dict: dict[str, torch.Tensor]) -> None:
             fetched_keys.append(sorted(state_dict))
             if self.rank == 1:
                 raise RuntimeError("fetch failed")
 
         if self.rank == 1:
             with self.assertRaisesRegex(RuntimeError, "fetch failed"):
-                asyncio.run(wrapper.load_state_dict_direct(fetch))
+                wrapper.load_state_dict_direct(fetch)
             self.assertEqual(fetched_keys, [["layers.0.bias", "layers.0.weight"]])
         else:
-            asyncio.run(wrapper.load_state_dict_direct(fetch))
+            wrapper.load_state_dict_direct(fetch)
             self.assertEqual(len(fetched_keys), 4)
         self.assertTrue(
             all(
@@ -439,6 +438,19 @@ def test_direct_load_groups_rejects_quantized_params(tmp_path, monkeypatch) -> N
         # Treat every sharded parameter as quantized.
         monkeypatch.setattr(model_wrapper, "_ShardedFSDPTensor", torch.Tensor)
         with pytest.raises(ValueError, match="does not support quantized parameters"):
+            model_wrapper._direct_load_groups(model)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_direct_load_groups_rejects_unsharded_params(tmp_path) -> None:
+    dist.init_process_group(
+        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
+    )
+    try:
+        model = nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16))
+        fully_shard(model[0], mesh=init_device_mesh("cpu", (1,)))
+        with pytest.raises(AssertionError, match="1.weight is neither FSDP-sharded"):
             model_wrapper._direct_load_groups(model)
     finally:
         dist.destroy_process_group()

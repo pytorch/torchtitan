@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import abc
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -46,7 +46,7 @@ class GenerationEngine(Configurable, abc.ABC):
         reset_kv_cache_on_model_state_dict_load: Whether each model state dict load resets
             all KV. When False, a request may reuse only KV computed under its
             ``min_policy_version``.
-        direct_rdma_model_state_dict: Whether model state dict loads go through
+        fetch_model_state_dict_to_gpu: Whether model state dict loads go through
             ``load_model_state_dict_direct`` instead of the prefetched model state dict.
         rank: Global rank of this process.
         generator_name: Name of the generator, for engine metrics.
@@ -72,7 +72,7 @@ class GenerationEngine(Configurable, abc.ABC):
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
         ``load_prefetched_model_state_dict``. Safe to fill from any thread while no load runs.
-        None with ``direct_rdma_model_state_dict``."""
+        None with ``fetch_model_state_dict_to_gpu``."""
 
     @abc.abstractmethod
     def add_requests(
@@ -94,18 +94,18 @@ class GenerationEngine(Configurable, abc.ABC):
         """Load the prefetched model state dict into the model, and reset the KV cache when
         configured."""
 
-    async def load_model_state_dict_direct(
-        self, fetch: Callable[[dict[str, torch.Tensor]], Awaitable[None]]
+    def load_model_state_dict_direct(
+        self, fetch: Callable[[dict[str, torch.Tensor]], None]
     ) -> None:
         """Load a model state dict by having ``fetch`` fill the model's weights in place, and
-        reset the KV cache when configured. Used with ``direct_rdma_model_state_dict``.
+        reset the KV cache when configured. Used with ``fetch_model_state_dict_to_gpu``.
 
         Args:
             fetch: Fills each tensor of the given subset of the model state dict in place
                 with the new weights.
         """
         raise NotImplementedError(
-            f"{type(self).__name__} does not support direct_rdma_model_state_dict"
+            f"{type(self).__name__} does not support fetch_model_state_dict_to_gpu"
         )
 
     @property

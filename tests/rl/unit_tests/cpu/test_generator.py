@@ -165,7 +165,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
     async def main():
         staging_state_dict = {"weight": "old"}
         generator = Generator.__new__(Generator)
-        generator.config = SimpleNamespace(direct_rdma_model_state_dict=False)
+        generator.config = SimpleNamespace(fetch_model_state_dict_to_gpu=False)
         generator._prefetched_model_state_dict = staging_state_dict
 
         def fill_state_dict(*args, **kwargs):
@@ -545,12 +545,12 @@ def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
 
 @pytest.mark.parametrize("reset_kv_cache", [False, True])
 def test_load_model_state_dict_direct_fetches_into_the_model(reset_kv_cache: bool):
-    async def fetch(state_dict):
+    def fetch(state_dict):
         pass
 
     fetches = []
 
-    async def load_state_dict_direct(fetch):
+    def load_state_dict_direct(fetch):
         fetches.append(fetch)
 
     engine = _vllm_engine(
@@ -558,96 +558,69 @@ def test_load_model_state_dict_direct_fetches_into_the_model(reset_kv_cache: boo
         model=SimpleNamespace(load_state_dict_direct=load_state_dict_direct),
     )
 
-    asyncio.run(engine.load_model_state_dict_direct(fetch))
+    engine.load_model_state_dict_direct(fetch)
 
     assert fetches == [fetch]
     expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
     assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
 
 
-def test_direct_fetch_requires_torchstore_client():
-    generator = Generator.__new__(Generator)
-    generator._torchstore_loop = None
-
-    with pytest.raises(RuntimeError, match="initialize_torchstore_client"):
-        asyncio.run(generator._fetch_model_state_dict({}))
-
-
-def test_direct_fetch_runs_on_torchstore_loop():
+def _fetch_on_torchstore_loop(state_dict, get_state_dict, current_stream=None):
+    """Runs `Generator._fetch_model_state_dict` against a fake TorchStore loop thread."""
     torchstore_loop = asyncio.new_event_loop()
     thread = threading.Thread(target=torchstore_loop.run_forever)
     thread.start()
     generator = Generator.__new__(Generator)
     generator._torchstore_loop = torchstore_loop
-    state_dict = {"weight": torch.zeros(2)}
-    calls = []
-
-    async def get_state_dict(*args, **kwargs):
-        calls.append((asyncio.get_running_loop(), args, kwargs))
-
+    current_stream = current_stream or Mock()
     try:
-        with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
-            asyncio.run(generator._fetch_model_state_dict(state_dict))
+        with (
+            patch.object(generator_module.ts, "get_state_dict", get_state_dict),
+            patch.object(torch.cuda, "current_stream", current_stream),
+        ):
+            generator._fetch_model_state_dict(state_dict)
     finally:
         torchstore_loop.call_soon_threadsafe(torchstore_loop.stop)
         thread.join()
         torchstore_loop.close()
+    return torchstore_loop, current_stream
+
+
+def test_direct_fetch_runs_on_torchstore_loop():
+    state_dict = {"weight": torch.zeros(2)}
+    calls = []
+    current_stream = Mock()
+
+    async def get_state_dict(*args, **kwargs):
+        # Queued GPU work on the weights must finish before the read writes them.
+        current_stream.return_value.synchronize.assert_called_once_with()
+        calls.append((asyncio.get_running_loop(), args, kwargs))
+        return kwargs["user_state_dict"]
+
+    torchstore_loop, _ = _fetch_on_torchstore_loop(
+        state_dict, get_state_dict, current_stream
+    )
 
     ((loop, args, kwargs),) = calls
     assert loop is torchstore_loop
     assert args == ("model_state_dict",)
     assert kwargs["user_state_dict"] is state_dict
-    assert kwargs["direct_rdma"] is True
+    assert kwargs["direct_rdma"] is False
 
 
-@pytest.mark.parametrize("num_cancels", [1, 2])
-def test_cancelled_direct_fetch_waits_for_the_read(num_cancels: int):
-    torchstore_loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=torchstore_loop.run_forever)
-    thread.start()
-    generator = Generator.__new__(Generator)
-    generator._torchstore_loop = torchstore_loop
-    reading, released = threading.Event(), threading.Event()
-    read_cancelled = []
+def test_direct_fetch_raises_on_missing_weights():
+    state_dict = {"weight": torch.zeros(2), "bias": torch.zeros(2)}
 
     async def get_state_dict(*args, **kwargs):
-        reading.set()
-        try:
-            await asyncio.to_thread(released.wait, 30)
-        except asyncio.CancelledError:
-            read_cancelled.append(True)
-            raise
+        return {"weight": kwargs["user_state_dict"]["weight"]}
 
-    async def run() -> None:
-        fetch = asyncio.create_task(generator._fetch_model_state_dict({}))
-        assert await asyncio.to_thread(reading.wait, 30)
-        for _ in range(num_cancels):
-            fetch.cancel()
-            # Let the fetch handle the cancellation; it would finish here if it
-            # did not wait for the read.
-            for _ in range(5):
-                await asyncio.sleep(0)
-            # RDMA writes continue after cancel, so the fetch must not return yet.
-            assert not fetch.done()
-        released.set()
-        with pytest.raises(asyncio.CancelledError):
-            await fetch
-
-    try:
-        with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
-            asyncio.run(run())
-    finally:
-        released.set()
-        torchstore_loop.call_soon_threadsafe(torchstore_loop.stop)
-        thread.join()
-        torchstore_loop.close()
-
-    assert read_cancelled == []
+    with pytest.raises(RuntimeError, match="did not return 1 weights.*bias"):
+        _fetch_on_torchstore_loop(state_dict, get_state_dict)
 
 
-def test_prefetch_model_state_dict_is_noop_with_direct_rdma():
+def test_prefetch_model_state_dict_is_noop_with_fetch_to_gpu():
     generator = Generator.__new__(Generator)
-    generator.config = SimpleNamespace(direct_rdma_model_state_dict=True)
+    generator.config = SimpleNamespace(fetch_model_state_dict_to_gpu=True)
     get_state_dict = AsyncMock()
 
     with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
@@ -668,9 +641,9 @@ class _InlineEngineLoopThread:
         return fn()
 
 
-@pytest.mark.parametrize("direct_rdma", [False, True])
-def test_direct_rdma_model_state_dict_reaches_engine_and_engine_loop(
-    monkeypatch, tmp_path, direct_rdma: bool
+@pytest.mark.parametrize("fetch_to_gpu", [False, True])
+def test_fetch_model_state_dict_to_gpu_reaches_engine_and_engine_loop(
+    monkeypatch, tmp_path, fetch_to_gpu: bool
 ):
     build = Mock(
         return_value=SimpleNamespace(
@@ -689,17 +662,19 @@ def test_direct_rdma_model_state_dict_reaches_engine_and_engine_loop(
     monkeypatch.setattr(torch.accelerator, "set_device_index", Mock())
 
     generator = Generator(
-        Generator.Config(model=_MODEL_CONFIG, direct_rdma_model_state_dict=direct_rdma),
+        Generator.Config(
+            model=_MODEL_CONFIG, fetch_model_state_dict_to_gpu=fetch_to_gpu
+        ),
         model_path="unused",
         max_num_seqs=8,
         output_dir=str(tmp_path),
         rank=0,
     )
 
-    assert build.call_args.kwargs["direct_rdma_model_state_dict"] is direct_rdma
+    assert build.call_args.kwargs["fetch_model_state_dict_to_gpu"] is fetch_to_gpu
     engine_loop_kwargs = cast(Mock, generator_module.EngineLoop).call_args.kwargs
     assert engine_loop_kwargs["fetch_model_state_dict"] == (
-        generator._fetch_model_state_dict if direct_rdma else None
+        generator._fetch_model_state_dict if fetch_to_gpu else None
     )
 
 
@@ -798,7 +773,7 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             dist_moe_runtime=None,
             debug=DebugConfig(),
             reset_kv_cache_on_model_state_dict_load=True,
-            direct_rdma_model_state_dict=False,
+            fetch_model_state_dict_to_gpu=False,
             rank=0,
             generator_name="generator",
             output_dir=str(tmp_path),
@@ -830,7 +805,7 @@ def _build_engine_kwargs(
     monkeypatch,
     tmp_path,
     config: Generator.Config,
-    direct_rdma_model_state_dict: bool = False,
+    fetch_model_state_dict_to_gpu: bool = False,
 ) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
     ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
@@ -851,7 +826,7 @@ def _build_engine_kwargs(
         dist_moe_runtime=None,
         debug=config.debug,
         reset_kv_cache_on_model_state_dict_load=False,
-        direct_rdma_model_state_dict=direct_rdma_model_state_dict,
+        fetch_model_state_dict_to_gpu=fetch_model_state_dict_to_gpu,
         rank=0,
         generator_name="generator",
         output_dir=str(tmp_path),
@@ -863,18 +838,18 @@ def test_generator_defaults_to_the_vllm_engine():
     assert isinstance(Generator.Config(model=_MODEL_CONFIG).engine, VLLMEngine.Config)
 
 
-@pytest.mark.parametrize("direct_rdma", [False, True])
-def test_direct_rdma_model_state_dict_reaches_model_registration(
-    monkeypatch, tmp_path, direct_rdma: bool
+@pytest.mark.parametrize("fetch_to_gpu", [False, True])
+def test_fetch_model_state_dict_to_gpu_reaches_model_registration(
+    monkeypatch, tmp_path, fetch_to_gpu: bool
 ):
     _build_engine_kwargs(
         monkeypatch,
         tmp_path,
         Generator.Config(model=_MODEL_CONFIG),
-        direct_rdma_model_state_dict=direct_rdma,
+        fetch_model_state_dict_to_gpu=fetch_to_gpu,
     )
     register = cast(Mock, vllm_engine_module.register_to_vllm)
-    assert register.call_args.kwargs["direct_rdma_model_state_dict"] is direct_rdma
+    assert register.call_args.kwargs["fetch_model_state_dict_to_gpu"] is fetch_to_gpu
 
 
 def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):

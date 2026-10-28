@@ -30,7 +30,6 @@ Run each backend in a separate torchrun invocation:
         tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityFlex -v
 """
 
-import asyncio
 import copy
 import dataclasses
 import gc
@@ -299,10 +298,12 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine, *, direct: bool) -> Non
 
     if direct:
 
-        async def fetch(state_dict: dict[str, torch.Tensor]) -> None:
+        def fetch(state_dict: dict[str, torch.Tensor]) -> None:
             copy_trainer_weights(state_dict)
+            # As TorchStore reads do, finish writing before returning.
+            torch.cuda.current_stream().synchronize()
 
-        asyncio.run(wrapper.load_state_dict_direct(fetch))
+        wrapper.load_state_dict_direct(fetch)
     else:
         # As a model state dict load: fill the pinned CPU copy, then load it with load_state_dict.
         vllm_sd = wrapper._prefetched_model_state_dict
@@ -603,8 +604,8 @@ class BitwiseParityTestBase(unittest.TestCase):
     # weights (including attention sinks) are copied into the engine in-process.
     sync_weights_from_trainer: bool = False
     # With sync_weights_from_trainer, copy into the generator's sharded parameters one
-    # FSDP group at a time (direct_rdma_model_state_dict) instead of a pinned CPU copy.
-    direct_rdma_model_state_dict: bool = False
+    # FSDP group at a time (fetch_model_state_dict_to_gpu) instead of a pinned CPU copy.
+    fetch_model_state_dict_to_gpu: bool = False
 
     # Shared across all tests in the class (built once in setUpClass)
     model: torch.nn.Module
@@ -668,7 +669,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             config.generator.model,
             parallelism=config.generator.parallelism,
             checkpointer_config=generator_checkpointer,
-            direct_rdma_model_state_dict=cls.direct_rdma_model_state_dict,
+            fetch_model_state_dict_to_gpu=cls.fetch_model_state_dict_to_gpu,
         )
 
         # Test runs trainer and generator in the same process, so limit
@@ -691,7 +692,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
             _sync_trainer_weights_to_vllm(
-                cls.model, cls.engine, direct=cls.direct_rdma_model_state_dict
+                cls.model, cls.engine, direct=cls.fetch_model_state_dict_to_gpu
             )
 
         tokenizer = cls.engine.get_tokenizer()
@@ -925,9 +926,13 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
 
 
 class TestBitwiseParityQwen35DebugVarlenDirect(TestBitwiseParityQwen35DebugVarlen):
-    """Qwen3.5 parity with weights loaded via direct_rdma_model_state_dict."""
+    """Qwen3.5 parity with weights loaded via fetch_model_state_dict_to_gpu."""
 
-    direct_rdma_model_state_dict = True
+    fetch_model_state_dict_to_gpu = True
+
+    def test_no_pinned_cpu_copy(self):
+        wrapper = self.engine.model_executor.driver_worker.get_model()
+        self.assertIsNone(wrapper._prefetched_model_state_dict)
 
     def test_reload_after_generate(self):
         """Reload changed weights after generation has replayed the captured graphs."""
