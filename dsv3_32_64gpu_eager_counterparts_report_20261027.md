@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T11:55:44.583470+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T12:05:02.693020+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -98,7 +98,7 @@ MFU uses the same model-FLOP estimate, excluding recompute, and 5 PFLOP/s dense 
 
 | Configuration ID | BS / GA | CPU activation quota GiB | Graph outcome | Graph allocated / reserved peak GiB | Graph tokens/s/GPU | Graph MFU % | Native outcome | Native allocated / reserved peak GiB | Native tokens/s/GPU | Native MFU % | Graph / native throughput | MAST jobs | Profiles, update 16 rank 0 |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
-| `native_cuda_graphs_64g_sac_bs6` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 236.47 / 244.55 | 4,948.86 | 28.89 | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nebius-64g-ep64-b6-ga8-sac-17u-20261026-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b6-sac-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_b368a8dd-9f0e-428a-bdf2-f80b28c840f0_dsv3-nebius-64g-ep64-b6-ga8-sac-17u-20261026-ivankobzarev__update16_rank0_compacted.json.gz) |
+| `native_cuda_graphs_64g_sac_bs6` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 236.47 / 244.55 | 4,948.86 | 28.89 | RUNNING | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nebius-64g-ep64-b6-ga8-sac-17u-20261026-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b6-sac-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_b368a8dd-9f0e-428a-bdf2-f80b28c840f0_dsv3-nebius-64g-ep64-b6-ga8-sac-17u-20261026-ivankobzarev__update16_rank0_compacted.json.gz) |
 | `native_cuda_graphs_64g_full_bs6` | 6 / 8 | Disabled | PASS, all 64 x 17 (reference) | 189.59 / 193.63 | 4,760.57 | 27.79 | PASS, all 64 x 17 | 213.24 / 218.24 | 4,559.22 | 26.61 | 1.044x | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b6-full-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_6548b64d-cb41-44a5-8160-34d958e4bb50_dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev__update16_rank0_compacted.json.gz) / [Native CG](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_ca84b859-52e6-4656-a7f6-dd0827a87917_rank0_trace.json.gz) |
 | `native_cuda_graphs_64g_full_bs10` | 10 / 8 | Disabled | PASS, all 64 x 17 (reference) | 235.96 / 240.56 | 4,826.62 | 28.17 | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-night-64g-ep64-b10-full64-b10-20261026-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-64g-b10-full-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_d9c75545-1623-45fd-bc08-9cfbeca9cb55_dsv3-night-64g-ep64-b10-full64-b10-20261026-ivankobzarev__update16_rank0_compacted.json.gz) |
 
@@ -108,6 +108,7 @@ MFU uses the same model-FLOP estimate, excluding recompute, and 5 PFLOP/s dense 
 | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
 | `native_cuda_graphs_32g_full_bs8` | 8 / 8 | Disabled | PASS, all 32 x 17 (reference) | 254.82 / 258.39 | 4,582.42 | 26.75 | OOM; 32 ranks logged | 266.10 / 267.23 at failure; +0.50 requested | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-ep32-b8-full-17u-20261027-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-32g-b8-full-ga8-17u-20261027-ivankobzarev) | [Graph](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_98f6fecd-6967-48b5-96c5-3d2354834c2c_dsv3-fp32-32g-ep32-b8-full-17u-20261027-ivankobzarev__update16_rank0_compacted.json.gz) |
 | `native_cuda_graphs_32g_full_bs10` | 10 / 8 | Disabled | OOM | ~272.95 projected / - | - | - | OOM; 32 ranks logged | 263.29 / 264.27 at failure; +1.25 requested | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-ep32-b10-full-17u-20261027-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-32g-b10-full-ga8-17u-20261027-ivankobzarev) | OOM before profiling |
+| `native_cuda_graphs_32g_full_bs6` | 6 / 8 | Disabled | Held for experiment priority | - | - | - | Held for experiment priority | - | - | - | - | [Graph](https://www.internalfb.com/msl/studio/runs/mast/dsv3-fp32-32g-b6-full-ga8-17u-20261028-repeat-ivankobzarev) / [Native CG](https://www.internalfb.com/msl/studio/runs/mast/dsv3-nativecg-32g-b6-full-ga8-17u-20261028-bs6-ivankobzarev) | Not yet produced |
 
 ## Additional native scheduling settings
 
@@ -199,6 +200,7 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `32g_full-ao_bs10_ao48` | 32 | 45.85 | 32 | 560.79 |
 | `64g_sac-ao_bs10_ao60` | 64 | 48.19 | 64 | 558.02 |
 | `64g_sac-ao_bs10_ao80` | 64 | 46.69 | 64 | 545.64 |
+| `native_cuda_graphs_64g_sac_bs6` | 64 | 44.36 | 0 | - |
 | `native_cuda_graphs_64g_full_bs6` | 64 | 46.03 | 64 | 546.66 |
 | `native_cuda_graphs_32g_full_bs8` | 32 | 44.07 | 32 | 570.24 |
 | `native_cuda_graphs_32g_full_bs10` | 32 | 47.67 | 32 | 556.69 |
@@ -247,6 +249,77 @@ Counters below include the failed update. Forward counts refer to top-level mode
 | `native_diagnostic_sac_cpuoffload_bs6_ao80` | 64 | 80.00 / 80.00 | 174 / 174 | 0 | 1 / 1 | 0 / 0 |
 
 The hardware diagnostic filled the 80 GiB quota on every rank, making 174 CPU copies per rank with zero host-pressure skips. Every rank failed in its first microbatch forward before reaching backward or completing an update. The CUDA failure is in the MTP attention MXFP8 projection. This establishes a first-microbatch capacity failure with active CPU offload; it does not identify which remaining GPU storage would need a different policy.
+
+## Why GraphTrainer helps at BS6
+
+### 64 GPU Full recompute: capture alone explains a small part of the speed gap
+
+All three runs use BS6/GA8 on 64 x GB300, FP32 GPU master weights and persistent gradients, BF16 GPU Adam moments, and parameter gathering and gradient reduction every microbatch. All 64 ranks completed 17 updates; throughput is reconstructed from the ten measured updates.
+
+| Execution | Update seconds | Tokens/s/GPU | MFU % | Allocated / reserved peak GiB | Rank-0 profile |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Native eager | 43.343 | 4,536.09 | 26.48 | 219.08 / 225.21 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_e49e9518-7a8d-4cc4-947a-c457d96ee662_rank0_trace.json.gz) |
+| Native CUDA graphs | 43.123 | 4,559.22 | 26.61 | 213.24 / 218.24 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_ca84b859-52e6-4656-a7f6-dd0827a87917_rank0_trace.json.gz) |
+| GraphTrainer | 41.299 | 4,760.57 | 27.79 | 189.59 / 193.63 | [Original](https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fivankobzarev_09c20ce1-2119-412e-ae88-60c97992c1c5_dsv3-nebius-64g-ep64-b6-ga8-full-17u-20261026-ivankobzarev__update16_rank0_original.json.gz) |
+
+Native capture improves throughput by 0.51%, accounting for 0.220 seconds of the 2.044-second eager-to-GraphTrainer gap, or approximately 11%. GraphTrainer remains 4.42% faster than native CUDA graphs. The native profile records one `cudaGraphLaunch` for the whole GA8 forward/backward, confirming actual replay.
+
+### The captured programs execute different amounts of GPU work
+
+The table counts only GPU slices with a nonzero CUDA graph ID, excluding the outside-graph token-count reduction, optimizer and input preparation. Counts are robust structural observations; durations from the separately profiled update are not a decomposition of the ten-update throughput result.
+
+| Captured GPU observation | Native CUDA graphs | GraphTrainer |
+| --- | ---: | ---: |
+| Total GPU slices | 207,422 | 169,121 |
+| `memcpy128` kernel slices | 20,272 | 1,544 |
+| `memcpy32_post` kernel slices | 11,625 | 1,897 |
+| BF16 conversion/copy kernel slices | 12,016 | 4,992 |
+| Dense GEMM slices | 15,248 | 14,760 |
+| Attention kernel slices | 1,488 | 1,488 |
+| Dist-MoE GEMM slices | 3,776 | 3,776 |
+| All-gather kernel slices | 1,048 | 1,024 |
+| Reduce-scatter kernel slices | 520 | 640 |
+
+GraphTrainer executes 18.5% fewer captured GPU slices. The reductions are primarily tensor copies, dtype conversions, checks and 488 dense GEMM slices. Whole-graph tracing can eliminate unused computations and temporary materializations; native region replay and FSDP/autograd retain their runtime operations inside capture. The major Dist-MoE GEMMs have essentially identical aggregate kernel time, about 17.14 seconds in both profiles. These observations point to lower auxiliary GPU work, rather than faster expert GEMMs.
+
+Communication is not uniformly reduced: GraphTrainer has more reduce-scatter slices because its chunked head reductions differ. The earlier eager trace's 42-second symmetric-memory barrier time is dominated by profiling disturbance; under native capture and GraphTrainer the corresponding unions are 0.72 and 0.75 seconds.
+
+The captured GPU span is 41.60 seconds for native capture and 41.25 seconds for GraphTrainer in this single rank-0 profile. This smaller profile gap cannot assign the entire 1.824-second difference in measured, slowest-rank update times to individual kernels. Rank timing variation and single-trial variance remain limitations. The added 32-GPU native-capture run and original-payload GraphTrainer repeat test the BS6 comparison with FP32 CPU optimizer moments.
+
+### The remaining memory advantage is in the graph workspace pool
+
+Rank-0 update-17 allocator snapshots place almost the entire native-capture-to-GraphTrainer reserved-memory difference in the CUDA graph pool.
+
+| Snapshot observation, GiB | Native CUDA graphs | GraphTrainer |
+| --- | ---: | ---: |
+| Reserved outside the graph pool | 107.13 | 107.12 |
+| Reserved in the graph pool | 111.11 | 86.51 |
+| Allocated in the graph pool after the update | 39.735 | 39.735 |
+| Inactive blocks retained in the graph pool | 71.38 | 46.77 |
+
+The 24.61 GiB difference is workspace reserved for replay. The near-identical outside-pool allocation and retained gradient storage support a buffer-lifetime/materialization explanation; optimizer and gradient precision have not been lowered. Captured temporary addresses remain reserved while the graph exists.
+
+Native eager's reconstructed update-17 peak is 219.0846 GiB, agreeing with its measured 219.0848 GiB peak within allocator rounding. It contains 20.02 GiB from 61 block-sized residual outputs and 27.19 GiB attributed to the retained Dist-MoE region. GraphTrainer Full also forces layer-boundary outputs to be saved, so those 61 residual tensors cannot simply be counted as eliminated memory. History starts after capture and lacks the internal graph-pool allocation stacks; the exact buffer-by-buffer explanation of the 24.61 GiB workspace difference still needs capture-time allocation history or focused ablations.
+
+### 32 GPU BS6 offload: fewer bytes transferred and more overlap
+
+Both engines use a 24 GiB/rank activation quota and FP32 CPU Adam moments. Traffic below is the increase over each engine's matching run without activation offload, removing the common CPU optimizer traffic.
+
+| Rank-0 update-16 observation | Native eager | GraphTrainer |
+| --- | ---: | ---: |
+| Additional activation D2H traffic, GiB/update | 191.99 | 99.75 |
+| Additional activation H2D traffic, GiB/update | 191.99 | 99.75 |
+| Additional D2H transfers/update | 1,456 | 304 |
+| H2D/D2H interval overlap with compute, seconds | 0.025 | 0.629 |
+| Throughput loss relative to no offload | 4.18% | 0.57% |
+
+GraphTrainer's selected activation-transfer set is smaller under the same quota: approximately 12.47 GiB transferred each direction per microbatch, versus 24.00 GiB for native eager. This is measured traffic, not a GraphTrainer peak-live CPU counter. Its offload pass also prefetches reloads and defers waits; native saved-tensor hooks copy and restore on the current compute stream. The trace shows more transfer/compute overlap for GraphTrainer. Selection and scheduling both contribute to its lower offload cost; this is not an equal-byte transfer-speed comparison.
+
+The baselines both write 158.94 GiB of FP32 optimizer state back to CPU per update. This confirms the optimizer offload traffic is comparable. The measured BS6 offload pair achieves 4,515.63 tokens/s/GPU in GraphTrainer versus 4,155.38 in eager, with reserved peaks of 221.06 versus 243.87 GiB. Their profile links and job links are in the matched BS6 table.
+
+The strongest supported conclusions are a smaller replay workspace, fewer auxiliary GPU operations, and a more efficient activation-offload selection and schedule. The exact attribution of every saved GiB and every fraction of the speed gap remains open. Cross-engine numerical differences described elsewhere in this report also remain.
+
+
 
 ## 32 GPU CPU memory observations
 
@@ -410,6 +483,7 @@ The main twelve counterparts use uncaptured native execution with seed 14536, de
 | `native_diagnostic_sac_cpuoffload_bs6_ao80` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 | `native_full_recompute_cpuoffload_bs10_ao24` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 | `native_full_recompute_cpuoffload_bs8_ao40_profile0` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
+| `native_cuda_graphs_32g_full_bs6` | Native CUDA graphs, whole GA8 forward/backward | every_microbatch / every_microbatch | disabled | 14536 / False |
 
 ## Native MTP checkpoint qualification
 
