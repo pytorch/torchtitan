@@ -501,7 +501,7 @@ class MTPCrossEntropyLoss(Loss[tuple[torch.Tensor, ...]]):
         global_vocab_size: int | None = None
 
     def __init__(self, config: Config):
-        self.cross_entropy = CrossEntropyLoss(
+        self.cross_entropy_loss = CrossEntropyLoss(
             CrossEntropyLoss.Config(global_vocab_size=config.global_vocab_size)
         )
         self.mtp_scale = config.mtp_scale
@@ -551,7 +551,7 @@ class MTPCrossEntropyLoss(Loss[tuple[torch.Tensor, ...]]):
                 loss_token_counts = tuple(
                     count.clamp_min(1) for count in global_loss_token_counts.unbind()
                 )
-        main_loss, _ = self.cross_entropy(pred[0], labels[0], loss_token_counts[0])
+        main_loss, _ = self.cross_entropy_loss(pred[0], labels[0], loss_token_counts[0])
         mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
         if spmd.is_type_checking():
             mtp_loss = spmd.mutate_type(
@@ -562,7 +562,7 @@ class MTPCrossEntropyLoss(Loss[tuple[torch.Tensor, ...]]):
         for depth, (mtp_pred, mtp_labels) in enumerate(
             zip(pred[1:], labels[1:], strict=True), 1
         ):
-            depth_loss, _ = self.cross_entropy(
+            depth_loss, _ = self.cross_entropy_loss(
                 mtp_pred,
                 mtp_labels,
                 loss_token_counts[depth],
