@@ -33,5 +33,12 @@ def apply_env_defaults() -> None:
             "importing torch.",
             stacklevel=2,
         )
+    # An explicit setting under either name must take precedence over defaults.
+    allocator_conf = os.environ.get(
+        "PYTORCH_CUDA_ALLOC_CONF", os.environ.get("PYTORCH_ALLOC_CONF")
+    )
+    if allocator_conf is not None:
+        os.environ.setdefault("PYTORCH_ALLOC_CONF", allocator_conf)
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", allocator_conf)
     for key, value in RL_ENV_DEFAULTS.items():
         os.environ.setdefault(key, value)
