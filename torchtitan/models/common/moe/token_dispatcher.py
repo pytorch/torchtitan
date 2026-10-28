@@ -44,17 +44,14 @@ class LocalTokenDispatcher(Module):
     """Token dispatcher for EP=1. Handles local token reordering only.
 
     Dispatchers are parameterless modules so they can own remat region names
-    and policy state. Dispatch stays bare (cheap to recompute); combine is
-    one never-replayed ``<fqn>.combine`` region, like the DeepEP combine.
+    and policy state.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
         top_k: int
-        # None = auto: RoutedExperts decides from its output_postprocess, since
-        # absorbing the score scales W2's input and a post-W2 postprocess must
-        # not see scaled expert outputs.
+        # None = auto: RoutedExperts decides from its output_postprocess.
         absorb_router_scores: bool | None = False
 
     def __init__(self, config: Config):
@@ -151,12 +148,6 @@ class LocalTokenDispatcher(Module):
     ) -> torch.Tensor:
         """Score and scatter_add routed expert outputs.
 
-        Runs as the single never-replayed ``<fqn>.combine`` region, like the
-        DeepEP combine: the expert outputs are read only by this saved body,
-        so nothing pins them for a replay that never comes. With absorbed
-        router scores the scatter-add saves only indices, and the w2 output
-        is freed after the forward instead of being persisted for it.
-
         Args:
             routed_output_RD: ``(R, D)`` expert outputs
             metadata: LocalDispatchMetadata from dispatch()
@@ -182,15 +173,9 @@ class LocalTokenDispatcher(Module):
         token_indices_N: torch.Tensor,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
-        """Weight expert-sorted outputs by their router scores and sum them per token.
-
-        ``topk_scores_N`` is None when the dispatcher absorbed the router scores
-        before W2, which leaves the combine a pure reduction.
-        """
+        """Weight expert-sorted outputs by their router scores and sum them per token."""
         if topk_scores_N is not None:
-            # Type promotion computes the product in float32 without materializing a
-            # float32 copy of the routed output, which the multiply would save for
-            # backward (twice the bytes of the routed output itself).
+            # Promote to float32 without saving a float32 copy of the output.
             routed_output_ND = (
                 routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
             ).to(routed_output_ND.dtype)
@@ -257,11 +242,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
     With EP, each of dispatch and combine is one remat region,
     ``<fqn>.dispatch`` and ``<fqn>.combine``, covering its local reordering,
-    collectives, and (for combine) the score-weighted scatter-add. Dispatch
-    follows the remat policy; combine is never replayed, like the DeepEP
-    combine: a replay would re-run the combine all-to-all and need the w2
-    output real on the replay path (pinning it under policies that save w2),
-    while saving it retains only the small permutation indices and scores.
+    collectives, and (for combine) the score-weighted scatter-add.
 
     The EP mesh is resolved from the ambient SPMD runtime.
     """
@@ -480,8 +461,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         Runs as the single ``<fqn>.dispatch`` remat region, so a saved dispatch
         replays neither the collectives nor the device-to-host split sync, and
         a recomputed one replays all of them. Regions return only tensors, so
-        the splits come back as CPU tensors. ``routed_scores_R`` is the one
-        exception: it is None unless the dispatcher absorbs router scores.
+        the splits come back as CPU tensors.
         """
         # (N, D) where N = T*K; the all-to-all below produces (R, D).
         (
@@ -532,11 +512,10 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             )
             routed_scores_rank_major_R = None
             if routed_scores_N is not None:
-                # The scores ride the same all-to-all pattern as the tokens so
-                # their expert-major rows stay aligned with routed_input_RD.
+                # The scores ride the same all-to-all, staying aligned with the tokens.
                 routed_scores_rank_major_R = self._dispatch_token_exchange(
                     routed_scores_N.reshape(-1, 1),
-                    pg,
+                    ep_group,
                     output_splits.tolist(),
                     input_splits.tolist(),
                 ).reshape(-1)
@@ -670,8 +649,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         out_TD = remat.region(
             self._combine,
             self.remat_region_name("combine"),
-            # Never replayed, like the DeepEP combine: the w2 output is read
-            # only by this saved body, so nothing pins it for a replay.
+            # Never replayed: the w2 output is read only by this saved body.
             recompute=False,
         )(
             routed_output_RD,
@@ -698,9 +676,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     ) -> torch.Tensor:
         """Unpermute, all-to-all back to token ranks, then score and scatter-add.
 
-        Runs as the single ``<fqn>.combine`` remat region, which is never
-        replayed: the w2 output is read only by this saved body, and replay
-        would re-run the combine all-to-all for nothing.
+        Runs as the single ``<fqn>.combine`` remat region.
         """
         with maybe_set_sparse_mesh():
             ep_group = spmd_mesh_group(MeshAxisName.EP)
@@ -815,8 +791,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
         # EP=1: strip the padding (via _unpermute) to recover expert-sorted
         # order, then apply the local score + scatter_add used by the EP=1
-        # path. Mirrors LocalTokenDispatcher.combine, plus the unpad, and
-        # runs as one never-replayed ``combine`` region like it.
+        # path. Mirrors LocalTokenDispatcher.combine, plus the unpad.
         assert isinstance(metadata, AllToAllDispatchMetadata)
         return remat.region(
             self._combine_padded_local,
@@ -856,9 +831,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         routed_scores_rank_major_R: torch.Tensor,
         permuted_indices: torch.Tensor,
     ) -> torch.Tensor:
-        # Pad positions index the appended zero sentinel row via -1, which the
-        # scores tensor lacks; appending one zero score makes pad rows read 0
-        # instead of wrapping to the last real score.
+        # Pad rows gather index -1; append one zero score so they read 0.
         return torch.cat(
             [
                 routed_scores_rank_major_R,
@@ -929,13 +902,9 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     the static expert-major layout. Combine is synchronized before returning its result.
 
     Dispatch and combine declare ``ep_communication.dispatch`` and
-    ``ep_communication.combine``. The dispatch region follows the remat
-    policy: a policy replays it unless ``ep_communication`` is saved (the
-    full policy never saves it); a replay must receive rows in the forward's
-    order, so ``init_buffer`` then makes the buffer deterministic (a sort
-    per dispatch). The combine region is never replayed: it folds the score
-    multiply, unpermute and combine kernel into one saved body, which reads
-    the w2 output only there, like the standard dispatchers' combines.
+    ``ep_communication.combine``. Dispatch follows the remat policy: a replay
+    must receive rows in the forward's order, so ``init_buffer`` then makes
+    the buffer deterministic (a sort per dispatch). Combine is never replayed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -1034,10 +1003,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
         routed_scores_R = None
         if self.absorb_router_scores:
-            # Take the scores DeepEP tracked for the dispatched rows, clearing
-            # them so its combine skips the score multiply. The expand
-            # (CUDA-graph) layout keeps one score per received row per top-k
-            # slot; the compact layout keeps expert-sorted per-row scores.
+            # Take the tracked scores so combine skips the multiply.
             if state.cuda_graph_compatible:
                 recv_scores = state.recv_scores
                 state.recv_scores = None
@@ -1182,8 +1148,7 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
 
         routed_scores_R = None
         if self.absorb_router_scores:
-            # Take the padded per-row scores HybridEP tracked, clearing them so
-            # its combine skips the score multiply.
+            # Take the tracked padded scores so combine skips the multiply.
             routed_scores_R = state.permuted_scores
             state.permuted_scores = None
 
@@ -1202,8 +1167,7 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
 
         from torchtitan.distributed.deepep import hybridep
 
-        # combine_tokens applies routing scores and the combine kernel reads the
-        # expert outputs with bare ops (no remat region on this path).
+        # No remat region on this path, so the bare compute ops need the output pinned.
         remat.recompute_needs_tensor(routed_output_RD)
         combined_TD = hybridep.combine_tokens(
             routed_output_RD,

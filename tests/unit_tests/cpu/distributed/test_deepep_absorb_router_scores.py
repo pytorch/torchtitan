@@ -1,17 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""fp64 parity of absorbed router scores through the DeepEP dispatcher.
-
-The real deep_ep kernels are bf16-only, so this test replaces the
-ElasticBuffer with a pure-PyTorch stub (all_gather + local selection) and
-runs the dispatcher, the torchtitan deepep wrapper, its custom ops and their
-autograd on CPU in float64. With rounding gone, absorbing the router scores
-into W2's input and applying them after W2 compute the same function, so a
-dropped, doubled or misaligned score is an O(1) error.
-"""
+"""fp64 parity of absorbed router scores through the DeepEP dispatcher, with stubbed kernels."""
 
 import importlib
 import sys
@@ -39,11 +32,6 @@ _NUM_TOKENS = 64
 _TOP_K = 2
 
 
-# ---------------------------------------------------------------------------
-# deep_ep kernel stub
-# ---------------------------------------------------------------------------
-
-
 class _FakeEvent:
     """No-op stand-in for deep_ep's async combine event."""
 
@@ -52,12 +40,7 @@ class _FakeEvent:
 
 
 class _FakeHandle:
-    """Routing layout of one dispatch, computed identically on every rank.
-
-    ``per_rank_recv[r]`` is ``(src_rank_R, src_token_R)``: row i of rank r's
-    received tokens is token ``per_rank_recv[r][1][i]`` of rank
-    ``per_rank_recv[r][0][i]``.
-    """
+    """Routing layout of one dispatch, computed identically on every rank."""
 
     def __init__(self, per_rank_recv, num_recv_tokens_per_expert_list, num_tokens):
         self.per_rank_recv = per_rank_recv
@@ -81,14 +64,7 @@ def _all_gather_rows(rows: torch.Tensor, group) -> list[torch.Tensor]:
 
 
 class _FakeElasticBuffer:
-    """Pure-PyTorch stand-in for deep_ep.ElasticBuffer, compact layout only.
-
-    Dispatch gathers every rank's tokens and keeps the rows with at least one
-    local expert pick (deduplicated, one row per token). Combine sends rows
-    back to their owners, which sum the rows of each token. The layout is a
-    deterministic function of the gathered inputs, so all ranks agree on it
-    and repeated dispatches receive rows in the same order.
-    """
+    """Pure-PyTorch stand-in for deep_ep.ElasticBuffer, compact layout only."""
 
     def __init__(
         self,
@@ -148,8 +124,7 @@ class _FakeElasticBuffer:
             lo = r * num_local_experts
             src_ranks, src_tokens = [], []
             for s in range(num_ranks):
-                # -1 picks (no selection) and other ranks' experts fall outside
-                # [lo, lo + num_local_experts).
+                # -1 picks and other ranks' experts fall outside [lo, lo + num_local_experts).
                 is_local = (idxs[s] >= lo) & (idxs[s] < lo + num_local_experts)
                 keep = is_local.any(dim=1)
                 src_ranks.append(
@@ -192,8 +167,7 @@ class _FakeElasticBuffer:
         return grad_rows, empty.long(), empty, handle, _FakeEvent()
 
     def combine(self, x, *, handle, topk_weights=None, async_with_compute_stream=False):
-        # Forward combine and dispatch backward share this reduction: each
-        # owner token sums the rows routed to it across all ranks.
+        # Forward combine and dispatch backward: each owner sums its rows across ranks.
         num_ranks = dist.get_world_size(self.group)
         rank = dist.get_rank(self.group)
         xs = _all_gather_rows(x, self.group)
@@ -235,26 +209,14 @@ def _import_wrapper_with_stub():
 
 
 _deepep_wrapper = _import_wrapper_with_stub()
-# The wrapper registers its op impls for the CUDA key only; the stub runs on
-# CPU, so point the same impls at the CPU key.
+# The wrapper registers its impls for CUDA only; register them for CPU too.
 _cpu_impl_library = torch.library.Library("deepep", "FRAGMENT")
 _cpu_impl_library.impl("dispatch", _deepep_wrapper._dispatch_op_impl, "CPU")
 _cpu_impl_library.impl("combine", _deepep_wrapper._combine_op_impl, "CPU")
 
 
-# ---------------------------------------------------------------------------
-# fp64 parity test
-# ---------------------------------------------------------------------------
-
-
 class _ExactGroupedLinear(GroupedLinear):
-    """GroupedLinear whose GEMM runs in the weight dtype.
-
-    ``torch._grouped_mm`` is bf16-only, so the fp64 test swaps in this
-    per-group matmul through the documented ``_grouped_mm`` override seam.
-    ``RoutedExperts.forward`` hands w13 a bf16 input; both parity paths see
-    the same bf16 rounding, so upcasting it keeps the comparison sharp.
-    """
+    """GroupedLinear whose GEMM runs in the weight dtype."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(GroupedLinear.Config):
@@ -277,9 +239,7 @@ class _DeepEPBlock(Module):
 
     def __init__(self, num_experts: int, *, absorb_router_scores: bool):
         super().__init__()
-        # RoutedExperts.forward runs after EP has selected this rank's local
-        # expert-weight shard. This test bypasses parallelization, so construct
-        # that local view directly while the dispatcher retains the global E.
+        # Build the EP-local expert view directly; the dispatcher keeps the global E.
         num_local_experts = num_experts // dist.get_world_size()
         routed_experts = RoutedExperts.__new__(RoutedExperts)
         Module.__init__(routed_experts)
@@ -317,14 +277,14 @@ class _DeepEPBlock(Module):
         expert_ids_TK = (token_ids_T1 + offsets_1K) % self.num_experts
         # Scores depend on the gate, so a misplaced score moves the gradients.
         scores_TK = torch.sigmoid(self.gate(x_TD)).gather(1, expert_ids_TK)
-        num_tokens_per_expert_E = torch.bincount(
-            expert_ids_TK.flatten(), minlength=self.num_experts
-        )
+        routing_map_TE = torch.nn.functional.one_hot(
+            expert_ids_TK, num_classes=self.num_experts
+        ).any(dim=1)
         out_TD = self.routed_experts(
             x_TD,
             scores_TK,
             expert_ids_TK,
-            num_tokens_per_expert_E,
+            routing_map_TE,
         )
         remat.recompute_needs_tensor(out_TD)
         return out_TD.square().sum()
@@ -408,8 +368,7 @@ class TestDeepEPAbsorbRouterScoresParity(DTensorTestBase):
             expected_loss, expected = _forward_backward(baseline, x_TD)
             actual_loss, actual = _forward_backward(absorbed, x_TD)
 
-            # The absorbed path scales W2's input in float32, so agreement is
-            # at float32 scale, not float64 epsilon.
+            # Scores are applied in float32, so compare at float32 scale.
             torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-5, atol=1e-6)
             for actual_grad, expected_grad in zip(actual, expected):
                 torch.testing.assert_close(

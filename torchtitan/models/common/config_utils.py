@@ -476,11 +476,7 @@ def make_routed_experts_config(
     Expert weights use sparse ``{EP}`` placements when ``enable_ep`` and
     dense replicated placements otherwise.
 
-    ``absorb_router_scores`` is forwarded to the standard dispatcher. ``None``
-    (auto) absorbs the router scores before W2 unless RoutedExperts carries an
-    output_postprocess, which must see unscaled expert outputs. DeepEP-family
-    dispatchers are installed later by TokenDispatcherTransform; their fused
-    combines apply the scores themselves, so they keep their own opt-in default.
+    ``absorb_router_scores`` is forwarded to the standard dispatcher; see RoutedExperts for ``None``.
     """
     missing = {"w1_EFD", "w2_EDF", "w3_EFD"} - param_init.keys()
     if param_init and missing:

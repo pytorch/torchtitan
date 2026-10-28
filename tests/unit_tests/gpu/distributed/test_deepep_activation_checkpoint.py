@@ -125,11 +125,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
 
     @with_comms
     def test_dispatch_and_combine_are_saved_not_replayed(self):
-        # DeepEP fills receive slots with atomics, so a replayed dispatch can
-        # receive rows in another order than the forward's handle records.
-        # Backward would then pair each token's gradient with another token's
-        # activations. These policies save the dispatch communication, and the
-        # combine region is never replayed regardless.
+        # A replayed dispatch can reorder rows, so these policies save it; combine never replays.
         self._check_deepep_activation_checkpointing(
             (
                 DefaultActivationRematConfig(),
@@ -140,13 +136,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
 
     @with_comms
     def test_region_ac_replay_is_exact(self):
-        # The full policy and policies without ep_communication saved replay
-        # the dispatch communication. DeepEP then uses a deterministic buffer,
-        # which receives rows in the forward's order, so the gradients match
-        # the run without AC bitwise. The combine region is never replayed:
-        # it folds the score multiply, unpermute and combine kernel into one
-        # saved body, so combine runs only in the forward and the dispatch
-        # backward.
+        # Without a saved dispatch, the replay uses a deterministic buffer, so gradients match.
         self._check_deepep_activation_checkpointing(
             (
                 FullActivationRematConfig(),
@@ -235,8 +225,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 self.assertEqual(baseline_calls, {"dispatch": 2, "combine": 2})
                 self.assertEqual(
                     num_calls,
-                    # Only the dispatch communication replays; the combine
-                    # region is never replayed.
+                    # Only the dispatch communication replays.
                     {"dispatch": 2 + num_replays, "combine": 2},
                     msg=f"unexpected DeepEP replays: {num_calls}",
                 )

@@ -32,8 +32,7 @@ class ActivationRematConfig:
     Activation rematerialization, also known as activation checkpointing:
     ``apply`` checkpoints each transformer block with ``torch_remat``. Regions
     that model code always retains with ``recompute=False``, such as MoE
-    routing decisions and the token-dispatcher combines, are saved under
-    every policy.
+    routing decisions, are saved under every policy.
     """
 
     save_regions: list[str]
@@ -170,9 +169,7 @@ class FullActivationRematConfig(ActivationRematConfig):
 
     Every operation in a transformer block is recomputed except the regions
     model code always retains with ``recompute=False``, such as MoE routing
-    decisions, auxiliary-loss accumulation, trailing residual adds, and the
-    token-dispatcher combines (which read the expert outputs only from their
-    saved bodies, so replaying them would pin those outputs for nothing).
+    decisions, auxiliary-loss accumulation, and trailing residual adds.
     """
 
     save_regions: list[str] = field(default_factory=list)

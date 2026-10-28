@@ -106,12 +106,7 @@ _lib.define(
 # autograd disables grad regardless of the outer context. When False (generator no_grad /
 # inference), the op frees the handle itself (setup_context never runs).
 _lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
-# Ordered effects, so graph-level selective checkpointing (the graph trainer's memory
-# policy) saves both ops instead of replaying them in backward. DeepEP assigns receive
-# slots with atomics, so a replayed dispatch can receive rows in another order, while
-# backward routes the gradients with the forward's handle. torch_remat ignores effects
-# and follows the ``recompute`` argument of dispatch_tokens (combine_tokens is never
-# replayed); dispatch_tokens only replays with a deterministic buffer.
+# Ordered effects: a replayed dispatch can reorder rows; combine_tokens never replays.
 _lib._register_effectful_op("deepep::dispatch", torch.library.EffectType.ORDERED)
 _lib._register_effectful_op("deepep::combine", torch.library.EffectType.ORDERED)
 
@@ -505,8 +500,7 @@ def dispatch_tokens(
             must not exceed that maximum.
         remat_region_name: Name for the dispatch communication region.
         recompute: Whether activation remat replays the dispatch communication during
-            backward. Requires a deterministic buffer (see below). The combine
-            region is never replayed, so it has no matching argument.
+            backward. Requires a deterministic buffer (see below).
         cuda_graph_compatible: If True, use the static, no-host-sync expand layout so the forward is
             CUDA-graph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
@@ -639,11 +633,7 @@ def combine_tokens(
     will_backward = torch.is_grad_enabled()
 
     def _scored_combine(hidden_states: torch.Tensor) -> torch.Tensor:
-        """Apply scores/unpermute and launch the reduction op.
-
-        Runs as one never-replayed region, so the expert outputs are read only
-        by this saved body; nothing on the replay path touches them.
-        """
+        """Apply scores/unpermute and launch the combine op in one saved region."""
         if not state.cuda_graph_compatible:
             assert state.permuted_indices is not None
             if state.permuted_scores is not None:
@@ -654,9 +644,7 @@ def combine_tokens(
                 hidden_states, state.permuted_indices, state.num_recv_tokens
             )
         elif state.recv_scores is not None:
-            # One routing score per received row (each row is one token->expert assignment).
-            # Collapse the trailing dim with sum so this is correct whether recv_scores is
-            # [num_recv], [num_recv, 1], or [num_recv, topk] with a single valid entry/row.
+            # Sum the trailing dim: works for [num_recv], [num_recv, 1] or [num_recv, topk].
             per_row_score = state.recv_scores.reshape(hidden_states.shape[0], -1).sum(
                 dim=-1, keepdim=True
             )
