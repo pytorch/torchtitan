@@ -21,7 +21,6 @@ from torchtitan.components.optim import (
     LRSchedulersContainer,
     OptimizersContainer,
 )
-from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.flex_shard import BucketConfig
 from torchtitan.models.common import HiMidLoLinear, Sigmoid
 from torchtitan.models.common.decoder import TransformerBlock
@@ -145,32 +144,16 @@ class TestOptimizerConfig(unittest.TestCase):
             class Config(BaseOptimizer.Config):
                 lr: float
 
-            def __init__(
-                self,
-                config: Config,
-                *,
-                params,
-                parallelism_context: ParallelismContext | None = None,
-            ) -> None:
+            def __init__(self, config: Config, *, params) -> None:
                 super().__init__(params, lr=config.lr)
-                self.parallelism_context = parallelism_context
 
         model = SimpleModel()
         config = OptimizersContainer.Config(
             optimizers=[ExternalSGD.Config(pattern=r".*", lr=0.25)]
         )
-        parallelism_context = MagicMock(spec=ParallelismContext)
-
-        container = config.build(
-            model_parts=[model],
-            parallelism_context=parallelism_context,
-        )
+        container = config.build(model_parts=[model])
 
         self.assertIsInstance(container.optimizers[0], ExternalSGD)
-        self.assertIs(
-            container.optimizers[0].parallelism_context,
-            parallelism_context,
-        )
         self.assertEqual(container.optimizers[0].param_groups[0]["lr"], 0.25)
 
     def test_bfloat16_moments_require_fused_adam(self):
@@ -581,9 +564,8 @@ class TestDistMuonRedistributionMeshes(unittest.TestCase):
             MagicMock(device_mesh=shared_storage_mesh),
             MagicMock(device_mesh=other_storage_mesh),
         ]
-        parallelism_context = MagicMock()
 
-        def build_redistribution_mesh(storage_mesh, *, max_ctas):
+        def build_mesh(storage_mesh, *, max_ctas):
             self.assertEqual(max_ctas, 8)
             return (
                 shared_redistribution_mesh
@@ -591,9 +573,6 @@ class TestDistMuonRedistributionMeshes(unittest.TestCase):
                 else other_redistribution_mesh
             )
 
-        parallelism_context.build_redistribution_mesh.side_effect = (
-            build_redistribution_mesh
-        )
         bucket_configs = tuple(
             BucketConfig(patterns=(name,), name=name)
             for name in ("first", "second", "third")
@@ -605,10 +584,16 @@ class TestDistMuonRedistributionMeshes(unittest.TestCase):
             max_nccl_ctas_for_comms=8,
         )
 
-        with patch(
-            "torchtitan.components.optim.optimizer.FlexShardDistMuon.__init__",
-            return_value=None,
-        ) as flex_shard_init:
+        with (
+            patch(
+                "torchtitan.components.optim.optimizer.build_alternative_fsdp_mesh",
+                side_effect=build_mesh,
+            ) as build_mesh_mock,
+            patch(
+                "torchtitan.components.optim.optimizer.FlexShardDistMuon.__init__",
+                return_value=None,
+            ) as flex_shard_init,
+        ):
             config.build(
                 params=[
                     {
@@ -616,14 +601,10 @@ class TestDistMuonRedistributionMeshes(unittest.TestCase):
                         "param_names": ["first", "second", "third"],
                     }
                 ],
-                parallelism_context=parallelism_context,
             )
 
-        self.assertEqual(parallelism_context.build_redistribution_mesh.call_count, 2)
-        built_storage_meshes = [
-            call.args[0]
-            for call in parallelism_context.build_redistribution_mesh.call_args_list
-        ]
+        self.assertEqual(build_mesh_mock.call_count, 2)
+        built_storage_meshes = [call.args[0] for call in build_mesh_mock.call_args_list]
         self.assertCountEqual(
             built_storage_meshes,
             [shared_storage_mesh, other_storage_mesh],
@@ -990,13 +971,7 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
             class Config(BaseOptimizer.Config):
                 lr: float = 1e-3
 
-            def __init__(
-                self,
-                config: Config,
-                *,
-                params,
-                parallelism_context: ParallelismContext | None = None,
-            ) -> None:
+            def __init__(self, config: Config, *, params) -> None:
                 super().__init__(params, lr=config.lr)
 
         model = torch.nn.Linear(2, 2)

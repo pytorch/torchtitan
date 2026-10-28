@@ -22,12 +22,12 @@ from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
-from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.flex_shard import (
     BucketConfig,
     ComputeLayout,
     DistMuon as FlexShardDistMuon,
 )
+from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
 from .utils import (
     get_flat_optim_state_dict,
@@ -50,11 +50,7 @@ MomentDType = Literal["parameter", "bfloat16"]
 
 
 class BaseOptimizer(Optimizer, Configurable):
-    """Base class for configurable TorchTitan optimizers.
-
-    Constructors accept ``params`` and ``parallelism_context``. Optimizers that
-    do not use runtime meshes may ignore the context.
-    """
+    """Base class for configurable TorchTitan optimizers."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -139,7 +135,6 @@ class Adam(torch.optim.Adam, BaseOptimizer):
         config: Config,
         *,
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
-        parallelism_context: ParallelismContext | None = None,
     ) -> None:
         super().__init__(
             params,
@@ -177,7 +172,6 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
         config: Config,
         *,
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
-        parallelism_context: ParallelismContext | None = None,
     ) -> None:
         super().__init__(
             params,
@@ -225,14 +219,29 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         Newton-Schulz there and copies the result back. Momentum, parameters,
         gradients and the exchange between ranks stay where they are, so this only
         changes anything when the parameters live on the host."""
-        max_nccl_ctas_for_comms: int = -1  # Cap NCCL CTAs to save memory; <0 disables.
+        max_nccl_ctas_for_comms: int = -1  # Cap NCCL CTAs to save memory; <=0 disables.
+        """Limit NCCL CTAs for DistMuon redistribution only; ``<= 0`` disables.
+
+        All-to-all opens connection buffers for every peer and channel. A lower
+        CTA cap reduces this connection state on dedicated child communicators
+        of the ``dp_shard``/``edp_shard`` groups, while FSDP keeps its original
+        communicators. Each child adds fixed workspace memory, and fewer CTAs
+        may reduce all-to-all bandwidth.
+
+        A positive value requires NCCL on the FSDP shard axes. Other backends
+        raise ``ValueError``; fake warns and keeps the storage groups without
+        modeling the cap.
+
+        TODO: Replace this temporary all-to-all connection-memory workaround
+        with lower-memory redistribution, such as a pull-based symmetric-memory
+        implementation.
+        """
 
     def __init__(
         self,
         config: Config,
         *,
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
-        parallelism_context: ParallelismContext,
     ) -> None:
         param_groups = tuple(cast(Iterable[dict[str, Any]], params))
         bucket_configs = config.bucket_configs
@@ -270,7 +279,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
                 if storage_mesh not in redistribution_mesh_by_storage_mesh:
                     redistribution_mesh_by_storage_mesh[
                         storage_mesh
-                    ] = parallelism_context.build_redistribution_mesh(
+                    ] = build_alternative_fsdp_mesh(
                         storage_mesh,
                         max_ctas=config.max_nccl_ctas_for_comms,
                     )
@@ -316,7 +325,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
     Args:
         config (Config): Ordered optimizer configurations.
         model_parts (List[nn.Module]): List of model parts to be optimized.
-        parallelism_context: Runtime device meshes and process groups.
         enable_accelerator_graph: Prepare every optimizer for accelerator graph capture.
     """
 
@@ -362,7 +370,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         config: Config,
         *,
         model_parts: list[nn.Module],
-        parallelism_context: ParallelismContext | None = None,
         enable_accelerator_graph: bool = False,
     ) -> None:
         all_params: list[nn.Parameter] = []
@@ -377,10 +384,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                     optimizer_config,
                     claimed,
                 )
-                optimizer = optimizer_config.build(
-                    params=[param_group],
-                    parallelism_context=parallelism_context,
-                )
+                optimizer = optimizer_config.build(params=[param_group])
                 if enable_accelerator_graph:
                     if any(
                         "capturable" not in group for group in optimizer.param_groups

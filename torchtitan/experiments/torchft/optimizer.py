@@ -17,7 +17,6 @@ from torchtitan.components.optim.utils import (
     get_flat_optim_state_dict,
     init_optim_state,
 )
-from torchtitan.distributed import ParallelismContext
 
 if TYPE_CHECKING:
     from torchtitan.experiments.torchft.manager import TorchFTManager
@@ -37,13 +36,11 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         config: Config,
         *,
         model_parts: list[nn.Module],
-        parallelism_context: ParallelismContext | None = None,
         enable_accelerator_graph: bool = False,
     ) -> None:
         super().__init__(
             config,
             model_parts=model_parts,
-            parallelism_context=parallelism_context,
             enable_accelerator_graph=enable_accelerator_graph,
         )
 

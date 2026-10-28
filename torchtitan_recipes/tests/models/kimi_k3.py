@@ -326,6 +326,10 @@ def _dist_muon_optimizer(
                 weight_decay=0.1,
                 adjust_lr_fn="match_rms_adamw",
                 ns_device="accelerator",
+                # Start with 8 CTAs to reduce all-to-all memory without limiting
+                # FSDP. At 64 ranks and ~12 MiB per peer/channel, the 32-to-8
+                # channel connection-state estimate falls from ~23.6 to ~5.9 GiB
+                # per rank; revisit the cap if redistribution is bandwidth-bound.
                 max_nccl_ctas_for_comms=8,
             ),
             # The remaining parameters are embeddings, norms, biases, the LM

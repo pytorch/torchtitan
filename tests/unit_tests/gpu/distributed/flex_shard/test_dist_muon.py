@@ -13,7 +13,7 @@ from unittest import mock
 import pytest
 import torch
 from torch import nn
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, OffloadPolicy
 from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
@@ -45,7 +45,7 @@ from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
     DistMuon,
 )
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
 
 pytestmark = pytest.mark.multi_gpu
@@ -61,24 +61,8 @@ class TestDistMuon(DTensorTestBase):
     def device_type(self):
         return "cuda"
 
-    def _build_capped_redistribution_mesh(self, storage_mesh: DeviceMesh) -> DeviceMesh:
-        parallelism_context = ParallelismContext(
-            dp_replicate=1,
-            dp_shard=self.world_size,
-            cp=1,
-            tp=1,
-            pp=1,
-            ep=1,
-            world_size=self.world_size,
-            enable_sequence_parallel=False,
-        )
-        return parallelism_context.build_redistribution_mesh(
-            storage_mesh,
-            max_ctas=8,
-        )
-
     @with_comms(eager_init=True)
-    def test_build_redistribution_mesh_creates_capped_nccl_group(self):
+    def test_build_alternative_fsdp_mesh_creates_capped_nccl_group(self):
         mesh = init_device_mesh(
             self.device_type,
             (1, self.world_size),
@@ -86,7 +70,7 @@ class TestDistMuon(DTensorTestBase):
         )
         parent_group = mesh.get_group("dp_shard")
         replicate_group = mesh.get_group("dp_replicate")
-        redistribution_mesh = self._build_capped_redistribution_mesh(mesh)
+        redistribution_mesh = build_alternative_fsdp_mesh(mesh, max_ctas=8)
         redistribution_group = redistribution_mesh.get_group("dp_shard")
         redistribution_backend = redistribution_group._get_backend(
             torch.device(self.device_type, self.rank)
@@ -147,7 +131,7 @@ class TestDistMuon(DTensorTestBase):
             (1, self.world_size),
             mesh_dim_names=("dp_replicate", "dp_shard"),
         )
-        redistribution_mesh = self._build_capped_redistribution_mesh(mesh)
+        redistribution_mesh = build_alternative_fsdp_mesh(mesh, max_ctas=8)
         redistribution_group = redistribution_mesh.get_group("dp_shard")
         device = torch.device(self.device_type, self.rank)
 
