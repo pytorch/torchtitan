@@ -58,6 +58,7 @@ from torchtitan.rl.generator.vllm.engine import (
 from torchtitan.rl.generator.vllm.registry import register_to_vllm
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
+    TorchTitanCudagraphDispatcher,
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
 )
@@ -65,6 +66,14 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import LeastLoadedRoutingStrategy
 from vllm import SamplingParams
+from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    DeviceConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
@@ -815,6 +824,50 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
         TorchTitanGPUModelRunner._pad_for_sequence_parallelism(model_runner, 5)
         == expected_num_tokens
     )
+
+
+@pytest.mark.parametrize(
+    "num_tokens,valid_modes,batch_invariant,expected",
+    [
+        (2, None, False, (CUDAGraphMode.FULL, True)),
+        # 3 decodes pad to 8, past the largest decode graph (2): mixed graph.
+        (3, None, False, (CUDAGraphMode.FULL, False)),
+        # Batch-invariant runs keep them eager on the decode kernels.
+        (3, None, True, (CUDAGraphMode.NONE, False)),
+        # DP sync pads a decoding rank to a peer's batch and allows only FULL:
+        # a decode graph up to the largest one, else the mixed graph.
+        (2, {CUDAGraphMode.FULL}, False, (CUDAGraphMode.FULL, True)),
+        (16, {CUDAGraphMode.FULL}, True, (CUDAGraphMode.FULL, False)),
+    ],
+)
+def test_full_mode_decode_dispatch(
+    monkeypatch, num_tokens, valid_modes, batch_invariant, expected
+):
+    monkeypatch.setattr(
+        "torchtitan.rl.generator.vllm.worker.is_in_batch_invariant_mode",
+        lambda: batch_invariant,
+    )
+    # An explicit device: CPU CI has no platform for vLLM to infer one from.
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_capture_sizes=[1, 2, 8, 16],
+        max_cudagraph_capture_size=16,
+    )
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=64,
+        max_num_seqs=4,
+        max_num_batched_tokens=16,
+        is_encoder_decoder=False,
+    )
+    dispatcher = TorchTitanCudagraphDispatcher(config)
+    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+
+    mode, descriptor = dispatcher.dispatch(
+        num_tokens, uniform_decode=True, valid_modes=valid_modes
+    )
+    assert (mode, descriptor.uniform) == expected
 
 
 def test_only_weights_use_cumem_allocator(monkeypatch):
