@@ -132,22 +132,18 @@ def resolve_fsdp_mesh(
     if parallelism_context.cp_enabled and shard_on_cp_axis:
         shard_axes.append("cp")
 
-    shard: str
+    shard: str | tuple[str, ...]
     if len(shard_axes) > 1:
-        # Flatten eagerly with a dedicated communicator instead of leaving it
-        # to FSDP2's own ``DataParallelMeshDims`` flattening. ``dp_shard`` *
-        # ``cp`` spans every rank whenever ``dp_shard == 1`` (the common
-        # CP-only case); left unflattened here, FSDP2 would flatten it with no
-        # backend override and ``DeviceMesh`` would silently reuse the
-        # default/WORLD process group -- the same group CP's own ``cp`` axis
-        # reuses in that case (see ``dedicated_pg_backend_override``). FSDP's
-        # all-gather/reduce-scatter run on FSDP's own CUDA streams while CP's
-        # collectives run on the default/compute stream, so with a shared
-        # communicator the two can be enqueued in different orders across
-        # ranks and NCCL deadlocks instead of merely serializing.
-        shard = "_".join(shard_axes)
-        storage_mesh[tuple(shard_axes)]._flatten(
-            shard,
+        shard = tuple(shard_axes)
+        # FSDP2 flattens multi-axis shard dims as
+        # ``mesh[names]._flatten("_".join(names))`` with no backend override.
+        # ``dp_shard * cp`` spans every rank whenever ``dp_shard == 1``, and
+        # then ``DeviceMesh`` would reuse the default/WORLD process group --
+        # the same group CP's own ``cp`` axis reuses in that case (see
+        # ``dedicated_pg_backend_override``). Flatten under the same name
+        # first so FSDP2's flatten hits this dedicated group in the cache.
+        storage_mesh[shard]._flatten(
+            "_".join(shard),
             backend_override=dedicated_pg_backend_override(
                 parallelism_context.world_mesh
             ),

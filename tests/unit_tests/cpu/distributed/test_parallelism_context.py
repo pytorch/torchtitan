@@ -19,6 +19,10 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 from spmd_types import SpmdType
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp._fully_shard._fsdp_init import (
+    _get_mesh_info,
+    _validate_mesh,
+)
 from torch.distributed.tensor import Replicate
 from torch.distributed.tensor.debug import CommDebugMode
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -1096,12 +1100,10 @@ class TestFsdpCpCommunicatorIsolation(DTensorTestBase):
 
             storage_mesh, dp_mesh_dims = resolve_fsdp_mesh(pd)
             assert dp_mesh_dims is not None
-            # Re-flatten the same (dp_shard, cp) axes `resolve_fsdp_mesh` just
-            # flattened: DeviceMesh caches identical flattens by name, so this
-            # returns the same mesh/process group it already created, without
-            # relying on the deprecated flattened-name `mesh[name]` lookup.
-            fsdp_mesh = storage_mesh[("dp_shard", "cp")]._flatten(dp_mesh_dims.shard)
-            fsdp_group_name = fsdp_mesh.get_group().group_name
+            # Validate and resolve the shard group the way ``fully_shard`` does.
+            _validate_mesh(storage_mesh, dp_mesh_dims)
+            mesh_info = _get_mesh_info(storage_mesh, dp_mesh_dims)
+            fsdp_group_name = mesh_info.shard_process_group.group_name
 
             self.assertNotEqual(
                 cp_group_name,
