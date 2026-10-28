@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T00:48:32.160972+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T00:55:22.783250+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -107,6 +107,8 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `64g_sac-ao_bs10_ao100` | 64 | 46.99 | 64 | 558.88 |
 | `64g_noac_bs6` | 64 | 50.98 | 64 | 632.55 |
 | `64g_sac_bs10` | 64 | 45.77 | 64 | 550.34 |
+| `32g_full_bs8` | 32 | 45.88 | 0 | - |
+| `32g_full-ao_bs8_ao24` | 32 | 44.80 | 0 | - |
 
 ## Full recompute BS6 profile interpretation
 
@@ -129,6 +131,18 @@ The native profiled update has substantial instrumentation disturbance and long 
 - `64g_sac-ao_bs10_ao100`: Native forward in attention projection (torch.nn.functional.scaled_mm); no optimizer update completed with configured 100 GiB/rank CPU activation quota. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
   No after-update sidecar was emitted because the first update failed; actual copied bytes are unavailable for this attempt.
 - `64g_noac_bs6`: Native forward in fused MLA key/RoPE preparation (_fused_mla_k_rope_op); no optimizer update completed. All reported memory values are at the failed allocation, not a successful training peak or an exact capacity forecast.
+
+## Cross-engine scalar observations
+
+The completed Full recompute BS6 performance pair uses seed 14536 with deterministic algorithms disabled. Its globally aggregated rank-0 scalar histories are not bitwise equivalent. The first loss agrees within 0.000001, while gradients and subsequent losses differ. These observations do not establish a root cause or convergence.
+
+| Scalar | Graph update 1 / 17 | Native update 1 / 17 | Largest absolute difference over 17 updates |
+| --- | ---: | ---: | ---: |
+| `global_avg_loss` | 8.406084 / 6.556857 | 8.406085 / 6.558824 | 0.042672 at update 12 |
+| `global_max_loss` | 8.568663 / 6.714091 | 8.568663 / 6.715082 | 0.039763 at update 12 |
+| `grad_norm` | 45.760014 / 1.684176 | 45.345272 / 1.677615 | 9.343822 at update 13 |
+
+Strict seed-42 Full recompute and Full + offload counterparts are prioritized after the main 32 GPU comparisons and budget sweep. The local MTP annotation and native offload qualification still match bitwise against their native controls; that does not establish equivalence across native and graph engines.
 
 ## Additional execution controls
 
