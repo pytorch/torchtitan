@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T08:14:45.403571+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T08:28:02.236584+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -133,7 +133,7 @@ These supplement the matched presentation tables with smaller-batch native train
 
 | ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
-| `native_boundary_full_recompute_bs7` | 7 / 8 | 1792 | Disabled | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b7-full-ga8-17u-20261028-bound1-ivankobzarev) | Not yet produced |
+| `native_boundary_full_recompute_bs7` | 7 / 8 | 1792 | Disabled | OOM; 32 ranks logged | 266.19 / 267.47 at failure; +1.73 requested | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b7-full-ga8-17u-20261028-bound1-ivankobzarev) | OOM before profiling |
 
 ## Native 64 GPU activation-offload rescue configurations
 
@@ -152,7 +152,7 @@ This increases the CPU activation quota from 24 to 40 GiB/rank at the original B
 
 | ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
-| `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 8 / 8 | 2048 | 40 | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
+| `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 8 / 8 | 2048 | 40 | RUNNING; updates 1-1 / 17 across ranks | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-32g-b8-full-ao40-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
 
 ## Native startup observations
 
@@ -186,6 +186,8 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `native_fit_full_recompute_cpuoffload_bs6_ao24` | 32 | 44.24 | 32 | 542.62 |
 | `native_rescue_sac_cpuoffload_bs6_ao80` | 64 | 45.27 | 64 | 532.60 |
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 64 | 47.09 | 64 | 541.78 |
+| `native_boundary_full_recompute_bs7` | 32 | 45.06 | 32 | 559.00 |
+| `native_rescue_full_recompute_cpuoffload_bs8_ao40` | 32 | 46.73 | 32 | 578.01 |
 
 ## Native activation offload actually used
 
