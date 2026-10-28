@@ -145,6 +145,11 @@ add the corresponding backend at build time. Both require `log_dir` to be
 passed to `MetricsProcessor.Config.build(...)`. `WANDB_PROJECT` defaults to
 `titan_rl`; set the env var or `wandb_project=` on the config to override.
 
+RL metrics use `trainer/step` as their W&B step metric. Use that axis when
+plotting optimizer steps: training and post-training validation at the final
+step are separate W&B events with the same `trainer/step` value. W&B's internal
+`_step` counts logging events, not optimizer updates.
+
 ## vLLM engine metrics
 
 `VllmOtelStatLogger` exports engine-level rollout metrics through

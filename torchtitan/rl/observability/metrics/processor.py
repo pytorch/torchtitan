@@ -121,7 +121,13 @@ class MetricsProcessor(Configurable):
             )
         if config.enable_wandb:
             os.environ.setdefault("WANDB_PROJECT", config.wandb_project)
-            self._backends.append(WandBLogger(log_dir=log_dir, config_dict=job_config))
+            self._backends.append(
+                WandBLogger(
+                    log_dir=log_dir,
+                    config_dict=job_config,
+                    step_metric="trainer/step",
+                )
+            )
         if config.enable_tensorboard:
             self._backends.append(TensorBoardLogger(log_dir=log_dir))
 
