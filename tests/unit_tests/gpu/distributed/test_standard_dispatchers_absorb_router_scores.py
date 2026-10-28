@@ -1,24 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""fp64 parity of absorbed router scores across the standard dispatchers.
-
-With ``absorb_router_scores`` the dispatcher returns the per-row router
-scores for W2 to scale its input, and combine skips its score multiply. In
-fp64 both paths compute the same function, so a dropped, doubled or
-misaligned score is an O(1) error. Covered:
-
-- LocalTokenDispatcher (no EP),
-- AllToAllTokenDispatcher at EP=1 (falls back to the local methods) and
-  EP=2 (tokens cross ranks),
-- TorchAOTokenDispatcher at EP=1 (local padded permute; exercises the
-  zero-sentinel for pad rows) and EP=2.
-
-The DeepEP dispatcher has its own fp64 test with a stubbed deep_ep kernel
-under tests/unit_tests/cpu/distributed/.
-"""
+"""fp64 parity of absorbed router scores across the standard dispatchers."""
 
 import unittest
 from dataclasses import dataclass
@@ -55,13 +41,7 @@ _PAD_MULTIPLE = 16
 
 
 class _ExactGroupedLinear(GroupedLinear):
-    """GroupedLinear whose GEMM runs in the weight dtype.
-
-    ``torch._grouped_mm`` is bf16-only, so the fp64 test swaps in this
-    per-group matmul through the documented ``_grouped_mm`` override seam.
-    ``RoutedExperts.forward`` hands w13 a bf16 input; both parity paths see
-    the same bf16 rounding, so upcasting it keeps the comparison sharp.
-    """
+    """GroupedLinear whose GEMM runs in the weight dtype."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(GroupedLinear.Config):
@@ -89,9 +69,7 @@ class _RoutedExpertsBlock(Module):
         dispatcher_config: LocalTokenDispatcher.Config,
     ):
         super().__init__()
-        # RoutedExperts.forward runs after EP has selected this rank's local
-        # expert-weight shard. This test bypasses parallelization, so construct
-        # that local view directly while the dispatcher retains the global E.
+        # Build the EP-local expert view directly; the dispatcher keeps the global E.
         routed_experts = RoutedExperts.__new__(RoutedExperts)
         Module.__init__(routed_experts)
         routed_experts.w13 = _ExactGroupedLinear.Config(
@@ -253,8 +231,7 @@ class TestStandardDispatchersAbsorbRouterScoresParity(DTensorTestBase):
         expected_loss, expected = _forward_backward(baseline, x_TD)
         actual_loss, actual = _forward_backward(absorbed, x_TD)
 
-        # The absorbed path scales W2's input in float32, so agreement is at
-        # float32 scale, not float64 epsilon.
+        # Scores are applied in float32, so compare at float32 scale.
         torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-5, atol=1e-6)
         for actual_grad, expected_grad in zip(actual, expected):
             torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-5, atol=1e-6)

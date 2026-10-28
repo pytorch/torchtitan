@@ -417,20 +417,14 @@ class GroupedLinear(Module):
         Args:
             input_RI: Input rows grouped by the selected linear.
             offsets_E: Exclusive cumulative row end for each group.
-            routed_scores_R: Optional per-row router scores to absorb into the
-                input, one per input row. Router scores are produced in
-                float32; rows are scaled in float32 and cast back to the input
-                dtype so the grouped GEMM sees its usual operand type.
+            routed_scores_R: Optional per-row router scores, absorbed in float32.
 
         Returns:
             Output rows with an optional ``num_linears`` axis before the output
             feature axis.
         """
         if routed_scores_R is not None:
-            # On the standard all-to-all path the scores are an output of the
-            # dispatcher's saved dispatch region; this scaling is a bare
-            # consumer, so replay needs them persisted. No-op when the scores
-            # are bare-produced (DeepEP/HybridEP) or without a checkpoint.
+            # A bare consumer of the dispatch region's output, so pin it for replay.
             remat.recompute_needs_tensor(routed_scores_R)
             input_RI = (input_RI.float() * routed_scores_R.reshape(-1, 1)).to(
                 input_RI.dtype

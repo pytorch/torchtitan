@@ -89,12 +89,6 @@ class RoutedExperts(Module):
                 self.output_postprocess is not None
                 and self.token_dispatcher.absorb_router_scores
             ):
-                # Absorbed scores scale W2's input, so the postprocess would see
-                # score-scaled outputs; the post-combine path instead applies the
-                # score after the postprocess. Only a linear postprocess keeps
-                # those equivalent, and a scale-invariant one (e.g. RMSNorm)
-                # would drop the score entirely. ``absorb_router_scores=None``
-                # (auto) is resolved against this postprocess at build time.
                 raise ValueError(
                     "output_postprocess and absorb_router_scores cannot be "
                     "combined: absorbed router scores are applied before W2, "
@@ -114,9 +108,7 @@ class RoutedExperts(Module):
         )
         self.token_dispatcher = config.token_dispatcher.build()
         if config.token_dispatcher.absorb_router_scores is None:
-            # Auto: resolve here rather than in the config builder, since a
-            # caller may attach output_postprocess to an already-built config.
-            # A post-W2 postprocess must see unscaled expert outputs.
+            # Auto: a post-W2 postprocess must see unscaled expert outputs.
             self.token_dispatcher.absorb_router_scores = self.output_postprocess is None
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
@@ -168,8 +160,7 @@ class RoutedExperts(Module):
             gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
             hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
-            # Widen W2's contract only when a score is actually absorbed, so
-            # W2 modules that do not know about scores keep working unchanged.
+            # Pass the scores only when absorbed, so other W2 modules keep working.
             w2_kwargs = (
                 {} if routed_scores_R is None else {"routed_scores_R": routed_scores_R}
             )

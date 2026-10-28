@@ -4,21 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The local combine remat region, shared by the standard dispatchers at EP=1.
-
-``LocalTokenDispatcher.combine`` -- also the AllToAll dispatcher's EP=1
-fallback -- runs as one never-replayed ``token_dispatcher.combine`` region,
-like the DeepEP combine: the expert outputs are read only by that saved body,
-so nothing pins them for a replay that never comes.
-
-These tests pin the three consequences on CPU:
-
-- the combine body runs exactly once (never replayed) under every policy,
-  while the policy still decides the w2 projection's replay;
-- with absorbed router scores and w2 saved, the w2 output's storage is freed
-  after the forward, since no persistence marker pins it anymore;
-- forward and backward match the un-checkpointed run bitwise.
-"""
+"""The local combine remat region, shared by the standard dispatchers at EP=1."""
 
 import gc
 import unittest
@@ -27,6 +13,7 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 import torch_remat as remat
+
 from torch.multiprocessing.reductions import StorageWeakRef
 
 import torchtitan.models.common.moe.token_dispatcher as token_dispatcher_module
@@ -48,13 +35,7 @@ _TOP_K = 2
 
 
 class _W2Region(Module):
-    """Stand-in for the w2 grouped projection: one policy-controlled region.
-
-    The matmul allocates a fresh output and, like a grouped GEMM, saves its
-    input and weight (not its output) for backward, so only the remat
-    machinery could retain the output. ``num_forwards`` counts region-body
-    executions, so a skipped replay does not count.
-    """
+    """Stand-in for the w2 grouped projection: one policy-controlled region."""
 
     def __init__(self):
         super().__init__()
@@ -74,11 +55,7 @@ class _W2Region(Module):
 
 
 class _DispatcherBlock(Module):
-    """Routed-experts block: dispatch, one projection, combine.
-
-    The router scores depend on the gate, so a wrong score placement or a
-    misaligned combine changes the gradients, as in training.
-    """
+    """Routed-experts block: dispatch, one projection, combine."""
 
     def __init__(self, dispatcher_config: LocalTokenDispatcher.Config):
         super().__init__()
@@ -102,8 +79,7 @@ class _DispatcherBlock(Module):
         )
         routed_scores_R = getattr(metadata, "routed_scores_R", None)
         if routed_scores_R is not None:
-            # Absorbed scores scale the projection input, as GroupedLinear
-            # does before its grouped_mm region.
+            # Absorbed scores scale the projection input, as GroupedLinear does.
             remat.recompute_needs_tensor(routed_scores_R)
             routed_input_RD = (
                 routed_input_RD.float() * routed_scores_R.reshape(-1, 1)
@@ -141,8 +117,7 @@ def _forward_backward(
 class TestLocalCombineRematRegion(unittest.TestCase):
     @staticmethod
     def _dispatcher_cases():
-        # name, dispatcher Config. Without a sparse mesh the AllToAll
-        # dispatcher falls back to the local dispatch/combine methods.
+        # Without a sparse mesh, AllToAll uses the local dispatch/combine.
         return (
             ("local", LocalTokenDispatcher.Config),
             ("alltoall_ep1", AllToAllTokenDispatcher.Config),
@@ -199,8 +174,7 @@ class TestLocalCombineRematRegion(unittest.TestCase):
                         ):
                             actual = _forward_backward(remat_model, x_TD)
 
-                        # The combine body runs only on the original forward;
-                        # the policy still decides the w2 projection's replay.
+                        # The combine body runs once; the policy still drives w2.
                         self.assertEqual(num_scatter_adds, 1)
                         self.assertEqual(block.w2.num_forwards, expected_w2_forwards)
                         torch.testing.assert_close(
@@ -212,10 +186,7 @@ class TestLocalCombineRematRegion(unittest.TestCase):
                             )
 
     def test_absorbed_combine_does_not_pin_w2_output(self):
-        # With the router scores absorbed, no backward consumer needs the w2
-        # output (the scatter-add saves only indices), and the combine region
-        # reads it only from its saved body, so saving w2 must not keep the
-        # w2 output alive.
+        # Absorbed scores leave no backward consumer of the w2 output, so saving w2 must not retain it.
         for name, config_cls in self._dispatcher_cases():
             with self.subTest(dispatcher=name):
                 baseline = self._build(config_cls, absorb_router_scores=True)
@@ -228,8 +199,7 @@ class TestLocalCombineRematRegion(unittest.TestCase):
 
                 def recorded_forward(module, *args, **kwargs):
                     output = original_forward(module, *args, **kwargs)
-                    # The forward also runs (with its region skipped) during
-                    # replay.
+                    # The forward also runs (region skipped) during replay.
                     if module is w2 and not remat.is_recomputing():
                         # remat retains a detached alias, so track the storage.
                         w2_output_storages.append(

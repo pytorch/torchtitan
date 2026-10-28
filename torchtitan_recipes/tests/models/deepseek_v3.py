@@ -160,13 +160,7 @@ def deepseek_v3_debugmodel_mxfp8(
 def deepseek_v3_debugmodel_alltoall(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    """DeepSeek V3 debug pretraining with the stock all-to-all dispatcher, EP=2.
-
-    EP=2 so routed tokens actually cross ranks; the same dispatcher at EP=1
-    (the plain ``deepseek_v3_debugmodel``) runs its local fallback, which
-    reorders tokens without communication. The token-count exchange syncs
-    with the CPU, so CUDA graphs stay off, as in the base config at EP>1.
-    """
+    """DeepSeek V3 debug pretraining with the stock all-to-all dispatcher, EP=2."""
     return deepseek_v3_debugmodel(
         seq_len=seq_len,
         parallelism=ParallelismConfig(expert_parallel_degree=2),
@@ -176,24 +170,7 @@ def deepseek_v3_debugmodel_alltoall(
 def deepseek_v3_debugmodel_deepep(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    """DeepSeek V3 debug pretraining with the DeepEP v2 backend (compact training path), EP=2.
-
-    The MoE expert dispatch uses the DeepEP v2 ElasticBuffer all-to-all; under
-    autograd it takes the compact, host-synced, backward-able path, so like the
-    stock all-to-all backend it keeps CUDA graphs off. EP=2 so the dispatch
-    actually moves tokens across ranks; the training shape determines the fixed
-    per-rank buffer capacity. Numerics match the standard all-to-all backend
-    (step-1 bitwise, reduction-order drift thereafter). Needs deep_ep v2
-    (ElasticBuffer) in the env.
-
-    Local devgpu (no RDMA NIC) needs these env vars so the ElasticBuffer inits
-    NVLink-only:
-      - EP_DISABLE_GIN=1            skip the NCCL GIN / RDMA requirement (no RDMA NIC)
-      - EP_REUSE_NCCL_COMM=0        avoid the ElasticBuffer null-device-comm segfault
-      - NVSHMEM_REMOTE_TRANSPORT=none + NVSHMEM_DISABLE_MNNVL=1   intra-node NVLink only
-      - LD_LIBRARY_PATH must include the deep_ep wheels' nvshmem + nccl lib dirs
-    Then launch with NGPU=2 ./run_train.sh (none of this is needed on RDMA/RoCE hosts).
-    """
+    """DeepSeek V3 debug pretraining with the DeepEP v2 backend (compact path), EP=2; needs deep_ep v2."""
     config = deepseek_v3_debugmodel(
         seq_len=seq_len, parallelism=ParallelismConfig(expert_parallel_degree=2)
     )
