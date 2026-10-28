@@ -156,19 +156,24 @@ class _Model:
 def _runner(model) -> TorchTitanGPUModelRunner:
     runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
     runner.get_model = lambda: model  # type: ignore[method-assign]
+    runner.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_expert_parallel=False, tensor_parallel_size=1
+        )
+    )
     return runner
 
 
 def test_runner_publishes_the_unpadded_count_before_vllm_pads():
     model = _Model()
-    sentinel = (object(), object())
+    sentinel = (object(), object(), object(), None, object())
     with patch.object(
         GPUModelRunner, "_determine_batch_execution_and_padding", return_value=sentinel
     ) as parent:
         out = _runner(model)._determine_batch_execution_and_padding(
             31, 3, None, 1, False, force_eager=True
         )
-    assert out is sentinel
+    assert out == sentinel
     assert model.published == [31]
     parent.assert_called_once()
     assert parent.call_args.args[0] == 31

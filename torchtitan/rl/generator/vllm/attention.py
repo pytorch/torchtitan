@@ -201,8 +201,6 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             "fp8"
         ), "FP8 KV cache not supported yet."
 
-        assert not attn_metadata.use_cascade, "Cascade not supported yet."
-
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
         max_seqlen_q = attn_metadata.max_query_len
