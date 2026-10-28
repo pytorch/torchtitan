@@ -2,7 +2,7 @@
 
 **Hardware: 64 x NVIDIA GB300 or 32 x NVIDIA GB300 GPUs.**
 
-Updated: 2026-10-28T07:34:50.662809+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
+Updated: 2026-10-28T07:48:15.489806+00:00. Autonomous experiment window ends 2026-10-28T12:56:10+00:00.
 
 This report pairs the existing graph trainer presentation configurations with native TorchTitan eager execution. Results come from real MAST jobs. Prepared or queued runs have no measured throughput or memory result.
 
@@ -140,7 +140,8 @@ These add an 80 GiB/rank CPU activation quota to two failed native configuration
 | ID | BS / GA | Global batch | CPU activation quota GiB/rank | Native outcome | Allocated / reserved peak GiB | Tokens/s/GPU | MFU % | MAST job | Profile, update 16 rank 0 |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
 | `native_rescue_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | OOM; 64 ranks logged | 267.59 / 268.70 at failure; +0.33 requested | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-ga8-17u-20261028-res1-ivankobzarev) | OOM before profiling |
-| `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 10 / 8 | 5120 | 80 | RUNNING | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao80-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
+| `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 10 / 8 | 5120 | 80 | RUNNING; updates 4-4 / 17 across ranks | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b10-full-ao80-ga8-17u-20261028-res1-ivankobzarev) | Not yet produced |
+| `native_diagnostic_sac_cpuoffload_bs6_ao80` | 6 / 8 | 3072 | 80 | Held for experiment priority | - | - | - | [Job](https://www.internalfb.com/msl/studio/runs/mast/dsv3-eager-64g-b6-sac-ao80-diag-ga8-17u-20261028-ivankobzarev) | Not yet produced |
 
 ## Native 32 GPU activation-offload rescue configuration
 
@@ -181,7 +182,7 @@ Checkpoint restoration varies with cache and storage conditions across sequentia
 | `native_fit_full_recompute_bs6` | 32 | 43.92 | 32 | 571.10 |
 | `native_fit_full_recompute_cpuoffload_bs6_ao24` | 32 | 44.24 | 32 | 542.62 |
 | `native_rescue_sac_cpuoffload_bs6_ao80` | 64 | 45.27 | 64 | 532.60 |
-| `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 64 | 47.09 | 0 | - |
+| `native_rescue_full_recompute_cpuoffload_bs10_ao80` | 64 | 47.09 | 64 | 541.78 |
 
 ## Native activation offload actually used
 
@@ -329,6 +330,7 @@ The main twelve counterparts use uncaptured native execution with seed 14536, de
 | `native_rescue_sac_cpuoffload_bs6_ao80` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 | `native_rescue_full_recompute_cpuoffload_bs10_ao80` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 | `native_rescue_full_recompute_cpuoffload_bs8_ao40` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
+| `native_diagnostic_sac_cpuoffload_bs6_ao80` | Native eager | every_microbatch / every_microbatch | disabled | 14536 / False |
 
 ## Native MTP checkpoint qualification
 
@@ -364,4 +366,5 @@ Both fused gather arms recorded 6069 uses per rank of an existing MXFP8 running 
 | 32 GPU native counterparts | `f66c0e6cd7aa3d5356d918e7b8d6a2a6f1fd1c65` + MTP annotation patch | `torchtitan_workspace:aa3efdac1f8d413da72d4f5ac8f94b37` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
 | 64 GPU scheduling payload before head qualification (held, superseded) | `2eb747d1b479616880b27e21c068578d4cb333e6` + MTP annotation patch | `torchtitan_workspace:34c5271cac874defb21c29c02c1d5a89` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
 | 64 GPU native scheduling with qualified head policy | `2eb747d1b479616880b27e21c068578d4cb333e6` + MTP annotation patch | `torchtitan_workspace:6b7c7969487b435b85105645768736d9` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
+| 64 GPU native SAC with failure telemetry | `1457497a35d2fd7570b87566a8af0b3fd22b7538` + MTP annotation patch | `torchtitan_workspace:185df65145ea45478b3322c3bcfd172b` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
 | Original 32 GPU graph payload reused for matched BS6 controls | `f66c0e6cd7aa3d5356d918e7b8d6a2a6f1fd1c65` | `torchtitan_workspace:f426b59d31f74b749092f6d9ace965ad` | `torchtitan_conda_ivankobzarev_gt_report256_20261013_v3:c57edcb8f7a74a58836a31c4a3d44266` |
