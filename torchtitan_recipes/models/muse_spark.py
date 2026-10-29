@@ -16,6 +16,7 @@ from dataclasses import replace
 from typing import Any, cast, Literal
 
 from renderers import Message, ToolSpec
+from torch.nn.attention import SDPBackend
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.checkpointer.torch_checkpointing import (
@@ -56,12 +57,16 @@ from torchtitan.models.common.activation import ClampedSwiGLU
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
     AllGatherKVSlidingWindowFlexInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesSlidingWindowFlexInnerAttention,
+    UlyssesSlidingWindowVarlenInnerAttention,
+    UlyssesVarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.moe import (
@@ -96,6 +101,10 @@ def _muse_spark_context_parallel_transform() -> ContextParallelTransform:
         inner_attention_map={
             FlexInnerAttention: UlyssesFlexInnerAttention,
             SlidingWindowFlexInnerAttention: (UlyssesSlidingWindowFlexInnerAttention),
+            VarlenInnerAttention: UlyssesVarlenInnerAttention,
+            SlidingWindowVarlenInnerAttention: (
+                UlyssesSlidingWindowVarlenInnerAttention
+            ),
         },
     )
 
@@ -313,6 +322,7 @@ def _muse_spark_816b_a42b(
     seq_len: int | None = None,
     *,
     parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "flex",
 ) -> Trainer.Config:
     """Configure full-parameter text continuation from the Muse Spark Open checkpoint.
 
@@ -336,7 +346,7 @@ def _muse_spark_816b_a42b(
         parallelism=parallelism,
         seq_len=seq_len,
         moe_comm_backend="standard",
-        attn_backend="flex",
+        attn_backend=attn_backend,
     )
     if parallelism.context_parallel_degree > 1:
         transform_model_config_(
@@ -761,6 +771,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
             enable_sequence_parallel=False,
             context_parallel_load_balancer=None,
         ),
+        attn_backend="varlen",
     )
     config.hf_assets_path = os.environ.get(
         "MUSE_SPARK_HF_ASSETS_PATH", _MUSE_SPARK_HF_ASSETS_PATH
@@ -822,7 +833,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
             _ultradata_lora_sft_transform(),
         ],
     )
-    for _, inner_attention, _, _ in config.model.traverse(FlexInnerAttention.Config):
-        inner_attention.kernel_options = {"BACKEND": "FLASH"}
-        inner_attention.block_size = 256
+    # VarlenInnerAttention defaults to cuDNN first; on the 128k global layers it is ~13% slower than FA4.
+    for _, inner_attention, _, _ in config.model.traverse(VarlenInnerAttention.Config):
+        inner_attention.sdpa_backends = [SDPBackend.FLASH_ATTENTION]
     return config
