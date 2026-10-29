@@ -1124,13 +1124,14 @@ def test_document_aware_concat_packing_restores_exactly():
     "packing_type",
     [ConcatThenSplitPackingConfig, FirstFitPackingConfig],
 )
-def test_packing_splits_positioned_long_documents(packing_type):
+@pytest.mark.parametrize("max_num_documents", [2, None])
+def test_packing_splits_positioned_long_documents(packing_type, max_num_documents):
     documents = SingleDatasetConfig(
         source=RowsSourceConfig(
             rows=(
                 {
-                    "tokens": list(range(15)),
-                    "positions": list(range(14)),
+                    "tokens": list(range(17)),
+                    "positions": list(range(16)),
                 },
             )
         ),
@@ -1140,7 +1141,7 @@ def test_packing_splits_positioned_long_documents(packing_type):
         CONTEXT,
         max_context_length=4,
         num_tokens_per_microbatch=8,
-        max_num_documents=2,
+        max_num_documents=max_num_documents,
     )
 
     packing = packing_type(dataset=documents)
@@ -1162,42 +1163,14 @@ def test_packing_splits_positioned_long_documents(packing_type):
     for row in rows:
         assert row.positions is not None
         assert row.padding_mask is not None
-        assert (
-            np.count_nonzero((row.positions == 0) & ~row.padding_mask)
-            <= context.max_num_documents
-        )
+        if context.max_num_documents is not None:
+            assert (
+                np.count_nonzero((row.positions == 0) & ~row.padding_mask)
+                <= context.max_num_documents
+            )
         assert int(row.positions.max()) < context.max_context_length
         real_input_ids.extend(row.input_ids[row.labels != IGNORE_INDEX].tolist())
-    assert real_input_ids == list(range(14))
-
-
-def test_concat_then_split_wraps_positioned_long_documents():
-    """Without max_num_documents, processor positions longer than the context
-    restart every max_context_length tokens, the same as missing positions."""
-
-    def pack(row):
-        documents = SingleDatasetConfig(
-            source=RowsSourceConfig(rows=(row,)),
-            processor=RowToTokens.Config(),
-        )
-        context = replace(CONTEXT, max_context_length=4, num_tokens_per_microbatch=8)
-        return list(
-            ConcatThenSplitPackingConfig(dataset=documents).build(
-                context=context,
-                dataset_iteration_policy=dataset_iteration_policy(
-                    shuffle=False, repeat=False
-                ),
-            )
-        )
-
-    positioned = pack({"tokens": list(range(17)), "positions": list(range(16))})
-    unpositioned = pack({"tokens": list(range(17))})
-
-    assert len(positioned) == len(unpositioned) == 2
-    for row, expected in zip(positioned, unpositioned, strict=True):
-        np.testing.assert_array_equal(row.positions, [0, 1, 2, 3, 0, 1, 2, 3])
-        np.testing.assert_array_equal(row.positions, expected.positions)
-        np.testing.assert_array_equal(row.input_ids, expected.input_ids)
+    assert real_input_ids == list(range(16))
 
 
 def test_first_fit_num_packing_bins_is_independent_of_token_budget(monkeypatch):

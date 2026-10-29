@@ -372,13 +372,12 @@ def _text_sequence_to_packing_input(
     long documents. Missing positions mean the sample is one document.
     """
     token_indices = np.arange(len(text_sequence.input_ids), dtype=np.int64)
-    if text_sequence.positions is None:
-        positions = token_indices % max_context_length
-    else:
+    document_starts = 0
+    if text_sequence.positions is not None:
         document_starts = np.maximum.accumulate(
             np.where(np.asarray(text_sequence.positions) == 0, token_indices, 0)
         )
-        positions = (token_indices - document_starts) % max_context_length
+    positions = (token_indices - document_starts) % max_context_length
     padding_mask = text_sequence.padding_mask
     if padding_mask is None:
         padding_mask = np.zeros(len(text_sequence.input_ids), dtype=np.bool_)
