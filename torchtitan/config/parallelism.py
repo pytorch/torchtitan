@@ -61,6 +61,14 @@ class ParallelismConfig:
     fsdp_defer_gradient_reduction: bool = False
     """Defer FSDP gradient reduction until the last accumulation step."""
 
+    fsdp_enable_explicit_backward_prefetch: bool = True
+    """Enable explicit FSDP backward prefetching for expert-parallel models.
+
+    Disabling this also suppresses FSDP's implicit fallback prefetch, reducing
+    peak unsharded-parameter memory at the cost of communication overlap. It
+    has no effect when expert parallelism is off.
+    """
+
     fsdp_symm_mem_scope: FSDPSymmMemScope = None
     """
     Which FSDP modules use symmetric-memory communication. None disables it.

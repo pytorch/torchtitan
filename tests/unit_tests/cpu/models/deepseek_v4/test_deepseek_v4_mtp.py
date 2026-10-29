@@ -72,6 +72,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         )
         parallelism = SimpleNamespace(
             fsdp_reshard_after_forward="default",
+            fsdp_enable_explicit_backward_prefetch=False,
             fsdp_symm_mem_scope=None,
         )
 
@@ -90,6 +91,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
             pp_enabled=False,
             cpu_offload=False,
             reshard_after_forward_policy="default",
+            enable_explicit_backward_prefetch=False,
             ep_degree=2,
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,

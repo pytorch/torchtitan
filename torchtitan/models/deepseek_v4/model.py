@@ -163,6 +163,9 @@ class DeepSeekV4Model(Decoder):
             pp_enabled=parallelism_context.pp_enabled,
             cpu_offload=training.enable_cpu_offload,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            enable_explicit_backward_prefetch=(
+                parallelism.fsdp_enable_explicit_backward_prefetch
+            ),
             ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,

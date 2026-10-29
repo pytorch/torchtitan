@@ -238,6 +238,9 @@ class MTPDecoder(Decoder):
             pp_enabled=parallelism_context.pp_enabled,
             cpu_offload=training.enable_cpu_offload,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            enable_explicit_backward_prefetch=(
+                parallelism.fsdp_enable_explicit_backward_prefetch
+            ),
             ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,
@@ -458,6 +461,7 @@ def apply_fsdp_to_mtp_decoder(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
+    enable_explicit_backward_prefetch: bool = True,
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
     dp_mesh_dims: DataParallelMeshDims | None = None,
@@ -481,6 +485,7 @@ def apply_fsdp_to_mtp_decoder(
             pp_enabled=pp_enabled,
             cpu_offload=cpu_offload,
             reshard_after_forward_policy=reshard_after_forward_policy,
+            enable_explicit_backward_prefetch=enable_explicit_backward_prefetch,
             ep_degree=ep_degree,
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,

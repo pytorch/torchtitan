@@ -66,6 +66,61 @@ def test_apply_fsdp_to_decoder_forwards_param_dtype_override_fn() -> None:
     assert mp_policy.param_dtype_override_fn is param_dtype_override_fn
 
 
+@pytest.mark.parametrize("enable_backward_prefetch", [True, False])
+def test_apply_fsdp_to_decoder_configures_backward_prefetch_policy(
+    enable_backward_prefetch: bool,
+) -> None:
+    """EP models may trade backward communication overlap for peak memory."""
+    model = _FSDPModule()
+    model.enable_weight_tying = False
+    model.tok_embeddings = _FSDPModule()
+    model.norm = _FSDPModule()
+    model.lm_head = _FSDPModule()
+    layer = _FSDPModule()
+    layer.feed_forward = nn.Identity()
+    layer.feed_forward.set_modules_to_backward_prefetch = mock.Mock()
+    model.layers = nn.ModuleDict({"0": layer})
+    fsdp_modules = (model, model.tok_embeddings, model.norm, model.lm_head, layer)
+    for module in fsdp_modules:
+        module.set_gradient_divide_factor = mock.Mock()
+        module.set_modules_to_forward_prefetch = mock.Mock()
+        module.set_modules_to_backward_prefetch = mock.Mock()
+    dp_mesh = mock.Mock(mesh_dim_names=("dp_shard",))
+
+    with (
+        mock.patch("torchtitan.distributed.fsdp.fully_shard"),
+        mock.patch("torchtitan.distributed.fsdp.FSDPModule", _FSDPModule),
+        mock.patch(
+            "torchtitan.distributed.fsdp._fsdp_unit_holds_only_embedding_weights",
+            return_value=False,
+        ),
+    ):
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=True,
+            ep_degree=2,
+            enable_explicit_backward_prefetch=enable_backward_prefetch,
+        )
+
+    model.tok_embeddings.set_modules_to_forward_prefetch.assert_called_once_with(
+        [layer]
+    )
+    layer.feed_forward.set_modules_to_backward_prefetch.assert_not_called()
+    if enable_backward_prefetch:
+        model.lm_head.set_modules_to_backward_prefetch.assert_called_once_with([layer])
+        layer.set_modules_to_backward_prefetch.assert_called_once_with(
+            [model.tok_embeddings]
+        )
+        model.tok_embeddings.set_modules_to_backward_prefetch.assert_not_called()
+        model.norm.set_modules_to_backward_prefetch.assert_not_called()
+    else:
+        for module in fsdp_modules:
+            module.set_modules_to_backward_prefetch.assert_called_once_with([module])
+
+
 def test_stacked_linear_shard_placements_use_num_linears() -> None:
     module = nn.Module()
     stacked = Linear.Config(
