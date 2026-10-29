@@ -10,7 +10,7 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor import distribute_tensor, DTensor, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
@@ -19,6 +19,7 @@ from torchtitan.distributed.flex_shard import (
     BucketConfig,
     ComputeLayout,
     DistMuon,
+    Owned,
 )
 from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
     _BucketedRedistributionRuntime,
@@ -66,6 +67,39 @@ class TestMuonPlanConstruction(unittest.TestCase):
                 bucket_configs=[bucket_config],
             )
 
+    def test_tied_loads_rotate_across_ranks_with_uneven_storage(self):
+        # Ten rows on four ranks store as 3, 3, 3, 1, and every bucket ties on
+        # load. Earlier-bucket cost must rotate the owners across all ranks
+        # instead of always picking the ranks that store the most rows.
+        dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=4)
+        self.addCleanup(dist.destroy_process_group)
+        mesh = init_device_mesh("cpu", (4,), mesh_dim_names=("dp_shard",))
+        names = [f"layers.{layer}.weight" for layer in range(8)]
+        params = [
+            torch.nn.Parameter(
+                distribute_tensor(torch.empty(10, 16), mesh, (Shard(0),))
+            )
+            for _name in names
+        ]
+        with patch.object(_BucketedRedistributionRuntime, "reserve_buffers"):
+            optimizer = DistMuon(
+                [{"params": params, "param_names": names}],
+                compute_sharding_by_fqn={
+                    name: ComputeLayout(
+                        {"dp_shard": Owned()}, compute_dtype=torch.bfloat16
+                    )
+                    for name in names
+                },
+                bucket_configs=[BucketConfig(patterns=(name,)) for name in names],
+            )
+        owners = [
+            partition.participant
+            for bucket in optimizer._bucket_plans
+            for partition in bucket.redistribution_plans[0].compute_partitions
+            if partition.logical_regions
+        ]
+        self.assertEqual(sorted(owners), [0, 0, 1, 1, 2, 2, 3, 3])
+
     def test_fixed_work_changes_placement_and_plan_reuse(self):
         dist.init_process_group("fake", store=FakeStore(), rank=1, world_size=2)
         self.addCleanup(dist.destroy_process_group)
@@ -110,14 +144,16 @@ class TestMuonPlanConstruction(unittest.TestCase):
             )
         plans = [bucket.redistribution_plans[0] for bucket in optimizer._bucket_plans]
         # Fixed work [1600, 0] exceeds both chunks together (960 + 200).
-        # Layers 0 and 2 put both chunks on rank 1; layer 1 keeps each chunk
-        # on the rank that stores most of it.
+        # Layers 0 and 2 put both chunks on rank 1. Layer 1 has no fixed work,
+        # so its tied 960 chunk goes to rank 1, which carries less cost from
+        # layer 0 (1160 vs. 1600), and the 200 chunk goes to rank 0.
         self.assertIs(plans[0], plans[2])
         self.assertIsNot(plans[0], plans[1])
         self.assertEqual(plans[0].storage_partitions, plans[1].storage_partitions)
         self.assertEqual(plans[0].compute_partition(0).logical_regions, ())
         self.assertEqual(plans[0].compute_partition(1).tensor_shape, (6, 4))
-        self.assertEqual(plans[1].compute_partition(0).tensor_shape, (4, 4))
+        self.assertEqual(plans[1].compute_partition(0).tensor_shape, (2, 4))
+        self.assertEqual(plans[1].compute_partition(1).tensor_shape, (4, 4))
         self.assertEqual(
             [
                 (tuple(view.shape), view.offset)
