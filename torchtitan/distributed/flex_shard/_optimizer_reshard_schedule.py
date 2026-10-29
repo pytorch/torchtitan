@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import bisect
 import fnmatch
 import hashlib
 import math
@@ -152,15 +153,21 @@ _DTensorStorageDomain: TypeAlias = tuple[
 
 @dataclass(frozen=True, slots=True)
 class _ParticipantPartition:
-    """One participant's tensor shape and its global logical regions."""
+    """One participant's tensor shape and its global logical regions.
+
+    ``tensor_regions[i]`` is where ``logical_regions[i]`` sits in the
+    participant's tensor.
+    """
 
     participant: int
     tensor_shape: tuple[int, ...]
     logical_regions: tuple[_TensorRegion, ...]
+    tensor_regions: tuple[_TensorRegion, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tensor_shape", tuple(self.tensor_shape))
         object.__setattr__(self, "logical_regions", tuple(self.logical_regions))
+        object.__setattr__(self, "tensor_regions", tuple(self.tensor_regions))
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,10 +313,19 @@ def _validate_redistribution_plan(plan: _RedistributionPlan) -> None:
     compute_by_participant = {
         partition.participant: partition for partition in plan.compute_partitions
     }
+    source_routes_by_participant: dict[int, list[_TensorRegionRoute]] = {
+        participant: [] for participant in plan.participants
+    }
+    destination_routes_by_participant: dict[int, list[_TensorRegionRoute]] = {
+        participant: [] for participant in plan.participants
+    }
+    for route in routes:
+        for participant in route.source.participants:
+            source_routes_by_participant[participant].append(route)
+        for participant in route.destination.participants:
+            destination_routes_by_participant[participant].append(route)
     for participant in plan.participants:
-        source_routes = tuple(
-            route for route in routes if participant in route.source.participants
-        )
+        source_routes = source_routes_by_participant[participant]
         _validate_regions_cover_partition(
             tuple(route.logical_region for route in source_routes),
             storage_by_participant[participant].logical_regions,
@@ -322,9 +338,7 @@ def _validate_redistribution_plan(plan: _RedistributionPlan) -> None:
             direction=f"storage source tensor {participant}",
         )
 
-        destination_routes = tuple(
-            route for route in routes if participant in route.destination.participants
-        )
+        destination_routes = destination_routes_by_participant[participant]
         _validate_regions_cover_partition(
             tuple(route.logical_region for route in destination_routes),
             compute_by_participant[participant].logical_regions,
@@ -360,14 +374,25 @@ def _validate_disjoint_regions_in_bounds(
         f"{direction} regions must be in bounds",
     )
 
-    positive_regions = sorted(
-        (region for region in regions if region.numel),
-        key=lambda region: region.offsets,
+    positive_regions = [region for region in regions if region.numel]
+    # Sweep along the dim with the most distinct region starts: once a later
+    # region starts at or past the end of `first` on that dim, so do all the
+    # regions after it, and none of them can overlap `first`.
+    sweep_dim = max(
+        range(len(bounds_shape)),
+        key=lambda dim: len({region.offsets[dim] for region in positive_regions}),
+        default=None,
     )
+    if sweep_dim is not None:
+        positive_regions.sort(key=lambda region: region.offsets[sweep_dim])
     for index, first in enumerate(positive_regions):
         for other_index in range(index + 1, len(positive_regions)):
             second = positive_regions[other_index]
-            if bounds_shape and second.offsets[0] >= first.offsets[0] + first.shape[0]:
+            if (
+                sweep_dim is not None
+                and second.offsets[sweep_dim]
+                >= first.offsets[sweep_dim] + first.shape[sweep_dim]
+            ):
                 break
             _require_valid_plan(
                 not all(
@@ -543,6 +568,12 @@ def _build_region_redistribution_plan(
             participant=participant,
             tensor_shape=storage_by_participant[participant].shape,
             logical_regions=(storage_by_participant[participant],),
+            tensor_regions=(
+                _TensorRegion(
+                    offsets=(0,) * len(logical_shape),
+                    shape=storage_by_participant[participant].shape,
+                ),
+            ),
         )
         for participant in participants
     )
@@ -550,8 +581,11 @@ def _build_region_redistribution_plan(
     regions_by_participant: dict[int, list[_TensorRegion]] = {
         participant: [] for participant in participants
     }
+    tensor_regions_by_participant: dict[int, list[_TensorRegion]] = {
+        participant: [] for participant in participants
+    }
     packed_sizes = dict.fromkeys(participants, 0)
-    compute_endpoints = []
+    compute_endpoints: list[tuple[int, _TensorRegion, tuple[int, ...]]] = []
     for participant, region in compute_regions:
         _require_valid_plan(
             participant in participant_set,
@@ -570,6 +604,9 @@ def _build_region_redistribution_plan(
         compute_endpoints.append((participant, region, packed_offsets))
         packed_sizes[participant] += region.shape[0]
         regions_by_participant[participant].append(region)
+        tensor_regions_by_participant[participant].append(
+            _TensorRegion(offsets=packed_offsets, shape=region.shape)
+        )
     _validate_tensor_region_partition(
         tuple(region for _participant, region in compute_regions),
         logical_shape,
@@ -580,13 +617,40 @@ def _build_region_redistribution_plan(
             participant=participant,
             tensor_shape=(packed_sizes[participant], *logical_shape[1:]),
             logical_regions=tuple(regions_by_participant[participant]),
+            tensor_regions=tuple(tensor_regions_by_participant[participant]),
         )
         for participant in participants
     )
 
+    # Compute regions are disjoint row intervals, so a storage region can only
+    # meet the endpoints whose rows overlap its own. Visit those in endpoint
+    # order so the routes match a full scan.
+    endpoint_order = sorted(
+        range(len(compute_endpoints)),
+        key=lambda index: compute_endpoints[index][1].offsets[0],
+    )
+    endpoint_starts = [
+        compute_endpoints[index][1].offsets[0] for index in endpoint_order
+    ]
+    endpoint_ends = [
+        compute_endpoints[index][1].offsets[0] + compute_endpoints[index][1].shape[0]
+        for index in endpoint_order
+    ]
     storage_to_compute_routes = []
     for source_holders, storage_region in storage_regions:
-        for destination, compute_region, packed_offsets in compute_endpoints:
+        storage_start = storage_region.offsets[0]
+        storage_end = storage_start + storage_region.shape[0]
+        overlapping_endpoints = sorted(
+            endpoint_order[
+                bisect.bisect_right(endpoint_ends, storage_start) : bisect.bisect_left(
+                    endpoint_starts, storage_end
+                )
+            ]
+        )
+        for endpoint_index in overlapping_endpoints:
+            destination, compute_region, packed_offsets = compute_endpoints[
+                endpoint_index
+            ]
             logical_region = _tensor_region_intersection(
                 storage_region,
                 compute_region,
@@ -698,6 +762,8 @@ class _RedistributionBucketPlan(Generic[_ItemT]):
     group: _RedistributionGroup
     storage_to_compute_schedule: _PackedAllToAllSchedule
     compute_to_storage_schedule: _PackedAllToAllSchedule
+    # Offset of the compute -> storage input in the compute exchange buffer.
+    compute_to_storage_input_offset: int
     dtype: torch.dtype
     compute_dtype: torch.dtype
     device: torch.device
@@ -842,27 +908,34 @@ def _redistribution_group(mesh: DeviceMesh) -> _RedistributionGroup:
     )
 
 
-def _device_mesh_coordinate(
-    mesh: DeviceMesh,
-    participant: int,
-) -> list[int]:
+def _device_mesh_coordinates(mesh: DeviceMesh) -> dict[int, list[int]]:
+    """Map each rank of the mesh to its mesh coordinate."""
     mesh_shape = tuple(mesh.shape)
-    flat_mesh_index = _device_mesh_ranks(mesh).index(participant)
-    mesh_coordinate = [0] * len(mesh_shape)
-    for mesh_axis in range(len(mesh_shape) - 1, -1, -1):
-        flat_mesh_index, mesh_coordinate[mesh_axis] = divmod(
-            flat_mesh_index, mesh_shape[mesh_axis]
-        )
-    return mesh_coordinate
+    coordinates = {}
+    for flat_mesh_index, rank in enumerate(_device_mesh_ranks(mesh)):
+        mesh_coordinate = [0] * len(mesh_shape)
+        for mesh_axis in range(len(mesh_shape) - 1, -1, -1):
+            flat_mesh_index, mesh_coordinate[mesh_axis] = divmod(
+                flat_mesh_index, mesh_shape[mesh_axis]
+            )
+        coordinates[rank] = mesh_coordinate
+    return coordinates
 
 
 def _dtensor_storage_region_for_participant(
     tensor: DTensor,
     participant: int,
 ) -> _TensorRegion:
-    mesh_shape = tuple(tensor.device_mesh.shape)
-    mesh_coordinate = _device_mesh_coordinate(tensor.device_mesh, participant)
+    return _dtensor_storage_region_at_coordinate(
+        tensor, _device_mesh_coordinates(tensor.device_mesh)[participant]
+    )
 
+
+def _dtensor_storage_region_at_coordinate(
+    tensor: DTensor,
+    mesh_coordinate: list[int],
+) -> _TensorRegion:
+    mesh_shape = tuple(tensor.device_mesh.shape)
     local_shape = list(tensor.shape)
     global_offsets = [0] * tensor.ndim
     for mesh_axis, placement in enumerate(tensor.placements):
@@ -969,8 +1042,11 @@ def _dtensor_storage_regions(
         domain_offsets[tensor_dim] = global_offset
 
     holders_by_region: dict[_TensorRegion, list[int]] = {}
+    mesh_coordinates = _device_mesh_coordinates(storage_mesh)
     for participant in participants:
-        global_region = _dtensor_storage_region_for_participant(tensor, participant)
+        global_region = _dtensor_storage_region_at_coordinate(
+            tensor, mesh_coordinates[participant]
+        )
         region = _TensorRegion(
             offsets=tuple(
                 offset - domain_offset
@@ -1130,24 +1206,37 @@ def _build_bucket_plans(
             raise ValueError(f"bucket {context.name!r} mixes compute dtypes")
 
         redistribution_plans_tuple = tuple(redistribution_plans)
+        storage_to_compute_schedule = _build_packed_all_to_all_schedule(
+            redistribution_plans_tuple,
+            direction=_RedistributionDirection.STORAGE_TO_COMPUTE,
+            process_group=group.process_group,
+            local_participant=group.local_participant,
+        )
+        compute_to_storage_schedule = _build_packed_all_to_all_schedule(
+            redistribution_plans_tuple,
+            direction=_RedistributionDirection.COMPUTE_TO_STORAGE,
+            process_group=group.process_group,
+            local_participant=group.local_participant,
+        )
+        # Compute writes each parameter's update into the exchange buffer before
+        # later parameters read their inputs from it. In place is safe only when
+        # every update lands on its own consumed inputs; replicated storage
+        # returns an update to every holder, so its updates go after the inputs.
+        compute_to_storage_input_offset = (
+            0
+            if compute_to_storage_schedule.input_spans_by_parameter
+            == storage_to_compute_schedule.output_spans_by_parameter
+            else storage_to_compute_schedule.output_buffer_numel
+        )
         plans.append(
             _RedistributionBucketPlan(
                 unredistributed_items=unredistributed_items,
                 redistributed_items=redistributed_items,
                 redistribution_plans=redistribution_plans_tuple,
                 group=group,
-                storage_to_compute_schedule=_build_packed_all_to_all_schedule(
-                    redistribution_plans_tuple,
-                    direction=_RedistributionDirection.STORAGE_TO_COMPUTE,
-                    process_group=group.process_group,
-                    local_participant=group.local_participant,
-                ),
-                compute_to_storage_schedule=_build_packed_all_to_all_schedule(
-                    redistribution_plans_tuple,
-                    direction=_RedistributionDirection.COMPUTE_TO_STORAGE,
-                    process_group=group.process_group,
-                    local_participant=group.local_participant,
-                ),
+                storage_to_compute_schedule=storage_to_compute_schedule,
+                compute_to_storage_schedule=compute_to_storage_schedule,
+                compute_to_storage_input_offset=compute_to_storage_input_offset,
                 dtype=dtype,
                 compute_dtype=next(iter(compute_dtypes)),
                 device=device,
