@@ -66,6 +66,7 @@ class KimiLatentMoE(MoE):
             routed_x_TD,
             routed_padding_mask_T,
         ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+        shared_input_ready = self._record_shared_expert_input_ready(x_TD)
 
         weights_TK, expert_ids_TK, routing_map_TE = self.router(
             routed_x_TD,
@@ -90,4 +91,6 @@ class KimiLatentMoE(MoE):
         # The TP zero-fill and the shared-expert add read the routed_up projection
         # output with bare ops.
         remat.recompute_needs_tensor(out_TD)
-        return self._add_shared_experts_and_reduce_across_tp(out_TD, x_TD)
+        return self._add_shared_experts_and_reduce_across_tp(
+            out_TD, x_TD, shared_input_ready
+        )
