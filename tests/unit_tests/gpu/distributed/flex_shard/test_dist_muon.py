@@ -490,7 +490,9 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             "layers.0.blocks": (12, 6),
         }
         torch.manual_seed(0)
-        values = {fqn: torch.randn(shape, device=device) for fqn, shape in shapes.items()}
+        values = {
+            fqn: torch.randn(shape, device=device) for fqn, shape in shapes.items()
+        }
         gradients = [
             {fqn: torch.randn(shape, device=device) for fqn, shape in shapes.items()}
             for _step in range(2)
