@@ -487,6 +487,9 @@ class VLLMModelWrapper(Module):
         # and with expandable segments the holes stay mapped (~1% of the KV cache).
         # Lift the cap (PyTorch's default: none) for the loop, in GDN models only.
         has_gdn = any(isinstance(module, GDN) for module in self.model.modules())
+        # TODO: drop this once vLLM's load_model lets the loader opt out of its 20 MiB cap.
+        # The binding is private; vLLM's _scoped_allocator_max_split uses the same one:
+        # https://github.com/vllm-project/vllm/blob/262eefc9f2ce6c4a04997757397e68b00b8de1f9/vllm/v1/worker/gpu_worker.py#L419-L446
         allocator_settings = torch._C._accelerator_getAllocatorSettings()
         if has_gdn:
             torch._C._accelerator_setAllocatorSettings(
