@@ -572,7 +572,7 @@ def _debugmodel_moe(
     head_dim = 128
     n_layers = 8
     vocab_size = 2048
-    config = Qwen3Model.Config(
+    return Qwen3Model.Config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
@@ -615,9 +615,6 @@ def _debugmodel_moe(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
     )
-    # Only the MoE flavors run the router and its load-balance sums.
-    config.local_compile.regions += ["moe_router_topk", "moe_aux_loss"]
-    return config
 
 
 def _30b_a3b(
@@ -630,7 +627,7 @@ def _30b_a3b(
     head_dim = 128
     n_layers = 48
     vocab_size = 151936
-    config = Qwen3Model.Config(
+    return Qwen3Model.Config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
@@ -673,8 +670,6 @@ def _30b_a3b(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
     )
-    config.local_compile.regions += ["moe_router_topk", "moe_aux_loss"]
-    return config
 
 
 def _235b_a22b(
@@ -687,7 +682,7 @@ def _235b_a22b(
     head_dim = 128
     n_layers = 94
     vocab_size = 151936
-    config = Qwen3Model.Config(
+    return Qwen3Model.Config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
@@ -730,8 +725,6 @@ def _235b_a22b(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
     )
-    config.local_compile.regions += ["moe_router_topk", "moe_aux_loss"]
-    return config
 
 
 MODEL_FLAVORS = {

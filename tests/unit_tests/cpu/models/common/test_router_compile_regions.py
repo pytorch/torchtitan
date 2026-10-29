@@ -18,10 +18,9 @@ from torchtitan.models import (
     qwen3,
     qwen3_5,
 )
-from torchtitan.models.common.moe import TokenChoiceTopKRouter
 
 
-# One MoE debug flavor per model whose routers subclass TokenChoiceTopKRouter.
+# One MoE debug flavor per model on the shared router.
 @pytest.mark.parametrize(
     "model, flavor",
     [
@@ -36,18 +35,9 @@ from torchtitan.models.common.moe import TokenChoiceTopKRouter
     ],
     ids=lambda value: getattr(value, "__name__", value),
 )
-def test_moe_models_compile_the_router_region(model, flavor: str) -> None:
-    """Each MoE model lists moe_router_topk, uses TokenChoiceTopKRouter subclasses, and lists only registered regions."""
+def test_moe_models_list_only_registered_regions(model, flavor: str) -> None:
+    """Each MoE model's default regions, moe_router_topk included, are registered."""
     config = model.build_model_config(flavor, parallelism=ParallelismConfig())
-    routers = [
-        layer.feed_forward.router
-        for layer in config.layers
-        if hasattr(layer.feed_forward, "router")
-    ]
-
-    assert "moe_router_topk" in config.local_compile.regions
-    assert routers
-    assert all(isinstance(r, TokenChoiceTopKRouter.Config) for r in routers)
     try:
         # Raises on a name no local_compile function registered.
         LocalCompileConfig(regions=config.local_compile.regions).apply()

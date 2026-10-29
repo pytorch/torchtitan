@@ -329,10 +329,14 @@ class TokenChoiceTopKRouter(Module):
         )
 
     # options: Inductor's batch_invariant fixes each reduction's launch config, so a token's
-    # scores don't depend on the batch size (the 1-token graph would otherwise pick another).
-    # batch_invariant=False: torchtitan's batch-invariant mode still rejects this region.
+    # scores don't depend on the batch size (otherwise the 1-token graph picks another config
+    # and rounds differently). recompile_limit=16: DeepSeek-V4's hash and top-k layers share
+    # this frame, 2 graphs per shape (default 8).
     @local_compile(
-        "moe_router_topk", batch_invariant=False, options={"batch_invariant": True}
+        "moe_router_topk",
+        batch_invariant=True,
+        recompile_limit=16,
+        options={"batch_invariant": True},
     )
     def _score_and_select_experts(
         self,
@@ -588,8 +592,7 @@ def _microbatch_load_balance_local_stats(
 def _expert_counts(routing_map_TE: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Routed-token count per expert ``(E,)`` over this rank's tokens, in ``dtype``.
 
-    Compiled, the cast fuses into the sum: no ``[T, E]`` float copy
-    (16k tokens, E=256, H100: 32 -> 6 us).
+    Compiled, the cast fuses into the sum: no ``[T, E]`` float copy.
     """
     # Cast before summing: casting a Partial tensor is non-linear and
     # rejected by spmd_types.

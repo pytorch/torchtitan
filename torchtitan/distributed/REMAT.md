@@ -272,7 +272,9 @@ which regions are saved or recomputed.
 State accumulated for logging or optimizer-step updates must advance only on
 the original forward. The always-retained MoE `routing_decision` region owns
 expert selection, while token-count accumulation and quantile-histogram
-observation explicitly ignore checkpoint replay. Both reuse the routing map
+observation explicitly ignore checkpoint replay. With `moe_router_topk` on, that
+inner region is a plain call, so the compiled region, selection included, replays
+on recompute; it is deterministic and updates no state. Both reuse the routing map
 built for dispatch and auxiliary loss. Kimi K2.7 QK-clipping statistics also
 ignore replay. Auxiliary-loss accumulation uses an always-retained region.
 
