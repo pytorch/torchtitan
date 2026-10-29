@@ -617,9 +617,8 @@ class ChunkedLossWrapper(Loss[LossInput]):
 
         skip_non_loss_tokens: bool = True
         """Run the lm_head only on tokens where ``loss_mask`` is True; the rest get zero
-        grad. Set False if the inner loss reads other tokens. No effect without a
-        ``loss_mask`` (pretraining, SFT), with multiple outputs (MTP), or with accelerator
-        graphs."""
+        grad. Set False if the inner loss reads other tokens, or to use accelerator graphs.
+        No effect without a ``loss_mask`` (pretraining, SFT) or with multiple outputs (MTP)."""
 
     def __init__(self, config: Config):
         self.num_chunks = config.num_chunks
