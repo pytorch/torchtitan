@@ -181,17 +181,14 @@ class LimitedSwiGLU(BinaryActivationFn):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BinaryActivationFn.Config):
-        swiglu_limit: float
+        limit: float
 
         def __post_init__(self) -> None:
-            if not math.isfinite(self.swiglu_limit) or self.swiglu_limit <= 0:
-                raise ValueError(
-                    "swiglu_limit must be finite and positive, got "
-                    f"{self.swiglu_limit}"
-                )
+            if not math.isfinite(self.limit) or self.limit <= 0:
+                raise ValueError(f"limit must be finite and positive, got {self.limit}")
 
     def __init__(self, config: Config) -> None:
-        self.limit = config.swiglu_limit
+        self.limit = config.limit
 
     def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         gate = gate.clamp(max=self.limit)
@@ -204,24 +201,18 @@ class ClampedSwiGLU(BinaryActivationFn):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BinaryActivationFn.Config):
-        swiglu_alpha: float = 1.702
-        swiglu_limit: float = 7.0
+        alpha: float = 1.702
+        limit: float = 7.0
 
         def __post_init__(self) -> None:
-            if not math.isfinite(self.swiglu_alpha) or self.swiglu_alpha <= 0:
-                raise ValueError(
-                    "swiglu_alpha must be finite and positive, got "
-                    f"{self.swiglu_alpha}"
-                )
-            if not math.isfinite(self.swiglu_limit) or self.swiglu_limit <= 0:
-                raise ValueError(
-                    "swiglu_limit must be finite and positive, got "
-                    f"{self.swiglu_limit}"
-                )
+            if not math.isfinite(self.alpha) or self.alpha <= 0:
+                raise ValueError(f"alpha must be finite and positive, got {self.alpha}")
+            if not math.isfinite(self.limit) or self.limit <= 0:
+                raise ValueError(f"limit must be finite and positive, got {self.limit}")
 
     def __init__(self, config: Config) -> None:
-        self.alpha = config.swiglu_alpha
-        self.limit = config.swiglu_limit
+        self.alpha = config.alpha
+        self.limit = config.limit
 
     def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         gate = gate.clamp(max=self.limit)

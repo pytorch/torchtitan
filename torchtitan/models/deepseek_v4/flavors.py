@@ -427,11 +427,9 @@ def _make_v4_moe_config(
         else None
     )
     if swiglu_limit is not None:
-        routed_experts.activation_fn = LimitedSwiGLU.Config(swiglu_limit=swiglu_limit)
+        routed_experts.activation_fn = LimitedSwiGLU.Config(limit=swiglu_limit)
         if shared_experts is not None:
-            shared_experts.activation_fn = LimitedSwiGLU.Config(
-                swiglu_limit=swiglu_limit
-            )
+            shared_experts.activation_fn = LimitedSwiGLU.Config(limit=swiglu_limit)
 
     return MoE.Config(
         num_experts=num_experts,
