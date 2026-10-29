@@ -175,18 +175,18 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
     def _split_qkv(
         self, mixed_qkv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Split local fused channels and add a singleton batch dim."""
+        """Split local fused channels and add a singleton batch dim.
+
+        Query and key stay views: l2norm reads their strided rows and writes compact ones.
+        Value is copied: the chunk kernel would copy a strided value itself, more slowly.
+        """
         num_tokens = mixed_qkv.shape[0]
         local_key_dim = self.local_key_dim
-        query = (
-            mixed_qkv[:, :local_key_dim]
-            .contiguous()
-            .view(1, num_tokens, self.local_num_k_heads, self.head_k_dim)
+        query = mixed_qkv[:, :local_key_dim].view(
+            1, num_tokens, self.local_num_k_heads, self.head_k_dim
         )
-        key = (
-            mixed_qkv[:, local_key_dim : 2 * local_key_dim]
-            .contiguous()
-            .view(1, num_tokens, self.local_num_k_heads, self.head_k_dim)
+        key = mixed_qkv[:, local_key_dim : 2 * local_key_dim].view(
+            1, num_tokens, self.local_num_k_heads, self.head_k_dim
         )
         value = (
             mixed_qkv[:, 2 * local_key_dim :]
