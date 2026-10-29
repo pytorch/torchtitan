@@ -750,8 +750,19 @@ class MoE(FeedForward):
         """Route with ``expert_bias_E`` but never update it: no balancing hook is registered.
         ``load_balance_coeff=None`` instead removes the bias from routing."""
         shared_experts: DenseFeedForward.Config | None = None
+        overlap_shared_experts: bool = False
+        """Run the shared FFN on a CUDA side stream while routed work executes.
+
+        Requires CUDA and TP=1. The two branches keep their existing autograd
+        construction order. Event dependencies join the shared stream before
+        output addition, including during activation recomputation and graph
+        capture. Warm up on the final device before capture to initialize the
+        per-device stream. Concurrent execution can increase peak memory.
+        """
 
         def __post_init__(self) -> None:
+            if self.overlap_shared_experts and self.shared_experts is None:
+                raise ValueError("overlap_shared_experts requires shared experts")
             expert_counts = {
                 "moe": self.num_experts,
                 "router": self.router.num_experts,
@@ -774,6 +785,8 @@ class MoE(FeedForward):
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
         )
+        self.overlap_shared_experts = config.overlap_shared_experts
+        self._shared_expert_streams: dict[torch.device, torch.cuda.Stream] = {}
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: router.tokens_per_expert_E is accumulated in the router forward pass.
@@ -816,6 +829,7 @@ class MoE(FeedForward):
             routed_x_TD,
             routed_padding_mask_T,
         ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+        shared_input_ready = self._record_shared_expert_input_ready(x_TD)
 
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
@@ -834,10 +848,15 @@ class MoE(FeedForward):
             routing_map_TE,
             padding_mask_T=routed_padding_mask_T,
         )
-        return self._add_shared_experts_and_reduce_across_tp(out_TD, x_TD)
+        return self._add_shared_experts_and_reduce_across_tp(
+            out_TD, x_TD, shared_input_ready
+        )
 
     def _add_shared_experts_and_reduce_across_tp(
-        self, routed_out_TD: torch.Tensor, x_TD: torch.Tensor
+        self,
+        routed_out_TD: torch.Tensor,
+        x_TD: torch.Tensor,
+        shared_input_ready: torch.cuda.Event | None = None,
     ) -> torch.Tensor:
         """Add the shared experts' output of ``x_TD`` to the routed output and
         materialize the MoE output across TP.
@@ -845,6 +864,8 @@ class MoE(FeedForward):
         Args:
             routed_out_TD: The routed branch's output, of the routed tokens.
             x_TD: The MoE input.
+            shared_input_ready: Event recorded before routed work, or None for
+                serial shared-expert execution.
         """
         if self.shared_experts is not None and is_in_batch_invariant_mode():
             # Adding a token's routed output to its TP rank's shared-expert partial
@@ -857,20 +878,78 @@ class MoE(FeedForward):
                 region_name="tp_routed_reduction",
             )
             shared_TD = self._maybe_all_reduce_moe_output_across_tp(
-                self.shared_experts(x_TD)
+                self._run_shared_experts(x_TD, shared_input_ready)
             )
             return remat.region(
                 torch.add, self.remat_region_name("shared_add"), recompute=False
             )(routed_out_TD, shared_TD)
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(routed_out_TD)
         if self.shared_experts is not None:
-            shared_TD = self.shared_experts(x_TD)
+            shared_TD = self._run_shared_experts(x_TD, shared_input_ready)
             # Trailing add, always saved: it saves nothing for backward, so replay skips
             # it and its inputs need no persisting, matching checkpoint early stop.
             out_TD = remat.region(
                 torch.add, self.remat_region_name("shared_add"), recompute=False
             )(out_TD, shared_TD)
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
+
+    def _record_shared_expert_input_ready(
+        self, x_TD: torch.Tensor
+    ) -> torch.cuda.Event | None:
+        """Record readiness before routed launches without changing graph order.
+
+        Args:
+            x_TD: Shared-branch input on the caller's CUDA stream.
+
+        Returns:
+            A CUDA event preceding routed work, or None for serial execution.
+        """
+        if not self.overlap_shared_experts:
+            return None
+        if not x_TD.is_cuda:
+            raise ValueError("overlap_shared_experts requires CUDA inputs")
+        if spmd_mesh_size(MeshAxisName.TP) != 1:
+            raise ValueError("overlap_shared_experts currently requires TP=1")
+        if x_TD.device not in self._shared_expert_streams:
+            self._shared_expert_streams[x_TD.device] = torch.cuda.Stream(
+                device=x_TD.device
+            )
+        ready = torch.cuda.Event()
+        ready.record(torch.cuda.current_stream(x_TD.device))
+        return ready
+
+    def _run_shared_experts(
+        self, x_TD: torch.Tensor, input_ready: torch.cuda.Event | None
+    ) -> torch.Tensor:
+        """Execute the shared FFN and join its stream before output consumption.
+
+        Args:
+            x_TD: Shared-branch input with shape (T, D).
+            input_ready: Event recorded before routed work, or None for serial
+                execution. FSDP parameter readiness precedes this event when
+                the enclosing MoE or transformer block owns the FSDP boundary.
+
+        Returns:
+            Shared output ordered before subsequent work on the caller stream.
+        """
+        assert self.shared_experts is not None
+        if input_ready is None:
+            return self.shared_experts(x_TD)
+        caller_stream = torch.cuda.current_stream(x_TD.device)
+        shared_stream = self._shared_expert_streams[x_TD.device]
+        shared_stream.wait_event(input_ready)
+        with torch.cuda.stream(shared_stream):
+            # Checkpoint placeholders must not receive allocator operations.
+            # Recomputed inputs remain live until the explicit stream join.
+            if not remat.is_recomputing():
+                with spmd.no_typecheck():
+                    x_TD.record_stream(shared_stream)
+            shared_TD = self.shared_experts(x_TD)
+        caller_stream.wait_stream(shared_stream)
+        if not remat.is_recomputing():
+            with spmd.no_typecheck():
+                shared_TD.record_stream(caller_stream)
+        return shared_TD
 
     def _maybe_shard_routed_branch_inputs_across_tp(
         self,
