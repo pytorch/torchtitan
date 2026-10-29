@@ -133,6 +133,61 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
     return config
 
 
+def _configure_kimi_k3_dist_moe_fsdp2_ep2(
+    config: Trainer.Config,
+) -> Trainer.Config:
+    """Set common Kimi Dist-MoE integration-test capacity and training limits."""
+    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+
+    runtime_config = config.dist_moe_runtime
+    assert isinstance(runtime_config, DistMoeRuntime.Config)
+    runtime_config.scratch_capacity_factor = 2.0
+    config.training.num_tokens_per_microbatch_per_dp_rank = 128
+    config.training.max_context_length = 128
+    config.training.steps = 4
+    config.checkpointer = None
+    return config
+
+
+def kimi_k3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Config:
+    """Exercise Kimi SiTU-GLU with BF16 Dist-MoE, FSDP, and EP."""
+    from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel_dist_moe_bf16
+
+    return _configure_kimi_k3_dist_moe_fsdp2_ep2(
+        kimi_k3_debugmodel_dist_moe_bf16(
+            seq_len=128,
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2, expert_parallel_degree=2
+            ),
+        )
+    )
+
+
+def kimi_k3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
+    """Exercise Kimi SiTU-GLU with MXFP8 Dist-MoE, FSDP, and EP."""
+    from torchtitan_recipes.tests.models.kimi_k3 import (
+        kimi_k3_debugmodel_dist_moe_mxfp8,
+    )
+
+    return _configure_kimi_k3_dist_moe_fsdp2_ep2(
+        kimi_k3_debugmodel_dist_moe_mxfp8(
+            seq_len=128,
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2, expert_parallel_degree=2
+            ),
+        )
+    )
+
+
+def kimi_k3_debugmodel_dist_moe_bf16_fsdp2_ep2_pp2() -> Trainer.Config:
+    """Exercise ordinary 1F1B slots through Kimi's custom pipeline stage."""
+    config = kimi_k3_debugmodel_dist_moe_bf16_fsdp2_ep2()
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.parallelism.num_pp_microbatches = 4
+    return config
+
+
 def build_b200_tests_list() -> list[IntegrationTestDefinition]:
     """Build integration tests that require B200-class hardware."""
     return [
@@ -183,6 +238,23 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             configs=[deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2],
             test_descr="Eager MXFP8 Dist-MoE PP with BF16 reduction",
             test_name="dist_moe_eager_fsdp_ep_pp_accelerator_graph",
+            ngpu=4,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[
+                kimi_k3_debugmodel_dist_moe_bf16_fsdp2_ep2,
+                kimi_k3_debugmodel_dist_moe_mxfp8_fsdp2_ep2,
+            ],
+            test_descr="Kimi K3 BF16 and MXFP8 Dist-MoE with FSDP and EP",
+            test_name="kimi_k3_dist_moe_fsdp_ep",
+            ngpu=2,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[kimi_k3_debugmodel_dist_moe_bf16_fsdp2_ep2_pp2],
+            test_descr="Kimi K3 BF16 Dist-MoE with ordinary 1F1B",
+            test_name="kimi_k3_dist_moe_fsdp_ep_pp",
             ngpu=4,
             use_real_pg=True,
         ),

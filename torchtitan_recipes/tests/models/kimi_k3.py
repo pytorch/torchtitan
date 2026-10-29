@@ -30,6 +30,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import apply_transforms
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.distributed.flex_shard import (
     BlockShard,
@@ -54,6 +55,7 @@ from torchtitan.models.kimi_k3.attention import KimiMLAAttention
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.models.dist_moe import dist_moe_runtime_config, require_dist_moe
 from torchtitan_recipes.tests.models.kimi_k2_7 import (
     _align_dist_muon_expert_compute_layouts,
     _per_expert_compute_layout,
@@ -140,6 +142,62 @@ def kimi_k3_debugmodel(
         parallelism=parallelism,
         checkpointer=None,
         activation_remat=DefaultActivationRematConfig(),
+    )
+
+
+def kimi_k3_debugmodel_dist_moe_bf16(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    scratch_capacity_factor: float = 1.0,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Build the Kimi K3 debug recipe with BF16 Dist-MoE experts."""
+    require_dist_moe()
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+
+    config = kimi_k3_debugmodel(seq_len=seq_len, parallelism=parallelism)
+    config.model = build_model_config(
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        parallelism=config.parallelism,
+    )
+    config.activation_remat = None
+    config.dist_moe_runtime = dist_moe_runtime_config(
+        scratch_capacity_factor=scratch_capacity_factor
+    )
+    return apply_transforms(config, [DistMoeTransform()])
+
+
+def kimi_k3_debugmodel_dist_moe_mxfp8(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    scratch_capacity_factor: float = 1.0,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Build the Kimi K3 debug recipe with MXFP8 Dist-MoE experts."""
+    dist_moe = require_dist_moe()
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+
+    config = kimi_k3_debugmodel(seq_len=seq_len, parallelism=parallelism)
+    config.model = build_model_config(
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        parallelism=config.parallelism,
+    )
+    config.activation_remat = None
+    config.dist_moe_runtime = dist_moe_runtime_config(
+        scratch_capacity_factor=scratch_capacity_factor
+    )
+    return apply_transforms(
+        config,
+        [
+            DistMoeTransform(
+                expert_precision="mxfp8",
+                block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
+            )
+        ],
     )
 
 

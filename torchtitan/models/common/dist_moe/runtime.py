@@ -22,14 +22,19 @@ import math
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Literal, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 import torch
 from torch.distributed.pipelining import (
     analyze_pipeline_activation_liveness,
     PipelineStageInfo,
 )
-from torch.distributed.pipelining.schedules import PipelineScheduleMulti
+from torch.distributed.pipelining.schedules import (
+    PipelineScheduleMulti,
+    PipelineScheduleSingle,
+    Schedule1F1B,
+    ScheduleGPipe,
+)
 from torch.utils.hooks import RemovableHandle
 
 from torchtitan.config import Configurable
@@ -48,6 +53,15 @@ logger = logging.getLogger(__name__)
 __all__ = ["DistMoeRuntime"]
 
 PPActivationSlotPolicy = Literal["stage_microbatch", "microbatch"]
+PipelineSchedule = PipelineScheduleSingle | PipelineScheduleMulti
+
+
+def _pipeline_stages(schedule: PipelineSchedule) -> tuple[Any, ...]:
+    """Return the local stages owned by either PyTorch schedule family."""
+    if isinstance(schedule, PipelineScheduleSingle):
+        return (schedule._stage,)
+    return tuple(schedule._stages)
+
 
 # Inference picks its BF16 expert-GEMM schedule from the call size, and some
 # schedules round a row differently depending on the call size or on the other
@@ -106,6 +120,12 @@ class _DistMoeForwardContext:
         )
         self._activation_slot_ids_S = activation_slot_ids_S
         self._max_moe_layers_per_activation_slot = max_moe_layers_per_activation_slot
+        self._metadata_inference_active = False
+
+    @property
+    def is_metadata_inference(self) -> bool:
+        """Return whether dynamic pipeline metadata inference is active."""
+        return self._metadata_inference_active
 
     def _slot_id(self, info: PipelineStageInfo) -> int | None:
         if info.stage_index not in self._active_stage_indices:
@@ -131,9 +151,24 @@ class _DistMoeForwardContext:
             return None
         return self._activation_slot_ids_S.narrow(0, slot_id, 1)
 
+    def finish_metadata_inference(self) -> None:
+        """Leave metadata mode and reset the annex before execution or tracing."""
+        self._metadata_inference_active = False
+        self._context.reset()
+
     @contextmanager
     def __call__(self, info: PipelineStageInfo) -> Iterator[None]:
         """Select the slot used by one eager pipeline forward."""
+        if info.is_metadata_inference:
+            # Keep this state after the forward context exits because dynamic
+            # backward metadata inference may recompute checkpointed model
+            # regions without entering another forward context. The first real
+            # pipeline forward below clears it.
+            self._metadata_inference_active = True
+            yield
+            return
+
+        self._metadata_inference_active = False
         slot_id = self._slot_id(info)
         if slot_id is not None:
             self._context.select_activation_slot(
@@ -161,15 +196,15 @@ class DistMoeRuntime(Configurable):
         device: CUDA device that owns the Annex context and buffers.
         num_tokens_per_microbatch_per_dp_rank: Unsharded token count used to
             derive the exact local routing-input shape after CP and TP.
-        pp_schedule: Schedule used for activation-liveness analysis, or
-            ``None`` without pipeline parallelism. Eager PP also executes
-            metadata inference on this schedule.
+        pp_schedule: Runtime schedule used for activation-liveness analysis,
+            or ``None`` without pipeline parallelism. Ordinary 1F1B and
+            multi-stage schedules are supported.
         register_post_metadata_inference_cleanup: Optional registrar for the
             schedule that executes metadata inference when it differs from
             ``pp_schedule``. GraphPP uses this to retain its pre-rewrite
             liveness schedule while registering cleanup on its runtime schedule.
-        set_forward_context: GraphPP-owned setter for its slot resolver. Eager
-            PP leaves this unset and the runtime registers directly on each
+        set_forward_context: GraphPP-owned setter for its slot resolver. Both
+            schedule kinds also register the metadata-scoping context on each
             local stage. Passing ``None`` to the setter removes the GraphPP
             registration during cleanup.
         wgrad_dtype: Optional explicit functional WGrad dtype. Eager execution
@@ -271,7 +306,7 @@ class DistMoeRuntime(Configurable):
         parallelism_context: ParallelismContext,
         device: torch.device,
         num_tokens_per_microbatch_per_dp_rank: int,
-        pp_schedule: PipelineScheduleMulti | None,
+        pp_schedule: PipelineSchedule | None,
         register_post_metadata_inference_cleanup: (
             Callable[[Callable[[], None]], RemovableHandle] | None
         ) = None,
@@ -285,6 +320,7 @@ class DistMoeRuntime(Configurable):
         self.config = config
         self._num_local_input_tokens_per_call: int | None = None
         self._closed = False
+        self._pending_overflow_check: Any | None = None
         self._forward_context_handles: list[RemovableHandle] = []
         self._metadata_inference_cleanup_handle: RemovableHandle | None = None
         self._set_forward_context = set_forward_context
@@ -324,7 +360,7 @@ class DistMoeRuntime(Configurable):
         if parallelism_context.pp_enabled:
             if pp_schedule is None:
                 raise ValueError(
-                    "Dist-MoE PP activation planning requires a multi-stage schedule"
+                    "Dist-MoE PP activation planning requires the runtime schedule"
                 )
             pp_mesh = parallelism_context.get_optional_mesh(
                 "pp", include_singleton_axes=True
@@ -399,14 +435,13 @@ class DistMoeRuntime(Configurable):
                         pp_schedule.register_post_metadata_inference_cleanup
                     )
                 self._metadata_inference_cleanup_handle = cleanup_registrar(
-                    self.context.reset
+                    self.forward_context.finish_metadata_inference
                 )
-                if set_forward_context is None:
-                    for stage in pp_schedule._stages:
-                        self._forward_context_handles.append(
-                            stage.register_forward_context(self.forward_context)
-                        )
-                else:
+                for stage in _pipeline_stages(pp_schedule):
+                    self._forward_context_handles.append(
+                        stage.register_forward_context(self.forward_context)
+                    )
+                if set_forward_context is not None:
                     set_forward_context(self.forward_context)
             for module in self._modules:
                 module._runtime = self
@@ -420,6 +455,11 @@ class DistMoeRuntime(Configurable):
                 set_forward_context(None)
             self.context.close()
             raise
+
+    @property
+    def is_pipeline_metadata_inference(self) -> bool:
+        """Return whether pipeline setup is inferring forward/backward metadata."""
+        return self.forward_context.is_metadata_inference
 
     def _resolve_context_config(
         self,
@@ -446,6 +486,13 @@ class DistMoeRuntime(Configurable):
                 "swiglu_alpha": module.swiglu_alpha,
                 "swiglu_limit": module.swiglu_limit,
             }
+        elif module.activation == "situglu":
+            assert module.situglu_beta is not None
+            assert module.situglu_linear_beta is not None
+            activation_options = {
+                "situ_glu_gate_beta": module.situglu_beta,
+                "situ_glu_up_beta": module.situglu_linear_beta,
+            }
         return dist_moe.Config(
             max_num_local_input_tokens=max_num_local_input_tokens,
             hidden_dim=module.hidden_dim,
@@ -462,7 +509,9 @@ class DistMoeRuntime(Configurable):
             vmm=vmm,
             bf16_grouped_gemm_preset=self._bf16_grouped_gemm_preset(module),
             block_scaled=module.block_scaled_config,
-            activation=module.activation,
+            activation=(
+                "situ_glu" if module.activation == "situglu" else module.activation
+            ),
             wgrad_dtype=wgrad_dtype,
             inference=self.config.inference,
             **activation_options,
@@ -481,7 +530,7 @@ class DistMoeRuntime(Configurable):
 
     def _plan_pp_activation_slots(
         self,
-        schedule: PipelineScheduleMulti,
+        schedule: PipelineSchedule,
         *,
         pp_rank: int,
         model_parts: Sequence[torch.nn.Module],
@@ -489,11 +538,12 @@ class DistMoeRuntime(Configurable):
         """Derive immutable Dist-MoE slot assignments from the PP schedule."""
         from .routed_experts import DistMoeRoutedExperts
 
-        if len(schedule._stages) != len(model_parts):
+        stages = _pipeline_stages(schedule)
+        if len(stages) != len(model_parts):
             raise RuntimeError("pipeline schedule and model parts disagree")
         modules_by_stage = {
             stage.stage_index: modules
-            for stage, model_part in zip(schedule._stages, model_parts, strict=True)
+            for stage, model_part in zip(stages, model_parts, strict=True)
             if (
                 modules := [
                     module
@@ -506,12 +556,46 @@ class DistMoeRuntime(Configurable):
             raise RuntimeError("no local pipeline stage contains Dist-MoE")
 
         stage_indices = tuple(modules_by_stage)
-        liveness = analyze_pipeline_activation_liveness(
-            schedule,
-            pp_rank=pp_rank,
-            stage_indices=stage_indices,
-            granularity=self.config.pp_activation_slot_policy,
-        )
+        if isinstance(schedule, PipelineScheduleMulti):
+            liveness = analyze_pipeline_activation_liveness(
+                schedule,
+                pp_rank=pp_rank,
+                stage_indices=stage_indices,
+                granularity=self.config.pp_activation_slot_policy,
+            )
+            num_slots = liveness.num_slots
+            activation_slot_id_by_stage_and_microbatch = {
+                (stage_index, microbatch_index): liveness.slot_for(
+                    stage_index,
+                    microbatch_index,
+                )
+                for stage_index in stage_indices
+                for microbatch_index in range(liveness.num_microbatches)
+            }
+        elif isinstance(schedule, ScheduleGPipe):
+            stage = stages[0]
+            num_slots = schedule._n_microbatches
+            activation_slot_id_by_stage_and_microbatch = {
+                (stage.stage_index, microbatch_index): microbatch_index
+                for microbatch_index in range(schedule._n_microbatches)
+            }
+        elif isinstance(schedule, Schedule1F1B):
+            stage = stages[0]
+            num_warmup_microbatches = min(
+                schedule._n_microbatches,
+                stage.num_stages - stage.stage_index,
+            )
+            num_slots = num_warmup_microbatches
+            activation_slot_id_by_stage_and_microbatch = {
+                (stage.stage_index, microbatch_index): (
+                    microbatch_index % num_warmup_microbatches
+                )
+                for microbatch_index in range(schedule._n_microbatches)
+            }
+        else:
+            raise ValueError(
+                "Dist-MoE supports GPipe, ordinary 1F1B, or a multi-stage PP schedule"
+            )
         if self.config.pp_activation_slot_policy == "microbatch":
             max_moe_layers_per_activation_slot = sum(
                 len(modules) for modules in modules_by_stage.values()
@@ -520,16 +604,8 @@ class DistMoeRuntime(Configurable):
             max_moe_layers_per_activation_slot = max(
                 len(modules) for modules in modules_by_stage.values()
             )
-        activation_slot_id_by_stage_and_microbatch = {
-            (stage_index, microbatch_index): liveness.slot_for(
-                stage_index,
-                microbatch_index,
-            )
-            for stage_index in stage_indices
-            for microbatch_index in range(liveness.num_microbatches)
-        }
         return _DistMoePipelineActivationPlan(
-            max_live_activation_slots=liveness.num_slots,
+            max_live_activation_slots=num_slots,
             max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
             activation_slot_id_by_stage_and_microbatch=(
                 activation_slot_id_by_stage_and_microbatch
@@ -581,6 +657,34 @@ class DistMoeRuntime(Configurable):
             return self.context.max_num_local_input_tokens
         return self._num_local_input_tokens_per_call
 
+    def begin_overflow_check(self) -> None:
+        """Start copying planner low-water marks after forward/backward."""
+        if self._pending_overflow_check is not None:
+            raise RuntimeError("a Dist-MoE overflow check is already pending")
+        activation_buffer = self.context.activation_buffer
+        if activation_buffer is None:
+            raise RuntimeError("Dist-MoE training requires an activation buffer")
+        self._pending_overflow_check = activation_buffer.begin_check_overflow()
+
+    def finish_overflow_check(self) -> Any:
+        """Validate planner capacity before the optimizer mutates parameters.
+
+        Returns:
+            The Dist-MoE scratch-usage report for the completed update.
+
+        Raises:
+            RuntimeError: If no overflow check is pending.
+            ValueError: If the planner recorded a capacity overflow.
+        """
+        pending = self._pending_overflow_check
+        if pending is None:
+            raise RuntimeError("no Dist-MoE overflow check is pending")
+        self._pending_overflow_check = None
+        activation_buffer = self.context.activation_buffer
+        if activation_buffer is None:
+            raise RuntimeError("Dist-MoE training requires an activation buffer")
+        return activation_buffer.finish_check_overflow(pending)
+
     def close(self) -> None:
         """Remove PP registrations, detach modules, and close Annex state."""
         if self._closed:
@@ -596,5 +700,6 @@ class DistMoeRuntime(Configurable):
         for module in self._modules:
             if module._runtime is self:
                 module._runtime = None
+        self._pending_overflow_check = None
         self.context.close()
         self._closed = True

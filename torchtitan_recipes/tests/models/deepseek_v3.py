@@ -41,10 +41,9 @@ from torchtitan.trainer import Trainer
 from torchtitan_recipes.data import c4_document_capacity
 
 from torchtitan_recipes.models.deepseek_v3 import (
-    _dist_moe_runtime_config,
-    _require_dist_moe,
     deepseek_v3_mxfp8_linear_converter_config,
 )
+from torchtitan_recipes.models.dist_moe import dist_moe_runtime_config, require_dist_moe
 
 
 def deepseek_v3_debugmodel(
@@ -264,7 +263,7 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
     parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
     """Build the debug BF16 Dist-MoE test recipe."""
-    _require_dist_moe()
+    require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_debugmodel(seq_len=seq_len, parallelism=parallelism)
@@ -277,7 +276,7 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
     )
     config.dataloader.max_num_documents = 512
     config.training.mixed_precision_reduce = "bfloat16"
-    config.dist_moe_runtime = _dist_moe_runtime_config(
+    config.dist_moe_runtime = dist_moe_runtime_config(
         scratch_capacity_factor=scratch_capacity_factor
     )
     return apply_transforms(config, [DistMoeTransform()])
@@ -290,7 +289,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
     parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
     """Build the debug MXFP8 Dist-MoE test recipe."""
-    dist_moe = _require_dist_moe()
+    dist_moe = require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_debugmodel(seq_len=seq_len, parallelism=parallelism)
@@ -306,7 +305,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
     )
     config.dataloader.max_num_documents = 512
     config.training.mixed_precision_reduce = "bfloat16"
-    config.dist_moe_runtime = _dist_moe_runtime_config(
+    config.dist_moe_runtime = dist_moe_runtime_config(
         scratch_capacity_factor=scratch_capacity_factor
     )
     return apply_transforms(
@@ -362,7 +361,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
 
 def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
     """Build the 16B BF16 Dist-MoE test recipe."""
-    _require_dist_moe()
+    require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_16b(seq_len=seq_len)
@@ -373,13 +372,13 @@ def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
     )
     config.dataloader.max_num_documents = 512
     config.training.mixed_precision_reduce = "bfloat16"
-    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(config, [DistMoeTransform()])
 
 
 def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config:
     """Build the 16B MXFP8 Dist-MoE test recipe."""
-    dist_moe = _require_dist_moe()
+    dist_moe = require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_16b(seq_len=seq_len)
@@ -393,7 +392,7 @@ def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config
     )
     config.dataloader.max_num_documents = 512
     config.training.mixed_precision_reduce = "bfloat16"
-    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(
         config,
         [

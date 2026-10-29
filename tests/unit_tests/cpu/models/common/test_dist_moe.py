@@ -21,7 +21,9 @@ import torchtitan.config.transform as transform_api
 import torchtitan.config.transform.quantization as quantization_transform
 import torchtitan_recipes.models.deepseek_v3 as eager_production_recipes
 import torchtitan_recipes.tests.models.deepseek_v3 as eager_test_recipes
+import torchtitan_recipes.tests.models.kimi_k3 as kimi_k3_test_recipes
 from torch.distributed.pipelining import PipelineStageInfo
+from torch.distributed.pipelining.schedules import Schedule1F1B, ScheduleGPipe
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW
 from torchtitan.config.configs import TrainingConfig
@@ -124,8 +126,10 @@ def _runtime() -> DistMoeRuntime:
     runtime.config = DistMoeRuntime.Config()
     runtime.context = Mock()
     runtime._num_local_input_tokens_per_call = None
+    runtime.context.activation_buffer = Mock()
     runtime._modules = ()
     runtime._closed = False
+    runtime._pending_overflow_check = None
     runtime._forward_context_handles = []
     runtime._metadata_inference_cleanup_handle = None
     runtime._set_forward_context = None
@@ -137,6 +141,27 @@ def _runtime() -> DistMoeRuntime:
         max_moe_layers_per_activation_slot=1,
     )
     return runtime
+
+
+def test_runtime_checks_planner_overflow_before_reuse() -> None:
+    """Runtime delegates the asynchronous capacity check to the annex."""
+    runtime = _runtime()
+    pending = object()
+    scratch_info = object()
+    runtime.context.activation_buffer.begin_check_overflow.return_value = pending
+    runtime.context.activation_buffer.finish_check_overflow.return_value = scratch_info
+
+    runtime.begin_overflow_check()
+    runtime.context.activation_buffer.begin_check_overflow.assert_called_once_with()
+    with pytest.raises(RuntimeError, match="already pending"):
+        runtime.begin_overflow_check()
+
+    assert runtime.finish_overflow_check() is scratch_info
+    runtime.context.activation_buffer.finish_check_overflow.assert_called_once_with(
+        pending
+    )
+    with pytest.raises(RuntimeError, match="no Dist-MoE overflow check"):
+        runtime.finish_overflow_check()
 
 
 class _NativePostprocess(Module):
@@ -224,6 +249,144 @@ def test_runtime_selects_pp_activation_slot_from_forward_context() -> None:
     )
 
 
+def test_runtime_scopes_pipeline_metadata_inference() -> None:
+    """Metadata mode spans backward recompute and clears on a real forward."""
+    runtime = _runtime()
+    metadata_info = PipelineStageInfo(
+        stage_index=0,
+        microbatch_index=0,
+        is_metadata_inference=True,
+    )
+    runtime_info = PipelineStageInfo(stage_index=0, microbatch_index=0)
+
+    assert not runtime.is_pipeline_metadata_inference
+    with runtime.forward_context(metadata_info):
+        assert runtime.is_pipeline_metadata_inference
+        runtime.context.select_activation_slot.assert_not_called()
+    assert runtime.is_pipeline_metadata_inference
+    with runtime.forward_context(runtime_info):
+        assert not runtime.is_pipeline_metadata_inference
+    assert not runtime.is_pipeline_metadata_inference
+    runtime.context.select_activation_slot.assert_called_once_with(0, 1)
+
+
+@pytest.mark.parametrize("graph_pp", [False, True])
+def test_runtime_registers_metadata_scope_for_both_pipeline_consumers(
+    graph_pp: bool,
+) -> None:
+    """Both schedule consumers bypass routing during metadata, then clear it."""
+    expert = DistMoeTransform().transform(_stock_config(dim=64)).build()
+    stage = Mock(stage_index=0, num_stages=2)
+    schedule = Schedule1F1B.__new__(Schedule1F1B)
+    schedule._stage = stage
+    schedule._n_microbatches = 2
+    schedule.register_post_metadata_inference_cleanup = Mock()
+    ep_mesh = Mock()
+    pp_mesh = Mock()
+    pp_mesh.get_local_rank.return_value = 0
+    meshes = {"ep": ep_mesh, "pp": pp_mesh}
+    parallelism_context = SimpleNamespace(
+        cp=1,
+        tp=1,
+        pp_enabled=True,
+        get_optional_mesh=lambda name, **kwargs: meshes[name],
+    )
+    setter = Mock() if graph_pp else None
+    registrar = (
+        Mock() if graph_pp else schedule.register_post_metadata_inference_cleanup
+    )
+    context = Mock()
+    slot_ids_S = torch.arange(2)
+    with (
+        patch(
+            "torchtitan.models.common.dist_moe.runtime.torch.cuda.get_device_capability",
+            return_value=(10, 0),
+        ),
+        patch(
+            "torchtitan.models.common.dist_moe.runtime.torch.arange",
+            return_value=slot_ids_S,
+        ),
+        patch(
+            "torchtitan.models.common.dist_moe.runtime.dist_moe.create_context",
+            return_value=context,
+        ),
+    ):
+        runtime = DistMoeRuntime(
+            DistMoeRuntime.Config(),
+            model_parts=[torch.nn.Sequential(expert)],
+            parallelism_context=parallelism_context,
+            device=torch.device("cuda"),
+            num_tokens_per_microbatch_per_dp_rank=128,
+            pp_schedule=schedule,
+            register_post_metadata_inference_cleanup=registrar if graph_pp else None,
+            set_forward_context=setter,
+        )
+    try:
+        stage.register_forward_context.assert_called_once_with(runtime.forward_context)
+        if setter is not None:
+            setter.assert_called_once_with(runtime.forward_context)
+        with runtime.forward_context(
+            PipelineStageInfo(
+                stage_index=0, microbatch_index=0, is_metadata_inference=True
+            )
+        ):
+            assert runtime.is_pipeline_metadata_inference
+        assert runtime.is_pipeline_metadata_inference
+        cleanup = registrar.call_args.args[0]
+        cleanup()
+        assert not runtime.is_pipeline_metadata_inference
+        context.reset.assert_called_once_with()
+        context.select_activation_slot.assert_not_called()
+        assert (
+            runtime.forward_context.resolve_activation_slot(
+                PipelineStageInfo(stage_index=0, microbatch_index=1)
+            ).data_ptr()
+            == slot_ids_S[1:].data_ptr()
+        )
+    finally:
+        runtime.close()
+
+
+def test_forward_bypasses_dist_moe_during_pipeline_metadata_inference() -> None:
+    """Uninitialized PP placeholders never enter capacity-bounded routing."""
+    module = cast(
+        DistMoeRoutedExperts, DistMoeTransform().transform(_stock_config()).build()
+    )
+    runtime = _runtime()
+    module._runtime = runtime
+    x_TD = torch.full((2, 32), torch.nan, requires_grad=True)
+    info = PipelineStageInfo(
+        stage_index=0,
+        microbatch_index=0,
+        is_metadata_inference=True,
+    )
+
+    with runtime.forward_context(info):
+        pass
+    with (
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.dist_moe.routed_experts"
+        ) as execute,
+        patch.object(module, "_weight_operands") as weight_operands,
+    ):
+        out_TD = module(
+            x_TD,
+            torch.empty(2, 2),
+            torch.empty(2, 2, dtype=torch.int64),
+            torch.empty(4, dtype=torch.int64),
+        )
+
+    assert out_TD.shape == x_TD.shape
+    assert out_TD.dtype == x_TD.dtype
+    assert out_TD.requires_grad
+    assert torch.count_nonzero(out_TD) == 0
+    out_TD.sum().backward()
+    assert x_TD.grad is not None
+    assert torch.count_nonzero(x_TD.grad) == 0
+    execute.assert_not_called()
+    weight_operands.assert_not_called()
+
+
 def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
     """Standard forward/backward setup supplies eager PP state to the runtime."""
     runtime = Mock()
@@ -250,7 +413,7 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
     engine.parallelism_context = SimpleNamespace(pp_enabled=True)
     runtime_schedule = SimpleNamespace()
     engine.pp_schedule = runtime_schedule
-    engine.device = torch.device("cuda")
+    engine.device = torch.device("cpu")
     engine._dist_moe_runtime = None
     engine._forward_backward_body = Mock()
 
@@ -361,14 +524,85 @@ def test_transform_propagates_plain_swiglu_to_annex_config() -> None:
     assert context_config.activation == "swiglu"
 
 
-def test_transform_rejects_unsupported_source_activation() -> None:
-    """Unsupported source semantics fail instead of silently changing."""
-    source = replace(
-        _stock_config(dim=64),
-        activation_fn=SiTUGLU.Config(),
+@pytest.mark.parametrize("expert_precision", ["bf16", "mxfp8"])
+@pytest.mark.parametrize("gate_beta, up_beta", [(4.0, 25.0), (3.5, 20.0)])
+def test_transform_preserves_situglu_configuration(
+    expert_precision: Literal["bf16", "mxfp8"],
+    gate_beta: float,
+    up_beta: float,
+) -> None:
+    """Both expert paths translate model bounds to the public SiTU-GLU API."""
+    stock = _stock_config(dim=64)
+    stock.activation_fn = SiTUGLU.Config(beta=gate_beta, linear_beta=up_beta)
+
+    transformed = DistMoeTransform(expert_precision=expert_precision).transform(stock)
+    assert isinstance(transformed, DistMoeRoutedExperts.Config)
+    assert transformed.activation == "situglu"
+    assert transformed.situglu_beta == gate_beta
+    assert transformed.situglu_linear_beta == up_beta
+
+    module = cast(DistMoeRoutedExperts, transformed.build())
+    context_config = _runtime()._resolve_context_config(
+        module,
+        max_num_local_input_tokens=128,
+        max_live_activation_slots=1,
+        max_moe_layers_per_activation_slot=2,
     )
-    with pytest.raises(TypeError, match="supports SwiGLU.Config or ClampedSwiGLU"):
-        DistMoeTransform().transform(source)
+    assert context_config.activation == "situ_glu"
+    assert context_config.situ_glu_gate_beta == gate_beta
+    assert context_config.situ_glu_up_beta == up_beta
+    assert (context_config.block_scaled is not None) == (expert_precision == "mxfp8")
+
+
+def test_transform_rejects_unbounded_situglu_up_projection() -> None:
+    """The annex SiTU-GLU contract requires both clipping bounds."""
+    stock = _stock_config()
+    stock.activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=None)
+
+    with pytest.raises(ValueError, match="requires linear_beta"):
+        DistMoeTransform().transform(stock)
+
+
+def test_runtime_plans_slots_for_ordinary_one_f_one_b() -> None:
+    """Ordinary 1F1B reuses warmup slots after their backward actions."""
+    module = DistMoeTransform().transform(_stock_config()).build()
+    schedule = Schedule1F1B.__new__(Schedule1F1B)
+    schedule._stage = SimpleNamespace(stage_index=1, num_stages=4)
+    schedule._n_microbatches = 8
+
+    plan = _runtime()._plan_pp_activation_slots(
+        schedule,
+        pp_rank=1,
+        model_parts=[torch.nn.Sequential(module)],
+    )
+
+    assert plan.max_live_activation_slots == 3
+    assert plan.max_moe_layers_per_activation_slot == 1
+    assert [
+        plan.activation_slot_id_by_stage_and_microbatch[(1, microbatch_index)]
+        for microbatch_index in range(8)
+    ] == [0, 1, 2, 0, 1, 2, 0, 1]
+
+
+def test_runtime_plans_slots_for_gpipe() -> None:
+    """GPipe keeps every microbatch forward live until backward begins."""
+    module = DistMoeTransform().transform(_stock_config()).build()
+    schedule = ScheduleGPipe.__new__(ScheduleGPipe)
+    schedule._stage = SimpleNamespace(stage_index=2, num_stages=4)
+    schedule._n_microbatches = 3
+
+    plan = _runtime()._plan_pp_activation_slots(
+        schedule,
+        pp_rank=2,
+        model_parts=[torch.nn.Sequential(module)],
+    )
+
+    assert plan.max_live_activation_slots == 3
+    assert plan.max_moe_layers_per_activation_slot == 1
+    assert [
+        plan.activation_slot_id_by_stage_and_microbatch[(2, microbatch_index)]
+        for microbatch_index in range(3)
+    ] == [0, 1, 2]
 
 
 @pytest.mark.parametrize("targets", [("w13",), ("w2",), ("w13", "w2")])
@@ -1006,6 +1240,38 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     assert config.dataloader.max_num_documents == max_documents
 
 
+@pytest.mark.parametrize(
+    ("factory", "expected_type"),
+    [
+        (
+            kimi_k3_test_recipes.kimi_k3_debugmodel_dist_moe_bf16,
+            DistMoeRoutedExperts.Config,
+        ),
+        (
+            kimi_k3_test_recipes.kimi_k3_debugmodel_dist_moe_mxfp8,
+            MXFP8DistMoeRoutedExperts.Config,
+        ),
+    ],
+)
+def test_kimi_k3_dist_moe_recipes_preserve_situglu(factory, expected_type) -> None:
+    """Kimi recipes select varlen attention and preserve SiTU-GLU bounds."""
+    config = factory(seq_len=128)
+    experts = list(config.model.traverse(DistMoeRoutedExperts.Config))
+
+    assert len(experts) == 16
+    assert all(type(expert) is expected_type for _, expert, _, _ in experts)
+    assert all(expert.activation == "situglu" for _, expert, _, _ in experts)
+    assert all(expert.situglu_beta == 4.0 for _, expert, _, _ in experts)
+    assert all(expert.situglu_linear_beta == 25.0 for _, expert, _, _ in experts)
+    assert isinstance(config.dist_moe_runtime, DistMoeRuntime.Config)
+    assert config.dist_moe_runtime.scratch_capacity_factor == 1.0
+    assert isinstance(
+        config.model.first_full_attention.inner_attention.inner_attention,
+        VarlenInnerAttention.Config,
+    )
+    assert config.activation_remat is None
+
+
 def test_eager_dist_moe_recipe_supports_accelerator_graphs_with_pipeline_parallelism():
     """The eager recipe accepts EP and PP while retaining CUDA graphs."""
     config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
@@ -1066,8 +1332,11 @@ def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
         (eager_production_recipes.deepseek_v3_671b_dist_moe_mxfp8, 64, 240),
     ],
 )
-def test_dist_moe_671b_recipe_topology(factory, dp_degree, num_microbatches) -> None:
+def test_dist_moe_671b_recipe_topology(
+    factory, dp_degree, num_microbatches, monkeypatch
+) -> None:
     """The verified recipes encode their exact PP/VPP/DP/EP batch contract."""
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     config = factory()
 
     assert config.parallelism.pipeline_parallel_degree == 4
