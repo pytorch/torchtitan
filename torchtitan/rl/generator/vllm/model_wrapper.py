@@ -14,7 +14,7 @@ TorchTitan models for vLLM.
 import copy
 import dataclasses
 from collections import defaultdict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any, cast
 
 import spmd_types as spmd
@@ -596,7 +596,7 @@ class VLLMModelWrapper(Module):
         return incompatible_keys
 
     def load_state_dict_direct(
-        self, fetch: Callable[[dict[str, torch.Tensor]], None]
+        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
     ) -> None:
         """Fetch new weights straight into `self.model`, one FSDP group at a time.
 
@@ -607,10 +607,10 @@ class VLLMModelWrapper(Module):
 
         Args:
             fetch: Fills each tensor of the given subset of `self.model.state_dict()`
-                in place with the new weights. Each group's sharded storage is
-                reallocated just before its fetch, so a fetch writing outside the
-                current stream (e.g. RDMA) must first wait for queued device work,
-                and must finish writing before it returns.
+                in place with the new weights and returns the keys it filled. Each
+                group's sharded storage is reallocated just before its fetch, so a
+                fetch writing outside the current stream (e.g. RDMA) must first wait
+                for queued device work, and must finish writing before it returns.
         """
         error = None
         for module, keyed_params in self._direct_load_groups:
@@ -622,17 +622,25 @@ class VLLMModelWrapper(Module):
             # all-gathers across the FSDP group and the other ranks are still loading.
             if error is None:
                 try:
-                    fetch(
-                        {
-                            key: fsdp_param.sharded_param
-                            for key, fsdp_param in keyed_params
-                        }
-                    )
+                    params = {
+                        key: fsdp_param.sharded_param
+                        for key, fsdp_param in keyed_params
+                    }
+                    # An unfilled parameter would load its just-reallocated,
+                    # uninitialized storage.
+                    missing = params.keys() - fetch(params)
+                    if missing:
+                        raise RuntimeError(
+                            f"fetch did not fill {len(missing)} weights, e.g. "
+                            f"{sorted(missing)[:5]}"
+                        )
                 except Exception as e:
                     error = e
             _unshard_and_free_sharded_params(module)
         if error is not None:
             raise error
+        # Buffers the trainer does not publish (e.g. vLLM attention scales) keep
+        # their values.
         if self._direct_load_other_keys:
             fetch(
                 {

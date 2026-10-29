@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -416,14 +416,14 @@ class VLLMEngine(GenerationEngine):
         self._maybe_reset_kv_cache()
 
     def load_model_state_dict_direct(
-        self, fetch: Callable[[dict[str, torch.Tensor]], None]
+        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
     ) -> None:
         """Fetch the model state dict straight into the model's weights, one FSDP group at a
         time, and reset the KV cache when configured.
 
         Args:
             fetch: Fills each tensor of the given subset of the model state dict in place
-                with the new weights.
+                with the new weights and returns the keys it filled.
         """
         self._get_model().load_state_dict_direct(fetch)
         self._maybe_reset_kv_cache()

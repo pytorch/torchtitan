@@ -546,7 +546,7 @@ def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
 @pytest.mark.parametrize("reset_kv_cache", [False, True])
 def test_load_model_state_dict_direct_fetches_into_the_model(reset_kv_cache: bool):
     def fetch(state_dict):
-        pass
+        return state_dict
 
     fetches = []
 
@@ -565,25 +565,24 @@ def test_load_model_state_dict_direct_fetches_into_the_model(reset_kv_cache: boo
     assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
 
 
-def _fetch_on_torchstore_loop(state_dict, get_state_dict, current_stream=None):
+def _fetch_on_torchstore_loop(state_dict, get_state_dict, current_stream):
     """Runs `Generator._fetch_model_state_dict` against a fake TorchStore loop thread."""
     torchstore_loop = asyncio.new_event_loop()
     thread = threading.Thread(target=torchstore_loop.run_forever)
     thread.start()
     generator = Generator.__new__(Generator)
     generator._torchstore_loop = torchstore_loop
-    current_stream = current_stream or Mock()
     try:
         with (
             patch.object(generator_module.ts, "get_state_dict", get_state_dict),
             patch.object(torch.cuda, "current_stream", current_stream),
         ):
-            generator._fetch_model_state_dict(state_dict)
+            fetched = generator._fetch_model_state_dict(state_dict)
     finally:
         torchstore_loop.call_soon_threadsafe(torchstore_loop.stop)
         thread.join()
         torchstore_loop.close()
-    return torchstore_loop, current_stream
+    return torchstore_loop, fetched
 
 
 def test_direct_fetch_runs_on_torchstore_loop():
@@ -597,7 +596,7 @@ def test_direct_fetch_runs_on_torchstore_loop():
         calls.append((asyncio.get_running_loop(), args, kwargs))
         return kwargs["user_state_dict"]
 
-    torchstore_loop, _ = _fetch_on_torchstore_loop(
+    torchstore_loop, fetched = _fetch_on_torchstore_loop(
         state_dict, get_state_dict, current_stream
     )
 
@@ -606,16 +605,7 @@ def test_direct_fetch_runs_on_torchstore_loop():
     assert args == ("model_state_dict",)
     assert kwargs["user_state_dict"] is state_dict
     assert kwargs["direct_rdma"] is False
-
-
-def test_direct_fetch_raises_on_missing_weights():
-    state_dict = {"weight": torch.zeros(2), "bias": torch.zeros(2)}
-
-    async def get_state_dict(*args, **kwargs):
-        return {"weight": kwargs["user_state_dict"]["weight"]}
-
-    with pytest.raises(RuntimeError, match="did not return 1 weights.*bias"):
-        _fetch_on_torchstore_loop(state_dict, get_state_dict)
+    assert fetched is state_dict
 
 
 def test_prefetch_model_state_dict_is_noop_with_fetch_to_gpu():
