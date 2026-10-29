@@ -250,7 +250,8 @@ comment, not in both.
 
 Omit empty sections. "Example" is always present unless the PR is trivial
 (typo, one-line config fix). If the description is missing a motivation or
-misstates the code, say so as the first must-fix item.
+the human-written summary, or misstates the code, say so as the first must-fix
+item.
 
 Verdict rules (match how maintainers use them):
 - **Approve**: the gate passed, every changed file was reviewed, and any
