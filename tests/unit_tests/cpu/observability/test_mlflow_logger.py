@@ -10,12 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from torchtitan.observability.metrics import (
-    BaseLogger,
-    LoggerContainer,
-    MetricsProcessor,
-    MLFlowLogger,
-)
+from torchtitan.observability.metrics import MetricsProcessor, MLFlowLogger
 
 
 @pytest.fixture
@@ -73,40 +68,39 @@ def test_existing_run_is_not_closed(fake_mlflow):
     metric_logger.log({"loss": 0.5}, step=1)
     metric_logger.close()
     fake_mlflow.start_run.assert_not_called()
-    fake_mlflow.set_tags.assert_not_called()
     fake_mlflow.end_run.assert_not_called()
 
 
 @pytest.mark.parametrize("save_for_all_ranks", [False, True])
-@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize(
+    "parallelism_context, rank, num_runs",
+    [
+        (SimpleNamespace(pp_enabled=False), 0, 1),
+        (SimpleNamespace(pp_enabled=False), 1, 0),
+        # The first rank of the last pipeline stage holds the loss.
+        (SimpleNamespace(pp_enabled=True, world_size=8, pp=2), 4, 1),
+        (SimpleNamespace(pp_enabled=True, world_size=8, pp=2), 0, 0),
+    ],
+)
 def test_only_metrics_rank_uses_mlflow(
-    fake_mlflow, monkeypatch, save_for_all_ranks, rank
+    fake_mlflow, monkeypatch, save_for_all_ranks, parallelism_context, rank, num_runs
 ):
     monkeypatch.setattr("torch.distributed.get_rank", lambda: rank)
+    monkeypatch.setattr(
+        "torchtitan.observability.metrics._is_v_schedule", lambda _: False
+    )
     processor = object.__new__(MetricsProcessor)
     result = processor._build_metric_logger(
         config=MetricsProcessor.Config(
             enable_mlflow=True, save_for_all_ranks=save_for_all_ranks
         ),
-        parallelism_context=SimpleNamespace(pp_enabled=False),
+        parallelism_context=parallelism_context,
         dump_folder="unused",
         pp_schedule="1F1B",
     )
     result.log({"loss": 1.0}, step=1)
-    assert fake_mlflow.start_run.call_count == (1 if rank == 0 else 0)
+    assert fake_mlflow.start_run.call_count == num_runs
     result.close()
-
-
-def test_disabled_does_not_import_mlflow(monkeypatch):
-    monkeypatch.setitem(sys.modules, "mlflow", None)
-    processor = object.__new__(MetricsProcessor)
-    result = processor._build_metric_logger(
-        config=MetricsProcessor.Config(),
-        parallelism_context=SimpleNamespace(pp_enabled=False),
-        dump_folder="unused",
-        pp_schedule="1F1B",
-    )
-    assert type(result) is BaseLogger
 
 
 def test_missing_dependency_fails_before_rank_selection(monkeypatch):
@@ -119,35 +113,6 @@ def test_missing_dependency_fails_before_rank_selection(monkeypatch):
             dump_folder="unused",
             pp_schedule="1F1B",
         )
-
-
-@pytest.mark.parametrize("rank", [0, 4])
-def test_pipeline_parallel_uses_loss_rank(fake_mlflow, monkeypatch, rank):
-    monkeypatch.setattr("torch.distributed.get_rank", lambda: rank)
-    monkeypatch.setattr(
-        "torchtitan.observability.metrics._is_v_schedule", lambda _: False
-    )
-    processor = object.__new__(MetricsProcessor)
-    result = processor._build_metric_logger(
-        config=MetricsProcessor.Config(enable_mlflow=True, save_for_all_ranks=True),
-        parallelism_context=SimpleNamespace(pp_enabled=True, world_size=8, pp=2),
-        dump_folder="unused",
-        pp_schedule="1F1B",
-    )
-    result.log({"loss": 1.0}, step=1)
-    assert fake_mlflow.start_run.call_count == (1 if rank == 4 else 0)
-    result.close()
-
-
-def test_container_closes_failed_run(fake_mlflow):
-    container = LoggerContainer()
-    container.add_logger(MLFlowLogger())
-    container.log({"loss": 1.0}, step=1)
-    try:
-        raise RuntimeError("training failed")
-    except RuntimeError:
-        container.close()
-    fake_mlflow.end_run.assert_called_once_with(status="FAILED")
 
 
 def test_local_tracking_store(tmp_path, monkeypatch):

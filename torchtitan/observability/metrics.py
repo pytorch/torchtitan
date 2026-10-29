@@ -561,6 +561,8 @@ class MetricsProcessor(Configurable):
             tensorboard_logger = TensorBoardLogger(base_log_dir, tag)
             logger_container.add_logger(tensorboard_logger)
 
+        # MLflow writes to a shared tracking server rather than per-rank files,
+        # so only the metrics rank logs to it, even with save_for_all_ranks.
         if config.enable_mlflow and torch.distributed.get_rank() == _get_metrics_rank(
             parallelism_context=parallelism_context, pp_schedule=pp_schedule
         ):
