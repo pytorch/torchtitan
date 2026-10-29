@@ -12,6 +12,7 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, OffloadPolicy
@@ -459,8 +460,10 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
         # - Replicated storage sends each update back to every holder, so its
         #   return layout differs from its receive layout, and parameters after
         #   it must still compute on their own inputs.
-        # - Fixed work on ranks 0-2 packs several chunks of each other parameter
-        #   onto rank 3, which must compute on the right rows.
+        # - Fixed work on ranks 0-2 sends chunks to rank 3 up to its element
+        #   cap. Every other parameter then has several chunks packed on one
+        #   rank, which must compute on the right rows; for blocks they are
+        #   its 4-row and 2-row chunks.
         mesh = init_device_mesh(
             self.device_type,
             (self.world_size,),
@@ -487,7 +490,7 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             "layers.0.b": (4, 6, 5),
             "layers.0.c": (4, 6, 5),
             "layers.0.fixed": (3, 64, 64),
-            "layers.0.blocks": (12, 6),
+            "layers.0.blocks": (6, 6),
         }
         torch.manual_seed(0)
         values = {
@@ -538,7 +541,10 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
                 shared_plan.redistribution_plans,
                 strict=True,
             )
-            if len(plan.compute_partition(self.world_size - 1).logical_regions) > 1
+            if any(
+                len(partition.logical_regions) > 1
+                for partition in plan.compute_partitions
+            )
         }
         self.assertEqual(
             packed, {"layers.0.a", "layers.0.b", "layers.0.c", "layers.0.blocks"}
@@ -552,14 +558,19 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
                     ).to_local()
                     (parameter.to_local() * local_gradient).sum().backward()
                 optimizer.step()
-        for fqn in storage_placements:
-            self.assertTrue(
-                torch.equal(
-                    shared_bucket[0][fqn].to_local(),
-                    per_parameter_buckets[0][fqn].to_local(),
-                ),
-                fqn,
+        mismatches = [
+            fqn
+            for fqn in storage_placements
+            if not torch.equal(
+                shared_bucket[0][fqn].to_local(),
+                per_parameter_buckets[0][fqn].to_local(),
             )
+        ]
+        # A wrong placement can corrupt only some ranks' shards; fail on every
+        # rank so the others don't wait in teardown.
+        mismatches_by_rank = [None] * self.world_size
+        dist.all_gather_object(mismatches_by_rank, mismatches)
+        self.assertFalse(any(mismatches_by_rank), mismatches_by_rank)
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
