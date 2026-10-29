@@ -514,8 +514,10 @@ def _build_pipeline_schedule(
         )
         schedule._load_csv(pp_schedule_csv)
 
-    # Metadata inference runs a real backward. Discard its unreduced FSDP
-    # gradients as well as the sharded gradients cleared by the stage.
+    # Chunked partial backwards preserve deferred-reduction policies during
+    # metadata inference, leaving unsharded gradients outside param.grad.
+    # TODO: Move this reset into PipelineStage's metadata cleanup.
+    # https://github.com/pytorch/torchtitan/pull/5563#discussion_r4404643236
     for stage in stages:
         if isinstance(stage.submod, FSDPModule):
             schedule.register_post_metadata_inference_cleanup(

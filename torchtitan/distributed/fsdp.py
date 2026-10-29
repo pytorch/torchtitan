@@ -49,7 +49,6 @@ def post_validate_fsdp_for_cuda_graph(model_parts: list[nn.Module]) -> None:
     A group containing norm and lm_head can still have norm pending. Validation
     has no backward callback to clear this state.
     """
-    # TODO: Use public FSDP APIs for grouped eval cleanup.
     for model in model_parts:
         for module in model.modules():
             if not isinstance(module, FSDPModule):

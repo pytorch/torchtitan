@@ -642,7 +642,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
         head gradients are already accumulated. The returned loss is a leaf
         whose backward accumulates only its own gradient.
         """
-        from torchtitan.distributed.fsdp_lifecycle import chunked_loss_fsdp
+        from torchtitan.distributed.fsdp_lifecycle import fsdp_partial_backwards
 
         num_chunks = self.num_chunks
         lm_head = self.lm_head
@@ -727,14 +727,14 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 )
             metrics: dict[str, torch.Tensor] = {}
 
-            with chunked_loss_fsdp(
+            with fsdp_partial_backwards(
                 lm_head,
                 run_backward=run_backward,
-                decoder_requires_grad=decoder_requires_grad,
+                outer_backward_follows=decoder_requires_grad,
             ) as fsdp:
                 for chunk_index in range(num_chunks):
-                    if fsdp is not None and chunk_index == num_chunks - 1:
-                        fsdp.before_last_chunk()
+                    if chunk_index == num_chunks - 1:
+                        fsdp.before_last_backward()
 
                     h_chunks = tuple(
                         chunks[chunk_index] for chunks in hidden_state_chunks_per_output
@@ -754,8 +754,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
                     # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
                     # fails at lm_head's hooks, which can't be traced.
                     logits: LossInput = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
-                    if fsdp is not None:
-                        logits = fsdp.after_forward(logits)
+                    logits = fsdp.after_forward(logits)
                     if not is_multi_output:
                         logits = logits[0]
                         label_chunks = label_chunks[0]
