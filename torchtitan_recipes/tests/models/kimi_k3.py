@@ -56,8 +56,8 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.tests.models.kimi_k2_7 import (
-    _align_dist_muon_expert_compute_layouts,
     _per_expert_compute_layout,
+    align_dist_muon_compute_layouts,
 )
 
 
@@ -131,13 +131,12 @@ def kimi_k3_debugmodel(
     )
 
 
-def _dist_muon_optimizer(
+def _dist_muon_compute_config(
     model_config: KimiK3Model.Config,
     *,
-    muon_lr: float,
-    adamw_lr: float,
     parallelism: ParallelismConfig,
-) -> OptimizersContainer.Config:
+) -> tuple[dict[str, ComputeLayout], tuple[BucketConfig, ...], str]:
+    """Build matrix layouts, transport buckets, and selection for the final model."""
     attention = cast(KimiMLAAttention.Config, model_config.first_full_attention)
     delta_attention = next(
         layer.attention
@@ -149,19 +148,32 @@ def _dist_muon_optimizer(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: Owned(),
             f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Owned(),
+            MeshAxisName.TP.value: Owned(),
         },
         compute_dtype=torch.bfloat16,
     )
 
     def blocks_of(*num_rows: int) -> ComputeLayout:
-        """A repeating BlockShard pattern with one Muon matrix per entry."""
+        """Preserve TP heads and redistribute their complete projections within DP."""
         return ComputeLayout(
             shardings_by_mesh_axis={
                 MeshAxisName.DP_SHARD.value: BlockShard(dim=0, block_sizes=num_rows),
                 f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": BlockShard(
                     dim=0, block_sizes=num_rows
                 ),
+                MeshAxisName.TP.value: BlockShard(dim=0, block_sizes=num_rows),
             },
+            shard_order_by_tensor_dim=(
+                {
+                    0: (
+                        MeshAxisName.TP.value,
+                        MeshAxisName.DP_SHARD.value,
+                        f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}",
+                    )
+                }
+                if parallelism.tensor_parallel_degree > 1
+                else {}
+            ),
             compute_dtype=torch.bfloat16,
         )
 
@@ -172,7 +184,19 @@ def _dist_muon_optimizer(
         # per head: [q_nope_h; q_rope_h]
         "wq_b": blocks_of(attention.qk_nope_head_dim, attention.qk_rope_head_dim),
         # one block: [kv_latent; k_rope]
-        "wkv_a": blocks_of(attention.kv_lora_rank, attention.qk_rope_head_dim),
+        # Shared KV/RoPE is TP-replicated, unlike the head-local projections.
+        "wkv_a": ComputeLayout(
+            shardings_by_mesh_axis={
+                axis: BlockShard(
+                    0, (attention.kv_lora_rank, attention.qk_rope_head_dim)
+                )
+                for axis in (
+                    MeshAxisName.DP_SHARD.value,
+                    f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}",
+                )
+            },
+            compute_dtype=torch.bfloat16,
+        ),
         # per head: [k_nope_h; v_h]
         "inner_attention.wkv_b": blocks_of(
             attention.qk_nope_head_dim, attention.v_head_dim
@@ -198,6 +222,7 @@ def _dist_muon_optimizer(
             shardings_by_mesh_axis={
                 MeshAxisName.DP_SHARD.value: Shard(0),
                 f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Shard(0),
+                MeshAxisName.TP.value: Shard(0),
             },
             compute_dtype=torch.bfloat16,
         ),
@@ -277,17 +302,34 @@ def _dist_muon_optimizer(
         non_routed_fqns = tuple(
             fqn for fqn in fqns if compute_sharding_by_fqn[fqn] is not per_expert
         )
-        bucket_configs.append(BucketConfig(name=name, patterns=non_routed_fqns))
+        if parallelism.tensor_parallel_degree > 1:
+            # Head-local and TP-replicated blocks use DP-only transport;
+            # whole matrices require the joint DP/TP group.
+            dp_only_fqns = tuple(
+                fqn
+                for fqn in non_routed_fqns
+                if any(
+                    type(sharding) is BlockShard
+                    for sharding in compute_sharding_by_fqn[
+                        fqn
+                    ].shardings_by_mesh_axis.values()
+                )
+            )
+            joint_fqns = tuple(
+                fqn for fqn in non_routed_fqns if fqn not in dp_only_fqns
+            )
+            bucket_configs.extend(
+                (
+                    BucketConfig(name=name, patterns=joint_fqns),
+                    BucketConfig(name=f"{name}.dp-only", patterns=dp_only_fqns),
+                )
+            )
+        else:
+            bucket_configs.append(BucketConfig(name=name, patterns=non_routed_fqns))
         if routed_fqns:
             bucket_configs.append(
                 BucketConfig(name=f"{name}.routed-experts", patterns=routed_fqns)
             )
-    adamw_kwargs = {
-        "lr": adamw_lr,
-        "betas": (0.9, 0.95),
-        "eps": 1e-8,
-        "weight_decay": 0.1,
-    }
     # Muon is designed for matrix parameters; AdamW handles non-matrix
     # parameters (RMSNorm, embeddings, LM head, biases, A_log, dt_bias, the
     # depthwise convolutions) and the degenerate matrices: beta's rows are
@@ -304,11 +346,24 @@ def _dist_muon_optimizer(
         r"feed_forward\.routed_(?:down|up)\.weight"
         r")$"
     )
+    return compute_sharding_by_fqn, tuple(bucket_configs), muon_pattern
+
+
+def _dist_muon_optimizer(
+    model_config: KimiK3Model.Config,
+    *,
+    muon_lr: float,
+    adamw_lr: float,
+    parallelism: ParallelismConfig,
+) -> OptimizersContainer.Config:
+    compute_sharding_by_fqn, bucket_configs, muon_pattern = _dist_muon_compute_config(
+        model_config, parallelism=parallelism
+    )
     return OptimizersContainer.Config(
         optimizers=[
             DistMuon.Config(
                 pattern=muon_pattern,
-                bucket_configs=tuple(bucket_configs),
+                bucket_configs=bucket_configs,
                 compute_sharding_by_fqn=compute_sharding_by_fqn,
                 lr=muon_lr,
                 weight_decay=0.1,
@@ -326,7 +381,10 @@ def _dist_muon_optimizer(
                 pattern=r".*",
                 foreach=True,
                 fused=False,
-                **adamw_kwargs,
+                lr=adamw_lr,
+                betas=(0.9, 0.95),
+                eps=1e-8,
+                weight_decay=0.1,
             ),
         ],
     )
@@ -336,20 +394,13 @@ def _dist_muon_optimizer(
 class _KimiK3TrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        self.optim.optimizer = _align_dist_muon_expert_compute_layouts(
-            self.optim.optimizer,
-            parallelism=self.parallelism,
+        self.optim = replace(
+            self.optim,
+            optimizer=align_dist_muon_compute_layouts(
+                self.optim.optimizer,
+                compute_config=_dist_muon_compute_config(
+                    cast(KimiK3Model.Config, self.model),
+                    parallelism=self.parallelism,
+                ),
+            ),
         )
-        # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
-        uses_dist_muon = any(
-            isinstance(config, DistMuon.Config)
-            for config in self.optim.optimizer.optimizers
-        )
-        if uses_dist_muon and self.parallelism.tensor_parallel_degree > 1:
-            # Fail during config parsing, before TP/FSDP creates _StridedShard
-            # storage. Recipes that need TP replace the optimizer.
-            raise ValueError(
-                "Kimi K3 DistMuon currently requires tensor_parallel_degree=1: "
-                "tensor parallelism can produce unsupported _StridedShard "
-                "parameter layouts."
-            )

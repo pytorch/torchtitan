@@ -9,11 +9,10 @@ from __future__ import annotations
 import logging
 import math
 import os
-import warnings
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 import torch.cuda.nccl
@@ -27,7 +26,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.distributed.parallelism_context import DistributedTopology, MeshAxisName
+from torchtitan.distributed.parallelism_context import DistributedTopology
 from torchtitan.tools.utils import device_module, device_type, get_local_device
 
 logger = logging.getLogger(__name__)
@@ -415,88 +414,199 @@ def configure_nccl_for_ulysses(
     logger.info("Using NCCL_GRAPH_REGISTER=0 for Ulysses on NCCL before 2.32.3.")
 
 
-def build_alternative_fsdp_mesh(
-    storage_mesh: DeviceMesh,
-    *,
-    max_ctas: int,
-) -> DeviceMesh:
-    """Build a storage-shaped mesh with NCCL CTA-capped FSDP shard groups.
+# TODO: Use public root/flatten APIs when available
+# (https://github.com/pytorch/pytorch/issues/159013).
+_RootKey = tuple[str, tuple[str, ...], tuple[int, ...], tuple[int, ...]]
+_TransportKey = tuple[_RootKey, tuple[str, ...], int]
 
-    The ``dp_shard`` and ``edp_shard`` axes get resource-independent child
-    communicators. Other axis groups, rank order, and mesh shape stay unchanged.
-    Call collectively and reuse the result across buckets: each call creates
-    new communicators rather than looking them up in a persistent cache.
 
-    Requires NCCL on the FSDP shard axes; other backends raise ``ValueError``.
-    The fake backend preserves its groups, with a warning unless a group has one
-    rank. A mesh without FSDP shard axes is returned unchanged with a warning
-    that the cap is not applied.
-    """
-    mesh_axis_names = storage_mesh.mesh_dim_names
-    if mesh_axis_names is None:
-        raise ValueError("Redistribution storage mesh must have named axes")
-    fsdp_shard_axes = {
-        MeshAxisName.DP_SHARD.value,
-        MeshAxisName.EDP_SHARD.value,
-    }
-    if fsdp_shard_axes.isdisjoint(mesh_axis_names):
-        warnings.warn(
-            "The storage mesh has no FSDP shard axes; max_ctas will not be applied",
-            stacklevel=2,
-        )
-        return storage_mesh
-
-    groups = []
-    replaced_group = False
-    for axis_name in mesh_axis_names:
-        parent_group = storage_mesh.get_group(axis_name)
-        if axis_name not in fsdp_shard_axes:
-            groups.append(parent_group)
-            continue
-
-        backend = dist.get_backend(parent_group)
-        if backend == "fake":
-            # A one-rank group, such as a size-1 dp_shard or edp_shard, has
-            # nothing to cap.
-            if storage_mesh[axis_name].size() != 1:
-                warnings.warn(
-                    "Redistribution max_ctas is not modeled by the fake process "
-                    "group; using the storage-mesh process group",
-                    stacklevel=2,
-                )
-            groups.append(parent_group)
-            continue
-        if backend != dist.Backend.NCCL:
-            raise ValueError(
-                "Redistribution max_ctas requires an NCCL process group, "
-                f"got {backend!r} for mesh axis {axis_name!r}"
-            )
-
-        options = dist.ProcessGroupNCCL.Options()
-        options.config.max_ctas = max_ctas
-        # Keep redistribution channels independent from the FSDP parent.
-        options.config.split_share = 0  # pyrefly: ignore [missing-attribute]
-        num_ranks = dist.get_world_size(parent_group)
-        child_group = dist.split_group(
-            parent_pg=parent_group,
-            split_ranks=[list(range(num_ranks))],
-            pg_options=options,
-            group_desc=f"optimizer_redistribution_{axis_name}",
-            backend="nccl",
-        )
-        assert isinstance(child_group, dist.ProcessGroup)
-        groups.append(child_group)
-        replaced_group = True
-
+def _root_key(root: DeviceMesh) -> _RootKey:
+    """Identify a named mesh root consistently across world ranks."""
     return (
-        DeviceMesh.from_group(
-            groups,
-            storage_mesh.device_type,
-            mesh=storage_mesh.mesh,
-            mesh_dim_names=mesh_axis_names,
+        root.device_type,
+        root.mesh_dim_names or (),
+        tuple(root.mesh.shape),
+        tuple(root.mesh.flatten().tolist()),
+    )
+
+
+def _transport_name(axes: tuple[str, ...], max_ctas: int | None) -> str:
+    """Return the native cache name for one transport and CTA policy."""
+    joined = "_".join(axes)
+    return joined if max_ctas is None else f"optimizer_{joined}_max_ctas_{max_ctas}"
+
+
+def _flatten_transport_mesh(
+    transport_mesh: DeviceMesh, max_ctas: int | None, backend: str
+) -> DeviceMesh:
+    """Use the root's native flatten cache, with a separate name for each cap."""
+    name = _transport_name(
+        cast(tuple[str, ...], transport_mesh.mesh_dim_names), max_ctas
+    )
+    if max_ctas is None:
+        return transport_mesh._flatten(name)
+    options = dist.ProcessGroupNCCL.Options()
+    options.config.max_ctas = max_ctas
+    cast(Any, options.config).split_share = 0
+    # Native flatten caches by name/layout, not backend options. Keep distinct
+    # caps distinct and avoid the existing-axis shortcut for a capped 1D mesh.
+    return transport_mesh._flatten(
+        name,
+        backend_override=(backend, options),
+    )
+
+
+def precreate_transport_meshes(
+    requests: Sequence[tuple[DeviceMesh, tuple[str, ...], int | None]],
+    *,
+    storage_meshes: Iterable[DeviceMesh],
+    validation_errors: Sequence[str] = (),
+) -> None:
+    """Create a WORLD-wide union using existing local storage-mesh views.
+
+    All WORLD ranks call in the same order, including ranks without requests.
+    Requests contain storage meshes, ordered axes, and optional positive NCCL
+    CTA caps. Two metadata exchanges agree on requests and validate local views
+    and native cache hits before any group is created. ``validation_errors``
+    lets the owning optimizer report local layout failures collectively.
+
+    Each requested root must cover WORLD, and ``storage_meshes`` must contain
+    an unambiguous view with its requested axes in root rank order on every rank.
+    Missing/unsorted views, conflicting roots, and inconsistent cache hits raise
+    ``ValueError`` on all ranks. Otherwise native ``DeviceMesh._flatten`` owns
+    group creation/reuse.
+    Supply precreated ``BucketConfig.mesh`` values for unsupported layouts or
+    unequal optimizer-construction sequences. Fake groups skip the exchange.
+    """
+    if dist.get_backend() == "fake":
+        if validation_errors:
+            raise ValueError("; ".join(validation_errors))
+        return
+    views = tuple(storage_meshes)
+    local_errors = list(validation_errors)
+    if any(cap is not None and cap <= 0 for _, _, cap in requests):
+        local_errors.append("Transport CTA caps must be positive when supplied")
+    local_requests: set[_TransportKey] = {
+        (_root_key(mesh._get_root_mesh()), axes, cap or 0)
+        for mesh, axes, cap in requests
+        if (len(axes) > 1 or cap is not None) and (cap is None or cap > 0)
+    }
+    gathered: list[Any] = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, (local_requests, tuple(local_errors)))
+    errors = sorted({error for _, rank_errors in gathered for error in rank_errors})
+    if errors:
+        raise ValueError("DistMuon transport preparation failed: " + "; ".join(errors))
+    union = sorted({request for requests, _ in gathered for request in requests})
+    if not union:
+        return
+    names = {(key, _transport_name(axes, cap or None)) for key, axes, cap in union}
+    if len(names) != len(union):
+        raise ValueError("Optimizer transport names must identify unique axis requests")
+
+    resolved = []
+    cache_hits = []
+    for key, axes, cap in union:
+        candidates = []
+        for mesh in views:
+            if _root_key(mesh._get_root_mesh()) != key or not all(
+                axis in (mesh.mesh_dim_names or ()) for axis in axes
+            ):
+                continue
+            try:
+                candidates.append(mesh[axes])
+            except (KeyError, ValueError, RuntimeError) as error:
+                errors.append(f"Cannot resolve transport view {axes!r}: {error}")
+        if not candidates or set(key[3]) != set(range(dist.get_world_size())):
+            errors.append(
+                f"Transport {axes!r} needs a WORLD-covering storage view on every "
+                "rank; supply precreated BucketConfig.mesh values"
+            )
+            continue
+        selected = candidates[0]
+        root = selected._get_root_mesh()
+        root_order = {rank: index for index, rank in enumerate(key[3])}
+        positions = [root_order[rank] for rank in selected.mesh.flatten().tolist()]
+        if positions != sorted(positions):
+            errors.append(
+                f"Transport {axes!r} must follow root rank order; "
+                "supply precreated BucketConfig.mesh values for unsorted views"
+            )
+        if any(
+            candidate._get_root_mesh() is not root or candidate != selected
+            for candidate in candidates[1:]
+        ):
+            errors.append(f"Ambiguous storage views for transport {axes!r}")
+        if cap and dist.get_backend(selected.get_group(0)) != "nccl":
+            errors.append("Transport CTA caps must be positive and require NCCL")
+        name = _transport_name(axes, cap or None)
+        if name in (root.mesh_dim_names or ()):
+            errors.append(f"Transport name {name!r} conflicts with a root axis")
+        try:
+            cached = root[name]
+        except KeyError:
+            cached = None
+            # An unsorted native cache entry exists but cannot be sliced.
+            try:
+                root.get_group(name)
+            except KeyError:
+                pass
+            else:
+                errors.append(
+                    f"Cannot resolve native cache layout for transport {axes!r}"
+                )
+        if cached is not None and not torch.equal(
+            cached.mesh.flatten(), selected.mesh.flatten()
+        ):
+            errors.append(f"Conflicting native cache layout for transport {axes!r}")
+        cache_hits.append(cached is not None)
+        resolved.append(selected)
+    dist.all_gather_object(gathered, (tuple(errors), tuple(cache_hits)))
+    errors = sorted({error for rank_errors, _ in gathered for error in rank_errors})
+    if errors:
+        raise ValueError("DistMuon transport preparation failed: " + "; ".join(errors))
+    if any(hits != gathered[0][1] for _, hits in gathered):
+        raise ValueError(
+            "Optimizer transport cache state must agree on every WORLD rank"
         )
-        if replaced_group
-        else storage_mesh
+    for selected, (_, axes, cap) in zip(resolved, union, strict=True):
+        build_transport_mesh(selected, axes, max_ctas=cap or None)
+
+
+def build_transport_mesh(
+    storage_mesh: DeviceMesh,
+    mesh_axis_names: tuple[str, ...],
+    *,
+    max_ctas: int | None = None,
+) -> DeviceMesh:
+    """Flatten storage axes into a native, cached optimizer transport mesh.
+
+    First creation is collective over the default process group: all ranks must
+    request the same axes and cap in the same order. Subsequent calls reuse the
+    root mesh's cached communicator, including across optimizer instances.
+    The returned 1D mesh uses the joined-axis name and logical storage order.
+
+    ``max_ctas`` must be positive when supplied and requires NCCL. It creates a
+    resource-independent capped communicator without modifying storage groups.
+    """
+    transport_mesh = storage_mesh[
+        mesh_axis_names[0] if len(mesh_axis_names) == 1 else mesh_axis_names
+    ]
+    axis_name = "_".join(mesh_axis_names)
+    if max_ctas is not None and max_ctas <= 0:
+        raise ValueError("max_ctas must be positive when supplied")
+    backend = dist.get_backend(transport_mesh.get_group(0))
+    if max_ctas is not None and backend != dist.Backend.NCCL:
+        raise ValueError(f"max_ctas requires NCCL, got {backend!r}")
+    flattened = _flatten_transport_mesh(transport_mesh, max_ctas, str(backend))
+    if max_ctas is None:
+        return flattened
+    # Rename only the logical axis, without constructing another communicator.
+    # The list-group form preserves logical mesh order independently of PG order.
+    return DeviceMesh.from_group(
+        [flattened.get_group()],
+        storage_mesh.device_type,
+        mesh=flattened.mesh,
+        mesh_dim_names=(axis_name,),
     )
 
 

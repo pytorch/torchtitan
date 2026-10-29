@@ -26,6 +26,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.components.optim.optimizer import DistMuon as ConfigurableDistMuon
 from torchtitan.components.optim.utils import (
     get_flat_optim_state_dict,
     init_optim_state,
@@ -45,7 +46,12 @@ from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
     DistMuon,
 )
-from torchtitan.distributed.utils import build_alternative_fsdp_mesh
+
+from torchtitan.distributed.utils import build_transport_mesh
+
+from tests.unit_tests.cpu.distributed.flex_shard.test_dist_muon_tp import (
+    TensorParallelParity,
+)
 
 
 pytestmark = pytest.mark.multi_gpu
@@ -62,7 +68,7 @@ class TestDistMuon(DTensorTestBase):
         return "cuda"
 
     @with_comms(eager_init=True)
-    def test_build_alternative_fsdp_mesh_creates_capped_nccl_group(self):
+    def test_build_transport_mesh_creates_capped_nccl_group(self):
         mesh = init_device_mesh(
             self.device_type,
             (1, self.world_size),
@@ -70,8 +76,36 @@ class TestDistMuon(DTensorTestBase):
         )
         parent_group = mesh.get_group("dp_shard")
         replicate_group = mesh.get_group("dp_replicate")
-        redistribution_mesh = build_alternative_fsdp_mesh(mesh, max_ctas=8)
+        parameter = nn.Parameter(
+            distribute_tensor(
+                torch.ones(4, 4, device=self.device_type),
+                mesh,
+                (Replicate(), Shard(0)),
+            )
+        )
+        optimizer = ConfigurableDistMuon.Config(
+            pattern=".*",
+            compute_sharding_by_fqn={
+                "matrix": ComputeLayout(
+                    {"dp_shard": Owned()}, compute_dtype=torch.bfloat16
+                )
+            },
+            bucket_configs=[BucketConfig(patterns=("matrix",))],
+            max_nccl_ctas_for_comms=8,
+        ).build(params=[{"params": [parameter], "param_names": ["matrix"]}])
+        redistribution_mesh = build_transport_mesh(mesh, ("dp_shard",), max_ctas=8)
         redistribution_group = redistribution_mesh.get_group("dp_shard")
+        self.assertIs(
+            optimizer._bucket_plans[0].group.process_group, redistribution_group
+        )
+        self.assertIs(
+            build_transport_mesh(mesh, ("dp_shard",), max_ctas=8).get_group(),
+            redistribution_group,
+        )
+        self.assertIsNot(
+            build_transport_mesh(mesh, ("dp_shard",), max_ctas=4).get_group(),
+            redistribution_group,
+        )
         redistribution_backend = redistribution_group._get_backend(
             torch.device(self.device_type, self.rank)
         )
@@ -84,7 +118,7 @@ class TestDistMuon(DTensorTestBase):
 
         self.assertIsNot(redistribution_group, parent_group)
         self.assertIs(
-            redistribution_mesh.get_group("dp_replicate"),
+            mesh.get_group("dp_replicate"),
             replicate_group,
         )
         self.assertEqual(
@@ -131,7 +165,7 @@ class TestDistMuon(DTensorTestBase):
             (1, self.world_size),
             mesh_dim_names=("dp_replicate", "dp_shard"),
         )
-        redistribution_mesh = build_alternative_fsdp_mesh(mesh, max_ctas=8)
+        redistribution_mesh = build_transport_mesh(mesh, ("dp_shard",), max_ctas=8)
         redistribution_group = redistribution_mesh.get_group("dp_shard")
         device = torch.device(self.device_type, self.rank)
 
@@ -719,6 +753,44 @@ class TestDistMuonCpuOffload(DTensorTestBase):
             torch.testing.assert_close(
                 host_param.to_local(), gpu_param.to_local().cpu(), rtol=0, atol=0
             )
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestDistMuonTensorParallel(DTensorTestBase, TensorParallelParity):
+    mesh_shape = (2, 2)
+
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_dp_tp_storage_matches_unsharded_update(self):
+        self._assert_storage_update()
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+class TestDistMuonTensorParallelTwoRank(DTensorTestBase, TensorParallelParity):
+    mesh_shape = (1, 2)
+
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_tp_storage_matches_unsharded_update(self):
+        self._assert_storage_update()
+
+    @with_comms
+    def test_tp_storage_matches_unsharded_update_in_cuda_graph(self):
+        self._assert_storage_update(capture_graph=True)
 
 
 instantiate_parametrized_tests(TestDistMuon)

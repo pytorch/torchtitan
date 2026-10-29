@@ -17,6 +17,7 @@ from torch.nn.attention.flex_attention import AuxRequest
 
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.attention import FlexInnerAttention, MLAAttention
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
@@ -48,18 +49,27 @@ class QKClipFlexInnerAttention(FlexInnerAttention):
             self.max_attention_logits_H.append(max_scores_1HT.amax(dim=(0, 2)).detach())
 
 
-def _replicated_scales(row_scales_R1: torch.Tensor, weight: DTensor) -> DTensor:
+def _distributed_row_scales(row_scales_R1: torch.Tensor, weight: DTensor) -> DTensor:
     """Represent per-row scales on the same distributed mesh as ``weight``.
 
-    The MAX all-reduce already leaves identical scales on every rank.
-    ``from_local`` records the scales as replicated without communication,
-    allowing DTensor dispatch to align them with the sharded rows. Using
-    ``distribute_tensor`` would add an unnecessary broadcast.
+    The MAX all-reduce leaves identical scales across DP and CP, but TP
+    records only its local heads. Preserve the TP row shard and replicate
+    over the reduction axes; DTensor aligns these rows with FSDP's storage
+    shards without broadcasting or gathering the head scales.
     """
+    mesh_dim_names = weight.device_mesh.mesh_dim_names
     return DTensor.from_local(
         row_scales_R1,
         weight.device_mesh,
-        tuple(Replicate() for _ in weight.placements),
+        # DP/CP scales stay replicated after MAX, even if FSDP shards weight rows.
+        tuple(
+            placement
+            if mesh_dim_names is not None
+            and mesh_dim_names[axis] == MeshAxisName.TP.value
+            and placement.is_shard(dim=0)
+            else Replicate()
+            for axis, placement in enumerate(weight.placements)
+        ),
         run_check=False,
     )
 
@@ -77,13 +87,9 @@ def _scale_mla_heads(
     """Scale the NoPE and remaining rows of every MLA head in place.
 
     Rows ``[h * rows_per_head, (h + 1) * rows_per_head)`` of ``weight`` belong to
-    head ``h``, and ``scales_H`` contains one scale per head. A zero
-    ``remaining_scale_exponent`` leaves the remaining rows unchanged.
+    head ``h``, and ``scales_H`` contains one scale per TP-local head. A
+    zero ``remaining_scale_exponent`` leaves the remaining rows unchanged.
     """
-    num_heads = scales_H.numel()
-    if weight.ndim != 2 or weight.shape[0] != num_heads * rows_per_head:
-        raise ValueError("QK clip scales do not match the MLA weight shape.")
-
     # One scale per row: Shard(0) can split a head across ranks when num_heads
     # is not a multiple of the shard count.
     row_scales_R1 = torch.cat(
@@ -95,7 +101,10 @@ def _scale_mla_heads(
         ],
         dim=1,
     ).view(-1, 1)
-    weight.mul_(_replicated_scales(row_scales_R1, weight))
+    distributed_scales_R1 = _distributed_row_scales(row_scales_R1, weight)
+    if weight.ndim != 2 or distributed_scales_R1.shape[0] != weight.shape[0]:
+        raise ValueError("QK clip scales do not match the MLA weight shape.")
+    weight.mul_(distributed_scales_R1)
 
 
 @torch.no_grad()

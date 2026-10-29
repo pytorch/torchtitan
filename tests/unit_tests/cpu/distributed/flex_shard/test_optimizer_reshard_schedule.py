@@ -14,6 +14,7 @@ from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
+from torchtitan.components.optim.optimizer import DistMuon as ConfigurableDistMuon
 from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
@@ -27,6 +28,19 @@ from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
 
 class TestMuonPlanConstruction(unittest.TestCase):
     _FQN = "layers.0.weight"
+
+    def test_ordered_block_shards_require_matching_patterns(self):
+        for other_sharding, message in (
+            (Shard(0), "cannot mix Shard and BlockShard"),
+            (BlockShard(0, (2, 4)), "equal BlockShard block-size sequences"),
+        ):
+            with self.subTest(sharding=other_sharding), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                ComputeLayout(
+                    {"dp_shard": BlockShard(0, (4, 2)), "tp": other_sharding},
+                    shard_order_by_tensor_dim={0: ("tp", "dp_shard")},
+                )
 
     def _make_1d_parameter(self) -> tuple[DeviceMesh, torch.nn.Parameter]:
         dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=2)
@@ -42,6 +56,22 @@ class TestMuonPlanConstruction(unittest.TestCase):
             )
         )
         return mesh, parameter
+
+    def test_wrapper_preserves_single_tensor_parameter_group(self):
+        mesh, parameter = self._make_1d_parameter()
+        with patch.object(_BucketedRedistributionRuntime, "reserve_buffers"):
+            optimizer = ConfigurableDistMuon.Config(
+                pattern=".*",
+                compute_sharding_by_fqn={
+                    self._FQN: ComputeLayout(
+                        {"dp_shard": BlockShard(0, (4,))},
+                        compute_dtype=torch.bfloat16,
+                    )
+                },
+                bucket_configs=[BucketConfig(patterns=(self._FQN,), mesh=mesh)],
+            ).build(params=[{"params": parameter, "param_names": [self._FQN]}])
+        self.assertEqual(len(optimizer.param_groups[0]["params"]), 1)
+        self.assertIs(optimizer.param_groups[0]["params"][0], parameter)
 
     def _build_single_parameter_optimizer(
         self,

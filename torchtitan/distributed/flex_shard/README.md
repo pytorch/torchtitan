@@ -50,14 +50,58 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   named DTensor parameters and plans their storage-to-compute transitions.
 
 Storage placements describe persistent ownership only; they do not define
-Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
-most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
-`Replicate`; every other non-unit storage mesh axis must be replicated.
+Muon matrix boundaries. Flat matrix-batch compute may use `BlockShard` on one
+or more non-unit mesh axes. Callers supply a mesh combining those axes into
+one optimizer transport group. FlexShard routes complete matrices across it and restores the
+original DTensor storage layout after the update. This supports combined DP
+and TP storage, including the strided shards produced when TP and FSDP shard
+the same tensor dimension. Non-transport mesh axes retain their storage
+placement.
 
 Native `[..., R, C]` parameters can redistribute `Replicate()`, a shard of the
 matrix-row dimension, or a shard of the matrix-column dimension to `Shard(0)`
 compute on one mesh axis, with every other non-unit storage mesh axis
-replicated.
+preserving its existing batch ownership. Changed matrix axes may also combine
+into one transport group; complete matrices are assigned across that group.
+For example, expert storage `Shard(0), Shard(1)` on DP/TP preserves each DP
+rank's expert range while TP redistributes matrix rows to whole-expert compute.
+
+`redistribution_mesh_axes(fqn, parameter, compute_layout)` queries the exact
+transport axes without communication. The caller creates the transport mesh
+and supplies it through `BucketConfig.mesh`; FlexShard validates its axis names,
+ranks, and logical rank order, then reuses the bound groups for initialization,
+updates, and checkpoint loading. It does not construct communicators or choose
+process-group options. A single-axis bucket with `mesh=None` uses the existing
+storage group. A combined transport requires an explicit 1D mesh with the
+joined name, such as `dp_shard_tp`.
+
+For example, create a whole-matrix DP/TP transport before constructing DistMuon:
+
+```python
+from torchtitan.distributed.utils import build_transport_mesh
+
+axes = redistribution_mesh_axes("matrix", parameter, compute_layout)
+transport_mesh = build_transport_mesh(parameter.device_mesh, axes)
+bucket = BucketConfig(patterns=("matrix",), mesh=transport_mesh)
+```
+
+The TorchTitan DistMuon wrapper builds these meshes before calling FlexShard.
+Its existing `max_nccl_ctas_for_comms` cap applies only to those optimizer
+communicators; FSDP continues to use the original groups. The builder lives in
+`torchtitan/distributed/utils.py` and uses native `DeviceMesh._flatten` caching,
+with a separate resource-independent NCCL communicator for each positive cap.
+Callers may instead supply a precreated mesh with their own process-group
+options; the wrapper requires its automatic cap to be disabled in that case.
+
+First native group creation requires all WORLD ranks to request the same axes
+and cap in the same order. The wrapper calls `precreate_transport_meshes` on a
+common transport union before binding local buckets, so uneven PP buckets do
+not desynchronize group creation. This requires the same wrapper-constructor
+sequence and WORLD-covering roots with the requested storage views on every
+rank. VPP chunks reuse the native cached groups. For unequal optimizer counts,
+missing expert views, partial roots, or unsorted views, the caller must create
+meshes collectively and supply explicit `BucketConfig.mesh` values. Direct
+FlexShard constructors perform no WORLD transport preparation.
 
 Several mesh axes may shard the same tensor dimension. By default they apply
 in storage-mesh order; `shard_order_by_tensor_dim` states a different order,
