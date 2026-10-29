@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -530,6 +531,7 @@ class GradAccumulator:
         self.num_chunks = num_chunks
         self.seq_dim = seq_dim
         self._next_idx = 0
+        self._next_offset = 0
         self.buffer = torch.zeros_like(reference, dtype=dtype)
 
     def add(self, chunk_grad: torch.Tensor) -> None:
@@ -544,7 +546,7 @@ class GradAccumulator:
             chunk_grad = chunk_grad.to(self.buffer.dtype)
 
         chunk_seq_len = chunk_grad.shape[self.seq_dim]
-        start = self._next_idx * chunk_seq_len
+        start = self._next_offset
         end = start + chunk_seq_len
 
         slices = [slice(None)] * self.buffer.ndim
@@ -552,6 +554,7 @@ class GradAccumulator:
         self.buffer[tuple(slices)] = chunk_grad
 
         self._next_idx += 1
+        self._next_offset = end
 
 
 class ChunkedLossWrapper(Loss[LossInput]):
@@ -568,9 +571,15 @@ class ChunkedLossWrapper(Loss[LossInput]):
     loss. Additional per-token ``loss_inputs`` are chunked along the same
     sequence dimension and forwarded to the inner loss.
 
+    With a ``loss_mask`` loss input (RL) and ``skip_non_loss_tokens``, only the
+    loss_mask tokens run the lm_head; the others get zero gradient:
+        T=16384, num_chunks=8, 2932 loss tokens -> 2 chunks of 1466 rows (else 8 of 2048)
+    The inner loss must read only loss_mask tokens (loss and metrics).
+
     The flow:
     1. Model forward with _skip_lm_head=True to get one or more hidden states [T, D]
-    2. Split each hidden state and its labels into N chunks along seq dim
+    2. Gather the loss_mask tokens (see above), then split each hidden state and its
+       labels into chunks along seq dim
     3. Detach each hidden-state chunk at the lm_head boundary
     4. Disable FSDP reshard on lm_head across all outputs and chunks
     5. For each chunk: lm_head on each output -> loss_fn(logits, labels, gvt) -> backward()
@@ -606,8 +615,15 @@ class ChunkedLossWrapper(Loss[LossInput]):
         loss_fn: Loss.Config = field(default_factory=CrossEntropyLoss.Config)
         """Loss applied to each chunk's logits."""
 
+        skip_non_loss_tokens: bool = True
+        """Run the lm_head only on tokens where ``loss_mask`` is True; the rest get zero
+        grad. Set False if the inner loss reads other tokens. No effect without a
+        ``loss_mask`` (pretraining, SFT), with multiple outputs (MTP), or with accelerator
+        graphs."""
+
     def __init__(self, config: Config):
         self.num_chunks = config.num_chunks
+        self.skip_non_loss_tokens = config.skip_non_loss_tokens
         self.loss_fn: Callable[..., LossResult] = config.loss_fn.build()
         self.lm_head: nn.Module | None = None
 
@@ -641,6 +657,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
         from torch.distributed._composable.fsdp import FSDPModule
 
         num_chunks = self.num_chunks
+        kept_indices = None
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
         if isinstance(pred, torch.Tensor) and isinstance(labels, torch.Tensor):
@@ -672,10 +689,12 @@ class ChunkedLossWrapper(Loss[LossInput]):
             and any(p.requires_grad for p in lm_head.parameters())
         )
 
-        # Chunking operates on the local tensor. Equal chunk sizes match
-        # GradAccumulator's sequential slice
-        # writes, which use one chunk length for each write offset.
+        # Chunking operates on the local tensor. The full sequence gets equal chunks, so
+        # its length must divide by num_chunks. The loss_mask block below may set
+        # kept_indices and lower num_chunks: the kept tokens get balanced chunks.
         def _chunk_local(t):
+            if kept_indices is not None:
+                return tuple(c.contiguous() for c in torch.tensor_split(t, num_chunks))
             seq_len = t.shape[0]
             torch._check(
                 seq_len % num_chunks == 0,
@@ -687,6 +706,42 @@ class ChunkedLossWrapper(Loss[LossInput]):
             )
 
         with spmd.local():
+            # Multi-output losses (MTP) keep every token: the extra outputs predict later
+            # tokens, so loss_mask doesn't mark their rows.
+            loss_mask = loss_inputs.get("loss_mask")
+            if (
+                self.skip_non_loss_tokens
+                and loss_mask is not None
+                and not is_multi_output
+            ):
+                num_tokens = loss_mask.shape[0]
+                # Check every microbatch: _chunk_local checks only the full sequence, which runs
+                # only when every token is a loss token, so a bad num_chunks would fail late.
+                torch._check(
+                    num_tokens % num_chunks == 0,
+                    lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
+                )
+                # nonzero waits for the forward to finish: one host sync per microbatch.
+                indices = loss_mask.nonzero().squeeze(1)
+                if indices.numel() == 0:
+                    # No loss tokens: run one masked row; its loss and grad are zero.
+                    indices = indices.new_zeros(1)
+                num_kept = indices.shape[0]
+                if num_kept < num_tokens:
+                    kept_indices = indices
+                    # Keep the chunk size, drop chunks: each chunk reads the whole [V, D] weight.
+                    num_chunks = math.ceil(num_kept * num_chunks / num_tokens)
+                    pred = (pred[0][kept_indices],)
+                    labels = (labels[0][kept_indices],)
+                    loss_inputs = {
+                        key: (
+                            value[kept_indices]
+                            if isinstance(value, torch.Tensor)
+                            else value
+                        )
+                        for key, value in loss_inputs.items()
+                    }
+
             # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
             # accumulates ``.grad`` for ``GradAccumulator``.
             hidden_state_chunks_per_output = tuple(

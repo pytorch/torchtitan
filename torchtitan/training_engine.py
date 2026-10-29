@@ -534,6 +534,14 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 ),
             )
             return
+        if isinstance(self.loss_fn, ChunkedLossWrapper):
+            # Graphs replay fixed shapes; the number of loss tokens changes per microbatch.
+            # GraphTrainingEngine overrides this method, but rejects per-microbatch loss
+            # inputs, so no loss_mask reaches the wrapper there.
+            self.loss_fn.skip_non_loss_tokens = False
+            logger.info(
+                "Accelerator graphs: ChunkedLossWrapper runs the lm_head on every token"
+            )
 
         def prepare_for_capture(microbatch_groups, global_loss_token_counts) -> None:
             """Prepare training PP metadata outside capture.
