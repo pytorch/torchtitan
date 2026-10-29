@@ -82,6 +82,11 @@ def test_parallelism_config_rejects_non_positive_layers_per_stage(
         ParallelismConfig(pipeline_parallel_layers_per_stage=layers_per_stage)
 
 
+def test_parallelism_config_rejects_startup_cache_release_without_pp() -> None:
+    with pytest.raises(ValueError, match="requires pipeline_parallel_degree > 1"):
+        ParallelismConfig(pipeline_parallel_empty_cache_before_first_backward=True)
+
+
 @pytest.mark.parametrize("scope", ["all", "dense"])
 def test_parallelism_config_accepts_fsdp_symm_mem_scopes(
     scope: FSDPSymmMemScope, monkeypatch: pytest.MonkeyPatch

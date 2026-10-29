@@ -306,6 +306,11 @@ def pipeline_hf_transformers(
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
     del training  # Only the core pipeline reads it, for static stage metadata.
+    if parallelism.pipeline_parallel_empty_cache_before_first_backward:
+        raise ValueError(
+            "HF Transformers pipeline stages do not support "
+            "pipeline_parallel_empty_cache_before_first_backward."
+        )
     pp_mesh = parallelism_context.get_mesh("pp")
 
     # Determine the number of virtual stages based on schedule type
