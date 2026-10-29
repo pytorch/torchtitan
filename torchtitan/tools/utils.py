@@ -63,9 +63,17 @@ def get_cuda_flash_attention_impl() -> str | None:
     return impl
 
 
+def is_rocm() -> bool:
+    """Whether this process runs on a ROCm device.
+
+    ROCm reuses ``torch.cuda`` and reports device type ``"cuda"``, so
+    ``torch.version.hip`` is the discriminator.
+    """
+    return torch.cuda.is_available() and torch.version.hip is not None
+
+
 def has_rocm_capability(major: int, minor: int) -> bool:
-    is_rocm = torch.cuda.is_available() and torch.version.hip is not None
-    return is_rocm and torch.cuda.get_device_capability() >= (
+    return is_rocm() and torch.cuda.get_device_capability() >= (
         major,
         minor,
     )

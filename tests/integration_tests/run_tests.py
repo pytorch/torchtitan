@@ -372,10 +372,14 @@ def run_single_test(
 
 def _filter_tests(
     args, test_list: list[IntegrationTestDefinition]
-) -> tuple[list[IntegrationTestDefinition], list[IntegrationTestDefinition]]:
-    """Filter tests by name, scope, disabled state, architecture, and GPU count.
+) -> tuple[
+    list[IntegrationTestDefinition],
+    list[IntegrationTestDefinition],
+    list[IntegrationTestDefinition],
+]:
+    """Filter tests by name, scope, filter rule, and GPU count.
 
-    Returns (runnable, skipped_due_to_ngpu).
+    Returns (runnable, skipped_due_to_ngpu, skipped_by_filter).
     """
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
@@ -383,6 +387,7 @@ def _filter_tests(
 
     runnable: list[IntegrationTestDefinition] = []
     skipped_ngpu: list[IntegrationTestDefinition] = []
+    skipped_filter: list[IntegrationTestDefinition] = []
     for test_flavor in test_list:
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -394,18 +399,16 @@ def _filter_tests(
             and not test_flavor.use_real_pg
         ):
             continue
-        if test_flavor.disabled or test_flavor.test_name in exclude_set:
+        if test_flavor.test_name in exclude_set:
             continue
-        if (
-            getattr(args, "gpu_arch_type", "cuda") == "rocm"
-            and test_flavor.skip_rocm_test
-        ):
+        if test_flavor.should_skip():
+            skipped_filter.append(test_flavor)
             continue
         if execution_mode != "fake_pg" and args.ngpu < test_flavor.ngpu:
             skipped_ngpu.append(test_flavor)
             continue
         runnable.append(test_flavor)
-    return runnable, skipped_ngpu
+    return runnable, skipped_ngpu, skipped_filter
 
 
 def run_tests(
@@ -414,7 +417,12 @@ def run_tests(
     parallel: bool = True,
 ):
     """Run all integration tests to test the core features of TorchTitan."""
-    runnable, skipped_ngpu = _filter_tests(args, test_list)
+    runnable, skipped_ngpu, skipped_filter = _filter_tests(args, test_list)
+    for test_flavor in skipped_filter:
+        logger.info(
+            f"Skipping test {test_flavor.test_name}: "
+            f"{test_flavor.filter_rule} condition is not met"
+        )
     for test_flavor in skipped_ngpu:
         logger.info(
             f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
@@ -510,7 +518,7 @@ def run_tests(
         )
 
     if not ran_any_test:
-        available_tests = [t.test_name for t in test_list if not t.disabled]
+        available_tests = [t.test_name for t in test_list]
         if hasattr(args, "test_suite"):
             logger.warning(
                 f"No tests were run for --test_name '{args.test_name}' in test suite '{args.test_suite}'.\n"

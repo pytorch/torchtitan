@@ -32,8 +32,12 @@ class IntegrationTestDefinition:
     test_descr: str = "default"
     test_name: str = "default"
     ngpu: int = 4
-    disabled: bool = False
-    skip_rocm_test: bool = False
+    filter_rule: str | None = None
+    """``"black_list"`` or ``"white_list"``; ``None`` means no filtering."""
+
+    condition: bool | None = None
+    """With ``"black_list"``, skip when true; with ``"white_list"``, skip
+    when false."""
     timeout: int | None = None
     golden_numerics_path: str | None = None
     """Run through loss_compare.py using this mode-specific golden path."""
@@ -63,6 +67,36 @@ class IntegrationTestDefinition:
                 f"{self.test_name} defines {len(self.entrypoints)} entrypoints "
                 f"for {len(self.configs)} configs"
             )
+        if self.condition is not None and not isinstance(self.condition, bool):
+            raise TypeError(
+                f"{self.test_name}: condition must be bool, "
+                f"got {type(self.condition).__name__}"
+            )
+        if self.filter_rule is not None and self.filter_rule not in (
+            "black_list",
+            "white_list",
+        ):
+            raise ValueError(
+                f"{self.test_name}: unknown filter_rule {self.filter_rule!r}"
+            )
+        if self.filter_rule is None:
+            if self.condition is not None:
+                raise ValueError(
+                    f"{self.test_name}: condition requires a filter_rule"
+                )
+        elif self.condition is None:
+            raise ValueError(
+                f"{self.test_name}: {self.filter_rule} requires a condition"
+            )
+
+    def should_skip(self) -> bool:
+        """Whether the filter rule excludes this test on the current backend."""
+        if self.filter_rule is None:
+            return False
+        matched = bool(self.condition)
+        if self.filter_rule == "black_list":
+            return matched
+        return not matched
 
     def entrypoint(self, index: int) -> str:
         """Return the module launched for ``configs[index]``."""
