@@ -11,7 +11,7 @@ from __future__ import annotations
 import heapq
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, cast, Literal, NoReturn, overload
 
@@ -991,8 +991,13 @@ def _resolve_muon_redistribution_plans(
             ns_steps_by_group=ns_steps_by_group,
         )
         cumulative_loads_by_participants[participants] = cumulative_loads
+        compute_groups = _balance_singleton_compute_groups(
+            context, ns_steps_by_group=ns_steps_by_group
+        )
         bucket_specs = []
-        for layout, owner_rank in zip(context.items, owner_ranks, strict=True):
+        for layout, owner_rank, compute_group in zip(
+            context.items, owner_ranks, compute_groups, strict=True
+        ):
             if layout.storage_is_compute_ready:
                 bucket_specs.append(None)
                 continue
@@ -1001,13 +1006,13 @@ def _resolve_muon_redistribution_plans(
                 tuple(layout.param.device_mesh.shape),
                 layout.storage_mesh_ranks,
                 layout.redistribution_storage_mesh_axis,
-                context.group.participants,
-                context.group.mesh_axis_participants,
+                compute_group.participants,
+                compute_group.mesh_axis_participants,
                 layout.compute_sharding,
                 owner_rank,
             )
             bucket_specs.append(spec)
-            unique_specs.setdefault(spec, (layout, context.group, owner_rank))
+            unique_specs.setdefault(spec, (layout, compute_group, owner_rank))
         specs_by_bucket.append(bucket_specs)
 
     plans_by_spec = {
@@ -1018,6 +1023,66 @@ def _resolve_muon_redistribution_plans(
         tuple(None if spec is None else plans_by_spec[spec] for spec in bucket)
         for bucket in specs_by_bucket
     )
+
+
+def _balance_singleton_compute_groups(
+    context: _BucketPlanningContext[_ParameterComputeLayout],
+    *,
+    ns_steps_by_group: Sequence[int],
+) -> tuple[_RedistributionGroup, ...]:
+    """Balance EP-local singleton expert batches over their E-FSDP ranks."""
+    participants = context.group.participants
+    groups = [context.group] * len(context.items)
+    if len(participants) == 1:
+        return tuple(groups)
+    candidates = []
+    loads = []
+    for index, layout in enumerate(context.items):
+        storage_axis = layout.redistribution_storage_mesh_axis
+        mesh_axis_names = layout.param.device_mesh.mesh_dim_names
+        if (
+            layout.storage_is_compute_ready
+            or type(layout.compute_sharding) is not Shard
+            or storage_axis is None
+            or mesh_axis_names is None
+            or mesh_axis_names[storage_axis] != "edp_shard"
+        ):
+            continue
+        storage_sharding = layout.param.placements[storage_axis]
+        if (
+            not isinstance(storage_sharding, Shard)
+            or storage_sharding.dim < layout.param.ndim - 2
+        ):
+            continue
+        local_shape, _ = _dtensor_storage_regions(
+            layout.param,
+            participants,
+            required_storage_mesh_axis=storage_axis,
+        )
+        if local_shape[0] != 1:
+            continue
+        candidates.append(index)
+        loads.append(
+            (
+                _estimate_muon_compute_cost(
+                    torch.Size(local_shape), ns_steps_by_group[layout.group_index]
+                ),
+                math.prod(local_shape) * layout.param.element_size(),
+                layout.fqn,
+            )
+        )
+    assignments, _ = _balance_loads_across_partitions(
+        loads, initial_cumulative_primary_loads=(0,) * len(participants)
+    )
+    for index, assignment in zip(candidates, assignments, strict=True):
+        owner = participants[assignment]
+        # Only shard zero is nonempty for a singleton batch.
+        shard_order = (owner,) + tuple(
+            rank for rank in context.group.mesh_axis_participants if rank != owner
+        )
+        # Keep transport participants unchanged; only reorder compute shards.
+        groups[index] = replace(context.group, mesh_axis_participants=shard_order)
+    return tuple(groups)
 
 
 def _assign_balanced_owner_ranks(
