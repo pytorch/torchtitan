@@ -65,6 +65,7 @@ from torchtitan_recipes.tests.models.llama3 import (
     sft_debugmodel,
 )
 from torchtitan_recipes.tests.models.muse_glimmer import muse_glimmer_debugmodel
+from torchtitan_recipes.tests.models.qwen3 import qwen3_debugmodel
 
 from tests.integration_tests import IntegrationTestDefinition
 
@@ -722,6 +723,27 @@ def llama3_debugmodel_fused_swiglu_tp2() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_higher_precision_rms_norm_tp2() -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=True)
+    config.override.imports = [
+        "torchtitan_recipes.overrides.higher_precision_rms_norm.higher_precision_rms_norm"
+    ]
+    config.parallelism.tensor_parallel_degree = 2
+    return config
+
+
+def qwen3_debugmodel_higher_precision_rms_norm_tp2() -> Trainer.Config:
+    # Qwen3 adds QK norms (RMSNorm over head_dim on head-sharded activations).
+    config = qwen3_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=True)
+    config.override.imports = [
+        "torchtitan_recipes.overrides.higher_precision_rms_norm.higher_precision_rms_norm"
+    ]
+    config.parallelism.tensor_parallel_degree = 2
+    return config
+
+
 def deepseek_v3_debugmodel_fused_swiglu_tp2_ep4() -> Trainer.Config:
     config = deepseek_v3_debugmodel(
         seq_len=2048,
@@ -1140,6 +1162,18 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             configs=[llama3_debugmodel_fused_swiglu_tp2],
             test_descr="Override: use Triton SwiGLU activation (FSDP2 + TP2)",
             test_name="override_fused_swiglu",
+            ngpu=4,
+        ),
+        IntegrationTestDefinition(
+            configs=[llama3_debugmodel_higher_precision_rms_norm_tp2],
+            test_descr="Override: use higher-precision RMSNorm (FSDP2 + TP2)",
+            test_name="override_higher_precision_rms_norm",
+            ngpu=4,
+        ),
+        IntegrationTestDefinition(
+            configs=[qwen3_debugmodel_higher_precision_rms_norm_tp2],
+            test_descr="Override: use higher-precision RMSNorm incl. QK norm on qwen3 (FSDP2 + TP2)",
+            test_name="override_higher_precision_rms_norm_qk_norm",
             ngpu=4,
         ),
         IntegrationTestDefinition(

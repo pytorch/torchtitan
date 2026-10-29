@@ -25,6 +25,7 @@ from torchtitan.models.common import (
     Embedding,
     FeedForward,
     HiMidLoLinear,
+    LimitedSwiGLU,
     Linear,
     MoE,
     RMSNorm,
@@ -401,10 +402,37 @@ def _make_v4_moe_config(
     n_hash_layers: int,
     route_norm: bool,
     route_scale: float,
+    swiglu_limit: float | None,
     load_balance_coeff: float,
     enable_sp: bool,
     enable_ep: bool,
 ):
+    routed_experts = make_routed_experts_config(
+        dim=dim,
+        hidden_dim=moe_inter_dim,
+        num_experts=num_experts,
+        top_k=top_k,
+        param_init=_depth_experts_init(layer_id),
+        enable_ep=enable_ep,
+    )
+    shared_experts = (
+        make_shared_expert_ffn_config(
+            dim=dim,
+            hidden_dim=moe_inter_dim * num_shared_experts,
+            w13_param_init=_LINEAR_INIT,
+            w2_param_init=_depth_init(layer_id),
+            enable_sp=enable_sp,
+        )
+        if num_shared_experts > 0
+        else None
+    )
+    if swiglu_limit is not None:
+        routed_experts.activation_fn = LimitedSwiGLU.Config(swiglu_limit=swiglu_limit)
+        if shared_experts is not None:
+            shared_experts.activation_fn = LimitedSwiGLU.Config(
+                swiglu_limit=swiglu_limit
+            )
+
     return MoE.Config(
         num_experts=num_experts,
         router=DeepSeekV4Router.Config(
@@ -428,25 +456,8 @@ def _make_v4_moe_config(
                 layer_id=layer_id, n_hash_layers=n_hash_layers
             ),
         ),
-        routed_experts=make_routed_experts_config(
-            dim=dim,
-            hidden_dim=moe_inter_dim,
-            num_experts=num_experts,
-            top_k=top_k,
-            param_init=_depth_experts_init(layer_id),
-            enable_ep=enable_ep,
-        ),
-        shared_experts=(
-            make_shared_expert_ffn_config(
-                dim=dim,
-                hidden_dim=moe_inter_dim * num_shared_experts,
-                w13_param_init=_LINEAR_INIT,
-                w2_param_init=_depth_init(layer_id),
-                enable_sp=enable_sp,
-            )
-            if num_shared_experts > 0
-            else None
-        ),
+        routed_experts=routed_experts,
+        shared_experts=shared_experts,
         load_balance_coeff=load_balance_coeff,
         sharding_config=moe_sharding_config(enable_sp=enable_sp),
     )
@@ -501,6 +512,7 @@ def _build_v4_layers(
     hc_eps: float = 1e-6,
     dense_hidden_dim: int | None = None,
     dense_layers: set[int] | None = None,
+    swiglu_limit: float | None = None,
     enable_sp: bool,
     enable_ep: bool,
 ) -> list[DeepSeekV4TransformerBlock.Config]:
@@ -556,6 +568,7 @@ def _build_v4_layers(
                 n_hash_layers=n_hash_layers,
                 route_norm=route_norm,
                 route_scale=route_scale,
+                swiglu_limit=swiglu_limit,
                 load_balance_coeff=load_balance_coeff,
                 enable_sp=enable_sp,
                 enable_ep=enable_ep,
@@ -894,6 +907,7 @@ def _deepseek_v4_flash(
     n_hash_layers = 3
     route_norm = True
     route_scale = 1.5
+    swiglu_limit = 10.0
     load_balance_coeff = 1e-3
     hc_mult = 4
     sinkhorn_iters = 20
@@ -942,6 +956,7 @@ def _deepseek_v4_flash(
         n_hash_layers=n_hash_layers,
         route_norm=route_norm,
         route_scale=route_scale,
+        swiglu_limit=swiglu_limit,
         load_balance_coeff=load_balance_coeff,
         rope=rope,
         rope_compress=rope_compress,
@@ -1040,6 +1055,7 @@ def _deepseek_v4_pro(
     n_hash_layers = 3
     route_norm = True
     route_scale = 2.5
+    swiglu_limit = 10.0
     load_balance_coeff = 1e-3
     hc_mult = 4
     sinkhorn_iters = 20
@@ -1088,6 +1104,7 @@ def _deepseek_v4_pro(
         n_hash_layers=n_hash_layers,
         route_norm=route_norm,
         route_scale=route_scale,
+        swiglu_limit=swiglu_limit,
         load_balance_coeff=load_balance_coeff,
         rope=rope,
         rope_compress=rope_compress,

@@ -67,7 +67,7 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
             ),
         )
 
-    def test_rejects_cp_backends_for_either_transform_order(self):
+    def test_supports_cp_backends_for_either_transform_order(self):
         for backend in (AllGatherKVMLAFlexAttention, UlyssesMLAAttention):
             for override_first in (False, True):
                 with self.subTest(
@@ -84,11 +84,13 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
                     if not override_first:
                         config = fused_mla(config)
 
-                    with self.assertRaisesRegex(
-                        ValueError,
-                        "does not support context parallelism.*Remove the fused_mla override",
-                    ):
-                        config.build()
+                    attention = config.build()
+                    self.assertIsInstance(attention, FusedMLAAttention)
+                    self.assertIsInstance(attention.inner_attention, backend)
+                    self.assertEqual(
+                        list(attention.state_dict()),
+                        list(self._attention_config().build().state_dict()),
+                    )
 
     def test_non_cp_backend_still_builds(self):
         config = fused_mla(self._attention_config())
