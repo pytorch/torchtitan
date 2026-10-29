@@ -50,6 +50,11 @@ def _replace_routed_experts(
             swiglu_alpha = None
             swiglu_limit = None
         elif isinstance(source.activation_fn, ClampedSwiGLU.Config):
+            if source.activation_fn.swiglu_offset != 1.0:
+                raise ValueError(
+                    "Dist-MoE clamped SwiGLU requires swiglu_offset=1.0; "
+                    f"got {source.activation_fn.swiglu_offset} at {fqn!r}"
+                )
             activation = "swiglu_clamped"
             swiglu_alpha = source.activation_fn.swiglu_alpha
             swiglu_limit = source.activation_fn.swiglu_limit

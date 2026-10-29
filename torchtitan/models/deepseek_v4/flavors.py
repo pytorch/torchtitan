@@ -20,12 +20,12 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.common import (
+    ClampedSwiGLU,
     ComplexRoPE,
     DenseFeedForward,
     Embedding,
     FeedForward,
     HiMidLoLinear,
-    LimitedSwiGLU,
     Linear,
     MoE,
     RMSNorm,
@@ -402,7 +402,7 @@ def _make_v4_moe_config(
     n_hash_layers: int,
     route_norm: bool,
     route_scale: float,
-    swiglu_limit: float | None,
+    swiglu_limit: float,
     load_balance_coeff: float,
     enable_sp: bool,
     enable_ep: bool,
@@ -426,12 +426,13 @@ def _make_v4_moe_config(
         if num_shared_experts > 0
         else None
     )
-    if swiglu_limit is not None:
-        routed_experts.activation_fn = LimitedSwiGLU.Config(swiglu_limit=swiglu_limit)
-        if shared_experts is not None:
-            shared_experts.activation_fn = LimitedSwiGLU.Config(
-                swiglu_limit=swiglu_limit
-            )
+    routed_experts.activation_fn = ClampedSwiGLU.Config(
+        swiglu_alpha=1.0, swiglu_limit=swiglu_limit, swiglu_offset=0.0
+    )
+    if shared_experts is not None:
+        shared_experts.activation_fn = ClampedSwiGLU.Config(
+            swiglu_alpha=1.0, swiglu_limit=swiglu_limit, swiglu_offset=0.0
+        )
 
     return MoE.Config(
         num_experts=num_experts,
@@ -504,6 +505,7 @@ def _build_v4_layers(
     n_hash_layers: int,
     route_norm: bool,
     route_scale: float,
+    swiglu_limit: float,
     load_balance_coeff: float,
     rope: RoPE.Config,
     rope_compress: RoPE.Config,
@@ -512,7 +514,6 @@ def _build_v4_layers(
     hc_eps: float = 1e-6,
     dense_hidden_dim: int | None = None,
     dense_layers: set[int] | None = None,
-    swiglu_limit: float | None = None,
     enable_sp: bool,
     enable_ep: bool,
 ) -> list[DeepSeekV4TransformerBlock.Config]:
@@ -761,6 +762,8 @@ def _debugmodel(
     n_hash_layers = 2
     route_norm = False
     route_scale = 1.5
+    # Match the published Flash/Pro clamping policy.
+    swiglu_limit = 10.0
     load_balance_coeff = 1e-3
     hc_mult = 4
     sinkhorn_iters = 20
@@ -809,6 +812,7 @@ def _debugmodel(
         n_hash_layers=n_hash_layers,
         route_norm=route_norm,
         route_scale=route_scale,
+        swiglu_limit=swiglu_limit,
         load_balance_coeff=load_balance_coeff,
         rope=rope,
         rope_compress=rope_compress,

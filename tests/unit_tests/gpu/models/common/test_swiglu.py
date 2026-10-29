@@ -43,22 +43,29 @@ class TestSwiGLULocalCompile(unittest.TestCase):
         self.assertTrue(any("sigmoid" in code for code in codes))
 
     def test_unbinds_inside_compiled_region(self):
-        for activation_fn in (
-            SwiGLU.Config().build(),
-            ClampedSwiGLU.Config().build(),
-            SiTUGLU.Config(beta=4.0, linear_beta=25.0).build(),
+        for config in (
+            SwiGLU.Config(),
+            ClampedSwiGLU.Config(),
+            ClampedSwiGLU.Config(
+                swiglu_alpha=1.0, swiglu_limit=10.0, swiglu_offset=0.0
+            ),
+            SiTUGLU.Config(beta=4.0, linear_beta=25.0),
         ):
-            with self.subTest(type(activation_fn).__name__):
+            with self.subTest(config=config):
+                activation_fn = config.build()
                 gate_up = torch.randn(
                     64, 2, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
                 )
                 output = activation_fn(gate_up)
-                # One edge, straight to gate_up. An eager unbind would give two
-                # UnbindBackward0 edges here: the node that stacks the two gradients.
-                next_functions = output.grad_fn.next_functions
+                # One differentiable edge, straight to gate_up. Scalar config
+                # inputs can add None edges; an eager unbind would add UnbindBackward0.
+                next_functions = [
+                    fn for fn, _ in output.grad_fn.next_functions if fn is not None
+                ]
                 self.assertEqual(
-                    [type(fn).__name__ for fn, _ in next_functions], ["AccumulateGrad"]
+                    [type(fn).__name__ for fn in next_functions], ["AccumulateGrad"]
                 )
+                self.assertIs(next_functions[0].variable, gate_up)
 
     def test_keeps_f_static_and_ignores_offsets(self):
         from torch._dynamo.utils import counters
@@ -196,6 +203,29 @@ class TestSwiGLULocalCompile(unittest.TestCase):
         torch.testing.assert_close(output, reference_output, rtol=2e-2, atol=1e-2)
         torch.testing.assert_close(grad_gate, reference_grad_gate, rtol=2e-2, atol=1e-2)
         torch.testing.assert_close(grad_up, reference_grad_up, rtol=2e-2, atol=1e-2)
+
+    def test_deepseek_v4_forward_and_backward_match_reference(self):
+        swiglu = ClampedSwiGLU.Config(
+            swiglu_alpha=1.0, swiglu_limit=2.0, swiglu_offset=0.0
+        ).build()
+        gate = (
+            10 * torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+        ).requires_grad_()
+        up = (10 * torch.randn_like(gate)).requires_grad_()
+        grad_output = torch.randn_like(gate)
+        output = swiglu(torch.stack((gate, up), dim=-2))
+        grads = torch.autograd.grad(output, (gate, up), grad_output)
+
+        reference_gate = gate.detach().clone().requires_grad_()
+        reference_up = up.detach().clone().requires_grad_()
+        reference_output = F.silu(reference_gate.clamp(max=2.0)) * reference_up.clamp(
+            min=-2.0, max=2.0
+        )
+        reference_grads = torch.autograd.grad(
+            reference_output, (reference_gate, reference_up), grad_output
+        )
+        torch.testing.assert_close(output, reference_output, rtol=2e-2, atol=1e-2)
+        torch.testing.assert_close(grads, reference_grads, rtol=2e-2, atol=1e-2)
 
     def test_grouped_offsets_match_reference(self):
         swiglu = SwiGLU.Config().build()
