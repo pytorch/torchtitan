@@ -10,12 +10,10 @@ import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
-from torchtitan.models import deepseek_v3, kimi_k2_7, kimi_k3, muse_spark
-from torchtitan.models.common.activation import Softmax
-from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
-from torchtitan.models.common.moe import BatchWiseLoadBalanceLoss, TokenChoiceTopKRouter
+from torchtitan.models import deepseek_v3, kimi_k2_7, kimi_k3, muse_spark, qwen3_5
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 
-TOKENS, DIM, NUM_EXPERTS = 256, 512, 64
+TOKENS = 256
 
 
 def _flavor_router(model_config) -> TokenChoiceTopKRouter:
@@ -30,10 +28,14 @@ def _flavor_router(model_config) -> TokenChoiceTopKRouter:
     return router
 
 
-# Sigmoid scores and route_norm; the tests pass an expert bias, as the MoE does.
+# Qwen3.5: softmax scores, route_norm and the batch-wise load-balance loss.
+# The others: sigmoid scores and route_norm; the tests pass an expert bias, as the MoE does.
 # DeepSeek-V3 671B also runs its group-limited top-k (8 expert groups, 4 kept) inside the region.
 # Kimi K3 picks 16 of 896 experts.
 FLAVOR_ROUTERS = {
+    "Qwen3.5-35B-A3B": lambda: _flavor_router(
+        qwen3_5.build_model_config("35B-A3B", parallelism=ParallelismConfig())
+    ),
     "DeepSeek-V3 671B": lambda: _flavor_router(
         deepseek_v3.build_model_config("671B", parallelism=ParallelismConfig())
     ),
@@ -84,72 +86,6 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
         router.zero_grad(set_to_none=True)
         return values
 
-    def test_router_matches_eager(self):
-        torch.manual_seed(0)
-        config = TokenChoiceTopKRouter.Config(
-            num_experts=NUM_EXPERTS,
-            gate=HiMidLoLinear.Config(
-                backward_mode="hi_mid_lo", in_features=DIM, out_features=NUM_EXPERTS
-            ),
-            score_func=Softmax.Config(),
-            top_k=8,
-            route_norm=True,
-            aux_loss=BatchWiseLoadBalanceLoss.Config(
-                coeff=1e-3, num_experts=NUM_EXPERTS
-            ),
-        )
-        with torch.device("cuda"):
-            router = config.build()
-        router.init_states(buffer_device=torch.device("cuda"))
-        with torch.no_grad():
-            router.gate.weight.normal_(std=0.02)
-        # bf16 gate weight as under FSDP mixed precision; buffers stay fp32.
-        router.gate.to(torch.bfloat16)
-        x = torch.randn(TOKENS, DIM, device="cuda", dtype=torch.bfloat16)
-
-        LocalCompileConfig(regions=[]).apply()
-        eager = self._run(router, x)
-        LocalCompileConfig(regions=["moe_router_topk", "moe_aux_loss"]).apply()
-        compiled = self._run(router, x)
-        # Default dtype-aware tolerances: ids, maps and counts must match exactly, and the
-        # compiled kernels may round bf16 grads one ulp differently.
-        for actual, expected in zip(compiled, eager, strict=True):
-            torch.testing.assert_close(actual, expected)
-
-    def test_scores_do_not_depend_on_batch_size(self):
-        """Bitwise: a token's router outputs at 1 and 34 tokens, and at 16k with grad on, equal its no-grad 16k outputs."""
-        torch.manual_seed(0)
-        config = TokenChoiceTopKRouter.Config(
-            num_experts=256,
-            gate=HiMidLoLinear.Config(in_features=DIM, out_features=256),
-            score_func=Softmax.Config(),
-            top_k=8,
-            route_norm=True,
-        )
-        with torch.device("cuda"):
-            router = config.build().eval()
-        LocalCompileConfig(regions=["moe_router_topk"]).apply()
-        gate_TE = torch.randn(16384, 256, device="cuda")
-        # The trainer's graph first, as in training: grad on and a static 16k shape, so the
-        # compiled forward also saves tensors for backward.
-        trainer_outputs = router._score_and_select_experts(
-            gate_TE.detach().requires_grad_(), None, padding_mask_T=None
-        )
-        with torch.no_grad():
-            # The generator's compile order: 16384 (static), 14336 (T turns dynamic), then
-            # decode; Dynamo gives T=1 its own graph.
-            outputs = {
-                n: router._score_and_select_experts(
-                    gate_TE[:n].contiguous(), None, padding_mask_T=None
-                )
-                for n in (16384, 14336, 34, 1)
-            }
-        for n in (34, 1):
-            for actual, expected in zip(outputs[n], outputs[16384], strict=True):
-                self.assertTrue(torch.equal(actual, expected[:n]))
-        for actual, expected in zip(trainer_outputs, outputs[16384], strict=True):
-            self.assertTrue(torch.equal(actual.detach(), expected))
-
     def test_flavor_routers_match_eager(self):
         """Full-size flavor routers: compiled fwd + bwd matches eager."""
         for flavor, build_router in FLAVOR_ROUTERS.items():
@@ -161,7 +97,7 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                 expert_bias_E = 1e-3 * torch.randn(router.num_experts, device="cuda")
                 LocalCompileConfig(regions=[]).apply()
                 eager = self._run(router, x, expert_bias_E=expert_bias_E)
-                LocalCompileConfig(regions=["moe_router_topk"]).apply()
+                LocalCompileConfig(regions=["moe_router_topk", "moe_aux_loss"]).apply()
                 compiled = self._run(router, x, expert_bias_E=expert_bias_E)
                 torch._dynamo.reset()
                 for actual, expected in zip(compiled, eager, strict=True):
@@ -174,7 +110,7 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                     self.assertLess((error_l2 / expected.float().norm()).item(), 1e-3)
 
     def test_flavor_router_scores_do_not_depend_on_batch_size(self):
-        """Full-size flavor routers: a token's routing is the same at 1-256 tokens and 16k."""
+        """Bitwise: a token's router outputs at 1-256 tokens, and at 16k with grad on, equal its no-grad 16k outputs."""
         for flavor, build_router in FLAVOR_ROUTERS.items():
             with self.subTest(flavor):
                 torch.manual_seed(0)
@@ -182,8 +118,15 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                 LocalCompileConfig(regions=["moe_router_topk"]).apply()
                 gate_TE = torch.randn(16384, router.num_experts, device="cuda")
                 expert_bias_E = 1e-3 * torch.randn(router.num_experts, device="cuda")
+                # The trainer's graph first, as in training: grad on and a static 16k shape, so the
+                # compiled forward also saves tensors for backward.
+                trainer_outputs = router._score_and_select_experts(
+                    gate_TE.detach().requires_grad_(),
+                    expert_bias_E=expert_bias_E,
+                    padding_mask_T=None,
+                )
                 with torch.no_grad():
-                    # Largest first, as the generator compiles.
+                    # Largest first, as the generator compiles; T turns dynamic at 256.
                     outputs = {
                         n: router._score_and_select_experts(
                             gate_TE[:n].contiguous(),
@@ -198,6 +141,10 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                         outputs[n], outputs[16384], strict=True
                     ):
                         self.assertTrue(torch.equal(actual, expected[:n]))
+                for actual, expected in zip(
+                    trainer_outputs, outputs[16384], strict=True
+                ):
+                    self.assertTrue(torch.equal(actual.detach(), expected))
 
 
 if __name__ == "__main__":
