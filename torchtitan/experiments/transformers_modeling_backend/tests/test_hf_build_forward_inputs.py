@@ -85,6 +85,10 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     expected_permutation = object()
 
     class TestLoadBalancer(ContextParallelLoadBalancer):
+        @property
+        def max_num_fragments(self):
+            return 2
+
         def generate_permutation(self):
             calls.append("permutation")
             return expected_permutation
@@ -98,8 +102,9 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         calls.append("cp_input")
         return input_dict
 
-    def prepare_cp_metadata(attention_metadata, *, permutation):
+    def prepare_cp_metadata(attention_metadata, *, permutation, max_num_fragments):
         assert permutation is expected_permutation
+        assert max_num_fragments == 2
         calls.append("cp_metadata")
         return attention_metadata
 

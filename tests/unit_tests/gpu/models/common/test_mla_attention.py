@@ -101,7 +101,7 @@ class TestMLAAttentionSharding(DTensorTestBase):
                 if backend is AllGatherKVMLAFlexAttention:
                     with parallelism_context.activate_spmd():
                         metadata = backend.prepare_cp_metadata(
-                            metadata, permutation=None
+                            metadata, permutation=None, max_num_fragments=1
                         )
 
                 def run(typechecking, save=None, recompute=()):
