@@ -1171,6 +1171,35 @@ def test_packing_splits_positioned_long_documents(packing_type):
     assert real_input_ids == list(range(14))
 
 
+def test_concat_then_split_wraps_positioned_long_documents():
+    """Without max_num_documents, processor positions longer than the context
+    restart every max_context_length tokens, the same as missing positions."""
+
+    def pack(row):
+        documents = SingleDatasetConfig(
+            source=RowsSourceConfig(rows=(row,)),
+            processor=RowToTokens.Config(),
+        )
+        context = replace(CONTEXT, max_context_length=4, num_tokens_per_microbatch=8)
+        return list(
+            ConcatThenSplitPackingConfig(dataset=documents).build(
+                context=context,
+                dataset_iteration_policy=dataset_iteration_policy(
+                    shuffle=False, repeat=False
+                ),
+            )
+        )
+
+    positioned = pack({"tokens": list(range(17)), "positions": list(range(16))})
+    unpositioned = pack({"tokens": list(range(17))})
+
+    assert len(positioned) == len(unpositioned) == 2
+    for row, expected in zip(positioned, unpositioned, strict=True):
+        np.testing.assert_array_equal(row.positions, [0, 1, 2, 3, 0, 1, 2, 3])
+        np.testing.assert_array_equal(row.positions, expected.positions)
+        np.testing.assert_array_equal(row.input_ids, expected.input_ids)
+
+
 def test_first_fit_num_packing_bins_is_independent_of_token_budget(monkeypatch):
     captured = {}
 
