@@ -960,10 +960,18 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         """Signal that one training-loop iteration has completed."""
         self.profiler.step()
 
-    def close_profiler(self) -> None:
-        """Close the profiler if it was started."""
+    def close_profiler(self, exc: BaseException | None = None) -> None:
+        """Close the profiler if it was started.
+
+        Args:
+            exc: The exception that ended training, if any. It is passed to
+                ``Profiler.__exit__`` so an OOM writes the exit memory snapshot.
+        """
         if hasattr(self, "profiler"):
-            self.profiler.__exit__(None, None, None)
+            if exc is None:
+                self.profiler.__exit__(None, None, None)
+            else:
+                self.profiler.__exit__(type(exc), exc, exc.__traceback__)
             del self.profiler
 
     def close(self) -> None:
