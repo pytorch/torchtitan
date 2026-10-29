@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import abc
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import torch
@@ -95,14 +95,14 @@ class GenerationEngine(Configurable, abc.ABC):
         configured."""
 
     def load_model_state_dict_direct(
-        self, fetch: Callable[[dict[str, torch.Tensor]], None]
+        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
     ) -> None:
         """Load a model state dict by having ``fetch`` fill the model's weights in place, and
         reset the KV cache when configured. Used with ``fetch_model_state_dict_to_gpu``.
 
         Args:
             fetch: Fills each tensor of the given subset of the model state dict in place
-                with the new weights.
+                with the new weights and returns the keys it filled.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support fetch_model_state_dict_to_gpu"

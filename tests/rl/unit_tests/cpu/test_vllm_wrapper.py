@@ -297,13 +297,14 @@ def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> No
 
         fetched_keys = []
 
-        def fetch(state_dict: dict[str, torch.Tensor]) -> None:
+        def fetch(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
             fetched_keys.append(sorted(state_dict))
             # Only the fetched group may hold sharded buffers.
             assert sum(map(is_allocated, groups)) <= 1
             with torch.no_grad():
                 for key, tensor in state_dict.items():
                     tensor.copy_(new_state_dict[key])
+            return state_dict
 
         wrapper.load_state_dict_direct(fetch)
 
@@ -318,6 +319,47 @@ def test_load_state_dict_direct_fetches_one_fsdp_group_at_a_time(tmp_path) -> No
         for name, param in model.named_parameters(remove_duplicate=False):
             assert param.equal(new_state_dict[name].to_local()), name
         assert model.scale.equal(new_state_dict["scale"])
+    finally:
+        dist.destroy_process_group()
+
+
+def test_load_state_dict_direct_requires_every_param(tmp_path) -> None:
+    """Raise when fetch skips a parameter, whose storage was just reallocated; an
+    unfilled buffer (e.g. a vLLM attention scale the trainer does not publish) keeps
+    its value."""
+    dist.init_process_group(
+        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
+    )
+    try:
+        model = nn.Module()
+        model.layers = nn.ModuleList(nn.Linear(4, 4) for _ in range(2))
+        model.register_buffer("scale", torch.ones(4))
+        mesh = init_device_mesh("cpu", (1,))
+        for block in model.layers:
+            fully_shard(block, mesh=mesh, reshard_after_forward=False)
+        fully_shard(model, mesh=mesh, reshard_after_forward=False)
+        model.set_keep_unsharded_storage(True)
+        wrapper = _Wrapper(model)
+        (
+            wrapper._direct_load_groups,
+            wrapper._direct_load_other_keys,
+        ) = model_wrapper._direct_load_groups(model)
+        for module in model.modules():  # as after the initial load
+            if isinstance(module, FSDPModule):
+                model_wrapper._unshard_and_free_sharded_params(module)
+
+        def fetch_published(published: set[str]):
+            def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+                return [key for key in state_dict if key in published]
+
+            return fetch
+
+        params = {name for name, _ in model.named_parameters()}
+        wrapper.load_state_dict_direct(fetch_published(params))
+        assert model.scale.equal(torch.ones(4))
+
+        with pytest.raises(RuntimeError, match="did not fill 1 weights.*layers.1.bias"):
+            wrapper.load_state_dict_direct(fetch_published(params - {"layers.1.bias"}))
     finally:
         dist.destroy_process_group()
 
@@ -370,10 +412,13 @@ class TestLoadStateDictDirectTwoRanks(DTensorTestBase):
         for version in (1, 2):
             new_state_dict = {k: v + version for k, v in initial_state_dict.items()}
 
-            def fetch(state_dict: dict[str, torch.Tensor]) -> None:
+            def fetch(
+                state_dict: dict[str, torch.Tensor],
+            ) -> dict[str, torch.Tensor]:
                 with torch.no_grad():
                     for key, tensor in state_dict.items():
                         tensor.copy_(new_state_dict[key])
+                return state_dict
 
             wrapper.load_state_dict_direct(fetch)
 
@@ -406,10 +451,11 @@ class TestLoadStateDictDirectTwoRanks(DTensorTestBase):
                 model_wrapper._unshard_and_free_sharded_params(module)
         fetched_keys = []
 
-        def fetch(state_dict: dict[str, torch.Tensor]) -> None:
+        def fetch(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
             fetched_keys.append(sorted(state_dict))
             if self.rank == 1:
                 raise RuntimeError("fetch failed")
+            return state_dict
 
         if self.rank == 1:
             with self.assertRaisesRegex(RuntimeError, "fetch failed"):

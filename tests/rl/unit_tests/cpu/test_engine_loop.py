@@ -971,8 +971,8 @@ class _DirectLoadEngine(_FakeEngine):
         fetch({})
 
 
-def _fetch_nothing(weights: dict) -> None:
-    pass
+def _fetch_nothing(weights: dict) -> dict:
+    return weights
 
 
 def test_direct_load_replies_only_after_every_rank_finished_reading(

@@ -14,7 +14,7 @@ import enum
 import gc
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TypeVar
 
@@ -139,7 +139,8 @@ class EngineLoop:
         broadcast_group: dist.ProcessGroup,
         max_engine_steps_between_decisions: int,
         reset_kv_cache_on_model_state_dict_load: bool,
-        fetch_model_state_dict: Callable[[dict[str, torch.Tensor]], None] | None = None,
+        fetch_model_state_dict: Callable[[dict[str, torch.Tensor]], Iterable[str]]
+        | None = None,
     ):
         self._engine: GenerationEngine | None = engine
         self._fetch_model_state_dict = fetch_model_state_dict
@@ -506,7 +507,7 @@ class EngineLoop:
         gc.collect()
 
     async def _load_model_state_dict_direct(
-        self, fetch: Callable[[dict[str, torch.Tensor]], None]
+        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
     ) -> None:
         """ALL RANKS: fetch the model state dict into the engine's weights, then wait for
         every rank to finish reading.

@@ -12,7 +12,7 @@ import asyncio
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -482,8 +482,12 @@ class Generator(Configurable):
             direct_rdma=False,
         )
 
-    def _fetch_model_state_dict(self, state_dict: dict[str, torch.Tensor]) -> None:
+    def _fetch_model_state_dict(
+        self, state_dict: dict[str, torch.Tensor]
+    ) -> Iterable[str]:
         """Read `state_dict`'s weights in place from the StorageVolume snapshot.
+
+        Returns the keys read; strict=False skips unpublished keys.
 
         Called on the engine loop thread during a load; blocks it while the read runs
         on the TorchStore client's event loop.
@@ -491,7 +495,7 @@ class Generator(Configurable):
         # The read writes outside the current stream; wait for queued work that
         # still uses state_dict's storage, e.g. its reallocation.
         torch.cuda.current_stream().synchronize()
-        fetched = asyncio.run_coroutine_threadsafe(
+        return asyncio.run_coroutine_threadsafe(
             ts.get_state_dict(
                 "model_state_dict",
                 user_state_dict=state_dict,
@@ -500,14 +504,6 @@ class Generator(Configurable):
             ),
             self._torchstore_loop,
         ).result()
-        # strict=False skips unpublished keys; a skipped key would load its
-        # just-reallocated, uninitialized storage.
-        missing = state_dict.keys() - fetched.keys()
-        if missing:
-            raise RuntimeError(
-                f"TorchStore did not return {len(missing)} weights, e.g. "
-                f"{sorted(missing)[:5]}"
-            )
 
     async def close(self) -> None:
         """Stop the engine loop, which releases the dispatcher and the engine on exit."""
