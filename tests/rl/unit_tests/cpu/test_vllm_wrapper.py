@@ -235,11 +235,12 @@ def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
         dist.destroy_process_group()
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
 @pytest.mark.parametrize(
     "one_group", [False, True], ids=["group_per_layer", "one_group_for_both_layers"]
 )
 def test_load_state_dict_refreshes_fused_gdn_weights_in_place(
-    tmp_path, one_group
+    tmp_path, one_group, dtype
 ) -> None:
     """Every weight load refreshes each GDN layer's fused weights in place (CUDA graphs
     capture their addresses), then frees its six projections."""
@@ -263,9 +264,13 @@ def test_load_state_dict_refreshes_fused_gdn_weights_in_place(
                 conv.weight = nn.Parameter(torch.randn(rows, 1, 4))
                 setattr(gdn, f"conv_{name}", conv)
             gdn.A_log = nn.Parameter(torch.randn(2))
+            gdn.dt_bias = nn.Parameter(torch.randn(2))
             gdn.input_weight_CD = gdn.conv_weight_CW = None
+            gdn.A_log_fp32_H = gdn.dt_bias_fp32_H = None
             model.layers.append(gdn)
         model.norm = nn.LayerNorm(4)
+        # bf16 exercises the cast; float32 checks that the copies stay separate tensors.
+        model.to(dtype)
         mesh = init_device_mesh("cpu", (1,))
         for group in [list(model.layers)] if one_group else model.layers:
             fully_shard(group, mesh=mesh)
@@ -275,18 +280,22 @@ def test_load_state_dict_refreshes_fused_gdn_weights_in_place(
         for module in model.modules():  # as after the initial load
             if isinstance(module, FSDPModule):
                 model_wrapper._unshard_and_free_sharded_params(module)
+        fused_names = (
+            "input_weight_CD",
+            "conv_weight_CW",
+            "A_log_fp32_H",
+            "dt_bias_fp32_H",
+        )
         data_ptrs = [
-            (gdn.input_weight_CD.data_ptr(), gdn.conv_weight_CW.data_ptr())
+            {name: getattr(gdn, name).data_ptr() for name in fused_names}
             for gdn in model.layers
         ]
 
         _Wrapper(model).load_state_dict(pushed)
 
         for i, gdn in enumerate(model.layers):
-            assert (
-                gdn.input_weight_CD.data_ptr(),
-                gdn.conv_weight_CW.data_ptr(),
-            ) == data_ptrs[i]
+            for name in fused_names:
+                assert getattr(gdn, name).data_ptr() == data_ptrs[i][name], name
             projections = [
                 pushed[f"layers.{i}.in_proj_{name}.weight"].to_local()
                 for name in "qkvzab"
@@ -296,6 +305,10 @@ def test_load_state_dict_refreshes_fused_gdn_weights_in_place(
                 pushed[f"layers.{i}.conv_{name}.weight"].to_local() for name in "qkv"
             ]
             assert torch.equal(gdn.conv_weight_CW, torch.cat(convs).squeeze(1))
+            for name in ("A_log", "dt_bias"):
+                expected = pushed[f"layers.{i}.{name}"].to_local()
+                assert torch.equal(getattr(gdn, f"{name}_fp32_H"), expected), name
+                assert getattr(gdn, f"{name}_fp32_H").dtype == torch.float32, name
             for name in "qkvzab":
                 weight = getattr(gdn, f"in_proj_{name}").weight
                 assert weight.untyped_storage().size() == 0, name
