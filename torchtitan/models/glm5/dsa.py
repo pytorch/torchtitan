@@ -4,13 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""GLM sparse attention using public PyTorch block-mask construction.
+"""GLM sparse attention with Attention Gym indexing and PyTorch block masks.
 
 T/Q/K are token/query/key counts; S is selected keys per query; N is heads.
 D/H/R/P are model/head/latent-or-rotary/pass-through widths; V is value width.
 Mask construction retains O(Q*K) storage. Attention delegates to the common
-FlexAttention backend rather than a model-owned kernel; the indexer still
-computes dense per-head ranking scores.
+FlexAttention backend; Attention Gym owns the weighted-ReLU top-k selection.
 """
 
 from dataclasses import dataclass
@@ -21,6 +20,8 @@ import torch.nn.functional as F
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.distributed.context_parallel import cp_all_gather_tensors
+
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
@@ -29,6 +30,7 @@ from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
 )
+from torchtitan.models.common.attn_gym import lightning_indexer, require_attn_gym
 
 
 def create_dsa_causal_mask(
@@ -61,23 +63,22 @@ def create_dsa_causal_mask(
 class DSAIndexerTopK(Module):
     """Compute local-query top-k indices against a global key sequence.
 
-    For every indexer head ``n`` and query/key pair, the indexer computes
-    ``relu(dot(q[q,n,:], k[k,:]) * scale)``. ``weights_QN`` then reduces the
-    head dimension into one score per ``(query, key)``. The causal/document
-    mask is added before the final top-k. The output is integer metadata; no
-    gradient flows through the discrete selection.
+    Attention Gym processes complete packed documents and returns indices local
+    to each document. Compact valid tokens before selection, then map selections
+    back to the global key sequence expected by FlexAttention. CP gathers query
+    features as well as keys because the indexer API requires complete documents.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         index_topk: int
-        softmax_scale: float
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        require_attn_gym(lightning_indexer)
         self.index_topk = config.index_topk
-        self.softmax_scale = config.softmax_scale
 
+    @torch.no_grad()
     def forward(
         self,
         q_QNH: torch.Tensor,
@@ -85,21 +86,59 @@ class DSAIndexerTopK(Module):
         weights_QN: torch.Tensor,
         attention_mask_QK: torch.Tensor,
     ) -> torch.Tensor:
-        # [Q,N,H] x [H,K] -> [N,Q,K]. Index scores intentionally use FP32:
-        # the K/K+1 boundary can change under a single low-precision ULP.
-        scores_NQK = (
-            torch.matmul(q_QNH.float().transpose(0, 1), k_KH.float().transpose(0, 1))
-            * self.softmax_scale
+        _, K = attention_mask_QK.shape
+        # In the document-causal mask, the first allowed key identifies the
+        # document. A fully masked row denotes an invalid query and key token.
+        mask_values_Q, document_starts_Q = attention_mask_QK.max(dim=-1)
+        valid_Q = mask_values_Q == 0
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is not None:
+            # TODO: Keep queries local once Attention Gym supports query chunks.
+            q_QNH, weights_QN, document_starts_Q, valid_Q = cp_all_gather_tensors(
+                (q_QNH, weights_QN, document_starts_Q, valid_Q),
+                reduce_dtype=torch.float32,
+            )
+        if q_QNH.shape[0] != K:
+            raise ValueError("DSA indexing requires complete query and key sequences")
+
+        # Keep token order within each document while moving padding to the end.
+        # Fixed-capacity offsets use repeated endpoints for empty documents.
+        token_order_K = (~valid_Q).to(torch.int32).argsort(stable=True)
+        valid_K = valid_Q[token_order_K]
+        document_starts_K = document_starts_Q[token_order_K]
+        token_indices_K = torch.arange(K, device=q_QNH.device, dtype=torch.int32)
+        starts_K = valid_K & (
+            (token_indices_K == 0) | (document_starts_K != document_starts_K.roll(1))
         )
-        scores_NQK = F.relu(scores_NQK)
-        # Each query predicts N mixing weights, producing one global-key score
-        # after the weighted reduction over indexer heads.
-        index_scores_QK = torch.matmul(
-            weights_QN.unsqueeze(1), scores_NQK.transpose(0, 1)
-        ).squeeze(1)
-        index_scores_QK = index_scores_QK + attention_mask_QK.float()
-        topk = min(self.index_topk, index_scores_QK.shape[-1])
-        return index_scores_QK.topk(topk, dim=-1).indices.to(torch.int32)
+        num_valid = valid_K.sum(dtype=torch.int32)
+        cu_seqlens = torch.cat(
+            (
+                torch.where(starts_K, token_indices_K, num_valid).sort().values,
+                num_valid[None],
+            )
+        )
+        document_offsets_K = torch.where(starts_K, token_indices_K, 0).cummax(0).values
+        # Keep FP32 ranking, including FP32 mixing weights. Attention Gym's
+        # fused indexer requires FP16/BF16 inputs and would change this contract.
+        indices_KS = lightning_indexer(
+            q_QNH[token_order_K].float().unsqueeze(0),
+            k_KH[token_order_K].float().unsqueeze(0),
+            weights_QN[token_order_K].float().unsqueeze(0),
+            min(self.index_topk, K),
+            causal=True,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            impl="reference",
+        ).squeeze(0)
+        packed_indices_KS = document_offsets_K[:, None] + indices_KS.clamp_min(0)
+        global_indices_KS = token_order_K[packed_indices_KS.long()].to(torch.int32)
+        global_indices_KS = global_indices_KS.masked_fill(indices_KS < 0, -1)
+        indices_KS = torch.empty_like(global_indices_KS).index_copy_(
+            0, token_order_K, global_indices_KS
+        )
+        if cp_group is not None:
+            return spmd.redistribute(indices_KS, cp_group, src=spmd.R, dst=spmd.S(0))
+        return indices_KS
 
 
 class Glm5DsaIndexer(Module):
@@ -133,7 +172,6 @@ class Glm5DsaIndexer(Module):
         self.head_dim = config.head_dim
         self.qk_rope_head_dim = config.qk_rope_head_dim
         self.index_topk = config.index_topk
-        self.softmax_scale = config.head_dim**-0.5
         self.wq_b = config.wq_b.build()
         self.wk = config.wk.build()
         self.k_norm = config.k_norm.build()
@@ -206,7 +244,7 @@ class Glm5DsaIndexer(Module):
             hidden_states_TD.to(self.weights_proj.weight.dtype)
         )
         remat.recompute_needs_tensor(weights_TN)
-        weights_TN = weights_TN.float() * (self.n_heads**-0.5)
+        # Attention Gym applies the 1/sqrt(N*H) indexer normalization.
         if attention_mask_TK is None:
             attention_mask_TK = create_dsa_causal_mask(
                 positions_T, dtype=torch.float32

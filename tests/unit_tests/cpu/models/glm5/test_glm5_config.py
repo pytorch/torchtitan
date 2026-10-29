@@ -155,9 +155,7 @@ class TestGlm5Config(unittest.TestCase):
             glm5_2_debugmodel_mtp(mtp_scale=-0.1)
 
     def test_deepep_recipe_replaces_only_the_dispatcher(self) -> None:
-        from torchtitan_recipes.tests.models.glm5 import (
-            glm5_2_debugmodel_deepep,
-        )
+        from torchtitan_recipes.tests.models.glm5 import glm5_2_debugmodel_deepep
 
         config = glm5_2_debugmodel_deepep(seq_len=128)
         self.assertEqual(config.parallelism.expert_parallel_degree, 4)

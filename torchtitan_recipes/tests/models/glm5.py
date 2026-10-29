@@ -133,12 +133,9 @@ def glm5_2_debugmodel_deepep(
         parallelism=parallelism,
         flavor="glm5_2_debugmodel",
     )
-    num_max_tokens_per_rank = (
-        config.training.num_tokens_per_microbatch_per_dp_rank
-        // (
-            config.parallelism.context_parallel_degree
-            * config.parallelism.tensor_parallel_degree
-        )
+    num_max_tokens_per_rank = config.training.num_tokens_per_microbatch_per_dp_rank // (
+        config.parallelism.context_parallel_degree
+        * config.parallelism.tensor_parallel_degree
     )
     return apply_transforms(
         config,

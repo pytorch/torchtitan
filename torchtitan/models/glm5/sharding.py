@@ -93,10 +93,14 @@ def glm5_indexer_sharding_config() -> ShardingConfig:
 def glm5_indexer_topk_sharding_config() -> ShardingConfig:
     """Run top-k on TP-replicated scores and CP-local queries."""
     query = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    query_features = SpmdType(
+        query.local_type,
+        partition_spec=spmd.PartitionSpec((DP, CP), None, None),
+    )
     key = dense_activation_placement(tp=spmd.R, cp=spmd.R)
     return ShardingConfig(
         in_src_shardings={
-            "q_QNH": query,
+            "q_QNH": query_features,
             "k_KH": key,
             "weights_QN": query,
             "attention_mask_QK": query,

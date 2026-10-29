@@ -354,7 +354,6 @@ def make_glm5_attention_config(
             ),
             topk=DSAIndexerTopK.Config(
                 index_topk=index_topk,
-                softmax_scale=index_head_dim**-0.5,
                 sharding_config=glm5_indexer_topk_sharding_config(),
             ),
             sharding_config=glm5_indexer_sharding_config(),

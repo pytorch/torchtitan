@@ -74,6 +74,16 @@ GLM-5.2 DSA is represented with a PyTorch FlexAttention `BlockMask`. It does
 not use the packed-sequence `varlen` attention contract because DSA selects an
 arbitrary learned Top-K key set for each query.
 
+The frozen indexer delegates weighted-ReLU Top-K selection to Attention Gym's
+`lightning_indexer`, using the repository's existing `attn-gym==0.0.17`
+dependency. Its reference implementation preserves FP32 ranking and mixing
+weights. Valid tokens are packed by document before selection, and the returned
+document-local indices are mapped back to global key indices. Under CP, the
+indexer gathers query features and weights in addition to keys to satisfy
+Attention Gym's complete-document input contract, then returns local queries'
+selections. This currently repeats indexer selection across CP ranks.
+Attention continues to use the common KV all-gather FlexAttention backend.
+
 ## Download tokenizer and checkpoint assets
 
 Download tokenizer and model metadata from the released GLM-5.2 repository:
