@@ -128,6 +128,15 @@ class LocalTokenDispatcher(Module):
         )
         return routed_input_RD, num_local_tokens_per_expert_E, metadata
 
+    def take_routed_scores(self, metadata: object) -> torch.Tensor | None:
+        """Return the ``(R,)`` routing scores for the experts to apply, or None.
+
+        Scores: the caller must apply them; ``combine`` then only sums.
+        None: ``combine`` applies them (this dispatcher always returns None).
+        """
+        del metadata
+        return None
+
     def combine(
         self,
         routed_output_RD: torch.Tensor,
@@ -913,6 +922,15 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]
+    def take_routed_scores(self, metadata: EPDispatchMetadata) -> torch.Tensor | None:
+        """Hand the ``(R,)`` routing scores to the experts, so ``combine`` only sums."""
+        state = metadata.state
+        # state is typed object; DeepEP's dispatch always stores a DispatchState.
+        # pyrefly: ignore [missing-attribute]
+        scores_R, state.recv_scores = state.recv_scores, None
+        return scores_R
+
+    # pyrefly: ignore [bad-override]
     def combine(
         self,
         routed_output_RD: torch.Tensor,
@@ -922,9 +940,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         """Combine tokens via DeepEP and wait for completion."""
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
-
-        # combine_tokens applies routing scores with bare ops.
-        remat.recompute_needs_tensor(routed_output_RD)
 
         combined_TD = combine_tokens(
             routed_output_RD,
