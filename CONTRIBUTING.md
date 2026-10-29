@@ -18,12 +18,34 @@ We actively welcome your pull requests.
 6. Fill in the PR template: the concrete problem with a simple example, what
    changed, numerics/performance evidence, and testing. Reviewers need to be
    convinced, not just informed.
-7. If you haven't already, complete the Contributor License Agreement ("CLA").
+7. Write the "Summary (human-written)" section yourself. See
+   [AI-assisted contributions](#ai-assisted-contributions).
+8. If you haven't already, complete the Contributor License Agreement ("CLA").
 
 Area experts are requested as reviewers automatically from
 [.github/area_reviewers.yml](.github/area_reviewers.yml). Maintainers can ask for
 an AI review by commenting `@claude review`; it follows
 [.claude/skills/pr-review](.claude/skills/pr-review/SKILL.md).
+
+### AI-assisted contributions
+We follow the PyTorch [AI policy](https://github.com/pytorch/pytorch/blob/main/AI_POLICY.md).
+You may use AI tools, but a human who understands the change must own it.
+
+- Write the PR's "Summary (human-written)" yourself. A few sentences are
+  enough: the problem, why this approach, and what you checked yourself. PRs
+  with an empty or AI-written summary may be closed or moved back to draft.
+  Write the summary in the PR description on GitHub. The merged commit takes
+  its message from the PR description, not from your local commit message. If
+  your tool rewrites the PR description from the commit message on each push
+  (stack-pr without `--keep-body`, `ghstack -u`), turn that off so the summary
+  is kept.
+- Other sections may be AI-drafted. You are responsible for every claim in
+  them, so check each number and statement against the code and logs.
+- Read and simplify the code before you request review. Open the PR as a draft
+  until then.
+- Don't reply to reviewers with raw AI output. If you quote AI output, put it in
+  a code or quote block and add your own view of it.
+- We don't accept PRs from fully autonomous agents.
 
 ### Contributor License Agreement ("CLA")
 In order to accept your pull request, we need you to submit a CLA. You only need

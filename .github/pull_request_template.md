@@ -1,7 +1,11 @@
 <!--
 Reviewers need to be convinced, not just informed. Delete sections you don't need.
-Agents: follow .claude/skills/pr-description/SKILL.md.
+Agents: follow .claude/skills/pr-description/SKILL.md. Never fill in the Summary.
 -->
+
+## Summary (human-written)
+<!-- Write this yourself, not with an AI tool. 2-5 sentences: the problem, why
+     this approach, and what you checked yourself. -->
 
 ## Why
 <!-- The concrete problem on main today. Include a simple before/after example. -->
