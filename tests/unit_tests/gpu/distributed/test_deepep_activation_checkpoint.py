@@ -313,3 +313,54 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     # weight grads.
                     for actual_grad, expected_grad in zip(actual, expected):
                         torch.testing.assert_close(actual_grad, expected_grad)
+
+    @with_comms
+    def test_experts_and_combine_apply_scores_alike(self):
+        # Exact SwiGLU takes the routing scores from DeepEP and applies them before w2;
+        # a SwiGLU subclass leaves them to the combine. Each applies them once, so the two
+        # agree up to bf16 rounding; a double or a missing multiply would not.
+        class _SwiGLUSubclass(SwiGLU):
+            pass
+
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("ep",),
+        )
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=mesh,
+            dense_sp_enabled=False,
+        )
+        num_experts = 4 * self.world_size
+        with (
+            torch.autograd.set_multithreading_enabled(False),
+            set_current_spmd_mesh(mesh),
+        ):
+            torch.manual_seed(42)
+            experts_apply = _Model(_DeepEPBlock(num_experts)).to(
+                self.device_type, torch.bfloat16
+            )
+            combine_applies = _Model(_DeepEPBlock(num_experts)).to(
+                self.device_type, torch.bfloat16
+            )
+            combine_applies.load_state_dict(experts_apply.state_dict())
+            activation_fn = _SwiGLUSubclass(SwiGLU.Config())
+            combine_applies.layers["0"].routed_experts.activation_fn = activation_fn
+            experts_apply.layers["0"].routed_experts.token_dispatcher.init_buffer()
+            torch.manual_seed(self.rank)
+            x_TD = torch.randn(
+                _NUM_TOKENS,
+                _MODEL_DIM,
+                device=self.device_type,
+                dtype=torch.bfloat16,
+            )
+            with torch.no_grad():
+                torch.testing.assert_close(
+                    experts_apply(x_TD), combine_applies(x_TD), rtol=1e-2, atol=0
+                )
+            actual = _run_forward_backward(experts_apply, x_TD)
+            expected = _run_forward_backward(combine_applies, x_TD)
+            for actual_grad, expected_grad in zip(actual, expected, strict=True):
+                error = (actual_grad - expected_grad).float().norm()
+                self.assertLess((error / expected_grad.float().norm()).item(), 1e-2)
