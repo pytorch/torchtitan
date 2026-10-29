@@ -23,7 +23,7 @@ from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
     DefaultActivationRematConfig,
 )
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
@@ -1158,11 +1158,11 @@ class TestRematRegions(unittest.TestCase):
     def test_quantile_router_statistics_are_recorded_once_with_topk_region(self):
         # The recompute replays the compiled region; a histogram update inside it would
         # run again (12 -> 24), so the router updates the histogram in eager.
-        apply_local_compile(["moe_router_topk"])
+        LocalCompileConfig(regions=["moe_router_topk"]).apply()
         try:
             self.test_quantile_router_statistics_are_recorded_once()
         finally:
-            apply_local_compile([])
+            LocalCompileConfig(regions=[]).apply()
 
     def test_forced_router_statistics_are_recorded_once(self):
         router = RoundRobinTokenChoiceTopKRouter.Config(

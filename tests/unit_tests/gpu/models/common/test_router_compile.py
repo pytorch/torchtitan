@@ -9,7 +9,7 @@ import unittest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models import deepseek_v3, kimi_k2_7, kimi_k3, muse_spark
 from torchtitan.models.common.activation import Softmax
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
@@ -52,7 +52,7 @@ FLAVOR_ROUTERS = {
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
     def tearDown(self):
-        apply_local_compile([])
+        LocalCompileConfig(regions=[]).apply()
         torch._dynamo.reset()
 
     def _run(self, router, x, expert_bias_E=None):
@@ -107,9 +107,9 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
         router.gate.to(torch.bfloat16)
         x = torch.randn(TOKENS, DIM, device="cuda", dtype=torch.bfloat16)
 
-        apply_local_compile([])
+        LocalCompileConfig(regions=[]).apply()
         eager = self._run(router, x)
-        apply_local_compile(["moe_router_topk", "moe_aux_loss"])
+        LocalCompileConfig(regions=["moe_router_topk", "moe_aux_loss"]).apply()
         compiled = self._run(router, x)
         # Default dtype-aware tolerances: ids, maps and counts must match exactly, and the
         # compiled kernels may round bf16 grads one ulp differently.
@@ -128,7 +128,7 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
         )
         with torch.device("cuda"):
             router = config.build().eval()
-        apply_local_compile(["moe_router_topk"])
+        LocalCompileConfig(regions=["moe_router_topk"]).apply()
         gate_TE = torch.randn(16384, 256, device="cuda")
         # The trainer's graph first, as in training: grad on and a static 16k shape, so the
         # compiled forward also saves tensors for backward.
@@ -159,9 +159,9 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                 dim = router.gate.weight.shape[1]
                 x = torch.randn(TOKENS, dim, device="cuda", dtype=torch.bfloat16)
                 expert_bias_E = 1e-3 * torch.randn(router.num_experts, device="cuda")
-                apply_local_compile([])
+                LocalCompileConfig(regions=[]).apply()
                 eager = self._run(router, x, expert_bias_E=expert_bias_E)
-                apply_local_compile(["moe_router_topk"])
+                LocalCompileConfig(regions=["moe_router_topk"]).apply()
                 compiled = self._run(router, x, expert_bias_E=expert_bias_E)
                 torch._dynamo.reset()
                 for actual, expected in zip(compiled, eager, strict=True):
@@ -179,7 +179,7 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
             with self.subTest(flavor):
                 torch.manual_seed(0)
                 router = build_router().eval()
-                apply_local_compile(["moe_router_topk"])
+                LocalCompileConfig(regions=["moe_router_topk"]).apply()
                 gate_TE = torch.randn(16384, router.num_experts, device="cuda")
                 expert_bias_E = 1e-3 * torch.randn(router.num_experts, device="cuda")
                 with torch.no_grad():
