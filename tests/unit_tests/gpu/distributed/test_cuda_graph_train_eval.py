@@ -79,6 +79,10 @@ def _validator(*, schedule=None, first=True, last=True):
 
 
 class _EvalLoader(list):
+    def restart(self):
+        """Start each list iteration at its first validation row."""
+        pass
+
     def close(self):
         pass
 
@@ -92,7 +96,11 @@ def _validate_loss(validator, model_parts, prepared, *, step):
         )
         for item in prepared
     ]
-    validator.dl_config.build = lambda **kwargs: _EvalLoader(rows)
+    loader = validator._validation_dataloader
+    if loader is None:
+        loader = _EvalLoader()
+        validator.dl_config.build = lambda **kwargs: loader
+    loader[:] = rows
     losses = []
     validator.metrics_processor.log_validation = lambda *, loss, step: losses.append(
         loss

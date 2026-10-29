@@ -26,12 +26,16 @@ class _ClosableLoader:
     def __init__(self, rows):
         self.rows = rows
         self.closed = False
+        self.restarts = 0
 
     def __iter__(self):
         return iter(self.rows)
 
     def close(self):
         self.closed = True
+
+    def restart(self):
+        self.restarts += 1
 
 
 class _EchoModel(nn.Module):
@@ -80,9 +84,58 @@ def _generic_validator(loader):
         reset=mock.Mock(),
         log_validation=mock.Mock(),
     )
-    validator.loss_fn = lambda predictions, labels: (predictions.sum(), None)
+    validator.loss_fn = lambda predictions, labels: (predictions.sum(), {})
     validator.parallelism = SimpleNamespace()
     return validator
+
+
+@pytest.mark.parametrize("global_batch_size", [0, -1])
+def test_validation_global_batch_size_must_be_positive(global_batch_size):
+    with pytest.raises(ValueError, match="global_batch_size must be positive"):
+        Validator.Config(global_batch_size=global_batch_size)
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_validation_preserves_configured_shuffle(shuffle):
+    config = Validator.Config(
+        dataloader=GrainDataLoader.Config(dataset=mock.Mock(), shuffle=shuffle),
+        steps=1,
+    )
+    validator = Validator(
+        config,
+        parallelism=mock.Mock(),
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=mock.Mock(),
+        parallelism_context=SimpleNamespace(pp_enabled=False),
+        loss_fn=mock.Mock(),
+        metrics_processor=mock.Mock(),
+        seq_len=4,
+        num_tokens_per_microbatch=4,
+    )
+    assert validator.dl_config.shuffle is shuffle
+    assert config.dataloader.shuffle is shuffle
+    assert validator.dl_config is not config.dataloader
+
+
+def test_independent_non_pipeline_validation_consumes_complete_global_batch(
+    monkeypatch,
+):
+    row = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 1),
+        labels=torch.ones(1, 1, dtype=torch.long),
+        positions=torch.zeros(1, 1, dtype=torch.long),
+        padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+        loss_token_counts=torch.tensor(1),
+        routing_token_counts=torch.tensor([1]),
+    )
+    loader = _ClosableLoader([row, row])
+    validator = _generic_validator(loader)
+    validator._validation_num_microbatches = 2
+    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
+    validator.validate([_EchoModel()], step=1)
+    assert validator.metrics_processor.ntokens_since_last_log == 2
+    validator.metrics_processor.log_validation.assert_called_once_with(loss=1.0, step=1)
 
 
 @pytest.mark.parametrize("num_groups", [1, 2])
@@ -133,6 +186,9 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch, num_groups):
     torch.testing.assert_close(calls[-1], row.input, rtol=0, atol=0)
     assert model.training
     assert model.counter.item() == 2 * num_groups
+    assert not loader.closed
+    assert loader.restarts == 2
+    validator.close()
     assert loader.closed
     assert not torch.equal(torch.random.get_rng_state(), rng_before)
     wrap.assert_called_once()
@@ -172,7 +228,7 @@ def test_validation_preprocessing_uses_validation_document_limit(monkeypatch):
 
 
 @pytest.mark.parametrize("raises", [False, True])
-def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
+def test_generic_validator_retains_loader_and_restores_model_mode(monkeypatch, raises):
     def microbatch():
         return TokenizedTrainingMicrobatch(
             input=torch.ones(1, 1),
@@ -196,9 +252,39 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
     else:
         validator.validate([model], step=1)
 
-    assert loader.closed
+    assert loader.closed is raises
+    assert loader.restarts == 1
     assert [module.training for module in model.modules()] == modes
     validator.metrics_processor.reset.assert_called_once()
+    validator.close()
+    assert loader.closed
+
+
+def test_generic_validator_restarts_one_source_across_events(monkeypatch):
+    microbatch = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 1),
+        labels=torch.ones(1, 1, dtype=torch.long),
+        positions=torch.zeros(1, 1, dtype=torch.long),
+        padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+        loss_token_counts=torch.tensor(1),
+        routing_token_counts=torch.tensor([1]),
+    )
+    loader = _ClosableLoader([microbatch])
+    validator = _generic_validator(loader)
+    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
+
+    try:
+        for step in (1, 10):
+            validator.validate([_EchoModel()], step)
+        validator.dl_config.build.assert_called_once()
+        assert loader.restarts == 2
+        assert not loader.closed
+        assert validator.metrics_processor.log_validation.call_args_list == [
+            mock.call(loss=1.0, step=1),
+            mock.call(loss=1.0, step=10),
+        ]
+    finally:
+        validator.close()
 
 
 @pytest.mark.parametrize("cuda_graph_enabled", [False, True])
