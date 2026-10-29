@@ -1117,9 +1117,11 @@ def _assign_balanced_compute_regions(
 
     Any number of a parameter's chunks can share a participant. Each chunk
     retains its original matrix batches; packing does not merge NS calls.
-    Current-bucket cost takes priority, then elements the rank already
-    stores, then bytes, then earlier bucket cost. Entirely local buckets
-    bypass redistribution planning.
+    Current-bucket cost takes priority, then cost from earlier buckets, then
+    elements the rank already stores, then bytes. Earlier-bucket cost comes
+    before locality so that ties rotate across ranks: with uneven storage,
+    locality first would always pick the ranks that store the most rows.
+    Entirely local buckets bypass redistribution planning.
     """
     participants = group.participants
     num_participants = len(participants)
@@ -1179,7 +1181,7 @@ def _assign_balanced_compute_regions(
         jobs, key=lambda entry: (-entry.cost, -entry.num_bytes, entry.stable_key)
     ):
         *_key, position = min(
-            (load, -stored_numel, num_bytes, cumulative, position)
+            (load, cumulative, -stored_numel, num_bytes, position)
             for position, ((load, num_bytes, cumulative), stored_numel) in enumerate(
                 zip(loads, job.stored_numel_by_position, strict=True)
             )
