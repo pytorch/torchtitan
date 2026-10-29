@@ -283,6 +283,7 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
     layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
     layer.prefix, layer.kv_cache = "gdn", (torch.empty(0), torch.empty(0))
+    layer.local_num_v_heads = layer.head_v_dim = 1
     extent = 4 if decode else 3
     metadata = TorchTitanLinearAttentionMetadata(
         execution_path=(
@@ -316,26 +317,32 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
     monkeypatch.setattr(gdn, "causal_conv1d_decode", convolution)
     monkeypatch.setattr(gdn, "paged_causal_conv1d", convolution)
 
-    def recurrent(conv, a, b, A_log, bias, out, offsets, slots, initial):
-        assert conv.shape[0] == out.shape[0] == extent
+    def recurrent(conv, a, b, A_log, bias, offsets, slots, initial):
+        assert conv.shape[0] == extent
         assert offsets[-1] == extent
         assert initial is metadata.has_initial_state
-        out.fill_(1)
+        return torch.ones(extent, 1, 1)
 
     monkeypatch.setattr(layer, "_forward_gdn", recurrent)
+    # NaN catches a row that is neither written nor zeroed.
+    monkeypatch.setattr(
+        torch.Tensor, "new_empty", lambda self, size: self.new_full(size, float("nan"))
+    )
     context = ForwardContext(
         no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
     )
-    value, output = torch.ones(6, 1), torch.zeros(6, 1)
+    value = torch.ones(6, 1)
     with override_forward_context(context):
-        layer._forward(value, value, value, value, None, value, value, output)
-        # Reject bias even in profiling and empty-batch early returns.
+        output = layer._forward(value, value, value, value, None, value, value)
+        # Profiling and empty-batch early returns reject bias and return zeros.
         for attn_metadata in (None, {"gdn": replace(metadata, num_actual_tokens=0)}):
             context.attn_metadata = attn_metadata
             with pytest.raises(
                 AssertionError,
                 match="Attention Gym convolution kernels do not support bias",
             ):
-                layer._forward(value, value, value, value, value, value, value, output)
+                layer._forward(value, value, value, value, value, value, value)
+            early = layer._forward(value, value, value, value, None, value, value)
+            assert torch.equal(early, torch.zeros(6, 1, 1))
     assert metadata.num_actual_tokens == 3
-    assert torch.equal(output[:, 0], (torch.arange(6) < extent).float())
+    assert torch.equal(output.flatten(), (torch.arange(6) < extent).float())
