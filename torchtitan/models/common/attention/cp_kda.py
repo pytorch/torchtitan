@@ -47,8 +47,10 @@ class UlyssesInnerKDA(Ulysses[LinearAttentionMetadata], InnerKDA):
         attention_metadata: LinearAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
+        max_num_fragments: int = 1,
     ) -> LinearAttentionMetadata:
         """Prepare Ulysses KDA metadata in original token order."""
+        del max_num_fragments
         return prepare_ulysses_linear_attention_metadata(
             attention_metadata, permutation=permutation
         )
@@ -145,10 +147,14 @@ class ContextParallelInnerKDA(
         attention_metadata: LinearAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
+        max_num_fragments: int = 1,
     ) -> ContextParallelLinearAttentionMetadata:
-        """Build rank-local routing from global KDA sequence metadata."""
+        """Build local routing with the padded global KDA sequence capacity."""
         return prepare_cp_linear_attention_metadata(
-            attention_metadata, permutation=permutation, family="KDA"
+            attention_metadata,
+            permutation=permutation,
+            max_num_fragments=max_num_fragments,
+            family="KDA",
         )
 
     def forward(
