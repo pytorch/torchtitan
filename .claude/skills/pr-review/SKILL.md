@@ -175,7 +175,9 @@ each with the diff paths, the applicable rule files, and its checklist sections:
   syncs, CUDA-graph/compile friendliness, hardware agnosticism.
 - **Tests, CI, docs, scope**: test value and placement, golden files, docs
   location, unrelated changes, description accuracy.
-Sub-agents return candidate findings as `(file:line, claim, evidence)`.
+Sub-agents return candidate findings as `(file:line, claim, evidence)`. Tell
+every sub-agent not to post anything to GitHub: no `gh pr review`, and never call
+the inline-comment tool. Only you post, after Step 5.
 
 ### Step 4: Consolidate
 Flatten all candidates into `(file:line, one-line claim)` and collapse them before
@@ -240,6 +242,12 @@ compared, size estimates for the smaller alternative.>
 Not verified: <claims that need a GPU run or that you couldn't confirm>.
 ```
 
+In GitHub Actions mode, findings anchored to a changed line are also posted as
+inline comments (see "Posting"). In the review body, list each of them as a
+one-line pointer (`path/file.py:123` -- short claim) so the verdict and the full
+must-fix list stay readable in one place; put the full explanation in the inline
+comment, not in both.
+
 Omit empty sections. "Example" is always present unless the PR is trivial
 (typo, one-line config fix). If the description is missing a motivation or
 misstates the code, say so as the first must-fix item.
@@ -257,7 +265,27 @@ Verdict rules (match how maintainers use them):
 
 ## Posting (GitHub Actions mode)
 
-Post exactly one formal review, mapped from the verdict:
+### Inline comments
+Post inline comments first, using `mcp__github_inline_comment__create_inline_comment`,
+only for fact-checked findings (must-fix and should-consider) that point at a
+specific changed line:
+- Always pass `confirmed: true`. Unconfirmed calls are buffered and posted
+  unfiltered after the session ends, so never call the tool to test it.
+- Use `line` (and `startLine` for a range) numbered on the new side (`RIGHT`) of
+  `gh pr diff`. The line must be inside a diff hunk; if the tool reports a
+  validation error, keep that finding in the review body instead of retrying with
+  guessed lines.
+- One finding per comment, in the same voice as the review: problem,
+  consequence, smallest fix. When the fix is a small drop-in replacement, include
+  a ```suggestion block that replaces exactly the selected lines.
+- At most ~10 inline comments. Design-level findings, gate findings, and things
+  that are missing (no specific line) go only in the review body.
+- On a re-review, don't re-post comments for issues that are still open; list them
+  in the body as "still open". Post inline comments only for new problems.
+- In local CLI and branch modes, don't post; print `file:line` findings instead.
+
+### Formal review
+Then post exactly one formal review, mapped from the verdict:
 ```bash
 gh pr review <N> --approve --body-file <file>           # Approve
 gh pr review <N> --request-changes --body-file <file>   # Request changes
