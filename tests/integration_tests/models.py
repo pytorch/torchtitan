@@ -245,28 +245,6 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
     return config
 
 
-def deepseek_v4_debugmodel_seed_checkpoint() -> Trainer.Config:
-    from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
-
-    config = deepseek_v4_debugmodel(seq_len=512)
-    config.optim.optimizer = OptimizersContainer.Config(
-        optimizers=[AdamW.Config(pattern=r".*", fused=False)]
-    )
-    return config
-
-
-def deepseek_v4_debugmodel_fsdp4() -> Trainer.Config:
-    from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
-
-    config = deepseek_v4_debugmodel(seq_len=512)
-    _set_spmd_typechecking(config, typechecking=False)
-    config.parallelism.data_parallel_shard_degree = 4
-    config.training.num_tokens_per_microbatch_per_dp_rank = 512
-    config.training.steps = 10
-    config.training.disable_cuda_graphs = True
-    return config
-
-
 def deepseek_v4_debugmodel_fsdp4_ep4() -> Trainer.Config:
     from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
 
@@ -745,7 +723,15 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="DeepSeek V4 AdamW FSDP+TP+EP",
             test_name="deepseek_v4_fsdp+tp+ep",
             ngpu=4,
+            # Sparse attention / indexer kernels are CUDA-only and unvalidated
+            # on ROCm.
             skip_rocm_test=True,
+            # Runs on a real PG. Under Fake PG this config's sequence-parallel
+            # collectives return activations that alias their inputs, which
+            # corrupts a saved-for-backward tensor and blows up grad_norm at
+            # step 1. The same config trains cleanly on a real 4-GPU PG
+            # (grad_norm ~3.8), so keep it on a real PG until the Fake PG
+            # collective aliasing under spmd_types is fixed.
             use_real_pg=True,
         ),
         IntegrationTestDefinition(

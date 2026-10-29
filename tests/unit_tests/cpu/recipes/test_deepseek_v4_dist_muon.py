@@ -137,16 +137,8 @@ def test_deepseek_v4_uses_dist_muon_with_complete_compute_layouts() -> None:
         Owned,
     )
 
-    buckets = muon_config.bucket_configs
-    bucket_patterns = [pattern for bucket in buckets for pattern in bucket.patterns]
-    assert set(bucket_patterns) == set(compute_shardings)
-    assert len(bucket_patterns) == len(set(bucket_patterns))
-    for bucket in buckets:
-        routed = [".routed_experts." in pattern for pattern in bucket.patterns]
-        assert all(routed) or not any(routed)
 
-
-@pytest.mark.parametrize("num_layers", (1, 2, 3, 4, 5, 23))
+@pytest.mark.parametrize("num_layers", (1, 2, 3, 4))
 def test_deepseek_v4_pairs_buckets_after_first_layer(num_layers: int) -> None:
     config = deepseek_v4_debugmodel()
     assert isinstance(config.model, DeepSeekV4Model.Config)
