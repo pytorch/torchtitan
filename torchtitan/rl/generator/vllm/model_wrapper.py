@@ -485,17 +485,20 @@ class VLLMModelWrapper(Module):
         # a free block of 20 MiB or more. So the projections each GDN layer frees in
         # this loop (e.g. 80 MiB at 27B TP2) fit none of the next layer's tensors,
         # and with expandable segments the holes stay mapped (~1% of the KV cache).
-        # Lift the cap (PyTorch's default: none) for the loop.
+        # Lift the cap (PyTorch's default: none) for the loop, in GDN models only.
+        has_gdn = any(isinstance(module, GDN) for module in self.model.modules())
         allocator_settings = torch._C._accelerator_getAllocatorSettings()
-        torch._C._accelerator_setAllocatorSettings(
-            f"max_split_size_mb:{(2**64 - 1) // 2**20}"
-        )
+        if has_gdn:
+            torch._C._accelerator_setAllocatorSettings(
+                f"max_split_size_mb:{(2**64 - 1) // 2**20}"
+            )
         # Unshard the model here so vLLM performs its GPU memory profiling
         # based on the model's actual representation used during forward
         for module in self.model.modules():
             if isinstance(module, FSDPModule):
                 _unshard_and_free_sharded_params(module)
-        torch._C._accelerator_setAllocatorSettings(allocator_settings)
+        if has_gdn:
+            torch._C._accelerator_setAllocatorSettings(allocator_settings)
 
     def load_state_dict(self, state_dict: Mapping[str, Any]):
         """Copy new weights into `self.model`, allocating about one FSDP group's sharded buffers at a time.
