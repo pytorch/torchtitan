@@ -37,6 +37,9 @@ from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAt
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.deepseek_v3 import (
+    build_model_config as build_deepseek_v3_model_config,
+)
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_config
 from torchtitan.models.qwen3 import build_model_config
@@ -759,6 +762,81 @@ def rl_grpo_kimi_k3_debug_varlen_batch_invariant(
     return _set_kimi_k3_batch_invariant(rl_grpo_kimi_k3_debug_varlen(seq_len=seq_len))
 
 
+def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
+    """Random-init DeepSeek V3 GRPO whose generator caches compressed MLA latents.
+
+    Without batch invariance, the generator uses vLLM's native MLA and captures
+    decode CUDA graphs.
+    """
+    trainer_parallelism = ParallelismConfig(data_parallel_shard_degree=2)
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=1,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_deepseek_v3_model_config,
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
+    return Controller.Config(
+        hf_assets_path="tests/assets/tokenizer",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=5,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=8,
+            batcher=Batcher.Config(
+                training_sample_builder=TrainingSampleBuilder.Config(
+                    drop_zero_std_reward_groups=False,
+                ),
+            ),
+            validation=ValidationConfig(steps=20),
+        ),
+        rollouter=_alphabet_sort_rollouter_config(),
+        renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        trainer=Trainer.Config(
+            model=trainer_model,
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
+            ),
+            training=TrainingConfig(
+                disable_cuda_graphs=True,
+                num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
+                max_context_length=seq_len,
+            ),
+            parallelism=trainer_parallelism,
+            checkpointer=None,
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=GRPOLoss.Config(
+                    global_vocab_size=decoder_vocab_size(trainer_model)
+                ),
+            ),
+        ),
+        generator=Generator.Config(
+            model=generator_model,
+            engine=VLLMEngine.Config(
+                cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
+            ),
+            parallelism=generator_parallelism,
+            checkpointer=None,
+            sampling=SamplingConfig(
+                temperature=1.0,
+                max_tokens=50,
+            ),
+        ),
+    )
+
+
 def _configure_ci(
     config: Controller.Config,
     *,
@@ -978,6 +1056,20 @@ def rl_grpo_kimi_k3_debug_batch_invariant() -> Controller.Config:
         config,
         steps=3,
         num_tokens_per_microbatch=1024,
+        max_generated_tokens=128,
+        use_hf_assets_from_env=False,
+    )
+
+
+def rl_grpo_deepseek_v3_debug() -> Controller.Config:
+    """Trainer FSDP=2 (2 GPUs); two generators with TP=1 (2 GPUs)."""
+    seq_len = 1024
+    config = rl_grpo_deepseek_v3_debug_varlen(seq_len=seq_len)
+    config.num_generators = 2
+    return _configure_ci(
+        config,
+        steps=3,
+        num_tokens_per_microbatch=2 * seq_len,
         max_generated_tokens=128,
         use_hf_assets_from_env=False,
     )

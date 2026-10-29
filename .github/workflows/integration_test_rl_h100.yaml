@@ -83,4 +83,4 @@ jobs:
           tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen -v
 
         python -m tests.integration_tests.run_tests "$OUTPUT_DIR/integration" \
-          --ngpu 8 --test_suite rl_kda
+          --ngpu 8 --test_suite rl_h100
