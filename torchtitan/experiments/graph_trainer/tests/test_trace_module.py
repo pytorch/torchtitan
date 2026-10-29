@@ -190,7 +190,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             profiler=Profiler.Config(),
             sdc_replayer=None,
             training=SimpleNamespace(
-                disable_cuda_graphs=False,
+                disable_accelerator_graphs=False,
                 num_tokens_per_microbatch_per_dp_rank=1,
                 num_tokens_per_train_step=2,
             ),
@@ -216,12 +216,12 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 return_value=graph_runtime,
             ) as make_runtime,
             patch(
-                "torchtitan.experiments.graph_trainer.trainer.cuda_graphs_supported",
+                "torchtitan.experiments.graph_trainer.trainer.accelerator_graphs_supported",
                 return_value=True,
             ),
             patch(
                 "torchtitan.experiments.graph_trainer.trainer."
-                "wrap_fwd_bwd_with_cuda_graph",
+                "wrap_fwd_bwd_with_accelerator_graph",
                 return_value=MagicMock(),
             ) as wrap_cuda_graph,
         ):

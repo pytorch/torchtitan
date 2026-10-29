@@ -169,7 +169,7 @@ def _qwen3_4b_verifiers_config(
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
                 max_context_length=max_total_tokens,
             ),

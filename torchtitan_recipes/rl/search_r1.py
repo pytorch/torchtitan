@@ -139,7 +139,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
             ),
@@ -285,7 +285,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             ),
             # TODO: Tune the trainer token budget and maximum context length.
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
             ),
@@ -417,7 +417,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=4096,
                 max_context_length=4096,
             ),

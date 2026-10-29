@@ -20,7 +20,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch
 
-from torchtitan.distributed.cuda_graph import CUDAGraphWrapper
+from torchtitan.distributed.accelerator_graph import AcceleratorGraphWrapper
 from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
 
 
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Every wrapper ``cuda_graph_pass`` applied; see ``reset_cuda_graphs``.
-_WRAPPERS: weakref.WeakSet[CUDAGraphWrapper] = weakref.WeakSet()
+_WRAPPERS: weakref.WeakSet[AcceleratorGraphWrapper] = weakref.WeakSet()
 
 
 def reset_cuda_graphs() -> None:
@@ -40,7 +40,7 @@ def reset_cuda_graphs() -> None:
     Each drops its captured graph, runs its next call eagerly, and captures
     again on the one after, so the memory a graph points into can be freed, and
     the next call can do work a capture cannot, without ending training.
-    ``cuda_graph_teardown`` is for shutdown: it also destroys the shared pool
+    ``accelerator_graph_teardown`` is for shutdown: it also destroys the shared pool
     and stream, after which a wrapper cannot capture again.
     """
     for wrapper in _WRAPPERS:
@@ -334,7 +334,7 @@ def cuda_graph_pass(
 
     if static_input_indices is None:
         static_input_indices = get_static_input_indices(gm, is_forward)
-    wrapper = CUDAGraphWrapper(
+    wrapper = AcceleratorGraphWrapper(
         gm.forward,
         example_inputs,
         static_input_indices,

@@ -26,13 +26,13 @@ from torchtitan_recipes.tests.models.muse_spark import (
 def test_fake_scale_recipe_tokenizer(recipe):
     # Keep Dist-MoE kernels and CUDA-graph checks outside this tokenizer test.
     def configure_dist_moe(config, **kwargs):
-        config.training.disable_cuda_graphs = False
+        config.training.disable_accelerator_graphs = False
         return config
 
     with (
         patch.object(recipes, "_with_dist_moe", side_effect=configure_dist_moe),
         patch(
-            "torchtitan.distributed.cuda_graph.cuda_graphs_supported",
+            "torchtitan.distributed.accelerator_graph.accelerator_graphs_supported",
             return_value=False,
         ),
     ):

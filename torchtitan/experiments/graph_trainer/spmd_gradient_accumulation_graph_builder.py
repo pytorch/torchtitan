@@ -733,7 +733,7 @@ def _compile_scheduled_fwd_bwd_graphs(
                 call_spec.module,
                 compile_config=trainer_config.compile,
                 graph_name=f"stage_{stage.stage_index}_{callable_name}",
-                use_cuda_graph=not trainer_config.training.disable_cuda_graphs,
+                use_cuda_graph=not trainer_config.training.disable_accelerator_graphs,
             ),
         )
 

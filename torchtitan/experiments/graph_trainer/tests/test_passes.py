@@ -171,7 +171,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                     mtp_layers=[object()],
                 ),
                 parallelism=SimpleNamespace(),
-                training=SimpleNamespace(disable_cuda_graphs=False),
+                training=SimpleNamespace(disable_accelerator_graphs=False),
             )
 
         traced_result = SimpleNamespace(
@@ -212,7 +212,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 fsdp_reshard_after_forward="always",
                 pipeline_parallel_degree=1,
             ),
-            training=TrainingConfig(disable_cuda_graphs=True),
+            training=TrainingConfig(disable_accelerator_graphs=True),
         )
         traced_result = SimpleNamespace(state_fqns=[])
 
@@ -274,7 +274,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             insert_kernel_annotations_pass,
         )
 
-        def make_config(*, disable_cuda_graphs):
+        def make_config(*, disable_accelerator_graphs):
             return SimpleNamespace(
                 compile=GraphTrainerCompileConfig(inductor_compilation="regional"),
                 loss=CrossEntropyLoss.Config(),
@@ -282,7 +282,9 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                     layers=[SimpleNamespace(feed_forward=None) for _ in range(2)]
                 ),
                 parallelism=SimpleNamespace(),
-                training=SimpleNamespace(disable_cuda_graphs=disable_cuda_graphs),
+                training=SimpleNamespace(
+                    disable_accelerator_graphs=disable_accelerator_graphs
+                ),
             )
 
         traced_result = SimpleNamespace(
@@ -296,11 +298,11 @@ class TestDefaultTransformerBlockBuckets(TestCase):
         ):
             with_cuda_graph = compile_time_passes(
                 traced_result,
-                make_config(disable_cuda_graphs=False),
+                make_config(disable_accelerator_graphs=False),
             )
             without_cuda_graph = compile_time_passes(
                 traced_result,
-                make_config(disable_cuda_graphs=True),
+                make_config(disable_accelerator_graphs=True),
             )
 
         self.assertEqual(with_cuda_graph.count(insert_kernel_annotations_pass), 1)
@@ -3890,7 +3892,7 @@ class TestChunkPasses(TestCase):
                 fsdp_reshard_after_forward="default",
                 pipeline_parallel_degree=1,
             ),
-            training=SimpleNamespace(disable_cuda_graphs=False),
+            training=SimpleNamespace(disable_accelerator_graphs=False),
             compile=GraphTrainerCompileConfig(
                 ep_overlap=EpOverlapConfig(
                     enabled=True,

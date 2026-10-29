@@ -135,7 +135,7 @@ def kimi_k3_debugmodel(
             max_context_length=model_config.max_context_length,
             steps=10,
             dtype="bfloat16",
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,

@@ -23,7 +23,7 @@ debugging questions. They intentionally do not share a fallback path:
 | Mode | Physical processes | Real communication | Use it to validate |
 | --- | --- | --- | --- |
 | `fake` | One | None | Configuration, logical mesh construction, rank-local model ownership, tensor shapes, and PyTorch-managed memory for one selected PP rank at SPMD coordinate zero. |
-| `real_pp_fake_spmd` | Exactly one per PP rank | PP send/receive only | Pipeline scheduling, real PP buffers and transport, CUDA-graph capture, and rank-local memory while DP, TP, CP, and EP remain logically scaled. |
+| `real_pp_fake_spmd` | Exactly one per PP rank | PP send/receive only | Pipeline scheduling, real PP buffers and transport, accelerator-graph capture, and rank-local memory while DP, TP, CP, and EP remain logically scaled. |
 
 Use pure fake mode first when a full logical model would require more ranks than
 are locally available. Escalate to real-PP/fake-SPMD when the question involves
@@ -104,7 +104,7 @@ SPMD coordinate zero and therefore form one PP line through the logical mesh.
 ### Memory debugging workflow
 
 Keep the model, dtype, batch geometry, parallel degrees, activation
-checkpointing, FSDP policy, and CUDA-graph settings identical to the intended
+checkpointing, FSDP policy, and accelerator-graph settings identical to the intended
 real job. Then:
 
 1. Select the logical PP coordinate whose SPMD-zero ownership is under
