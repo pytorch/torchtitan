@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import warnings
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import timedelta
@@ -27,7 +26,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.distributed.parallelism_context import DistributedTopology, MeshAxisName
+from torchtitan.distributed.parallelism_context import DistributedTopology
 from torchtitan.tools.utils import device_module, device_type, get_local_device
 
 logger = logging.getLogger(__name__)
@@ -397,87 +396,6 @@ def configure_nccl_for_ulysses(
 
     _warn_overwrite_env("NCCL_GRAPH_REGISTER", "0")
     logger.info("Using NCCL_GRAPH_REGISTER=0 for Ulysses on NCCL before 2.32.3.")
-
-
-def build_alternative_fsdp_mesh(
-    storage_mesh: DeviceMesh,
-    *,
-    max_ctas: int,
-) -> DeviceMesh:
-    """Build a storage-shaped mesh with NCCL CTA-capped FSDP shard groups.
-
-    The ``dp_shard`` and ``edp_shard`` axes get resource-independent child
-    communicators. Other axis groups, rank order, and mesh shape stay unchanged.
-    Call collectively and reuse the result across buckets: each call creates
-    new communicators rather than looking them up in a persistent cache.
-
-    Requires NCCL on the FSDP shard axes; other backends raise ``ValueError``.
-    The fake backend preserves its groups with a warning. A mesh without FSDP
-    shard axes is returned unchanged with a warning that the cap is not applied.
-    """
-    mesh_axis_names = storage_mesh.mesh_dim_names
-    if mesh_axis_names is None:
-        raise ValueError("Redistribution storage mesh must have named axes")
-    fsdp_shard_axes = {
-        MeshAxisName.DP_SHARD.value,
-        MeshAxisName.EDP_SHARD.value,
-    }
-    if fsdp_shard_axes.isdisjoint(mesh_axis_names):
-        warnings.warn(
-            "The storage mesh has no FSDP shard axes; max_ctas will not be applied",
-            stacklevel=2,
-        )
-        return storage_mesh
-
-    groups = []
-    replaced_group = False
-    for axis_name in mesh_axis_names:
-        parent_group = storage_mesh.get_group(axis_name)
-        if axis_name not in fsdp_shard_axes:
-            groups.append(parent_group)
-            continue
-
-        backend = dist.get_backend(parent_group)
-        if backend == "fake":
-            warnings.warn(
-                "Redistribution max_ctas is not modeled by the fake process "
-                "group; using the storage-mesh process group",
-                stacklevel=2,
-            )
-            groups.append(parent_group)
-            continue
-        if backend != dist.Backend.NCCL:
-            raise ValueError(
-                "Redistribution max_ctas requires an NCCL process group, "
-                f"got {backend!r} for mesh axis {axis_name!r}"
-            )
-
-        options = dist.ProcessGroupNCCL.Options()
-        options.config.max_ctas = max_ctas
-        # Keep redistribution channels independent from the FSDP parent.
-        options.config.split_share = 0  # pyrefly: ignore [missing-attribute]
-        num_ranks = dist.get_world_size(parent_group)
-        child_group = dist.split_group(
-            parent_pg=parent_group,
-            split_ranks=[list(range(num_ranks))],
-            pg_options=options,
-            group_desc=f"optimizer_redistribution_{axis_name}",
-            backend="nccl",
-        )
-        assert isinstance(child_group, dist.ProcessGroup)
-        groups.append(child_group)
-        replaced_group = True
-
-    return (
-        DeviceMesh.from_group(
-            groups,
-            storage_mesh.device_type,
-            mesh=storage_mesh.mesh,
-            mesh_dim_names=mesh_axis_names,
-        )
-        if replaced_group
-        else storage_mesh
-    )
 
 
 def init_distributed(

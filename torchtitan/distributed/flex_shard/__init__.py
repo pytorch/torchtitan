@@ -6,8 +6,15 @@
 
 """Flexible storage-to-compute redistribution APIs."""
 
-from .dist_muon import DistMuon
-from .optimizer_reshard import BlockShard, BucketConfig, ComputeLayout, Owned
+from .dist_muon import DistMuon, redistribution_mesh_axes
+from .optimizer_reshard import (
+    BlockShard,
+    BucketConfig,
+    build_transport_mesh,
+    ComputeLayout,
+    Owned,
+    precreate_transport_meshes,
+)
 
 __all__ = [
     "DistMuon",
@@ -15,4 +22,7 @@ __all__ = [
     "BucketConfig",
     "ComputeLayout",
     "Owned",
+    "redistribution_mesh_axes",
+    "build_transport_mesh",
+    "precreate_transport_meshes",
 ]
