@@ -78,8 +78,14 @@ class CPInnerAttention(
         attention_metadata: _GlobalAttentionMetadataT,
         *,
         permutation: torch.Tensor | None,
+        max_num_fragments: int = 1,
     ) -> _LocalAttentionMetadataT:
-        """Prepare this backend's metadata for rank-local CP execution."""
+        """Prepare rank-local metadata with the load balancer's fixed fragment cap.
+
+        ``max_num_fragments`` is 1 for contiguous sharding. A load balancer
+        supplies its batch-independent bound for replayable linear routing;
+        full-attention backends do not need the cap.
+        """
         raise NotImplementedError
 
 
@@ -95,6 +101,7 @@ class AllGatherKVFlex(CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetad
         attention_metadata: FlexAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
+        max_num_fragments: int = 1,
     ) -> FlexAttentionMetadata:
         """Prepare a rank-local BlockMask for K/V all-gather CP.
 
@@ -119,6 +126,7 @@ class AllGatherKVFlex(CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetad
             ValueError: If ``permutation`` has an invalid shape or sequence
                 length.
         """
+        del max_num_fragments
         block_mask = attention_metadata
         global_q_len, global_kv_len = block_mask.seq_lengths
         cp_group = spmd_mesh_group(MeshAxisName.CP)
@@ -282,8 +290,10 @@ class AllGatherKVVarlen(
         attention_metadata: VarlenAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
+        max_num_fragments: int = 1,
     ) -> AllGatherKVVarlenAttentionMetadata:
         """Prepare global document offsets and K/V reordering indices."""
+        del max_num_fragments
         if not isinstance(attention_metadata, VarlenAttentionMetadata):
             raise ValueError(
                 "K/V all-gather varlen CP requires VarlenAttentionMetadata, "
@@ -480,7 +490,9 @@ class Ulysses(CPInnerAttention[_GlobalAttentionMetadataT, _GlobalAttentionMetada
         attention_metadata: _GlobalAttentionMetadataT,
         *,
         permutation: torch.Tensor | None,
+        max_num_fragments: int = 1,
     ) -> _GlobalAttentionMetadataT:
+        del max_num_fragments
         if permutation is not None:
             raise ValueError(
                 "Ulysses CP requires contiguous token shards without a permutation."

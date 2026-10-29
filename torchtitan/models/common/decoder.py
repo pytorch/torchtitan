@@ -432,6 +432,9 @@ class Decoder(BaseModel):
         permutation = (
             load_balancer.generate_permutation() if load_balancer is not None else None
         )
+        max_num_fragments = (
+            load_balancer.max_num_fragments if load_balancer is not None else 1
+        )
         if "attention_metadata" in input_dict:
             attention_metadata = input_dict["attention_metadata"]
             assert isinstance(attention_metadata, dict)
@@ -443,6 +446,7 @@ class Decoder(BaseModel):
                 ] = inner_attention.prepare_cp_metadata(
                     metadata,
                     permutation=permutation,
+                    max_num_fragments=max_num_fragments,
                 )
         return context_parallel.shard_tensors(
             input_dict,
