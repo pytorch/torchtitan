@@ -22,6 +22,7 @@ from torchtitan.components.data.types import (
 from torchtitan.components.optim import GradientClipper, Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.profiler import CuspyProfilerConfig, Profiler
@@ -119,6 +120,8 @@ def _dict_microbatch(
 
 
 def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
+    if not hasattr(trainer, "model_cls"):
+        trainer.model_cls = BaseModel
     if not hasattr(trainer, "optim_step"):
         trainer.optim_step = lambda: TrainingEngine.optim_step(trainer)
     if not hasattr(trainer.config, "model"):
@@ -912,6 +915,8 @@ def test_optim_step_waits_for_checkpoint() -> None:
                 maybe_wait_for_staging=lambda: events.append("checkpoint")
             ),
             optim=optim,
+            model_parts=[],
+            parallelism_context=SimpleNamespace(),
         ),
     )
 

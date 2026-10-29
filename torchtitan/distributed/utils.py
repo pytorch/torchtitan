@@ -529,6 +529,8 @@ def clip_grad_norm_(
     error_if_nonfinite: bool = False,
     foreach: bool | None = None,
     pp_mesh: DeviceMesh | None = None,
+    *,
+    norm_parameters: Iterable[torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.
@@ -560,6 +562,9 @@ def clip_grad_norm_(
             fall back to the slow implementation for other device types.
             Default: ``None``
         pp_mesh: Pipeline Parallel device mesh. If not None, will reduce gradient norm across PP stages.
+        norm_parameters: Optional subset counted in the norm. Every parameter
+            in ``parameters`` is clipped, including replicas excluded from this
+            subset. Defaults to all parameters.
 
     Returns:
         Total norm of the parameter gradients (viewed as a single vector).
@@ -567,6 +572,13 @@ def clip_grad_norm_(
     """
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
+    elif not isinstance(parameters, list):
+        parameters = list(parameters)
+    norm_parameter_ids = (
+        {id(parameter) for parameter in norm_parameters}
+        if norm_parameters is not None
+        else None
+    )
 
     # get_total_norm stacks per-parameter norms, so all gradients passed to it
     # must be on the same mesh. Meshes can differ even over the same devices:
@@ -579,10 +591,17 @@ def clip_grad_norm_(
             params_by_mesh[mesh].append(p)
 
     norms = []
-    # An empty list yields tensor(0.), e.g. on a PP rank without gradients.
-    for params in params_by_mesh.values() or [[]]:
+    for params in params_by_mesh.values():
+        grads = [
+            p.grad
+            for p in params
+            if p.grad is not None
+            and (norm_parameter_ids is None or id(p) in norm_parameter_ids)
+        ]
+        if not grads:
+            continue
         norm = torch.nn.utils.get_total_norm(
-            [p.grad for p in params if p.grad is not None],
+            grads,
             norm_type,
             error_if_nonfinite,
             foreach,
@@ -602,7 +621,11 @@ def clip_grad_norm_(
             norm = norm.full_tensor()
         norms.append(norm)
 
-    if len(norms) == 1:
+    if not norms:
+        total_norm = torch.zeros(
+            (), device=parameters[0].device if parameters else None
+        )
+    elif len(norms) == 1:
         total_norm = norms[0]
     elif math.isinf(norm_type):
         total_norm = torch.stack(norms).amax()
