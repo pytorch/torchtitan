@@ -61,7 +61,9 @@ def retention_plan(root, *, keep=2, active_seconds=120, num_replicas=2):
             protected.add(contained(root, root / "last_words" / path.parent.name))
             for cursor_run in root.glob(f"ft-replicat-*/{path.parent.name}"):
                 protected.add(contained(root, cursor_run))
-    for manifest_path in (root / "last_words").glob("*/replica-*/manifest.json"):
+    manifests = list((root / "last_words").glob("*/replica-*/manifest.json"))
+    manifests.extend((root / "last_words").glob("*/events/event-*/replica-*/manifest.json"))
+    for manifest_path in manifests:
         manifest = json.loads(manifest_path.read_text())
         path = contained(root, manifest_path.parent)
         if any(entry.is_symlink() for entry in path.rglob("*")):
@@ -87,18 +89,15 @@ def retention_plan(root, *, keep=2, active_seconds=120, num_replicas=2):
         if root / "last_words" / binding["run_id"] in protected:
             protected.add(path)
         try:
-            from types import SimpleNamespace
+            from torchtitan.last_words.validation import periodic_recovery_preflight
 
-            from torchtitan.last_words.checkpoint import LastWordsCheckpointManager
-
-            manager = LastWordsCheckpointManager.__new__(LastWordsCheckpointManager)
-            manager.enable = False
-            manager.folder = str(root)
-            manager.last_words_signature = binding["signature"]
-            manager.last_words = SimpleNamespace(num_replicas=num_replicas)
-            manager.elastic_enabled = "torchft" in binding
-            manager._last_words_cursor_anchors = {}
-            state, _ = manager._periodic_recovery(int(path.name.removeprefix("step-")))
+            state, _ = periodic_recovery_preflight(
+                root,
+                int(path.name.removeprefix("step-")),
+                signature=binding["signature"],
+                num_replicas=num_replicas,
+                elastic_enabled="torchft" in binding,
+            )
             candidates.append(
                 (
                     ("periodic", binding["signature"]),
@@ -107,16 +106,12 @@ def retention_plan(root, *, keep=2, active_seconds=120, num_replicas=2):
                 )
             )
         except (Exception, CheckpointException) as error:
-            notes.append(
-                f"Unusable periodic checkpoint preserved for diagnosis: {path}: {error}"
-            )
+            notes.append(f"Unusable periodic checkpoint preserved for diagnosis: {path}: {error}")
             protected.add(path)
     signatures = {signature for signature, _, _ in candidates}
     for signature in signatures:
         same = [
-            (updates, path)
-            for candidate_signature, updates, path in candidates
-            if signature == candidate_signature
+            (updates, path) for candidate_signature, updates, path in candidates if signature == candidate_signature
         ]
         generations = sorted({updates for updates, _ in same}, reverse=True)[:keep]
         protected.update(path for updates, path in same if updates in generations)
@@ -130,10 +125,7 @@ def retention_plan(root, *, keep=2, active_seconds=120, num_replicas=2):
             protected.add(contained(root, cursor_run))
     deletes = []
     for _, _, path in candidates:
-        if any(
-            path.is_relative_to(anchor) or anchor.is_relative_to(path)
-            for anchor in protected
-        ):
+        if any(path.is_relative_to(anchor) or anchor.is_relative_to(path) for anchor in protected):
             continue
         contained(root, path)
         # Unexpected symlinks make cleanup fail closed, including nested entries.
@@ -183,15 +175,9 @@ def process_table():
 
 
 def descendant_workers(known, entries):
-    owned = {
-        pid
-        for pid, token in known.items()
-        if pid in entries and entries[pid][2] == token
-    }
+    owned = {pid for pid, token in known.items() if pid in entries and entries[pid][2] == token}
     while True:
-        expanded = owned | {
-            pid for pid, (parent, _, _) in entries.items() if parent in owned
-        }
+        expanded = owned | {pid for pid, (parent, _, _) in entries.items() if parent in owned}
         if expanded == owned:
             return {pid: entries[pid][2] for pid in owned}
         owned = expanded
@@ -322,9 +308,7 @@ def track_child(child, token):
         while not child.tracking_stop.is_set():
             entries = process_table()
             with child.tracking_lock:
-                child.owned_workers.update(
-                    descendant_workers(child.owned_workers, entries)
-                )
+                child.owned_workers.update(descendant_workers(child.owned_workers, entries))
             child.tracking_stop.wait(0.05)
 
     child.tracking_thread = threading.Thread(target=track, daemon=True)
@@ -352,9 +336,7 @@ class ExternalChild:
         if entry is None or entry[2] != self.token:
             return 75  # Missing exit evidence must never become success.
         try:
-            fields = (
-                Path(f"/proc/{self.pid}/stat").read_text().rsplit(")", 1)[1].split()
-            )
+            fields = Path(f"/proc/{self.pid}/stat").read_text().rsplit(")", 1)[1].split()
         except FileNotFoundError:
             return 75
         return 75 if fields[0] == "Z" else None
@@ -376,11 +358,7 @@ def owned_worker_pids(child):
     entries = process_table()
     with child.tracking_lock:
         child.owned_workers.update(descendant_workers(child.owned_workers, entries))
-        return [
-            pid
-            for pid, token in child.owned_workers.items()
-            if pid in entries and entries[pid][2] == token
-        ]
+        return [pid for pid, token in child.owned_workers.items() if pid in entries and entries[pid][2] == token]
 
 
 def stop_children(children, *, term_grace_seconds=5, kill_grace_seconds=2):
@@ -397,10 +375,7 @@ def stop_children(children, *, term_grace_seconds=5, kill_grace_seconds=2):
             return True
         for pid in owned_worker_pids(child):
             try:
-                if (
-                    Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-                    != "Z"
-                ):
+                if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z":
                     return True
             except FileNotFoundError:
                 continue
@@ -432,9 +407,7 @@ def stop_children(children, *, term_grace_seconds=5, kill_grace_seconds=2):
                         os.kill(pid, signal.SIGSTOP)
                 frozen.update(current)
             else:
-                raise RuntimeError(
-                    "Owned descendants did not stabilize; refusing to restart"
-                )
+                raise RuntimeError("Owned descendants did not stabilize; refusing to restart")
         signal_owned(child, signal.SIGKILL)
         child.wait(timeout=kill_grace_seconds)
     deadline = time.monotonic() + kill_grace_seconds
@@ -532,9 +505,7 @@ def deadline_guard(seconds):
         for child in children:
             with child.tracking_lock:
                 workers.update(child.owned_workers)
-        guardian.stdin.write(
-            json.dumps({"deadline": deadline, "workers": workers}) + "\n"
-        )
+        guardian.stdin.write(json.dumps({"deadline": deadline, "workers": workers}) + "\n")
         guardian.stdin.flush()
 
     try:
@@ -570,10 +541,7 @@ def supervised_attempts(spec, state_dir, guard):
         not isinstance(initial, list)
         or not initial
         or len(set(initial)) != len(initial)
-        or any(
-            type(replica) is not int or not 0 <= replica < len(commands)
-            for replica in initial
-        )
+        or any(type(replica) is not int or not 0 <= replica < len(commands) for replica in initial)
         or (not elastic_enabled and initial != list(range(len(commands))))
     ):
         raise ValueError("Invalid initial logical replica slots")
@@ -582,26 +550,16 @@ def supervised_attempts(spec, state_dir, guard):
     envs = spec.get("envs", [{} for _ in commands])
     if len(envs) != len(commands) or any(not isinstance(env, dict) for env in envs):
         raise ValueError("Provide one environment mapping per launch command")
-    if not commands or any(
-        not isinstance(command, list) or not command for command in commands
-    ):
+    if not commands or any(not isinstance(command, list) or not command for command in commands):
         raise ValueError("Job commands must be nonempty argument lists")
-    if last_words_enabled and any(
-        "{run_id}" not in " ".join(command) for command in commands
-    ):
+    if last_words_enabled and any("{run_id}" not in " ".join(command) for command in commands):
         raise ValueError("Every replica launch must consume the shared {run_id}")
-    if last_words_enabled and any(
-        "{resume_path}" not in " ".join(command) for command in commands
-    ):
-        raise ValueError(
-            "Every replica launch must consume {resume_path}; an empty value enables normal selection"
-        )
+    if last_words_enabled and any("{resume_path}" not in " ".join(command) for command in commands):
+        raise ValueError("Every replica launch must consume {resume_path}; an empty value enables normal selection")
     attempts = int(spec.get("max_attempts", 1 if elastic_enabled else 3))
     reserve = int(spec.get("required_free_bytes", 0))
     if not 1 <= attempts <= 3 or (last_words_enabled and reserve <= 0):
-        raise ValueError(
-            "Use one to three launch attempts and a positive emergency-space reserve"
-        )
+        raise ValueError("Use one to three launch attempts and a positive emergency-space reserve")
     state_dir.mkdir(parents=True, exist_ok=True)
     root = Path(spec["checkpoint_root"]).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -624,18 +582,9 @@ def supervised_attempts(spec, state_dir, guard):
                 if manifest.get("run_id") != run_id:
                     raise ValueError("Published candidate belongs to another launch")
                 if backend == "file":
-                    grant = json.loads(
-                        (
-                            root / "last_words/control" / run_id / "grant.json"
-                        ).read_text()
-                    )
-                    if any(
-                        manifest[key] != grant[key]
-                        for key in ("replica_id", "state", "signature")
-                    ):
-                        raise ValueError(
-                            "Published candidate does not match writer authorization"
-                        )
+                    grant = json.loads((root / "last_words/control" / run_id / "grant.json").read_text())
+                    if any(manifest[key] != grant[key] for key in ("replica_id", "state", "signature")):
+                        raise ValueError("Published candidate does not match writer authorization")
                 recovery_preflight(target, manifest, len(commands))
 
             if last_words_enabled and backend == "service":
@@ -664,22 +613,16 @@ def supervised_attempts(spec, state_dir, guard):
 
                     while True:
                         if coordinator.poll() is not None:
-                            raise RuntimeError(
-                                "Coordinator failed before training launch"
-                            )
+                            raise RuntimeError("Coordinator failed before training launch")
                         try:
                             if not address_file.is_file():
-                                raise OSError(
-                                    "Coordinator has not advertised its endpoint"
-                                )
+                                raise OSError("Coordinator has not advertised its endpoint")
                             address = json.loads(address_file.read_text())["address"]
                             with urllib.request.urlopen(address + "/status", timeout=1):
                                 break
                         except OSError as error:
                             if time.monotonic() >= startup_deadline:
-                                raise RuntimeError(
-                                    "Coordinator startup timed out"
-                                ) from error
+                                raise RuntimeError("Coordinator startup timed out") from error
                             time.sleep(0.1)
                     election = module["ServiceElection"](
                         root,
@@ -687,18 +630,14 @@ def supervised_attempts(spec, state_dir, guard):
                         address=address,
                         num_replicas=len(commands),
                         world_size=int(spec.get("replica_world_size", 2)),
-                        heartbeat_timeout=float(
-                            spec.get("heartbeat_timeout_seconds", 60)
-                        ),
+                        heartbeat_timeout=float(spec.get("heartbeat_timeout_seconds", 60)),
                         startup_timeout=float(spec.get("startup_timeout_seconds", 60)),
                         timeout=float(spec.get("fault_timeout_seconds", 300)),
                         validate=validate_candidate,
                         elastic=(
                             dict(
                                 active_replicas=initial,
-                                recovery_seconds=float(
-                                    spec.get("elastic_recovery_seconds", 180)
-                                ),
+                                recovery_seconds=float(spec.get("elastic_recovery_seconds", 180)),
                             )
                             if elastic_enabled
                             else None
@@ -753,16 +692,12 @@ def supervised_attempts(spec, state_dir, guard):
                         startup_seconds=float(spec.get("startup_timeout_seconds", 60)),
                     )
                 if last_words_enabled and shutil.disk_usage(root).free < reserve:
-                    raise OSError(
-                        "Insufficient free space for configured emergency candidate reserve"
-                    )
+                    raise OSError("Insufficient free space for configured emergency candidate reserve")
                 for replica, template in enumerate(commands):
                     if replica not in initial:
                         continue
                     command = [
-                        argument.replace("{run_id}", run_id).replace(
-                            "{resume_path}", resume_path
-                        )
+                        argument.replace("{run_id}", run_id).replace("{resume_path}", resume_path)
                         for argument in template
                     ]
                     log = (state_dir / f"{run_id}-replica-{replica}.log").open("w")
@@ -799,9 +734,7 @@ def supervised_attempts(spec, state_dir, guard):
                 while any(child.poll() is None for child in workers()):
                     try:
                         if coordinator is not None and coordinator.poll() is not None:
-                            raise RuntimeError(
-                                "Coordinator exited; save session cannot be resumed"
-                            )
+                            raise RuntimeError("Coordinator exited; save session cannot be resumed")
                         if election is not None:
                             election.tick(children, terminate=stop_children)
                         if admissions is not None:
@@ -819,9 +752,7 @@ def supervised_attempts(spec, state_dir, guard):
                         and (
                             election.success
                             if backend == "service"
-                            else json.loads(
-                                (election.control / "result.json").read_text()
-                            )["success"]
+                            else json.loads((election.control / "result.json").read_text())["success"]
                         )
                     ):
                         if terminal_saved_at is None:
@@ -839,9 +770,7 @@ def supervised_attempts(spec, state_dir, guard):
                         and not (
                             election.success
                             if backend == "service"
-                            else json.loads(
-                                (election.control / "result.json").read_text()
-                            )["success"]
+                            else json.loads((election.control / "result.json").read_text())["success"]
                         )
                     ):
                         forced_reason = "emergency_save_failed"
@@ -854,9 +783,7 @@ def supervised_attempts(spec, state_dir, guard):
                     ):
                         failure_at = now
                     grace = float(spec.get("failure_grace_seconds", 420))
-                    progress_limit = last_progress + float(
-                        spec.get("no_progress_seconds", 600)
-                    )
+                    progress_limit = last_progress + float(spec.get("no_progress_seconds", 600))
                     if last_update < 0:
                         progress_limit = max(progress_limit, startup_deadline)
                     if not last_words_enabled:
@@ -878,9 +805,7 @@ def supervised_attempts(spec, state_dir, guard):
                     else:
                         statuses = [
                             json.loads(status.read_text())
-                            for status in (root / "last_words/control" / run_id).glob(
-                                "replica-*-rank-*.json"
-                            )
+                            for status in (root / "last_words/control" / run_id).glob("replica-*-rank-*.json")
                         ]
                     for status in statuses:
                         value = status.get("state") or {}
@@ -893,47 +818,29 @@ def supervised_attempts(spec, state_dir, guard):
                             now + float(spec.get("no_progress_seconds", 600)),
                         )
                     stalled = last_words_enabled and now > progress_limit
-                    if (
-                        now - began > deadline
-                        or stalled
-                        or (failure_at is not None and now - failure_at > grace)
-                    ):
-                        forced_reason = (
-                            "no_training_progress" if stalled else "external_deadline"
-                        )
+                    if now - began > deadline or stalled or (failure_at is not None and now - failure_at > grace):
+                        forced_reason = "no_training_progress" if stalled else "external_deadline"
                         stop_children(workers())
                         break
                     time.sleep(0.5)
                 # All workers can exit between two polls after Coordinator loss.
                 # Finalize diagnostics/late publication before intentional shutdown.
-                coordinator_code = (
-                    coordinator.poll() if coordinator is not None else None
-                )
+                coordinator_code = coordinator.poll() if coordinator is not None else None
                 if last_words_enabled and backend == "service" and not forced_reason:
                     try:
                         if coordinator_code is not None:
-                            raise RuntimeError(
-                                f"Coordinator exited with code {coordinator_code}"
-                            )
+                            raise RuntimeError(f"Coordinator exited with code {coordinator_code}")
                         election.tick(children, terminate=stop_children)
                         if election.finished and not election.success:
                             forced_reason = "emergency_save_failed"
                     except Exception as error:
                         forced_reason = f"coordination_failed: {error}"
-                codes = [
-                    child.returncode if child is not None else None
-                    for child in children
-                ]
+                codes = [child.returncode if child is not None else None for child in children]
                 completed = all(code == 0 for code in codes)
                 if elastic_enabled:
-                    members = (
-                        election.snapshot["members"]
-                        if election is not None
-                        else initial
-                    )
+                    members = election.snapshot["members"] if election is not None else initial
                     completed = (
-                        bool(members)
-                        and all(codes[replica] == 0 for replica in members)
+                        bool(members) and all(codes[replica] == 0 for replica in members)
                         if election is not None
                         else any(code == 0 for code in codes)
                     )

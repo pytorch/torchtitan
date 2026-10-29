@@ -12,7 +12,7 @@ checkpoint/cursor/RNG bindings, publication, restore preflight, and its Linux
 supervisor. Backend plugins own device and communicator recovery.
 
 `torchtitan.last_words` contains `control`, `client`, `file_backend`, `validation`,
-`checkpoint`, `rng`, `training`, `job` and `external`. Service code is not copied
+`checkpoint`, `schema`, `rng`, `training`, `job` and `external`. Service code is not copied
 into TorchTitan. The FT experiment wires `LastWordsTrainingCoordinator` into its
 TrainingEngine, optimizer, checkpoint and trainer adapters. Ordinary training
 uses the existing path when the feature is disabled.
@@ -41,6 +41,9 @@ Use `FaultTolerantTrainer.Config` and set its `fault_tolerance` fields explicitl
 `min_replica_size == group_size`; elastic last-words requires service coordination.
 Full checkpointing and FT dataloader checkpoints must be enabled. Semi-sync
 methods and optimizer CUDA graphs are unsupported in this combination.
+Complete last-words recovery rejects `exclude_from_loading` entries for model,
+optimizer, scheduler, counters, dataloader, EMA and native TorchFT progress.
+Model-only warm starts are a separate workflow, not committed-state recovery.
 
 The training coordinator begins the quorum before consuming the attempt,
 requires a single commit authorization before persistent updates, and marks
@@ -48,6 +51,18 @@ completion only after the optimizer/scheduler/auxiliary update. Unknown commit,
 partial restoration and an interrupted update prohibit emergency publication.
 The checkpoint adapter records full state, logical cursors and rank-local RNG.
 The Main RNG layout is not an implicit upgrade path for old 0.3.0 checkpoints.
+Nonzero recovery candidates must include required-state schemas. Metadata checks
+cover required tensors, serialized fields and complete nonoverlapping storage
+chunks; restore also compares an independently derived live application schema
+before changing model or cursor values. Candidate declarations alone cannot
+relax the current application's requirements. These checks do not hash tensor
+contents or prove that arbitrary serialized payloads can be deserialized.
+
+Workers persist DCP contents and atomically publish candidate metadata. The
+supervisor then validates the candidate and records the save outcome. Candidate
+publication alone is not acceptance. Restart independently checks compatibility
+and completeness before restoring live state. A bound cursor may lag model
+progress; this permits data replay and does not promise an identical trajectory.
 
 The independent service runs on loopback HTTP. Job supervision requires Linux
 process groups, `/proc`, `fcntl`, and a shared POSIX checkpoint filesystem:
@@ -74,6 +89,9 @@ torchtitan_last_words_job cleanup --checkpoint-root /path/to/checkpoints --num-r
 `--apply` executes the plan. Retained checkpoints protect their referenced
 cursor branches; unusable candidates are preserved for diagnosis. Publication,
 independent storage validation and all owned process exits are separate checks.
+Periodic checkpoints, terminal candidates and elastic `events/event-*` candidates
+use the same explicit read-only recovery preflight. Cleanup does not instantiate
+an incomplete training manager and is separate from base `keep_latest_k` policy.
 
 ## Tests and WIP gates
 
@@ -93,8 +111,9 @@ against the pushed revision before its result can be claimed.
 
 Before removing WIP: build both wheels from their actual PR heads; pass CPU
 transaction/DCP and disabled-path regressions; run end-to-end failure/rejoin and
-shutdown cases; compare full state and actual inputs; and complete numerical and
-performance validation. The latest historical NPU recovery attempt ended with
-four SIGKILL exits before the first committed step. Its cause is unresolved.
-Normal model-only Inductor training is not fault-recovery, loss-compilation or
-bitwise-equivalence acceptance. Device validation remains paused by the author.
+shutdown cases; and compare full state, numerical results and actual inputs.
+The current validation plan contains three paired normal/numerical modes plus
+cross-replica periodic recovery, native shrink/rejoin and emergency cold recovery.
+Performance is deferred. Historical 0.3.0 runs cannot validate this Main revision.
+Model-only Inductor training does not establish loss compilation or bitwise
+equivalence. Nondeterministic functional recovery reports measured differences.

@@ -24,24 +24,24 @@ import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint.api import CheckpointException
 
 from torchtitan.components.checkpointer import (
-    CheckpointManager,
     DATALOADER,
     EMA,
     LR_SCHEDULER,
     MODEL,
     OPTIMIZER,
     TRAIN_STATE,
+    CheckpointManager,
 )
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
-from .control import atomic_json, LastWordsExitError, read_json, sync_checkpoint_tree
+
+from .control import LastWordsExitError, atomic_json, read_json, sync_checkpoint_tree
 from .rng import RNG_SCHEMA
+from .schema import state_schema, validate_state_schema
 from .validation import (
     checkpoint_state,
-    checkpoint_torchft_state,
-    contained,
+    cursor_candidates,
+    periodic_recovery_preflight,
     recovery_preflight,
-    validate_rng_cursor,
-    validate_storage_ranges,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
         return dict(
             state=dict(state),
             signature=self.last_words_signature,
+            recovery_schema=state_schema(self.ft_states, kind="cursor"),
             **self._rng_metadata(),
         )
 
@@ -103,10 +104,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             if self.last_words_stop_requested():
                 assert self.last_words_on_stop is not None
                 return self.last_words_on_stop()
-            if (
-                self.last_words_state is None
-                or self.last_words_state["step"] != curr_step
-            ):
+            if self.last_words_state is None or self.last_words_state["step"] != curr_step:
                 return False
             # Trainer.save is outside train_step's exception handler. Drain the
             # previous cursor on every shard before _ft_save can start another
@@ -114,9 +112,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             try:
                 uploaded = self._drain_last_words_upload()
             except (Exception, CheckpointException) as error:
-                self.last_words.request(
-                    f"Unsafe background checkpoint failure: {error}"
-                )
+                self.last_words.request(f"Unsafe background checkpoint failure: {error}")
                 self.last_words.publish("ineligible")
                 raise
             if not uploaded:
@@ -131,15 +127,11 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
                     try:
                         uploaded = self._drain_last_words_upload()
                     except (Exception, CheckpointException) as error:
-                        self.last_words.request(
-                            f"Unsafe background checkpoint failure: {error}"
-                        )
+                        self.last_words.request(f"Unsafe background checkpoint failure: {error}")
                         self.last_words.publish("ineligible")
                         raise
                     if not uploaded:
-                        self.last_words.request(
-                            "Completed cursor storage upload failed"
-                        )
+                        self.last_words.request("Completed cursor storage upload failed")
                         assert self.last_words_on_stop is not None
                         return self.last_words_on_stop()
         # Preserve TorchFT's full-checkpoint writer election; its per-replica
@@ -149,18 +141,15 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             saved = CheckpointManager._save(self, curr_step, last_step)
         if self.last_words is not None and saved and dist.get_rank() == 0:
             assert self.last_words_state is not None
-            path = (
-                Path(self._create_checkpoint_id(curr_step)) / "last_words_binding.json"
-            )
+            path = Path(self._create_checkpoint_id(curr_step)) / "last_words_binding.json"
             binding = {
                 **self._rng_metadata(),
+                "recovery_schema": state_schema(self._full_states(), kind="model"),
                 "signature": self.last_words_signature,
                 "run_id": self.last_words.config.run_id,
                 "state": dict(self.last_words_state),
                 "anchors": {
-                    str(replica): str(
-                        anchor.resolve().relative_to(Path(self.folder).resolve())
-                    )
+                    str(replica): str(anchor.resolve().relative_to(Path(self.folder).resolve()))
                     for replica, anchor in self._last_words_cursor_anchors.items()
                 },
             }
@@ -184,25 +173,17 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
     def _ft_save(self, step):
         if self.last_words is not None:
             self.maybe_wait_for_saving()
-            marker = (
-                Path(self._create_checkpoint_id(step, folder=self._ft_folder()))
-                / "last_words_cursor.json"
-            )
+            marker = Path(self._create_checkpoint_id(step, folder=self._ft_folder())) / "last_words_cursor.json"
             if marker.is_file():
                 if read_json(marker)["state"] != self.last_words_state:
-                    raise LastWordsExitError(
-                        "Refusing to overwrite an immutable cursor version"
-                    )
+                    raise LastWordsExitError("Refusing to overwrite an immutable cursor version")
                 return
         super()._ft_save(step)
         if self.last_words is None:
             return
         assert self.last_words_state is not None
         state = dict(self.last_words_state)
-        path = (
-            Path(self._create_checkpoint_id(step, folder=self._ft_folder()))
-            / "last_words_cursor.json"
-        )
+        path = Path(self._create_checkpoint_id(step, folder=self._ft_folder())) / "last_words_cursor.json"
         assert self.save_future is not None
         self._last_words_pending_cursor = (path, state)
         upload = self.save_future
@@ -221,22 +202,15 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
         path = marker.parent.parent / "last_words_cursor_index.json"
         try:
             value: dict[str, Any] = (
-                read_json(path)
-                if path.is_file()
-                else {"signature": self.last_words_signature, "entries": {}}
+                read_json(path) if path.is_file() else {"signature": self.last_words_signature, "entries": {}}
             )
-            if value["signature"] != self.last_words_signature or not isinstance(
-                value["entries"], dict
-            ):
+            if value["signature"] != self.last_words_signature or not isinstance(value["entries"], dict):
                 raise ValueError("Invalid cursor index header")
             if any(
                 Path(name).name != name
                 or not name.startswith("step-")
                 or not isinstance(entry, dict)
-                or any(
-                    type(entry.get(key)) is not int or entry[key] < 0
-                    for key in ("step", "last_words_num_updates")
-                )
+                or any(type(entry.get(key)) is not int or entry[key] < 0 for key in ("step", "last_words_num_updates"))
                 for name, entry in value["entries"].items()
             ):
                 raise ValueError("Invalid cursor index entry")
@@ -269,9 +243,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             super()._wait_for_saving()
             if self._last_words_pending_cursor is not None:
                 path, state = self._last_words_pending_cursor
-                if dist.get_rank() == 0 and not getattr(
-                    self, "_last_words_cursor_background", False
-                ):
+                if dist.get_rank() == 0 and not getattr(self, "_last_words_cursor_background", False):
                     sync_checkpoint_tree(path.parent, root=Path(self.folder))
                     atomic_json(path, self._cursor_record(state), durable=True)
                 self._last_words_pending_cursor = None
@@ -284,11 +256,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             if self.last_words is not None:
                 # Only an ended cursor upload with storage errors can fall back.
                 # A failed full save or communication/staging error is unsafe.
-                failures = (
-                    error.failures.values()
-                    if isinstance(error, CheckpointException)
-                    else [(error, None)]
-                )
+                failures = error.failures.values() if isinstance(error, CheckpointException) else [(error, None)]
                 safe = (
                     self._last_words_pending_cursor is not None
                     and self._last_words_pending_binding is None
@@ -315,80 +283,16 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
 
     def _cursor_candidates(self, replica, state, *, run_id=None, anchors=None):
         assert self.last_words is not None
-        source_root = Path(self.folder) / f"ft-replicat-{replica}"
-        run_id = self.last_words.config.run_id if run_id is None else run_id
-        anchors = self._last_words_cursor_anchors if anchors is None else anchors
-        available = []
-        branch = source_root / run_id
-        index = branch / "last_words_cursor_index.json"
-        markers = []
-        if index.is_file():
-            try:
-                value = read_json(index)
-                if value["signature"] != self.last_words_signature:
-                    raise ValueError("Cursor index has another signature")
-                eligible = [
-                    (entry["last_words_num_updates"], entry["step"], name)
-                    for name, entry in value["entries"].items()
-                    if entry["last_words_num_updates"]
-                    <= state["last_words_num_updates"]
-                    and entry["step"] <= state["step"]
-                ]
-                for _, _, name in sorted(eligible, reverse=True):
-                    if Path(name).name != name or not name.startswith("step-"):
-                        raise ValueError("Invalid indexed cursor path")
-                    candidate = branch / name
-                    validate_storage_ranges(candidate)
-                    marker = candidate / "last_words_cursor.json"
-                    cursor = read_json(marker)
-                    if (
-                        cursor["signature"] != self.last_words_signature
-                        or cursor["state"] != value["entries"][name]
-                    ):
-                        raise ValueError("Cursor index disagrees with published marker")
-                    markers = [marker]
-                    break
-            except (Exception, CheckpointException) as error:
-                logger.warning(
-                    "Cursor index unavailable; scanning published cursors: %s", error
-                )
-        if not markers:
-            markers = list(branch.glob("step-*/last_words_cursor.json"))
-        if self.elastic_enabled:
-            markers.extend(branch.glob("generation-*/step-*/last_words_cursor.json"))
-            markers.extend(branch.glob("initial/step-*/last_words_cursor.json"))
-        if replica in anchors:
-            markers.append(anchors[replica] / "last_words_cursor.json")
-        for marker in markers:
-            if not marker.is_file():
-                continue
-            try:
-                contained(Path(self.folder), marker.parent)
-                validate_storage_ranges(marker.parent)
-                cursor = read_json(marker)
-                if self.rng_state is not None:
-                    validate_rng_cursor(
-                        marker.parent, cursor, self.last_words.world_size
-                    )
-            except (Exception, CheckpointException) as error:
-                logger.warning("Ignoring incomplete cursor %s: %s", marker, error)
-                continue
-            if (
-                cursor["signature"] == self.last_words_signature
-                and cursor["state"]["last_words_num_updates"]
-                <= state["last_words_num_updates"]
-                and cursor["state"]["step"] <= state["step"]
-                and (marker.parent / ".metadata").is_file()
-            ):
-                available.append(
-                    (
-                        cursor["state"]["last_words_num_updates"],
-                        cursor["state"]["step"],
-                        marker.parent,
-                        cursor,
-                    )
-                )
-        return available
+        return cursor_candidates(
+            self.folder,
+            replica,
+            state,
+            signature=self.last_words_signature,
+            run_id=self.last_words.config.run_id if run_id is None else run_id,
+            anchors=self._last_words_cursor_anchors if anchors is None else anchors,
+            elastic_enabled=self.elastic_enabled,
+            num_shards=self.last_words.world_size if self.rng_state is not None else None,
+        )
 
     def initialize_elastic_cursors(self, state, *, make_cursor, initial_replicas):
         """Materialize all logical slots before their data can be consumed."""
@@ -398,9 +302,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
         self._drain_last_words_upload()
         for replica in range(control.num_replicas):
             if self.rng_state is not None:
-                owner = (
-                    replica if replica in initial_replicas else min(initial_replicas)
-                )
+                owner = replica if replica in initial_replicas else min(initial_replicas)
                 if control.replica_id != owner:
                     continue
             elif control.replica_id != min(initial_replicas):
@@ -408,20 +310,9 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             if self._cursor_candidates(replica, state):
                 continue
             if state["step"] != 0 or state["last_words_num_updates"] != 0:
-                raise LastWordsExitError(
-                    "Cannot invent a missing slot cursor after training has begun"
-                )
-            target = (
-                Path(self.folder)
-                / f"ft-replicat-{replica}"
-                / control.config.run_id
-                / "initial/step-0"
-            )
-            cursor = (
-                self.ft_states
-                if replica == control.replica_id
-                else make_cursor(replica)
-            )
+                raise LastWordsExitError("Cannot invent a missing slot cursor after training has begun")
+            target = Path(self.folder) / f"ft-replicat-{replica}" / control.config.run_id / "initial/step-0"
+            cursor = self.ft_states if replica == control.replica_id else make_cursor(replica)
             try:
                 dcp.save(cursor, checkpoint_id=target, process_group=self.pg)
             finally:
@@ -438,15 +329,10 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
                 dist.barrier(group=self._last_words_control_pg)
         deadline = time.monotonic() + control.config.timeout_seconds
         while True:
-            if all(
-                self._cursor_candidates(replica, state)
-                for replica in range(control.num_replicas)
-            ):
+            if all(self._cursor_candidates(replica, state) for replica in range(control.num_replicas)):
                 return
             if time.monotonic() >= deadline:
-                raise LastWordsExitError(
-                    "Timed out preparing complete logical slot cursors"
-                )
+                raise LastWordsExitError("Timed out preparing complete logical slot cursors")
             _ = control.requested
             time.sleep(0.1)
 
@@ -457,11 +343,13 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
         self._drain_last_words_upload()
         available = self._cursor_candidates(control.replica_id, state)
         if not available:
-            raise LastWordsExitError(
-                "No compatible safe cursor for this logical replica"
-            )
-        _, _, source, _ = max(
-            available, key=lambda entry: (entry[0], entry[1], str(entry[2]))
+            raise LastWordsExitError("No compatible safe cursor for this logical replica")
+        _, _, source, cursor = max(available, key=lambda entry: (entry[0], entry[1], str(entry[2])))
+        validate_state_schema(
+            source,
+            cursor.get("recovery_schema"),
+            kind="cursor",
+            expected=state_schema(self.ft_states, kind="cursor"),
         )
         dcp.load(self.ft_states, checkpoint_id=source, process_group=self.pg)
         self._restore_rng()
@@ -476,61 +364,24 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
 
     def _periodic_recovery(self, step):
         assert self.last_words is not None
-        path = Path(self._create_checkpoint_id(step))
-        if not (path / ".metadata").is_file():
-            raise LastWordsExitError("Periodic checkpoint metadata is missing")
-        validate_storage_ranges(path)
-        if step == 0:
-            return {}, {}
-        binding_path = path / "last_words_binding.json"
-        if not binding_path.is_file():
-            raise LastWordsExitError(
-                "Periodic checkpoint has no bound cursor recovery chain"
+        try:
+            return periodic_recovery_preflight(
+                self.folder,
+                step,
+                signature=self.last_words_signature,
+                num_replicas=self.last_words.num_replicas,
+                elastic_enabled=self.elastic_enabled,
+                num_shards=self.last_words.world_size if self.rng_state is not None else None,
+                expected_model=state_schema(self._full_states(), kind="model") if step else None,
+                expected_cursors={self.last_words.replica_id: state_schema(self.ft_states, kind="cursor")}
+                if step
+                else None,
             )
-        binding = read_json(binding_path)
-        if binding["signature"] != self.last_words_signature:
-            raise LastWordsExitError("Periodic checkpoint configuration differs")
-        if self.rng_state is not None and binding.get("rng_schema") != RNG_SCHEMA:
-            raise LastWordsExitError(
-                "Periodic checkpoint has no bound RNG recovery chain"
-            )
-        state = self._checkpoint_state(path)
-        if state["step"] != step or (
-            "state" in binding
-            and any(binding["state"][key] != value for key, value in state.items())
-        ):
-            raise LastWordsExitError("Periodic checkpoint binding progress differs")
-        if self.elastic_enabled and checkpoint_torchft_state(path) != binding.get(
-            "torchft"
-        ):
-            raise LastWordsExitError(
-                "Periodic checkpoint has no matching TorchFT progress"
-            )
-        anchors = {
-            int(replica): contained(Path(self.folder), Path(self.folder) / anchor)
-            for replica, anchor in binding["anchors"].items()
-        }
-        selected = {}
-        for replica in range(self.last_words.num_replicas):
-            available = self._cursor_candidates(
-                replica, state, run_id=binding["run_id"], anchors=anchors
-            )
-            if not available:
-                raise LastWordsExitError(
-                    "Periodic model checkpoint has no compatible safe replica cursor"
-                )
-            _, _, cursor_path, _ = max(
-                available, key=lambda entry: (entry[0], entry[1], str(entry[2]))
-            )
-            selected[replica] = cursor_path
-        return state, selected
+        except ValueError as error:
+            raise LastWordsExitError(str(error)) from error
 
     def _periodic_candidates(self, step):
-        paths = (
-            [Path(self._create_checkpoint_id(step))]
-            if step != -1
-            else Path(self.folder).glob("step-*")
-        )
+        paths = [Path(self._create_checkpoint_id(step))] if step != -1 else Path(self.folder).glob("step-*")
         available = []
         for path in paths:
             suffix = path.name.removeprefix("step-")
@@ -541,9 +392,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
                 state, anchors = self._periodic_recovery(candidate_step)
             except (Exception, CheckpointException) as error:
                 if step != -1:
-                    raise LastWordsExitError(
-                        f"Requested periodic checkpoint is not recoverable: {error}"
-                    ) from error
+                    raise LastWordsExitError(f"Requested periodic checkpoint is not recoverable: {error}") from error
                 logger.warning(
                     "Ignoring unpublished or incompatible periodic checkpoint %s: %s",
                     path,
@@ -585,13 +434,15 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
 
     def _load_periodic(self, step):
         assert self.last_words is not None
+        required = {MODEL, OPTIMIZER, LR_SCHEDULER, TRAIN_STATE, DATALOADER, EMA, "torchft"}
+        excluded = required.intersection(self.exclude_from_loading)
+        if excluded:
+            raise ValueError(f"Last words complete recovery cannot exclude training state: {sorted(excluded)}")
         candidates = self._periodic_candidates(step)
         if candidates:
             step, _, anchors = max(candidates, key=lambda entry: entry[0])
         elif self._find_load_step() != -1:
-            raise LastWordsExitError(
-                "No published periodic checkpoint has a complete recovery chain"
-            )
+            raise LastWordsExitError("No published periodic checkpoint has a complete recovery chain")
         else:
             anchors = {}
         imported = self._import_cursor_anchors(anchors) if anchors else {}
@@ -614,15 +465,11 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
                     self.ft_manager.load_state_dict(dict(step=0, batches_committed=0))
                 return loaded
             if not anchors:
-                raise LastWordsExitError(
-                    "Initial full checkpoint has no bound cursor recovery chain"
-                )
+                raise LastWordsExitError("Initial full checkpoint has no bound cursor recovery chain")
             self._last_words_cursor_anchors = imported
             dcp.load(
                 self.ft_states,
-                checkpoint_id=self._last_words_cursor_anchors[
-                    self.last_words.replica_id
-                ],
+                checkpoint_id=self._last_words_cursor_anchors[self.last_words.replica_id],
                 process_group=self.pg,
             )
             self._restore_rng()
@@ -635,11 +482,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             return super().load(step)
         root = Path(self.folder) / "last_words"
         requested = control.config.resume_path
-        paths = (
-            [Path(requested)]
-            if requested
-            else list(root.glob("*/replica-*/manifest.json"))
-        )
+        paths = [Path(requested)] if requested else list(root.glob("*/replica-*/manifest.json"))
         if not requested and self.elastic_enabled:
             paths.extend(root.glob("*/events/event-*/replica-*/manifest.json"))
         candidates = []
@@ -652,29 +495,28 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             try:
                 manifest = read_json(manifest_path)
                 if manifest["signature"] != self.last_words_signature:
-                    raise ValueError(
-                        "Last-words checkpoint topology or data configuration differs"
-                    )
+                    raise ValueError("Last-words checkpoint topology or data configuration differs")
                 if self.elastic_enabled and "torchft" not in manifest:
-                    raise ValueError(
-                        "Elastic recovery requires checkpointed TorchFT progress"
-                    )
-                if (
-                    self.rng_state is not None
-                    and manifest.get("rng_schema") != RNG_SCHEMA
-                ):
-                    raise ValueError(
-                        "Last-words checkpoint has no bound RNG recovery chain"
-                    )
+                    raise ValueError("Elastic recovery requires checkpointed TorchFT progress")
+                if self.rng_state is not None and manifest.get("rng_schema") != RNG_SCHEMA:
+                    raise ValueError("Last-words checkpoint has no bound RNG recovery chain")
                 if step != -1 and manifest["state"]["step"] != step:
                     continue
                 base = manifest_path.parent
-                recovery_preflight(base, manifest, control.num_replicas)
+                recovery_preflight(
+                    base,
+                    manifest,
+                    control.num_replicas,
+                    expected_model=state_schema(self._full_states(), kind="model"),
+                    expected_cursors={
+                        manifest["cursors"][str(control.replica_id)]["path"]: state_schema(
+                            self.ft_states, kind="cursor"
+                        )
+                    },
+                )
             except (Exception, CheckpointException) as error:
                 if requested:
-                    raise ValueError(
-                        f"Requested last-words candidate is not recoverable: {error}"
-                    ) from error
+                    raise ValueError(f"Requested last-words candidate is not recoverable: {error}") from error
                 logger.warning(
                     "Ignoring incomplete last-words candidate %s: %s",
                     manifest_path,
@@ -693,23 +535,14 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             if requested:
                 raise ValueError("No matching last-words candidate")
             return self._load_periodic(step)
-        _, _, manifest_path, manifest = max(
-            candidates, key=lambda entry: (entry[0], entry[1], str(entry[2]))
-        )
+        _, _, manifest_path, manifest = max(candidates, key=lambda entry: (entry[0], entry[1], str(entry[2])))
         # A later periodic checkpoint takes precedence over an older emergency save.
         if not requested and step == -1:
             periodic = self._periodic_candidates(-1)
-            if (
-                periodic
-                and max(periodic, key=lambda entry: entry[0])[0]
-                > manifest["state"]["step"]
-            ):
+            if periodic and max(periodic, key=lambda entry: entry[0])[0] > manifest["state"]["step"]:
                 return self._load_periodic(-1)
         base = manifest_path.parent
-        anchors = {
-            int(replica): base / cursor["path"]
-            for replica, cursor in manifest["cursors"].items()
-        }
+        anchors = {int(replica): base / cursor["path"] for replica, cursor in manifest["cursors"].items()}
         imported = self._import_cursor_anchors(anchors)
         cursor = manifest["cursors"][str(control.replica_id)]
         states = self._full_states()
@@ -718,9 +551,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
         if self.elastic_enabled:
             assert self.ft_manager is not None
             self.ft_manager.load_state_dict(states["torchft"])
-        dcp.load(
-            self.ft_states, checkpoint_id=base / cursor["path"], process_group=self.pg
-        )
+        dcp.load(self.ft_states, checkpoint_id=base / cursor["path"], process_group=self.pg)
         self._restore_rng()
         self._last_words_cursor_anchors = imported
         logger.warning(
@@ -737,21 +568,16 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             # from TorchFT's independently selected latest per-replica cursor.
             return CheckpointManager._load_checkpoint(
                 self,
-                states,
+                {key: value for key, value in states.items() if key != DATALOADER},
                 checkpoint_id,
                 from_hf=from_hf,
                 from_quantized=from_quantized,
             )
-        return super()._load_checkpoint(
-            states, checkpoint_id, from_hf=from_hf, from_quantized=from_quantized
-        )
+        return super()._load_checkpoint(states, checkpoint_id, from_hf=from_hf, from_quantized=from_quantized)
 
     def _full_states(self):
         self.states[OPTIMIZER]._refresh_cached_state_dict()
-        states = {
-            key: self.states[key]
-            for key in (MODEL, OPTIMIZER, LR_SCHEDULER, TRAIN_STATE)
-        }
+        states = {key: self.states[key] for key in (MODEL, OPTIMIZER, LR_SCHEDULER, TRAIN_STATE)}
         if EMA in self.states:
             states[EMA] = self.states[EMA]
         if self.elastic_enabled:
@@ -766,16 +592,12 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             if self._last_words_upload_error is None:
                 raise
         error = self._last_words_upload_error
-        failed = torch.tensor(
-            0 if error is None else (1 if error[0] else 2), dtype=torch.int32
-        )
+        failed = torch.tensor(0 if error is None else (1 if error[0] else 2), dtype=torch.int32)
         if dist.is_initialized():
             # All uploader futures have ended before probing their group.
             dist.all_reduce(failed, op=dist.ReduceOp.MAX, group=self.pg)
         if failed.item() == 2:
-            raise LastWordsExitError(
-                "Background checkpoint failed outside a completed cursor storage upload"
-            )
+            raise LastWordsExitError("Background checkpoint failed outside a completed cursor storage upload")
         if failed.item() == 1:
             logger.warning(
                 "Using previously published replica cursors after failed upload: %s",
@@ -799,9 +621,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             try:
                 for replica in range(control.num_replicas):
                     if not self._cursor_candidates(replica, state):
-                        raise LastWordsExitError(
-                            f"A safe cursor is missing for replica {replica}"
-                        )
+                        raise LastWordsExitError(f"A safe cursor is missing for replica {replica}")
             except Exception as error:
                 cursor_error = str(error)
         if dist.is_initialized():
@@ -810,12 +630,8 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             cursor_error = preparation[0]
         if cursor_error:
             control.publish("ineligible")
-            raise LastWordsExitError(
-                f"Emergency cursor preparation failed: {cursor_error}"
-            )
-        write, selected = control.await_save_authorization(
-            state, self.last_words_signature
-        )
+            raise LastWordsExitError(f"Emergency cursor preparation failed: {cursor_error}")
+        write, selected = control.await_save_authorization(state, self.last_words_signature)
         if not write:
             return selected
         if dist.is_initialized():
@@ -824,10 +640,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
         target = (
             control.checkpoint_target(control.replica_id)
             if self.elastic_enabled
-            else Path(self.folder)
-            / "last_words"
-            / control.config.run_id
-            / f"replica-{control.replica_id}"
+            else Path(self.folder) / "last_words" / control.config.run_id / f"replica-{control.replica_id}"
         )
         if not self.elastic_enabled or control.rank == 0:
             target.mkdir(parents=True, exist_ok=not self.elastic_enabled)
@@ -841,12 +654,8 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
                 for replica in range(control.num_replicas):
                     available = self._cursor_candidates(replica, state)
                     if not available:
-                        raise LastWordsExitError(
-                            f"A safe cursor is missing for replica {replica}"
-                        )
-                    _, _, source, cursor = max(
-                        available, key=lambda entry: (entry[0], entry[1], str(entry[2]))
-                    )
+                        raise LastWordsExitError(f"A safe cursor is missing for replica {replica}")
+                    _, _, source, cursor = max(available, key=lambda entry: (entry[0], entry[1], str(entry[2])))
                     relative = f"cursors/replica-{replica}"
                     shutil.copytree(source, target / relative)
                     cursors[str(replica)] = {"path": relative, "state": cursor["state"]}
@@ -857,9 +666,7 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
             dist.broadcast_object_list(preparation, group=self.pg, group_src=0)
             cursor_error = preparation[0]
         if cursor_error:
-            raise LastWordsExitError(
-                f"Emergency cursor preparation failed: {cursor_error}"
-            )
+            raise LastWordsExitError(f"Emergency cursor preparation failed: {cursor_error}")
         # self.pg is replica-local Gloo, never a TorchFT cross-replica group.
         states = self._full_states()
         dcp.save(states, checkpoint_id=target / "model", process_group=self.pg)
@@ -871,22 +678,17 @@ class LastWordsCheckpointManager(TorchFTCheckpointManager):
                     {
                         **self._rng_metadata(),
                         "format_version": 1,
+                        "recovery_schema": state_schema(states, kind="model"),
                         "run_id": control.config.run_id,
                         "replica_id": control.replica_id,
                         "signature": self.last_words_signature,
                         "state": state,
                         "cursors": cursors,
-                        "fault_reports": [
-                            read_json(path)
-                            for path in control.root.glob("request-*.json")
-                        ],
+                        "fault_reports": [read_json(path) for path in control.root.glob("request-*.json")],
                         **(
                             dict(
                                 torchft=states["torchft"],
-                                **{
-                                    key: control._coordinator_grant[key]
-                                    for key in ("event_id", "membership_epoch")
-                                },
+                                **{key: control._coordinator_grant[key] for key in ("event_id", "membership_epoch")},
                             )
                             if self.elastic_enabled
                             else {}

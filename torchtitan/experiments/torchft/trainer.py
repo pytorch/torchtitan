@@ -18,8 +18,9 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.config import apply_overrides, Configurable
-from torchtitan.distributed import ParallelismContext, utils as dist_utils
+from torchtitan.config import Configurable, apply_overrides
+from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
@@ -73,9 +74,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
 
         global_ranks = []
         if self.fault_tolerance.enable:
-            first_rank = (
-                self.fault_tolerance.replica_id * self.fault_tolerance.group_size
-            )
+            first_rank = self.fault_tolerance.replica_id * self.fault_tolerance.group_size
             last_rank = first_rank + self.fault_tolerance.group_size - 1
             global_ranks = list(range(first_rank, last_rank + 1))
 
@@ -217,17 +216,14 @@ class FaultTolerantTrainer(Configurable):
             from torchtitan.config import derive
             from torchtitan.last_words.checkpoint import LastWordsCheckpointManager
 
-            if (
-                config.checkpointer is None
-                or not config.checkpointer.enable_ft_dataloader_checkpoints
-            ):
-                raise ValueError(
-                    "Last words requires full and replica-local cursor checkpointing"
-                )
+            if config.checkpointer is None or not config.checkpointer.enable_ft_dataloader_checkpoints:
+                raise ValueError("Last words requires full and replica-local cursor checkpointing")
+            required = {"model", "optimizer", "lr_scheduler", "train_state", "dataloader", "ema", "torchft"}
+            excluded = required.intersection(config.checkpointer.exclude_from_loading)
+            if excluded:
+                raise ValueError(f"Last words complete recovery cannot exclude training state: {sorted(excluded)}")
             if not isinstance(config.checkpointer, LastWordsCheckpointManager.Config):
-                config.checkpointer = derive(
-                    config.checkpointer, LastWordsCheckpointManager.Config
-                )
+                config.checkpointer = derive(config.checkpointer, LastWordsCheckpointManager.Config)
         config.model = copy.deepcopy(config.model)
         if config.override.imports:
             apply_overrides(config.override, config)
@@ -255,20 +251,12 @@ class FaultTolerantTrainer(Configurable):
 
         # build tokenizer
         self.tokenizer = (
-            config.tokenizer.build(tokenizer_path=config.hf_assets_path)
-            if config.tokenizer is not None
-            else None
+            config.tokenizer.build(tokenizer_path=config.hf_assets_path) if config.tokenizer is not None else None
         )
 
-        num_pp_microbatches = (
-            config.parallelism.num_pp_microbatches
-            if parallelism_context.pp_enabled
-            else 1
-        )
+        num_pp_microbatches = config.parallelism.num_pp_microbatches if parallelism_context.pp_enabled else 1
         # build dataloader
-        num_tokens_per_microbatch = (
-            config.training.num_tokens_per_microbatch_per_dp_rank
-        )
+        num_tokens_per_microbatch = config.training.num_tokens_per_microbatch_per_dp_rank
         self.dataloader = config.dataloader.build(
             dp_world_size=dp_degree,
             dp_rank=dp_rank,
@@ -290,10 +278,7 @@ class FaultTolerantTrainer(Configurable):
         color = self.metrics_processor.color
 
         self.num_pp_microbatches = num_pp_microbatches
-        num_tokens_per_dp_rank = (
-            config.training.num_tokens_per_microbatch_per_dp_rank
-            * self.num_pp_microbatches
-        )
+        num_tokens_per_dp_rank = config.training.num_tokens_per_microbatch_per_dp_rank * self.num_pp_microbatches
         num_tokens_per_train_step = config.training.num_tokens_per_train_step
         if num_tokens_per_train_step < 0:
             num_tokens_per_train_step = num_tokens_per_dp_rank * dp_degree
@@ -304,9 +289,7 @@ class FaultTolerantTrainer(Configurable):
                 "of tokens processed globally in one gradient accumulation "
                 f"iteration ({num_tokens_per_dp_rank * dp_degree})."
             )
-        self.gradient_accumulation_steps = num_tokens_per_train_step // (
-            num_tokens_per_dp_rank * dp_degree
-        )
+        self.gradient_accumulation_steps = num_tokens_per_train_step // (num_tokens_per_dp_rank * dp_degree)
         if (
             config.fault_tolerance.enable
             and cuda_graphs_supported()
@@ -314,9 +297,7 @@ class FaultTolerantTrainer(Configurable):
             and parallelism_context.fsdp_enabled
             and self.gradient_accumulation_steps > 1
         ):
-            raise ValueError(
-                "TorchFT does not support CUDA-graphed FSDP gradient accumulation."
-            )
+            raise ValueError("TorchFT does not support CUDA-graphed FSDP gradient accumulation.")
 
         engine.initialize(
             extra_states={DATALOADER: self.dataloader},
@@ -391,9 +372,7 @@ class FaultTolerantTrainer(Configurable):
             f"(warmup {config.optim.lr_scheduler.warmup_steps})"
         )
 
-    def microbatch_generator(
-        self, data_iterable: Iterable[TrainingMicrobatch]
-    ) -> Iterator[TrainingMicrobatch]:
+    def microbatch_generator(self, data_iterable: Iterable[TrainingMicrobatch]) -> Iterator[TrainingMicrobatch]:
         data_iterator = iter(data_iterable)
         while True:
             data_load_start = time.perf_counter()
@@ -401,13 +380,9 @@ class FaultTolerantTrainer(Configurable):
                 microbatch = next(data_iterator)
             except StopIteration as ex:
                 raise DataloaderExhaustedError() from ex
-            ntokens_microbatch = (
-                self.config.training.num_tokens_per_microbatch_per_dp_rank
-            )
+            ntokens_microbatch = self.config.training.num_tokens_per_microbatch_per_dp_rank
             self.metrics_processor.ntokens_since_last_log += ntokens_microbatch
-            self.metrics_processor.data_loading_times.append(
-                time.perf_counter() - data_load_start
-            )
+            self.metrics_processor.data_loading_times.append(time.perf_counter() - data_load_start)
             yield microbatch
 
     def train_step(self, data_iterator: Iterator[TrainingMicrobatch]):
@@ -441,12 +416,8 @@ class FaultTolerantTrainer(Configurable):
             for _ in range(self.num_pp_microbatches):
                 microbatch = next(data_iterator)
                 if local_loss_token_counts is None:
-                    local_loss_token_counts = torch.zeros_like(
-                        microbatch.loss_token_counts
-                    )
-                    local_routing_token_counts = torch.zeros_like(
-                        microbatch.routing_token_counts
-                    )
+                    local_loss_token_counts = torch.zeros_like(microbatch.loss_token_counts)
+                    local_routing_token_counts = torch.zeros_like(microbatch.routing_token_counts)
                 local_loss_token_counts.add_(microbatch.loss_token_counts)
                 assert local_routing_token_counts is not None
                 local_routing_token_counts.add_(microbatch.routing_token_counts)
@@ -456,9 +427,7 @@ class FaultTolerantTrainer(Configurable):
         assert local_loss_token_counts is not None
         assert local_routing_token_counts is not None
         local_main_loss_token_count = (
-            local_loss_token_counts
-            if local_loss_token_counts.ndim == 0
-            else local_loss_token_counts[0]
+            local_loss_token_counts if local_loss_token_counts.ndim == 0 else local_loss_token_counts[0]
         )
         num_loss_objectives = local_loss_token_counts.numel()
         global_token_counts = torch.cat(
@@ -468,12 +437,8 @@ class FaultTolerantTrainer(Configurable):
             )
         ).to(engine.device)
         if parallelism_context.dp_enabled:
-            global_token_counts = dist_utils.dist_sum_tensor(
-                global_token_counts, parallelism_context.get_mesh("dp")
-            )
-        global_loss_token_counts = global_token_counts[:num_loss_objectives].reshape(
-            local_loss_token_counts.shape
-        )
+            global_token_counts = dist_utils.dist_sum_tensor(global_token_counts, parallelism_context.get_mesh("dp"))
+        global_loss_token_counts = global_token_counts[:num_loss_objectives].reshape(local_loss_token_counts.shape)
         global_routing_token_counts = global_token_counts[num_loss_objectives:].reshape(
             local_routing_token_counts.shape
         )
@@ -483,9 +448,7 @@ class FaultTolerantTrainer(Configurable):
             global_routing_token_counts=global_routing_token_counts,
         )
         global_main_loss_token_count = (
-            global_loss_token_counts
-            if global_loss_token_counts.ndim == 0
-            else global_loss_token_counts[0]
+            global_loss_token_counts if global_loss_token_counts.ndim == 0 else global_loss_token_counts[0]
         )
 
         grad_norm = engine.optim_step()
@@ -510,11 +473,7 @@ class FaultTolerantTrainer(Configurable):
             # local_avg_loss = local_loss_sum / local_valid_tokens
             #                = (accumulated_loss * global_valid_tokens) / local_valid_tokens
             # global_max_loss = max(local_avg_loss)
-            local_avg_loss = (
-                accumulated_loss
-                * global_main_loss_token_count
-                / local_main_loss_token_count
-            )
+            local_avg_loss = accumulated_loss * global_main_loss_token_count / local_main_loss_token_count
             global_avg_loss, global_max_loss, global_ntokens_seen = (
                 dist_utils.dist_sum(accumulated_loss, loss_mesh, ft_pg),
                 dist_utils.dist_max(local_avg_loss, loss_mesh, ft_pg),
@@ -558,11 +517,7 @@ class FaultTolerantTrainer(Configurable):
         logger.info(f"Training starts at step {engine.num_completed_steps + 1}")
 
         # FT addition: per-replica profiling leaf folder
-        leaf_folder = (
-            ""
-            if not engine.ft_manager.enabled
-            else f"replica_{engine.ft_manager.replica_id}"
-        )
+        leaf_folder = "" if not engine.ft_manager.enabled else f"replica_{engine.ft_manager.replica_id}"
         with (
             config.profiler.build(
                 global_step=engine.num_completed_steps,
@@ -574,11 +529,7 @@ class FaultTolerantTrainer(Configurable):
                 config.fault_tolerance,
                 ft_manager=engine.ft_manager,
                 model=engine.model_parts[0],
-                n_layers=(
-                    len(engine.model_config.layers)
-                    if hasattr(engine.model_config, "layers")
-                    else 0
-                ),
+                n_layers=(len(engine.model_config.layers) if hasattr(engine.model_config, "layers") else 0),
                 optimizer=engine.optim.optimizers,
                 fragment_fn=getattr(engine.model_cls, "_fragment", None),
             ),
@@ -596,13 +547,8 @@ class FaultTolerantTrainer(Configurable):
                 )
 
                 # Run validation if validator is available
-                if (
-                    self.config.validator is not None
-                    and self.validator.should_validate(engine.num_completed_steps)
-                ):
-                    self.validator.validate(
-                        engine.model_parts, engine.num_completed_steps
-                    )
+                if self.config.validator is not None and self.validator.should_validate(engine.num_completed_steps):
+                    self.validator.validate(engine.model_parts, engine.num_completed_steps)
 
                 # signal the profiler that the next profiling step has started
                 profiler.step()

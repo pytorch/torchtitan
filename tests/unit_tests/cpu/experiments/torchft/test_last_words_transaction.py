@@ -15,7 +15,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from torchtitan.components.optim import AdamW, EMA, LRSchedulersContainer
+from torchtitan.components.optim import EMA, AdamW, LRSchedulersContainer
 from torchtitan.experiments.torchft.optimizer import (
     TorchFTOptim,
     TorchFTOptimizersContainer,
@@ -55,9 +55,7 @@ def transaction():
     manager.report_error = Mock()
     context = SimpleNamespace(pp_enabled=False, get_optional_mesh=lambda axis: None)
     config = TorchFTOptim.Config(
-        optimizer=TorchFTOptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=".*", lr=0.01, fused=False)]
-        ),
+        optimizer=TorchFTOptimizersContainer.Config(optimizers=[AdamW.Config(pattern=".*", lr=0.01, fused=False)]),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=0),
         ema=EMA.Config(decays=[0.5]),
     )
@@ -134,10 +132,7 @@ def test_authorized_update_votes_once_before_persistent_hook(transaction):
     assert item.model.routing_bias.item() == 1
     assert not torch.equal(item.model.weight, before["weight"])
     assert item.optim.lr_schedulers.state_dict() != scheduler_before
-    assert any(
-        not torch.equal(item.optim.ema.state_dict()[key], value)
-        for key, value in ema_before.items()
-    )
+    assert any(not torch.equal(item.optim.ema.state_dict()[key], value) for key, value in ema_before.items())
     assert not item.optim.optimizers.last_words_pre_authorized
 
 
@@ -159,9 +154,7 @@ def test_hook_failure_keeps_updating_and_does_not_advance_scheduler(transaction)
     assert_state_equal(item.optim.lr_schedulers.state_dict(), before)
 
 
-@pytest.mark.parametrize(
-    "unsafe", ["updating", "restoration_incomplete", "commit_unknown"]
-)
+@pytest.mark.parametrize("unsafe", ["updating", "restoration_incomplete", "commit_unknown"])
 def test_incomplete_transaction_never_saves_or_retries(unsafe):
     coordinator = LastWordsTrainingCoordinator.__new__(LastWordsTrainingCoordinator)
     coordinator.completed = {"step": 2, "ntokens_seen": 8, "last_words_num_updates": 2}
@@ -215,13 +208,9 @@ def test_engine_only_counts_completed_update(committed):
     engine.num_completed_steps = 2
     engine.loss = torch.tensor(1.0)
     engine.checkpointer = SimpleNamespace(maybe_wait_for_staging=Mock())
-    engine.optim = SimpleNamespace(
-        step=Mock(return_value=torch.tensor(0.5)), update_committed=committed
-    )
+    engine.optim = SimpleNamespace(step=Mock(return_value=torch.tensor(0.5)), update_committed=committed)
     observed = []
-    engine.last_words = SimpleNamespace(
-        update_completed=lambda: observed.append(engine.num_completed_steps)
-    )
+    engine.last_words = SimpleNamespace(update_completed=lambda: observed.append(engine.num_completed_steps))
     engine.optim_step()
     assert engine.num_completed_steps == 2 + int(committed)
     assert observed == ([3] if committed else [])
@@ -232,9 +221,7 @@ def checkpoint(transaction, tmp_path):
     import torch.distributed as dist
     from torchtitan.last_words.checkpoint import LastWordsCheckpointManager
 
-    dist.init_process_group(
-        "gloo", init_method=(tmp_path / "rendezvous").as_uri(), rank=0, world_size=1
-    )
+    dist.init_process_group("gloo", init_method=(tmp_path / "rendezvous").as_uri(), rank=0, world_size=1)
     item = transaction
     item.manager.authorized = True
     item.optim.step(item.loss, current_step=1)
@@ -246,9 +233,7 @@ def checkpoint(transaction, tmp_path):
             values.clear()
             values.update(copy.deepcopy(saved))
 
-        return SimpleNamespace(
-            state_dict=lambda: copy.deepcopy(values), load_state_dict=load
-        )
+        return SimpleNamespace(state_dict=lambda: copy.deepcopy(values), load_state_dict=load)
 
     manager = LastWordsCheckpointManager.Config(
         folder="checkpoint",
@@ -309,12 +294,62 @@ def test_real_dcp_restores_model_optimizer_scheduler_ema_and_progress(checkpoint
     assert_state_equal(actual, expected)
 
 
+def test_periodic_model_load_skips_other_replica_grain_cursor(checkpoint, tmp_path):
+    import torch.distributed.checkpoint as dcp
+    from torchtitan.components.data.loader import GrainDataLoader
+
+    class ReplicaCursor:
+        state_dict = GrainDataLoader.state_dict
+        load_state_dict = GrainDataLoader.load_state_dict
+
+        def __init__(self, replica, payload):
+            self._dp_world_size = 2
+            self._rank_id = f"dp_rank_{replica}"
+            self.payload = payload
+            self._iterator = SimpleNamespace(
+                get_state=lambda: self.payload,
+                set_state=lambda state: setattr(self, "payload", state),
+            )
+
+        def close(self):
+            pass
+
+    manager, _, _, _ = checkpoint
+    receiver = ReplicaCursor(1, b"own-bound-cursor")
+    dcp.save({"dataloader": ReplicaCursor(0, b"other-replica")}, checkpoint_id=tmp_path / "periodic")
+    dcp.save({"dataloader": receiver}, checkpoint_id=tmp_path / "own-cursor")
+    receiver.payload = b"current-live-cursor"
+    selected = {"dataloader": receiver}
+    manager._last_words_loading_periodic = True
+    try:
+        manager._load_checkpoint(selected, str(tmp_path / "periodic"), from_hf=False, from_quantized=False)
+    finally:
+        manager._last_words_loading_periodic = False
+    assert receiver.payload == b"current-live-cursor"
+    assert selected == {"dataloader": receiver}
+    dcp.load(selected, checkpoint_id=tmp_path / "own-cursor")
+    assert receiver.payload == b"own-bound-cursor"
+
+
+@pytest.mark.parametrize(
+    "excluded", ["model", "optimizer", "lr_scheduler", "train_state", "dataloader", "ema", "torchft"]
+)
+def test_full_recovery_exclusions_fail_before_candidate_selection(checkpoint, excluded):
+    manager, item, progress, cursor = checkpoint
+    before = copy.deepcopy((item.model.state_dict(), progress, cursor))
+    manager.last_words = SimpleNamespace()
+    manager.exclude_from_loading = [excluded]
+    manager._periodic_candidates = Mock(side_effect=AssertionError("preflight must precede selection"))
+    with pytest.raises(ValueError, match="cannot exclude training state"):
+        manager._load_periodic(1)
+    manager._periodic_candidates.assert_not_called()
+    assert_state_equal((item.model.state_dict(), progress, cursor), before)
+
+
 def test_emergency_payload_includes_auxiliary_and_native_progress(checkpoint):
     manager, item, progress, cursor = checkpoint
     manager.elastic_enabled = True
-    manager.ft_manager = SimpleNamespace(
-        state_dict=lambda: {"step": 1, "batches_committed": 2}
-    )
+    manager.ft_manager = SimpleNamespace(state_dict=lambda: {"step": 1, "batches_committed": 2})
     payload = manager._full_states()
     assert "model" not in payload
     assert "weight" in payload and "routing_bias" in payload
@@ -370,14 +405,12 @@ def test_active_replica_publishes_its_own_initial_rng(checkpoint):
         requested=False,
         config=SimpleNamespace(run_id="initial-rng", timeout_seconds=5),
     )
-    manager.ft_states = {RNG_STATE: own}
+    manager.ft_states = {RNG_STATE: own, "dataloader": manager.states["dataloader"]}
     # The first active replica has already published. Replica 1 must publish
     # its own stream rather than wait for the first replica to invent one.
     other_path = Path(manager.folder) / "ft-replicat-0/initial-rng/initial/step-0"
-    dcp.save({RNG_STATE: own}, checkpoint_id=other_path)
-    (other_path / "last_words_cursor.json").write_text(
-        json.dumps(manager._cursor_record(zero))
-    )
+    dcp.save(manager.ft_states, checkpoint_id=other_path)
+    (other_path / "last_words_cursor.json").write_text(json.dumps(manager._cursor_record(zero)))
     manager.initialize_elastic_cursors(
         zero,
         make_cursor=Mock(side_effect=AssertionError("No dormant slots")),
@@ -398,6 +431,7 @@ def test_retention_recognizes_recoverable_rng_bound_periodic_checkpoints(checkpo
     import torch.distributed.checkpoint as dcp
     from torchtitan.last_words.job import retention_plan
     from torchtitan.last_words.rng import RNG_STATE, RNGCheckpointState
+    from torchtitan.last_words.schema import state_schema
 
     manager, item, progress, cursor = checkpoint
     root = Path(manager.folder)
@@ -409,12 +443,14 @@ def test_retention_recognizes_recoverable_rng_bound_periodic_checkpoints(checkpo
             path = root / f"ft-replicat-{replica}/retention/step-{step}"
             rng = RNGCheckpointState(torch.device("cpu"), 0)
             rng.capture()
-            dcp.save({RNG_STATE: rng}, checkpoint_id=path)
+            payload = {RNG_STATE: rng, "dataloader": {"position": step, "replica": replica}}
+            dcp.save(payload, checkpoint_id=path)
             record = dict(
                 state=dict(progress),
                 signature="retention-rng",
                 rng_schema=1,
                 rng_shards=1,
+                recovery_schema=state_schema(payload, kind="cursor"),
             )
             (path / "last_words_cursor.json").write_text(json.dumps(record))
             anchors[str(replica)] = str(path.relative_to(root))
@@ -425,6 +461,7 @@ def test_retention_recognizes_recoverable_rng_bound_periodic_checkpoints(checkpo
             anchors=anchors,
             rng_schema=1,
             rng_shards=1,
+            recovery_schema=state_schema(manager._full_states(), kind="model"),
         )
         (root / f"step-{step}/last_words_binding.json").write_text(json.dumps(binding))
     plan = retention_plan(root, keep=2, active_seconds=0, num_replicas=2)

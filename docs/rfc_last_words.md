@@ -63,11 +63,18 @@ state, scheduler, EMA when enabled, training counters, TorchFT progress when
 applicable, and logical-replica cursor bindings. The Main adapter also defines
 rank-local Python, NumPy, CPU and device RNG state with an explicit schema.
 
-Publication writes a temporary candidate, persists its contents, validates the
-payload and bindings, then publishes the manifest atomically. Recovery checks
-storage ranges, committed progress, configuration identity and cursor/RNG
-layout before loading. A matching signature alone does not prove correct bytes
-or a compatible software environment.
+Workers persist DCP contents and atomically publish candidate metadata. The
+supervisor then validates the candidate and records the save outcome. Candidate
+publication alone is not acceptance. Restart independently checks compatibility
+and completeness before restoring live state.
+
+Required-state schemas cover model parameters/buffers, optimizer, scheduler,
+optional EMA, counters and every logical replica's dataloader/RNG payload.
+Recovery compares DCP metadata against both published requirements and the live
+application's independently derived schema before mutating training objects.
+Storage coverage, state-schema completeness, byte integrity and actual cold
+restore are distinct guarantees. Full recovery rejects exclusion of necessary
+training state; model-only warm starts are a separate operation.
 
 The older 0.3.0 candidate and the Main adapter have distinct state layouts.
 Existing checkpoints without the Main RNG schema are not silently promoted to
@@ -81,6 +88,9 @@ Restoration must select the cursor bound to the checkpoint and logical replica,
 not whichever cursor directory happens to be newest. Retention must preserve
 referenced cursor branches as well as model shards, and reject an incomplete
 layout before DCP mutates live state.
+Cursor progress may be less than model progress, allowing data replay. This is
+not an exact-replay or bitwise training-trajectory contract. Retention covers
+periodic, terminal and elastic-event layouts and preserves dependent cursors.
 
 ### Define process ownership and terminal outcomes
 
@@ -118,10 +128,9 @@ vendor toolkit patches and validation schedulers do not belong in this PR.
 
 The WIP is rebased onto the current TrainingEngine APIs. Prior 0.3.0 normal
 training and CPU checkpoint results are historical evidence, not acceptance of
-this port. The latest accelerator recovery attempt failed before a committed
-step; its SIGKILL source remains unresolved. The final recovery matrix,
-same-input numerical comparison and paired performance measurements remain
-incomplete. See [implementation and validation notes](last_words.md).
+this port. Exact-revision native/package validation and typical end-to-end
+functional/numerical cases remain required. The current plan defers performance
+measurements. See [implementation and validation notes](last_words.md).
 
 ## Questions for discussion
 
