@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import pytest
 import torch
@@ -208,6 +208,76 @@ def test_full_metadata_and_native_dispatch_variants():
     assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
 
 
+@pytest.mark.parametrize("mode", ["align", "none"])
+@pytest.mark.parametrize("single_token", [False, True])
+def test_update_block_table_matches_build(single_token, mode):
+    """vLLM reuses one GDN group's metadata for the next; only the state slots differ."""
+    config = VllmConfig()
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_cudagraph_capture_size=8,
+        cudagraph_num_of_warmups=1,
+    )
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=16,
+        max_num_seqs=2,
+        max_num_batched_tokens=8,
+        is_encoder_decoder=False,
+    )
+    config.cache_config.mamba_cache_mode = mode
+    spec = MambaSpec(
+        block_size=8,
+        shapes=((3, 512), (2, 128, 128)),
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    first, other, reference = (
+        TorchTitanLinearAttentionMetadataBuilder(spec, [], config, torch.device("cpu"))
+        for _ in range(3)
+    )
+    offsets = torch.tensor([0, 1, 2] if single_token else [0, 1, 3], dtype=torch.int32)
+    num_tokens = int(offsets[-1])
+    common = CommonAttentionMetadata(
+        query_start_loc=offsets,
+        query_start_loc_cpu=offsets,
+        # "align": running states in block-table columns 1 and 0; "none": column 0.
+        seq_lens=torch.tensor([16, 2], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=num_tokens,
+        max_query_len=1 if single_token else 2,
+        max_seq_len=16,
+        block_table_tensor=torch.tensor([[1, 5], [2, 6]], dtype=torch.int32),
+        slot_mapping=torch.zeros(num_tokens, dtype=torch.int64),
+    )
+    other_table = torch.tensor([[3, 7], [4, 8]], dtype=torch.int32)
+    captured = other.build_for_cudagraph_capture(common)
+    # Stale values from an earlier step, so every copy and zeroing is checked.
+    for buffer in (other.query_start_loc, other.state_indices, other.has_initial_state):
+        buffer.fill_(True if buffer.dtype == torch.bool else -1)
+
+    updated = other.update_block_table(
+        first.build(0, common), other_table, common.slot_mapping
+    )
+
+    expected = reference.build(0, replace(common, block_table_tensor=other_table))
+    assert expected.non_spec_state_indices_tensor.tolist()[:2] == (
+        [7, 4] if mode == "align" else [3, 4]
+    )
+    for field in fields(expected):
+        want, got = getattr(expected, field.name), getattr(updated, field.name)
+        if not isinstance(want, torch.Tensor):
+            assert got == want, field.name
+            continue
+        assert torch.equal(got, want), field.name
+        # The graph captured this builder's buffers, not the first group's.
+        if field.name != "state_block_column":
+            assert (
+                got.data_ptr() == getattr(captured, field.name).data_ptr()
+            ), field.name
+
+
 @pytest.mark.parametrize("decode", [False, True])
 def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode):
     layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
@@ -235,6 +305,7 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
             torch.tensor([1, 2, 0, 0]) if decode else torch.tensor([1, 2, 3, 0])
         ),
         has_initial_state=torch.tensor([False, True, False, False]),
+        state_block_column=torch.zeros(extent, 1, dtype=torch.long),
     )
     monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: True)
 
