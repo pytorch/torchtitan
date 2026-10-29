@@ -140,7 +140,11 @@ def _replace_vllm_layer_configs(model_config):
 
         elif isinstance(attention_cfg, GDN.Config):
             delta_net_cfg = attention_cfg
-            from torchtitan.rl.generator.vllm.gdn import VLLMInnerGDN
+            from torchtitan.rl.generator.vllm.gdn import (
+                vllm_inner_gdn_sharding_config,
+                VLLMGDN,
+                VLLMInnerGDN,
+            )
 
             vllm_inner_gdn_cfg = VLLMInnerGDN.Config(
                 layer_idx=layer_idx,
@@ -153,14 +157,16 @@ def _replace_vllm_layer_configs(model_config):
                 head_k_dim=delta_net_cfg.key_head_dim,
                 head_v_dim=delta_net_cfg.value_head_dim,
                 conv_kernel_size=delta_net_cfg.conv_kernel_size,
-                sharding_config=delta_net_cfg.inner_attention.sharding_config,
+                sharding_config=vllm_inner_gdn_sharding_config(),
             )
+            # Same fields (and parameters) as the GDN config; VLLMGDN fuses the projections.
+            vllm_gdn_fields = {
+                field.name: getattr(delta_net_cfg, field.name)
+                for field in dataclasses.fields(delta_net_cfg)
+            }
+            vllm_gdn_fields["inner_attention"] = vllm_inner_gdn_cfg
             new_layer_cfg = dataclasses.replace(
-                new_layer_cfg,
-                attention=dataclasses.replace(
-                    delta_net_cfg,
-                    inner_attention=vllm_inner_gdn_cfg,
-                ),
+                new_layer_cfg, attention=VLLMGDN.Config(**vllm_gdn_fields)
             )
 
         elif isinstance(attention_cfg, KDA.Config):
@@ -327,6 +333,7 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
         after:   sharded: freed         unsharded: new weights (what CUDA graphs read)
 
     The unshard is explicit because CUDA graph replays skip FSDP's forward pre-hook.
+    Then refreshes the fused weights of the group's GDN layers (``VLLMGDN.refresh_fused_weights``).
     """
     from torch.distributed.fsdp._fully_shard._fsdp_param import free_storage
 
@@ -335,6 +342,19 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
         # TODO: replace this with FSDPModule._free_sharded_params()
         for sharded_data in _sharded_param_storages(module):
             free_storage(sharded_data)
+    # Each GDN layer owns A_log, so it is in `held`. The init loop calls this once per
+    # module of a group: skip layers an earlier call already refreshed and freed.
+    held = {
+        fsdp_param._module_info.module
+        for param_group in module._get_fsdp_state()._fsdp_param_groups
+        for fsdp_param in param_group.fsdp_params
+    }
+    for layer in held:
+        if (
+            isinstance(layer, GDN)
+            and layer.in_proj_q.weight.untyped_storage().size() > 0
+        ):
+            layer.refresh_fused_weights()
 
 
 @support_torch_compile(
