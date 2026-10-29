@@ -5,11 +5,69 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
-from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import _batched_copy_
+from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
+    _batched_copy_,
+    _initialize_all_to_all_communicators,
+)
+
+
+class TestCommunicatorInitialization(unittest.TestCase):
+    def test_initializes_each_remote_cuda_process_group_once(self):
+        first_group = object()
+        second_group = object()
+        schedules = (
+            SimpleNamespace(
+                process_group=first_group,
+                participants=(0, 1, 2),
+                has_remote_transfers=True,
+            ),
+            SimpleNamespace(
+                process_group=first_group,
+                participants=(0, 1, 2),
+                has_remote_transfers=True,
+            ),
+            SimpleNamespace(
+                process_group=second_group,
+                participants=(0,),
+                has_remote_transfers=False,
+            ),
+        )
+        input = object()
+        output = object()
+        with (
+            patch.object(torch, "empty", return_value=input) as empty,
+            patch.object(torch, "empty_like", return_value=output),
+            patch.object(torch.distributed, "all_to_all_single") as all_to_all_single,
+        ):
+            _initialize_all_to_all_communicators(
+                schedules,  # pyrefly: ignore [bad-argument-type]
+                torch.device("cuda"),
+            )
+
+        empty.assert_called_once_with(3, dtype=torch.uint8, device=torch.device("cuda"))
+        all_to_all_single.assert_called_once_with(
+            output,
+            input,
+            group=first_group,
+        )
+
+    def test_skips_non_cuda_devices(self):
+        schedule = SimpleNamespace(
+            process_group=object(),
+            participants=(0, 1),
+            has_remote_transfers=True,
+        )
+        with patch.object(torch.distributed, "all_to_all_single") as all_to_all_single:
+            _initialize_all_to_all_communicators(
+                (schedule,),  # pyrefly: ignore [bad-argument-type]
+                torch.device("cpu"),
+            )
+        all_to_all_single.assert_not_called()
 
 
 class TestBatchedCopy(unittest.TestCase):

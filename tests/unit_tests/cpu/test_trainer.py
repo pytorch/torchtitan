@@ -899,14 +899,17 @@ def test_optim_update_clips_before_parameter_update() -> None:
 
 def test_initialize_optim_builds_component() -> None:
     optim = MagicMock()
-    optim_config = SimpleNamespace(build=MagicMock(return_value=optim))
+    optim_config = SimpleNamespace(
+        build=MagicMock(return_value=optim),
+        initialize_state_before_training=False,
+    )
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
                 optim=optim_config,
                 profiler=Profiler.Config(),
-                training=SimpleNamespace(steps=10),
+                training=SimpleNamespace(steps=10, disable_accelerator_graphs=True),
             ),
             model_parts=[MagicMock()],
             pp_has_last_stage=True,
@@ -929,6 +932,107 @@ def test_initialize_optim_builds_component() -> None:
         engine.model_parts,
         engine.parallelism_context,
     )
+
+
+def test_initialize_optim_can_materialize_state_before_model_hooks() -> None:
+    events: list[str] = []
+    optimizers = MagicMock()
+    optimizers.initialize_state.side_effect = lambda: events.append("initialize_state")
+    optim = SimpleNamespace(optimizers=optimizers)
+    optim_config = SimpleNamespace(
+        build=MagicMock(return_value=optim),
+        initialize_state_before_training=True,
+    )
+    model_cls = SimpleNamespace(
+        _register_optimizer_hooks=lambda *args: events.append("register_hooks")
+    )
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                optim=optim_config,
+                profiler=Profiler.Config(),
+                training=SimpleNamespace(steps=10, disable_accelerator_graphs=True),
+            ),
+            device=torch.device("cuda"),
+            model_parts=[MagicMock()],
+            pp_has_last_stage=True,
+            model_cls=model_cls,
+            parallelism_context=MagicMock(),
+        ),
+    )
+
+    with patch(
+        "torchtitan.training_engine.utils.device_module.synchronize",
+        side_effect=lambda: events.append("synchronize"),
+    ), patch(
+        "torchtitan.training_engine.utils.device_module.empty_cache",
+        side_effect=lambda: events.append("empty_cache"),
+    ):
+        TrainingEngine._initialize_optim(engine)
+
+    assert events == [
+        "initialize_state",
+        "synchronize",
+        "empty_cache",
+        "register_hooks",
+    ]
+
+
+def test_initialize_optim_seeds_accelerator_graph_stream_allocator() -> None:
+    events: list[str] = []
+    optimizers = MagicMock()
+    optimizers.initialize_state.side_effect = lambda: events.append("initialize_state")
+    optim = SimpleNamespace(optimizers=optimizers)
+    optim_config = SimpleNamespace(
+        build=MagicMock(return_value=optim),
+        initialize_state_before_training=True,
+    )
+    model_cls = SimpleNamespace(
+        _register_optimizer_hooks=lambda *args: events.append("register_hooks")
+    )
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                optim=optim_config,
+                profiler=Profiler.Config(),
+                training=SimpleNamespace(steps=10, disable_accelerator_graphs=False),
+            ),
+            device=torch.device("cuda"),
+            model_parts=[MagicMock()],
+            pp_has_last_stage=True,
+            model_cls=model_cls,
+            parallelism_context=MagicMock(),
+        ),
+    )
+
+    def run_on_graph_stream(fn) -> None:
+        events.append("graph_stream")
+        fn()
+
+    with patch(
+        "torchtitan.training_engine.accelerator_graphs_supported",
+        return_value=True,
+    ), patch(
+        "torchtitan.training_engine.run_eager_on_accelerator_graph_stream",
+        side_effect=run_on_graph_stream,
+    ), patch(
+        "torchtitan.training_engine.utils.device_module.synchronize",
+        side_effect=lambda: events.append("synchronize"),
+    ), patch(
+        "torchtitan.training_engine.utils.device_module.empty_cache",
+        side_effect=lambda: events.append("empty_cache"),
+    ) as empty_cache:
+        TrainingEngine._initialize_optim(engine)
+
+    assert events == [
+        "graph_stream",
+        "initialize_state",
+        "synchronize",
+        "register_hooks",
+    ]
+    empty_cache.assert_not_called()
 
 
 def test_optim_step_waits_for_checkpoint() -> None:

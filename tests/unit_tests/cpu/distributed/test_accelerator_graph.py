@@ -12,11 +12,11 @@ import pytest
 import torch
 from torchtitan.distributed.accelerator_graph import (
     _ForwardBackwardAcceleratorGraphWrapper,
-    _run_eager_on_accelerator_graph_stream,
     accelerator_graph_manager,
     accelerator_graph_teardown,
     AcceleratorGraphWrapper,
     get_accelerator_graph_annotations,
+    run_eager_on_accelerator_graph_stream,
     wrap_with_accelerator_graph,
 )
 
@@ -57,7 +57,7 @@ def test_warmup_completion_tracks_all_registered_wrappers() -> None:
     with (
         patch.object(accelerator_graph_manager, "maybe_initialize"),
         patch(
-            "torchtitan.distributed.accelerator_graph._run_eager_on_accelerator_graph_stream",
+            "torchtitan.distributed.accelerator_graph.run_eager_on_accelerator_graph_stream",
             side_effect=lambda fn, *args: fn(*args),
         ),
     ):
@@ -92,7 +92,7 @@ def test_eager_execution_on_accelerator_graph_stream_synchronizes_streams() -> N
         patch.object(accelerator_graph_manager, "_stream", graph_stream),
         patch("torch.accelerator.current_stream", return_value=current_stream),
     ):
-        output = _run_eager_on_accelerator_graph_stream(fn, "arg", keyword="value")
+        output = run_eager_on_accelerator_graph_stream(fn, "arg", keyword="value")
 
     assert output == "output"
     maybe_initialize.assert_called_once_with()
@@ -249,7 +249,7 @@ def test_preparation_and_cache_release_run_only_before_first_capture() -> None:
             "torch.accelerator.empty_cache", side_effect=lambda: events.append("cache")
         ),
         patch(
-            "torchtitan.distributed.accelerator_graph._run_eager_on_accelerator_graph_stream",
+            "torchtitan.distributed.accelerator_graph.run_eager_on_accelerator_graph_stream",
             side_effect=lambda fn, *args: fn(*args),
         ),
         patch(
