@@ -205,7 +205,8 @@ class _BufferSlot:
                 reserved.compute_exchange,
                 max(
                     to_compute.output_buffer_numel,
-                    to_storage.input_buffer_numel,
+                    plan.compute_to_storage_input_offset
+                    + to_storage.input_buffer_numel,
                 ),
             ),
         )
@@ -380,7 +381,8 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 ),
                 compute_exchange_numel=max(
                     to_compute.output_buffer_numel,
-                    to_storage.input_buffer_numel,
+                    plan.compute_to_storage_input_offset
+                    + to_storage.input_buffer_numel,
                 ),
             )
             participant = plan.group.local_participant
@@ -637,7 +639,9 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             _execute_packed_all_to_all(
                 work.plan.compute_to_storage_schedule,
                 output=work.storage_buffer,
-                input=work.compute_fragment_buffer,
+                input=work.compute_fragment_buffer[
+                    work.plan.compute_to_storage_input_offset :
+                ],
             )
             _finalize_redistributed(work, work.slot.buffers, finalize=finalize)
             work.slot.done.record(transfer)
@@ -710,6 +714,7 @@ def _compute_redistributed(
     participant = plan.group.local_participant
     to_compute = plan.storage_to_compute_schedule
     to_storage = plan.compute_to_storage_schedule
+    output_buffer = work.compute_fragment_buffer[plan.compute_to_storage_input_offset :]
     for index, (item, redistribution_plan) in enumerate(
         zip(
             plan.redistributed_items,
@@ -741,9 +746,7 @@ def _compute_redistributed(
 
         output_spans = to_storage.input_spans_by_parameter[index]
         packed_views = tuple(
-            work.compute_fragment_buffer[
-                span.buffer_offset : span.buffer_offset + span.numel
-            ]
+            output_buffer[span.buffer_offset : span.buffer_offset + span.numel]
             for span in output_spans
         )
         compute_output_views = tuple(
