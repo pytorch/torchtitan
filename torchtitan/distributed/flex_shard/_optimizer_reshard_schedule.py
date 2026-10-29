@@ -152,15 +152,21 @@ _DTensorStorageDomain: TypeAlias = tuple[
 
 @dataclass(frozen=True, slots=True)
 class _ParticipantPartition:
-    """One participant's tensor shape and its global logical regions."""
+    """One participant's tensor shape and its global logical regions.
+
+    ``tensor_regions[i]`` is where ``logical_regions[i]`` sits in the
+    participant's tensor.
+    """
 
     participant: int
     tensor_shape: tuple[int, ...]
     logical_regions: tuple[_TensorRegion, ...]
+    tensor_regions: tuple[_TensorRegion, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tensor_shape", tuple(self.tensor_shape))
         object.__setattr__(self, "logical_regions", tuple(self.logical_regions))
+        object.__setattr__(self, "tensor_regions", tuple(self.tensor_regions))
 
 
 @dataclass(frozen=True, slots=True)
@@ -543,11 +549,20 @@ def _build_region_redistribution_plan(
             participant=participant,
             tensor_shape=storage_by_participant[participant].shape,
             logical_regions=(storage_by_participant[participant],),
+            tensor_regions=(
+                _TensorRegion(
+                    offsets=(0,) * len(logical_shape),
+                    shape=storage_by_participant[participant].shape,
+                ),
+            ),
         )
         for participant in participants
     )
 
     regions_by_participant: dict[int, list[_TensorRegion]] = {
+        participant: [] for participant in participants
+    }
+    tensor_regions_by_participant: dict[int, list[_TensorRegion]] = {
         participant: [] for participant in participants
     }
     packed_sizes = dict.fromkeys(participants, 0)
@@ -570,6 +585,9 @@ def _build_region_redistribution_plan(
         compute_endpoints.append((participant, region, packed_offsets))
         packed_sizes[participant] += region.shape[0]
         regions_by_participant[participant].append(region)
+        tensor_regions_by_participant[participant].append(
+            _TensorRegion(offsets=packed_offsets, shape=region.shape)
+        )
     _validate_tensor_region_partition(
         tuple(region for _participant, region in compute_regions),
         logical_shape,
@@ -580,6 +598,7 @@ def _build_region_redistribution_plan(
             participant=participant,
             tensor_shape=(packed_sizes[participant], *logical_shape[1:]),
             logical_regions=tuple(regions_by_participant[participant]),
+            tensor_regions=tuple(tensor_regions_by_participant[participant]),
         )
         for participant in participants
     )
@@ -698,6 +717,8 @@ class _RedistributionBucketPlan(Generic[_ItemT]):
     group: _RedistributionGroup
     storage_to_compute_schedule: _PackedAllToAllSchedule
     compute_to_storage_schedule: _PackedAllToAllSchedule
+    # Offset of the compute -> storage input in the compute exchange buffer.
+    compute_to_storage_input_offset: int
     dtype: torch.dtype
     compute_dtype: torch.dtype
     device: torch.device
@@ -1130,24 +1151,37 @@ def _build_bucket_plans(
             raise ValueError(f"bucket {context.name!r} mixes compute dtypes")
 
         redistribution_plans_tuple = tuple(redistribution_plans)
+        storage_to_compute_schedule = _build_packed_all_to_all_schedule(
+            redistribution_plans_tuple,
+            direction=_RedistributionDirection.STORAGE_TO_COMPUTE,
+            process_group=group.process_group,
+            local_participant=group.local_participant,
+        )
+        compute_to_storage_schedule = _build_packed_all_to_all_schedule(
+            redistribution_plans_tuple,
+            direction=_RedistributionDirection.COMPUTE_TO_STORAGE,
+            process_group=group.process_group,
+            local_participant=group.local_participant,
+        )
+        # Compute writes each parameter's update into the exchange buffer before
+        # later parameters read their inputs from it. In place is safe only when
+        # every update lands on its own consumed inputs; replicated storage
+        # returns an update to every holder, so its updates go after the inputs.
+        compute_to_storage_input_offset = (
+            0
+            if compute_to_storage_schedule.input_spans_by_parameter
+            == storage_to_compute_schedule.output_spans_by_parameter
+            else storage_to_compute_schedule.output_buffer_numel
+        )
         plans.append(
             _RedistributionBucketPlan(
                 unredistributed_items=unredistributed_items,
                 redistributed_items=redistributed_items,
                 redistribution_plans=redistribution_plans_tuple,
                 group=group,
-                storage_to_compute_schedule=_build_packed_all_to_all_schedule(
-                    redistribution_plans_tuple,
-                    direction=_RedistributionDirection.STORAGE_TO_COMPUTE,
-                    process_group=group.process_group,
-                    local_participant=group.local_participant,
-                ),
-                compute_to_storage_schedule=_build_packed_all_to_all_schedule(
-                    redistribution_plans_tuple,
-                    direction=_RedistributionDirection.COMPUTE_TO_STORAGE,
-                    process_group=group.process_group,
-                    local_participant=group.local_participant,
-                ),
+                storage_to_compute_schedule=storage_to_compute_schedule,
+                compute_to_storage_schedule=compute_to_storage_schedule,
+                compute_to_storage_input_offset=compute_to_storage_input_offset,
                 dtype=dtype,
                 compute_dtype=next(iter(compute_dtypes)),
                 device=device,
