@@ -14,7 +14,6 @@ from torch.distributed.tensor import Shard
 from torchtitan.components.optim import AdamW, DistMuon, OptimizersContainer
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.flex_shard import BlockShard, Owned
-from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.deepseek_v4 import DeepSeekV4Model
 from torchtitan_recipes.tests.models.deepseek_v4 import (
     _dist_muon_optimizer,
@@ -77,7 +76,14 @@ def test_deepseek_v4_uses_dist_muon_with_complete_compute_layouts() -> None:
     shared_w13 = compute_shardings["layers.0.feed_forward.shared_experts.w13.weight"]
     assert shared_w13.shardings_by_mesh_axis["dp_shard"] == Shard(0)
     per_expert = compute_shardings["layers.0.feed_forward.routed_experts.w13.weight"]
-    assert per_expert.shardings_by_mesh_axis["dp_shard"] == Shard(0)
+    assert per_expert.shardings_by_mesh_axis == {
+        "dp_shard": Shard(0),
+        "dp_shard_cp": Shard(0),
+        "ep": Shard(0),
+        "edp_shard": Shard(0),
+    }
+    assert per_expert.shard_order_by_tensor_dim == {0: ("ep", "edp_shard")}
+    assert per_expert.compute_dtype is torch.bfloat16
     csa = config.model.layers[2].attention
     csa_nope = csa.head_dim - csa.rope_head_dim
     assert compute_shardings[
@@ -158,7 +164,6 @@ def test_deepseek_v4_pairs_buckets_after_first_layer(num_layers: int) -> None:
         model_config,
         muon_lr=8e-4,
         adamw_lr=8e-4,
-        parallelism=config.parallelism,
         muon_ns_steps=10,
         muon_ns_coefficients=source_muon.ns_coefficients,
     ).optimizers[0]
@@ -226,26 +231,6 @@ def test_deepseek_v4_recipe_configures_per_step_ns_coefficients() -> None:
     assert isinstance(muon_config, DistMuon.Config)
     assert muon_config.ns_steps == 2
     assert muon_config.ns_coefficients == coefficients
-
-
-def test_deepseek_v4_aligns_expert_layout_after_parallelism_change() -> None:
-    config = deepseek_v4_debugmodel(
-        parallelism=ParallelismConfig(expert_parallel_degree=2),
-    )
-    config = replace(config)
-    muon_config = config.optim.optimizer.optimizers[0]
-    assert isinstance(muon_config, DistMuon.Config)
-    compute_shardings = muon_config.compute_sharding_by_fqn
-    per_expert = compute_shardings["layers.0.feed_forward.routed_experts.w13.weight"]
-
-    assert per_expert.compute_dtype is torch.bfloat16
-    assert per_expert.shardings_by_mesh_axis == {
-        MeshAxisName.EDP_SHARD.value: Shard(0),
-        MeshAxisName.EP.value: Shard(0),
-    }
-    assert per_expert.shard_order_by_tensor_dim == {
-        0: (MeshAxisName.EP.value, MeshAxisName.EDP_SHARD.value),
-    }
 
 
 def test_deepseek_v4_tp_pp_guards_apply_only_to_dist_muon() -> None:

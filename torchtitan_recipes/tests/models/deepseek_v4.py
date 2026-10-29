@@ -41,13 +41,10 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
-from torchtitan_recipes.tests.models.dist_muon_expert_layout import (
-    _align_dist_muon_expert_compute_layouts,
-    _per_expert_compute_layout,
-)
-
 _NSCoefficients = tuple[float, float, float]
 _NSCoefficientSchedule = _NSCoefficients | tuple[_NSCoefficients, ...]
+# DeepSeek-V4 report, Section 2.4: hybrid Newton-Schulz iterations.
+# https://arxiv.org/html/2606.19348v1#S2.SS4
 _FAST_NS: _NSCoefficients = (3.4445, -4.7750, 2.0315)
 _STABLE_NS: _NSCoefficients = (2.0, -1.5, 0.5)
 _DEFAULT_NS_COEFFICIENTS = (_FAST_NS,) * 8 + (_STABLE_NS,) * 2
@@ -58,7 +55,6 @@ def _dist_muon_optimizer(
     *,
     muon_lr: float,
     adamw_lr: float,
-    parallelism: ParallelismConfig,
     muon_ns_steps: int,
     muon_ns_coefficients: _NSCoefficientSchedule,
 ) -> OptimizersContainer.Config:
@@ -88,7 +84,16 @@ def _dist_muon_optimizer(
     compressor_projections = ("wkv", "wgate")
     hc_pre_modules = ("hc_attn_pre", "hc_ffn_pre")
     mtp_projections = ("e_proj", "h_proj")
-    per_expert = _per_expert_compute_layout(parallelism)
+    per_expert = ComputeLayout(
+        shardings_by_mesh_axis={
+            "dp_shard": Shard(0),
+            "dp_shard_cp": Shard(0),
+            "ep": Shard(0),
+            "edp_shard": Shard(0),
+        },
+        shard_order_by_tensor_dim={0: ("ep", "edp_shard")},
+        compute_dtype=torch.bfloat16,
+    )
 
     def compute_shardings_for_layer(
         prefix: str,
@@ -270,10 +275,6 @@ def _dist_muon_optimizer(
 class _DeepSeekV4TrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        self.optim.optimizer = _align_dist_muon_expert_compute_layouts(
-            self.optim.optimizer,
-            parallelism=self.parallelism,
-        )
         if (
             self.parallelism.tensor_parallel_degree > 1
             or self.parallelism.pipeline_parallel_degree > 1
@@ -326,7 +327,6 @@ def deepseek_v4_debugmodel(
                 model_config,
                 muon_lr=8e-4,
                 adamw_lr=8e-4,
-                parallelism=parallelism,
                 muon_ns_steps=muon_ns_steps,
                 muon_ns_coefficients=muon_ns_coefficients,
             ),
@@ -401,7 +401,6 @@ def deepseek_v4_mtp_debugmodel(
                 model_config,
                 muon_lr=8e-4,
                 adamw_lr=8e-4,
-                parallelism=parallelism,
                 muon_ns_steps=muon_ns_steps,
                 muon_ns_coefficients=muon_ns_coefficients,
             ),
@@ -457,7 +456,6 @@ def deepseek_v4_flash(
                 model_config,
                 muon_lr=8e-4,
                 adamw_lr=8e-4,
-                parallelism=parallelism,
                 muon_ns_steps=muon_ns_steps,
                 muon_ns_coefficients=muon_ns_coefficients,
             ),
@@ -513,7 +511,6 @@ def deepseek_v4_pro(
                 model_config,
                 muon_lr=8e-4,
                 adamw_lr=8e-4,
-                parallelism=parallelism,
                 muon_ns_steps=muon_ns_steps,
                 muon_ns_coefficients=muon_ns_coefficients,
             ),
