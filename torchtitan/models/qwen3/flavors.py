@@ -616,7 +616,7 @@ def _debugmodel_moe(
         ),
     )
     # Only the MoE flavors run the router and its load-balance sums.
-    config.local_compile_regions += ["moe_router_topk", "moe_aux_loss"]
+    config.local_compile.regions += ["moe_router_topk", "moe_aux_loss"]
     return config
 
 
@@ -673,7 +673,7 @@ def _30b_a3b(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
     )
-    config.local_compile_regions += ["moe_router_topk", "moe_aux_loss"]
+    config.local_compile.regions += ["moe_router_topk", "moe_aux_loss"]
     return config
 
 
@@ -730,7 +730,7 @@ def _235b_a22b(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
     )
-    config.local_compile_regions += ["moe_router_topk", "moe_aux_loss"]
+    config.local_compile.regions += ["moe_router_topk", "moe_aux_loss"]
     return config
 
 

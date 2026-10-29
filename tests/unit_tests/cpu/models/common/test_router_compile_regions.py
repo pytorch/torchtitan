@@ -7,7 +7,7 @@
 import pytest
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models import (
     deepseek_v3,
     deepseek_v4,
@@ -45,12 +45,12 @@ def test_moe_models_compile_the_router_region(model, flavor: str) -> None:
         if hasattr(layer.feed_forward, "router")
     ]
 
-    assert "moe_router_topk" in config.local_compile_regions
+    assert "moe_router_topk" in config.local_compile.regions
     assert routers
     assert all(isinstance(r, TokenChoiceTopKRouter.Config) for r in routers)
     try:
         # Raises on a name no local_compile function registered.
-        apply_local_compile(config.local_compile_regions)
+        LocalCompileConfig(regions=config.local_compile.regions).apply()
     finally:
         # The binding is process-wide: don't leave compiled regions on for later tests.
-        apply_local_compile([])
+        LocalCompileConfig(regions=[]).apply()
