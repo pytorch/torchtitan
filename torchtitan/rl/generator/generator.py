@@ -166,9 +166,10 @@ class Generator(Configurable):
         Saves generator host memory (one full copy of the weights) on hosts with
         little CPU memory, e.g. GB300. The transfer then happens inside the
         model state dict load, while the engine is paused, instead of
-        overlapping generation; without hot_swap, the generator is drained
-        for the whole transfer. A failed transfer leaves the weights partially
-        loaded, so it stops the engine loop on every generator rank."""
+        overlapping generation: with hot_swap, in-flight requests stall for the
+        whole transfer; without it, the generator is drained for it. A failed
+        transfer leaves the weights partially loaded, so it stops the engine
+        loop on every generator rank."""
 
         def __post_init__(self):
             # The generator runs full expert parallelism: the engine forms the EP
