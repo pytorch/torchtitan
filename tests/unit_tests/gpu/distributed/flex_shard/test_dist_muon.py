@@ -453,6 +453,80 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             )
             self.assertEqual(parameter.placements, storage_placements)
 
+    @with_comms
+    def test_replicated_storage_matches_per_parameter_buckets(self):
+        # Replicated storage sends each update back to every holder, so its
+        # return layout differs from its receive layout. Parameters after it in
+        # the same bucket must still compute on their own inputs.
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        storage_placements = {
+            "layers.0.a": (Shard(1),),
+            "layers.0.b": (Replicate(),),
+            "layers.0.c": (Shard(1),),
+        }
+        torch.manual_seed(0)
+        values = {
+            fqn: torch.randn(4, 6, 5, device=device) for fqn in storage_placements
+        }
+        gradients = [
+            {fqn: torch.randn(4, 6, 5, device=device) for fqn in storage_placements}
+            for _step in range(2)
+        ]
+
+        def build(bucket_patterns):
+            parameters = {
+                fqn: torch.nn.Parameter(
+                    distribute_tensor(value.clone(), mesh, storage_placements[fqn])
+                )
+                for fqn, value in values.items()
+            }
+            optimizer = DistMuon(
+                [
+                    {
+                        "params": list(parameters.values()),
+                        "param_names": list(parameters),
+                    }
+                ],
+                compute_sharding_by_fqn={
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Shard(0)},
+                        compute_dtype=torch.bfloat16,
+                    )
+                    for fqn in parameters
+                },
+                bucket_configs=[
+                    BucketConfig(patterns=(pattern,)) for pattern in bucket_patterns
+                ],
+                lr=0.02,
+                ns_steps=2,
+            )
+            return parameters, optimizer
+
+        shared_bucket = build(["layers.0.*"])
+        per_parameter_buckets = build(list(storage_placements))
+        for step_gradients in gradients:
+            for parameters, optimizer in (shared_bucket, per_parameter_buckets):
+                optimizer.zero_grad()
+                for fqn, parameter in parameters.items():
+                    local_gradient = distribute_tensor(
+                        step_gradients[fqn], mesh, storage_placements[fqn]
+                    ).to_local()
+                    (parameter.to_local() * local_gradient).sum().backward()
+                optimizer.step()
+        for fqn in storage_placements:
+            self.assertTrue(
+                torch.equal(
+                    shared_bucket[0][fqn].to_local(),
+                    per_parameter_buckets[0][fqn].to_local(),
+                ),
+                fqn,
+            )
+
 
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
 class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
