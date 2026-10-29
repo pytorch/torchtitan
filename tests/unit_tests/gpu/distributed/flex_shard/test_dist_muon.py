@@ -114,9 +114,10 @@ class TestDistMuon(DTensorTestBase):
         torch.testing.assert_close(output_tensor, expected)
 
     @parametrize("block_sizes", [(4,), (4, 2)])
+    @parametrize("persistent_buffers", [True, False])
     @with_comms(eager_init=True)
     def test_matches_plain_muon_across_flat_checkpoint(
-        self, block_sizes: tuple[int, ...]
+        self, block_sizes: tuple[int, ...], persistent_buffers: bool
     ):
         lr = 0.03
         num_repeats = 3
@@ -183,7 +184,18 @@ class TestDistMuon(DTensorTestBase):
                 momentum=0.8,
                 nesterov=True,
                 ns_steps=ns_steps,
+                persistent_redistribution_buffers=persistent_buffers,
             )
+
+        def assert_buffer_lifetime(current_optimizer: DistMuon) -> None:
+            runtime = current_optimizer._redistribution_runtime
+            if persistent_buffers:
+                self.assertIsNotNone(runtime._context)
+            else:
+                self.assertEqual(runtime._local_slot.buffers, {})
+                if runtime._context is not None:
+                    for slot in runtime._context.slots:
+                        self.assertEqual(slot.buffers.buffers, {})
 
         redistributed_value = (
             torch.arange(12, device=device).reshape(4, 3).float().div_(10).add_(1)
@@ -197,6 +209,9 @@ class TestDistMuon(DTensorTestBase):
         redistributed = make_parameter(redistributed_value)
         local_blocks = make_parameter(local_blocks_value)
         optimizer = make_optimizer(redistributed, local_blocks)
+        assert_buffer_lifetime(optimizer)
+        if not persistent_buffers:
+            self.assertIsNone(optimizer._redistribution_runtime._context)
         self.assertIs(type(optimizer), DistMuon)
         with self.assertRaisesRegex(RuntimeError, "parameter groups are frozen"):
             optimizer.add_param_group({"params": []})
@@ -251,7 +266,28 @@ class TestDistMuon(DTensorTestBase):
             ):
                 parameter.grad = grad.clone()
 
+            runtime = current_optimizer._redistribution_runtime
+            context = runtime._context
+            events = (
+                tuple(
+                    (slot.compute_input_ready, slot.compute_done, slot.done)
+                    for slot in context.slots
+                )
+                if context is not None
+                else None
+            )
             current_optimizer.step()
+            assert_buffer_lifetime(current_optimizer)
+            self.assertIsNotNone(runtime._context)
+            if context is not None:
+                self.assertIs(runtime._context, context)
+                self.assertEqual(
+                    tuple(
+                        (slot.compute_input_ready, slot.compute_done, slot.done)
+                        for slot in context.slots
+                    ),
+                    events,
+                )
             reference_optimizer.step()
 
             rank = mesh.get_local_rank("dp_shard")
@@ -321,7 +357,18 @@ class TestDistMuon(DTensorTestBase):
             ns_steps=3,
         )
         init_optim_state(resumed_optimizer)
-        load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+        assert_buffer_lifetime(resumed_optimizer)
+        context_before_load = resumed_optimizer._redistribution_runtime._context
+        runtime = resumed_optimizer._redistribution_runtime
+        with mock.patch.object(
+            runtime, "reserve_buffers", wraps=runtime.reserve_buffers
+        ) as reserve_buffers:
+            load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+        self.assertEqual(reserve_buffers.call_count, int(persistent_buffers))
+        assert_buffer_lifetime(resumed_optimizer)
+        self.assertIs(
+            resumed_optimizer._redistribution_runtime._context, context_before_load
+        )
 
         second_redistributed_grad = first_redistributed_grad.flip(0).contiguous()
         second_local_blocks_grad = first_local_blocks_grad.flip(0).contiguous()

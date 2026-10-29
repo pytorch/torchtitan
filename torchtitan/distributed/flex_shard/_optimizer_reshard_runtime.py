@@ -422,6 +422,15 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                     slot.done.record(context.transfer_stream)
             self._context = context
 
+    def release_buffers(self) -> None:
+        """Release optimizer-only tensors while preserving runtime resources."""
+        self._local_slot.buffers.clear()
+        self._local_slot._recorded_compute_streams.clear()
+        if self._context is not None:
+            for slot in self._context.slots:
+                slot.buffers.buffers.clear()
+                slot.buffers._recorded_compute_streams.clear()
+
     def run(
         self,
         plans: Sequence[_BucketPlan[_ItemT]],

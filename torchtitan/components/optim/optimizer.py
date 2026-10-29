@@ -238,6 +238,14 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         with lower-memory redistribution, such as a pull-based symmetric-memory
         implementation.
         """
+        persistent_redistribution_buffers: bool = True
+        """Keep exchange and compute scratch allocated between eager updates.
+
+        False reserves scratch only for each eager update and releases it
+        afterward. Construction and checkpoint loading do not reserve scratch.
+        Parameters, optimizer state, and initialized communication resources
+        remain owned; optimizer updates must remain outside graph capture.
+        """
 
     def __init__(
         self,
@@ -306,6 +314,9 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
             ns_device=config.ns_device,
+            persistent_redistribution_buffers=(
+                config.persistent_redistribution_buffers
+            ),
         )
 
 
