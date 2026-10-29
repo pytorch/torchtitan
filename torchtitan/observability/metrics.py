@@ -489,10 +489,14 @@ class MetricsProcessor(Configurable):
         if config.enable_mlflow:
             try:
                 import mlflow  # noqa: F401
-            except ImportError as e:
-                raise ImportError(
-                    "MLflow logging requires pip install 'torchtitan[mlflow]'"
-                ) from e
+            except ModuleNotFoundError as error:
+                if error.name != "mlflow":
+                    raise
+                raise ModuleNotFoundError(
+                    "MLflow logging requires the optional mlflow package. "
+                    "Install it with pip install mlflow-skinny.",
+                    name="mlflow",
+                ) from error
 
         # Check if any logging backend is enabled
         has_logging_enabled = (

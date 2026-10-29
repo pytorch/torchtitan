@@ -112,7 +112,7 @@ def test_disabled_does_not_import_mlflow(monkeypatch):
 def test_missing_dependency_fails_before_rank_selection(monkeypatch):
     monkeypatch.setitem(sys.modules, "mlflow", None)
     processor = object.__new__(MetricsProcessor)
-    with pytest.raises(ImportError, match=r"torchtitan\[mlflow\]"):
+    with pytest.raises(ModuleNotFoundError, match="pip install mlflow-skinny"):
         processor._build_metric_logger(
             config=MetricsProcessor.Config(enable_mlflow=True),
             parallelism_context=SimpleNamespace(pp_enabled=False),

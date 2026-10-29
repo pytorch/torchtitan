@@ -33,7 +33,8 @@ For an example you can inspect the Llama 3 [recipe](../../torchtitan_recipes/mod
 
 ## MLflow
 
-Install the optional tracking client with `pip install -e '.[mlflow]'`.
+Install the optional tracking client with `pip install mlflow-skinny`
+(or the full `mlflow` package).
 
 Enable `metrics.enable_mlflow` in your recipe and set `MLFLOW_TRACKING_URI`
 and `MLFLOW_EXPERIMENT_NAME` to select the tracking server and experiment.

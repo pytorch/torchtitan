@@ -22,7 +22,6 @@ Issues = "https://github.com/pytorch/torchtitan/issues"
 version = {file = "assets/version.txt"}
 dependencies = {file = ["requirements.txt"]}
 optional-dependencies.dev = {file = ["requirements-dev.txt"]}
-optional-dependencies.mlflow = {file = ["requirements-mlflow.txt"]}
 optional-dependencies.rl = {file = [".ci/docker/requirements-rl.txt"]}
 optional-dependencies.vlm = {file = [".ci/docker/requirements-vlm.txt"]}
 optional-dependencies.flux = {file = [".ci/docker/requirements-flux.txt"]}
@@ -55,6 +54,7 @@ project-excludes = ["torchtitan/experiments", "torchtitan/rl", "**/tests/**"]
 replace-imports-with-any = [
     "torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "batch_invariant_ops", "verifiers.*", # optional dependencies
     "dist_moe", "dist_moe.*", # optional dependency without Pyrefly stubs
+    "mlflow", "mlflow.*", # optional dependency
     # torch_remat is required, but does not publish Pyrefly stubs.
     "torch_remat",
 ]
