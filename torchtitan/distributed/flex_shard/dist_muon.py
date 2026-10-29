@@ -367,22 +367,35 @@ class DistMuon(Optimizer):
             compute_partition: _ParticipantPartition | None,
         ) -> tuple[_MatrixBatchView, ...]:
             if compute_partition is not None:
-                regions = compute_partition.logical_regions
-            elif type(layout.compute_sharding) is BlockShard:
-                regions = (
-                    _dtensor_storage_region_for_participant(
-                        layout.param, layout.param.device_mesh.get_rank()
-                    ),
+                # The plan packs chunks along dim 0; take each chunk's position
+                # from the plan rather than re-deriving the packing here.
+                row_numel = math.prod(compute_partition.tensor_shape[1:])
+                return tuple(
+                    _MatrixBatchView(
+                        shape=view.shape,
+                        strides=view.strides,
+                        offset=tensor_region.offsets[0] * row_numel + view.offset,
+                    )
+                    for logical_region, tensor_region in zip(
+                        compute_partition.logical_regions,
+                        compute_partition.tensor_regions,
+                        strict=True,
+                    )
+                    for view in _matrix_batch_views_for_region(
+                        layout.compute_sharding, logical_region
+                    )
+                )
+            if type(layout.compute_sharding) is BlockShard:
+                region = _dtensor_storage_region_for_participant(
+                    layout.param, layout.param.device_mesh.get_rank()
                 )
             else:
                 local_shape = tuple(layout.param.to_local().shape)
-                regions = (
-                    _TensorRegion(
-                        offsets=(0,) * len(local_shape),
-                        shape=local_shape,
-                    ),
+                region = _TensorRegion(
+                    offsets=(0,) * len(local_shape),
+                    shape=local_shape,
                 )
-            return _matrix_batch_views_for_regions(layout.compute_sharding, regions)
+            return _matrix_batch_views_for_region(layout.compute_sharding, region)
 
         matrix_views_by_fqn = {}
         direction_row_scale_by_fqn = {}
@@ -701,43 +714,27 @@ def _matrix_batch_views_from_shape(
     return tuple(sorted(views, key=lambda view: view.offset))
 
 
-def _matrix_batch_views_for_regions(
+def _matrix_batch_views_for_region(
     compute_sharding: _ResolvedComputeSharding,
-    regions: Sequence[_TensorRegion],
+    region: _TensorRegion,
 ) -> tuple[_MatrixBatchView, ...]:
-    """Preserve each chunk's NS batches when packing several chunks on a rank."""
-    views = []
-    packed_offset = 0
-    for region in regions:
-        if not region.numel:
-            continue
-        shape = torch.Size(region.shape)
-        if type(compute_sharding) is BlockShard:
-            chunk_views = _matrix_batch_views_from_shape(
-                shape,
-                matrix_row_sizes=compute_sharding.block_sizes,
-                logical_row_start=region.offsets[0],
-            )
-        else:
-            chunk_views = (
-                _MatrixBatchView(
-                    shape=shape,
-                    strides=tuple(
-                        math.prod(shape[dim + 1 :]) for dim in range(len(shape))
-                    ),
-                    offset=0,
-                ),
-            )
-        views.extend(
-            _MatrixBatchView(
-                shape=view.shape,
-                strides=view.strides,
-                offset=packed_offset + view.offset,
-            )
-            for view in chunk_views
+    """Describe one chunk's NS batches, relative to the chunk's first element."""
+    if not region.numel:
+        return ()
+    shape = torch.Size(region.shape)
+    if type(compute_sharding) is BlockShard:
+        return _matrix_batch_views_from_shape(
+            shape,
+            matrix_row_sizes=compute_sharding.block_sizes,
+            logical_row_start=region.offsets[0],
         )
-        packed_offset += region.numel
-    return tuple(views)
+    return (
+        _MatrixBatchView(
+            shape=shape,
+            strides=tuple(math.prod(shape[dim + 1 :]) for dim in range(len(shape))),
+            offset=0,
+        ),
+    )
 
 
 def _validate_matrix_batch_storage_placements(
@@ -1098,9 +1095,9 @@ def _compute_ready_costs(
             _device_mesh_coordinate(param.device_mesh, participant),
             param.placements,
         )
-        views = _matrix_batch_views_for_regions(
+        views = _matrix_batch_views_for_region(
             compute_layout.compute_sharding,
-            (_TensorRegion(offsets=global_offsets, shape=local_shape),),
+            _TensorRegion(offsets=global_offsets, shape=local_shape),
         )
         costs[participant] = sum(
             _estimate_muon_compute_cost(view.shape, ns_steps) for view in views
@@ -1152,7 +1149,7 @@ def _assign_balanced_compute_regions(
         ):
             if not region.numel:
                 continue
-            views = _matrix_batch_views_for_regions(layout.compute_sharding, (region,))
+            views = _matrix_batch_views_for_region(layout.compute_sharding, region)
             stored_numel = [0] * num_participants
             for holders, storage_region in storage_regions:
                 intersection = _tensor_region_intersection(storage_region, region)
