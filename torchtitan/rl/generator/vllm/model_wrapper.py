@@ -481,11 +481,18 @@ class VLLMModelWrapper(Module):
                 self.model.state_dict(), pin_memory=True
             )
 
+        # vLLM's load_model caps max_split_size at 20 MiB: a free block of 20 MiB or more then
+        # only serves requests of about its size, so later layers can't reuse the 80 MiB each
+        # GDN layer frees in this loop, and with expandable segments ~20 MiB of each stays
+        # mapped after empty_cache. Lift the cap for the loop.
+        allocator_settings = torch._C._accelerator_getAllocatorSettings()
+        torch._C._accelerator_setAllocatorSettings(f"max_split_size_mb:{2**64 // 2**20}")
         # Unshard the model here so vLLM performs its GPU memory profiling
         # based on the model's actual representation used during forward
         for module in self.model.modules():
             if isinstance(module, FSDPModule):
                 _unshard_and_free_sharded_params(module)
+        torch._C._accelerator_setAllocatorSettings(allocator_settings)
 
     def load_state_dict(self, state_dict: Mapping[str, Any]):
         """Copy new weights into `self.model`, allocating about one FSDP group's sharded buffers at a time.
