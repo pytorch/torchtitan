@@ -152,15 +152,21 @@ _DTensorStorageDomain: TypeAlias = tuple[
 
 @dataclass(frozen=True, slots=True)
 class _ParticipantPartition:
-    """One participant's tensor shape and its global logical regions."""
+    """One participant's tensor shape and its global logical regions.
+
+    ``tensor_regions[i]`` is where ``logical_regions[i]`` sits in the
+    participant's tensor.
+    """
 
     participant: int
     tensor_shape: tuple[int, ...]
     logical_regions: tuple[_TensorRegion, ...]
+    tensor_regions: tuple[_TensorRegion, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tensor_shape", tuple(self.tensor_shape))
         object.__setattr__(self, "logical_regions", tuple(self.logical_regions))
+        object.__setattr__(self, "tensor_regions", tuple(self.tensor_regions))
 
 
 @dataclass(frozen=True, slots=True)
@@ -543,11 +549,20 @@ def _build_region_redistribution_plan(
             participant=participant,
             tensor_shape=storage_by_participant[participant].shape,
             logical_regions=(storage_by_participant[participant],),
+            tensor_regions=(
+                _TensorRegion(
+                    offsets=(0,) * len(logical_shape),
+                    shape=storage_by_participant[participant].shape,
+                ),
+            ),
         )
         for participant in participants
     )
 
     regions_by_participant: dict[int, list[_TensorRegion]] = {
+        participant: [] for participant in participants
+    }
+    tensor_regions_by_participant: dict[int, list[_TensorRegion]] = {
         participant: [] for participant in participants
     }
     packed_sizes = dict.fromkeys(participants, 0)
@@ -570,6 +585,9 @@ def _build_region_redistribution_plan(
         compute_endpoints.append((participant, region, packed_offsets))
         packed_sizes[participant] += region.shape[0]
         regions_by_participant[participant].append(region)
+        tensor_regions_by_participant[participant].append(
+            _TensorRegion(offsets=packed_offsets, shape=region.shape)
+        )
     _validate_tensor_region_partition(
         tuple(region for _participant, region in compute_regions),
         logical_shape,
@@ -580,6 +598,7 @@ def _build_region_redistribution_plan(
             participant=participant,
             tensor_shape=(packed_sizes[participant], *logical_shape[1:]),
             logical_regions=tuple(regions_by_participant[participant]),
+            tensor_regions=tuple(tensor_regions_by_participant[participant]),
         )
         for participant in participants
     )
