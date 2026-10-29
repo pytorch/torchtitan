@@ -10,6 +10,7 @@ Each configuration function is selected by module and name in the launched
 training process, so it must stay importable from this module.
 """
 
+from torchtitan.tools.utils import is_rocm
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests import _set_spmd_typechecking
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel_hybridep
@@ -184,7 +185,8 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="FSDP symmetric memory",
             test_name="fsdp_symm_mem",
             ngpu=2,
-            skip_rocm_test=True,
+            filter_rule="black_list",
+            condition=is_rocm(),
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_debugmodel_hybridep_fsdp4_ep2],
@@ -192,7 +194,8 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             test_name="deepseek_v3_fsdp+hybridep",
             ngpu=4,
             # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
-            skip_rocm_test=True,
+            filter_rule="black_list",
+            condition=is_rocm(),
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_dist_gemm_tp2],
@@ -201,14 +204,16 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             test_name="dist_gemm",
             ngpu=4,
             # symmetric memory is CUDA-only.
-            skip_rocm_test=True,
+            filter_rule="black_list",
+            condition=is_rocm(),
         ),
         IntegrationTestDefinition(
             configs=[qwen3_moe_deepep_fsdp4_ep4],
             test_descr="Qwen3 FSDP+DeepEP",
             test_name="qwen3_fsdp+deepep",
             ngpu=4,
-            skip_rocm_test=True,
+            filter_rule="black_list",
+            condition=is_rocm(),
         ),
         IntegrationTestDefinition(
             configs=[qwen35_debugmodel_moe_lora],
