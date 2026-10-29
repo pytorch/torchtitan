@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import bisect
 import fnmatch
 import hashlib
 import math
@@ -312,10 +313,19 @@ def _validate_redistribution_plan(plan: _RedistributionPlan) -> None:
     compute_by_participant = {
         partition.participant: partition for partition in plan.compute_partitions
     }
+    source_routes_by_participant: dict[int, list[_TensorRegionRoute]] = {
+        participant: [] for participant in plan.participants
+    }
+    destination_routes_by_participant: dict[int, list[_TensorRegionRoute]] = {
+        participant: [] for participant in plan.participants
+    }
+    for route in routes:
+        for participant in route.source.participants:
+            source_routes_by_participant[participant].append(route)
+        for participant in route.destination.participants:
+            destination_routes_by_participant[participant].append(route)
     for participant in plan.participants:
-        source_routes = tuple(
-            route for route in routes if participant in route.source.participants
-        )
+        source_routes = source_routes_by_participant[participant]
         _validate_regions_cover_partition(
             tuple(route.logical_region for route in source_routes),
             storage_by_participant[participant].logical_regions,
@@ -328,9 +338,7 @@ def _validate_redistribution_plan(plan: _RedistributionPlan) -> None:
             direction=f"storage source tensor {participant}",
         )
 
-        destination_routes = tuple(
-            route for route in routes if participant in route.destination.participants
-        )
+        destination_routes = destination_routes_by_participant[participant]
         _validate_regions_cover_partition(
             tuple(route.logical_region for route in destination_routes),
             compute_by_participant[participant].logical_regions,
@@ -366,14 +374,25 @@ def _validate_disjoint_regions_in_bounds(
         f"{direction} regions must be in bounds",
     )
 
-    positive_regions = sorted(
-        (region for region in regions if region.numel),
-        key=lambda region: region.offsets,
+    positive_regions = [region for region in regions if region.numel]
+    # Sweep along the dim with the most distinct region starts: once a later
+    # region starts at or past the end of `first` on that dim, so do all the
+    # regions after it, and none of them can overlap `first`.
+    sweep_dim = max(
+        range(len(bounds_shape)),
+        key=lambda dim: len({region.offsets[dim] for region in positive_regions}),
+        default=None,
     )
+    if sweep_dim is not None:
+        positive_regions.sort(key=lambda region: region.offsets[sweep_dim])
     for index, first in enumerate(positive_regions):
         for other_index in range(index + 1, len(positive_regions)):
             second = positive_regions[other_index]
-            if bounds_shape and second.offsets[0] >= first.offsets[0] + first.shape[0]:
+            if (
+                sweep_dim is not None
+                and second.offsets[sweep_dim]
+                >= first.offsets[sweep_dim] + first.shape[sweep_dim]
+            ):
                 break
             _require_valid_plan(
                 not all(
@@ -566,7 +585,7 @@ def _build_region_redistribution_plan(
         participant: [] for participant in participants
     }
     packed_sizes = dict.fromkeys(participants, 0)
-    compute_endpoints = []
+    compute_endpoints: list[tuple[int, _TensorRegion, tuple[int, ...]]] = []
     for participant, region in compute_regions:
         _require_valid_plan(
             participant in participant_set,
@@ -603,9 +622,35 @@ def _build_region_redistribution_plan(
         for participant in participants
     )
 
+    # Compute regions are disjoint row intervals, so a storage region can only
+    # meet the endpoints whose rows overlap its own. Visit those in endpoint
+    # order so the routes match a full scan.
+    endpoint_order = sorted(
+        range(len(compute_endpoints)),
+        key=lambda index: compute_endpoints[index][1].offsets[0],
+    )
+    endpoint_starts = [
+        compute_endpoints[index][1].offsets[0] for index in endpoint_order
+    ]
+    endpoint_ends = [
+        compute_endpoints[index][1].offsets[0] + compute_endpoints[index][1].shape[0]
+        for index in endpoint_order
+    ]
     storage_to_compute_routes = []
     for source_holders, storage_region in storage_regions:
-        for destination, compute_region, packed_offsets in compute_endpoints:
+        storage_start = storage_region.offsets[0]
+        storage_end = storage_start + storage_region.shape[0]
+        overlapping_endpoints = sorted(
+            endpoint_order[
+                bisect.bisect_right(endpoint_ends, storage_start) : bisect.bisect_left(
+                    endpoint_starts, storage_end
+                )
+            ]
+        )
+        for endpoint_index in overlapping_endpoints:
+            destination, compute_region, packed_offsets = compute_endpoints[
+                endpoint_index
+            ]
             logical_region = _tensor_region_intersection(
                 storage_region,
                 compute_region,
@@ -863,27 +908,34 @@ def _redistribution_group(mesh: DeviceMesh) -> _RedistributionGroup:
     )
 
 
-def _device_mesh_coordinate(
-    mesh: DeviceMesh,
-    participant: int,
-) -> list[int]:
+def _device_mesh_coordinates(mesh: DeviceMesh) -> dict[int, list[int]]:
+    """Map each rank of the mesh to its mesh coordinate."""
     mesh_shape = tuple(mesh.shape)
-    flat_mesh_index = _device_mesh_ranks(mesh).index(participant)
-    mesh_coordinate = [0] * len(mesh_shape)
-    for mesh_axis in range(len(mesh_shape) - 1, -1, -1):
-        flat_mesh_index, mesh_coordinate[mesh_axis] = divmod(
-            flat_mesh_index, mesh_shape[mesh_axis]
-        )
-    return mesh_coordinate
+    coordinates = {}
+    for flat_mesh_index, rank in enumerate(_device_mesh_ranks(mesh)):
+        mesh_coordinate = [0] * len(mesh_shape)
+        for mesh_axis in range(len(mesh_shape) - 1, -1, -1):
+            flat_mesh_index, mesh_coordinate[mesh_axis] = divmod(
+                flat_mesh_index, mesh_shape[mesh_axis]
+            )
+        coordinates[rank] = mesh_coordinate
+    return coordinates
 
 
 def _dtensor_storage_region_for_participant(
     tensor: DTensor,
     participant: int,
 ) -> _TensorRegion:
-    mesh_shape = tuple(tensor.device_mesh.shape)
-    mesh_coordinate = _device_mesh_coordinate(tensor.device_mesh, participant)
+    return _dtensor_storage_region_at_coordinate(
+        tensor, _device_mesh_coordinates(tensor.device_mesh)[participant]
+    )
 
+
+def _dtensor_storage_region_at_coordinate(
+    tensor: DTensor,
+    mesh_coordinate: list[int],
+) -> _TensorRegion:
+    mesh_shape = tuple(tensor.device_mesh.shape)
     local_shape = list(tensor.shape)
     global_offsets = [0] * tensor.ndim
     for mesh_axis, placement in enumerate(tensor.placements):
@@ -990,8 +1042,11 @@ def _dtensor_storage_regions(
         domain_offsets[tensor_dim] = global_offset
 
     holders_by_region: dict[_TensorRegion, list[int]] = {}
+    mesh_coordinates = _device_mesh_coordinates(storage_mesh)
     for participant in participants:
-        global_region = _dtensor_storage_region_for_participant(tensor, participant)
+        global_region = _dtensor_storage_region_at_coordinate(
+            tensor, mesh_coordinates[participant]
+        )
         region = _TensorRegion(
             offsets=tuple(
                 offset - domain_offset
