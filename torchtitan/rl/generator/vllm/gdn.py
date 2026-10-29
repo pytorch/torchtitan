@@ -177,8 +177,9 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Split local fused channels and add a singleton batch dim.
 
-        Query and key stay views: l2norm reads their strided rows and writes compact ones.
-        Value is copied: the chunk kernel would copy a strided value itself, more slowly.
+        Query and key are strided views; the caller must pass them through l2norm,
+        which reads strided rows and writes compact ones. Value is copied because
+        paged_chunk_gdn would otherwise copy a strided value itself, more slowly.
         """
         num_tokens = mixed_qkv.shape[0]
         local_key_dim = self.local_key_dim
