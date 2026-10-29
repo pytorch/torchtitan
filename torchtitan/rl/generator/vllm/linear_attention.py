@@ -12,7 +12,7 @@ each family supplies its state shapes, dtypes and copy functions.
 """
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import auto, Enum
 from typing import Any, TypeVar
 
@@ -25,10 +25,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.attention.backends.utils import (
-    mamba_get_block_table_tensor,
-    split_decodes_and_prefills,
-)
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
@@ -42,6 +39,9 @@ class TorchTitanLinearAttentionMetadata(GDNAttentionMetadata):
     """vLLM's GDN metadata, which vLLM also uses for KDA, plus the execution path."""
 
     execution_path: LinearAttentionExecutionPath
+    # Block-table column of each request's running state, ``[num_reqs, 1]``; the same
+    # in every group, so ``update_block_table`` reuses it.
+    state_block_column: torch.Tensor
 
 
 class TorchTitanLinearAttentionBackend(AttentionBackend):
@@ -66,6 +66,7 @@ class TorchTitanLinearAttentionMetadataBuilder(
     """Stage shared request buffers before eager execution or native graph replay."""
 
     reorder_batch_threshold = 1
+    supports_update_block_table = True
 
     @classmethod
     def get_cudagraph_support(
@@ -144,20 +145,22 @@ class TorchTitanLinearAttentionMetadataBuilder(
                     f"{max_state_seq_len}. CUDA graph capture sizes (bounded by "
                     "max_num_batched_tokens) must not exceed max_model_len."
                 )
-        slots = mamba_get_block_table_tensor(
-            m.block_table_tensor,
-            m.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
-        )[:, 0]
+        # vLLM's `mamba_get_block_table_tensor`, one column: "align" keeps the
+        # running state in the request's last block, "none" in its only one.
+        seq_lens = m.seq_lens[: m.num_reqs]
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            state_block_column = (seq_lens - 1) // self.kv_cache_spec.block_size
+            # 0-length requests in CUDA graph capture read column 0.
+            state_block_column = state_block_column.clamp_(min=0).long().unsqueeze(1)
+        else:
+            state_block_column = seq_lens.new_zeros(m.num_reqs, 1, dtype=torch.long)
+        self._stage_state_indices(m.block_table_tensor, state_block_column)
         self.query_start_loc[: m.num_reqs + 1].copy_(
             m.query_start_loc[: m.num_reqs + 1]
         )
         # Under FULL, num_actual_tokens is the padded capacity, while the last
         # query offset is the real token count. The appended interval is null.
         self.query_start_loc[m.num_reqs + 1 :].fill_(m.num_actual_tokens)
-        self.state_indices[: m.num_reqs].copy_(slots[: m.num_reqs])
-        self.state_indices[m.num_reqs :].zero_()
         self.has_initial_state[: m.num_reqs].copy_(
             m.compute_num_computed_tokens()[: m.num_reqs] > 0
         )
@@ -199,7 +202,50 @@ class TorchTitanLinearAttentionMetadataBuilder(
                 if single_token
                 else self.has_initial_state[: capacity + 1]
             ),
+            state_block_column=state_block_column,
         )
+
+    def update_block_table(
+        self,
+        metadata: TorchTitanLinearAttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> TorchTitanLinearAttentionMetadata:
+        """Reuse another group's metadata for this group's block table.
+
+        vLLM calls this instead of ``build`` for the step's later groups with the same
+        spec. Only the state slots differ; the other buffers are copied into this
+        builder's own, which its CUDA graphs captured.
+        """
+        del slot_mapping
+        self._stage_state_indices(blk_table, metadata.state_block_column)
+        extent = metadata.has_initial_state.shape[0]
+        self.has_initial_state[:extent].copy_(metadata.has_initial_state)
+        # Single-token metadata runs eager or replays decode graphs, both reading the
+        # static decode offsets, so only the packed path copies the query offsets.
+        query_start_loc = self.decode_query_start_loc[: extent + 1]
+        if metadata.execution_path is LinearAttentionExecutionPath.PACKED:
+            query_start_loc = self.query_start_loc[: extent + 1]
+            query_start_loc.copy_(metadata.non_spec_query_start_loc)
+        return replace(
+            metadata,
+            non_spec_query_start_loc=query_start_loc,
+            non_spec_state_indices_tensor=self.state_indices[:extent],
+            has_initial_state=self.has_initial_state[:extent],
+        )
+
+    def _stage_state_indices(
+        self, block_table: torch.Tensor, state_block_column: torch.Tensor
+    ) -> None:
+        """Write each request's state slot; zero the rows past the requests (null slot)."""
+        num_reqs = state_block_column.shape[0]
+        torch.gather(
+            block_table[:num_reqs],
+            1,
+            state_block_column,
+            out=self.state_indices[:num_reqs].unsqueeze(1),
+        )
+        self.state_indices[num_reqs:].zero_()
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
