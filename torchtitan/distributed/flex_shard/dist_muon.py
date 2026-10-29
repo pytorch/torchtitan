@@ -1126,6 +1126,9 @@ def _assign_balanced_compute_regions(
     elements the rank already stores, then bytes. Earlier-bucket cost comes
     before locality so that ties rotate across ranks: with uneven storage,
     locality first would always pick the ranks that store the most rows.
+    No rank takes more than the even share of the bucket's redistributed
+    elements plus its largest chunk, which bounds the compute exchange buffer
+    when skewed fixed work would otherwise send every chunk to a few ranks.
     Entirely local buckets bypass redistribution planning.
     """
     participants = group.participants
@@ -1207,17 +1210,41 @@ def _assign_balanced_compute_regions(
         (*position_loads, position) for position, position_loads in enumerate(loads)
     ]
     heapq.heapify(heap)
+    # Every chunk lands whole on one rank, so any placement leaves some rank
+    # with at least the even share or the largest chunk; the cap stays within
+    # twice that. Until every chunk is placed, some rank holds less than the
+    # even share and can take any chunk under the cap.
+    numel_cap = sum(job.region.numel for job in jobs) // num_participants + max(
+        (job.region.numel for job in jobs), default=0
+    )
+    assigned_numel = [0] * num_participants
     assignments: list[list[_ComputeRegionMapping]] = [[] for _layout in compute_layouts]
     for job in sorted(
         jobs, key=lambda entry: (-entry.cost, -entry.num_bytes, entry.stable_key)
     ):
-        while heap[0][:3] != loads[heap[0][3]]:
-            heapq.heappop(heap)
+        max_assigned_numel = numel_cap - job.region.numel
+        # Drop stale heap entries, and set aside positions this chunk would
+        # take over the cap; they return to the heap for the next chunk.
+        over_cap = []
+        while (
+            heap[0][:3] != loads[heap[0][3]]
+            or assigned_numel[heap[0][3]] > max_assigned_numel
+        ):
+            entry = heapq.heappop(heap)
+            if entry[:3] == loads[entry[3]]:
+                over_cap.append(entry)
         # Positions that store none of the chunk differ only in loads and bytes,
-        # so the heap's top is the best of them; only positions that store part
-        # of the chunk can beat it, on locality.
+        # so the heap's top is the best of them under the cap; only positions
+        # that store part of the chunk can beat it, on locality.
         position = min(
-            {heap[0][3], *job.stored_numel_by_position},
+            {
+                heap[0][3],
+                *(
+                    candidate
+                    for candidate in job.stored_numel_by_position
+                    if assigned_numel[candidate] <= max_assigned_numel
+                ),
+            },
             key=lambda candidate: (
                 loads[candidate][0],
                 loads[candidate][1],
@@ -1226,7 +1253,10 @@ def _assign_balanced_compute_regions(
                 candidate,
             ),
         )
+        for entry in over_cap:
+            heapq.heappush(heap, entry)
         assignments[job.item_index].append((participants[position], job.region))
+        assigned_numel[position] += job.region.numel
         load, cumulative, num_bytes = loads[position]
         loads[position] = (
             load + job.cost,

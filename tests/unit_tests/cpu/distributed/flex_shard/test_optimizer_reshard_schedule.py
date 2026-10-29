@@ -100,6 +100,49 @@ class TestMuonPlanConstruction(unittest.TestCase):
         ]
         self.assertEqual(sorted(owners), [0, 0, 1, 1, 2, 2, 3, 3])
 
+    def test_skewed_fixed_work_caps_compute_elements_per_rank(self):
+        # Ranks 0-2 each hold one fixed 64x64 matrix and rank 3 holds none, a
+        # deficit larger than the cost of the four (16, 64) parameters together.
+        # Cost alone would put all 4096 of their elements on rank 3; the cap
+        # allows the even share (1024) plus the largest chunk (1024).
+        dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=4)
+        self.addCleanup(dist.destroy_process_group)
+        mesh = init_device_mesh("cpu", (4,), mesh_dim_names=("dp_shard",))
+        shapes = {"layers.0.fixed": (3, 64, 64)} | {
+            f"layers.0.weight{index}": (16, 64) for index in range(4)
+        }
+        with patch.object(_BucketedRedistributionRuntime, "reserve_buffers"):
+            optimizer = DistMuon(
+                [
+                    {
+                        "params": [
+                            torch.nn.Parameter(
+                                distribute_tensor(torch.empty(shape), mesh, (Shard(0),))
+                            )
+                            for shape in shapes.values()
+                        ],
+                        "param_names": list(shapes),
+                    }
+                ],
+                compute_sharding_by_fqn={
+                    name: ComputeLayout(
+                        {"dp_shard": Shard(0) if name == "layers.0.fixed" else Owned()},
+                        compute_dtype=torch.bfloat16,
+                    )
+                    for name in shapes
+                },
+                bucket_configs=[BucketConfig(patterns=("layers.0.*",))],
+            )
+        (bucket,) = optimizer._bucket_plans
+        compute_numel = [
+            sum(
+                plan.compute_partition(rank).tensor_shape[0] * 64
+                for plan in bucket.redistribution_plans
+            )
+            for rank in range(4)
+        ]
+        self.assertEqual(compute_numel, [1024, 1024, 0, 2048])
+
     def test_fixed_work_changes_placement_and_plan_reuse(self):
         dist.init_process_group("fake", store=FakeStore(), rank=1, world_size=2)
         self.addCleanup(dist.destroy_process_group)
