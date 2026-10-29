@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import bisect
+import heapq
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -29,7 +31,7 @@ from ._optimizer_reshard_schedule import (
     _build_bucket_plans,
     _build_region_redistribution_plan,
     _ComputeRegionMapping,
-    _device_mesh_coordinate,
+    _device_mesh_coordinates,
     _device_mesh_ranks,
     _dtensor_storage_region_for_participant,
     _dtensor_storage_regions,
@@ -38,7 +40,7 @@ from ._optimizer_reshard_schedule import (
     _ParticipantPartition,
     _RedistributionGroup,
     _RedistributionPlan,
-    _tensor_region_intersection,
+    _tensor_region_intersection_numel,
     _TensorRegion,
     _validate_bucket_plans_across_ranks,
 )
@@ -1048,7 +1050,9 @@ class _ComputeJob:
     num_bytes: int
     item_index: int
     region: _TensorRegion
-    stored_numel_by_position: tuple[int, ...]
+    # Elements of the chunk each participant position already stores; only
+    # positions that store some of it appear.
+    stored_numel_by_position: dict[int, int]
     stable_key: tuple[str, int]
 
 
@@ -1085,6 +1089,7 @@ def _compute_ready_costs(
 ) -> dict[int, int]:
     """Cost fixed work using DTensor's complete local storage geometry."""
     param = compute_layout.param
+    mesh_coordinates = _device_mesh_coordinates(param.device_mesh)
     costs = {}
     for participant in participants:
         # DTensor resolves repeated and strided storage shardings, unlike the
@@ -1092,7 +1097,7 @@ def _compute_ready_costs(
         local_shape, global_offsets = _compute_local_shape_and_global_offset(
             param.shape,
             param.device_mesh.shape,
-            _device_mesh_coordinate(param.device_mesh, participant),
+            mesh_coordinates[participant],
             param.placements,
         )
         views = _matrix_batch_views_for_region(
@@ -1142,6 +1147,17 @@ def _assign_balanced_compute_regions(
             continue
         assert domain is not None
         logical_shape, storage_regions = domain
+        # FSDP storage usually holds disjoint row intervals, which lets each
+        # chunk bisect to the storage regions it meets instead of scanning all.
+        storage_by_row = sorted(storage_regions, key=lambda entry: entry[1].offsets[0])
+        storage_starts = [region.offsets[0] for _holders, region in storage_by_row]
+        storage_ends = [
+            region.offsets[0] + region.shape[0] for _holders, region in storage_by_row
+        ]
+        disjoint_storage_rows = all(
+            end <= start
+            for end, start in zip(storage_ends, storage_starts[1:], strict=False)
+        )
         for chunk_index, region in enumerate(
             _compute_chunk_regions(
                 layout.compute_sharding,
@@ -1152,12 +1168,22 @@ def _assign_balanced_compute_regions(
             if not region.numel:
                 continue
             views = _matrix_batch_views_for_region(layout.compute_sharding, region)
-            stored_numel = [0] * num_participants
-            for holders, storage_region in storage_regions:
-                intersection = _tensor_region_intersection(storage_region, region)
-                if intersection is not None:
+            if disjoint_storage_rows:
+                chunk_start = region.offsets[0]
+                meeting_storage = storage_by_row[
+                    bisect.bisect_right(storage_ends, chunk_start) : bisect.bisect_left(
+                        storage_starts, chunk_start + region.shape[0]
+                    )
+                ]
+            else:
+                meeting_storage = storage_by_row
+            stored_numel: dict[int, int] = {}
+            for holders, storage_region in meeting_storage:
+                numel = _tensor_region_intersection_numel(storage_region, region)
+                if numel:
                     for holder in holders:
-                        stored_numel[position_of[holder]] += intersection.numel
+                        position = position_of[holder]
+                        stored_numel[position] = stored_numel.get(position, 0) + numel
             jobs.append(
                 _ComputeJob(
                     cost=sum(
@@ -1167,34 +1193,49 @@ def _assign_balanced_compute_regions(
                     num_bytes=region.numel * layout.param.element_size(),
                     item_index=index,
                     region=region,
-                    stored_numel_by_position=tuple(stored_numel),
+                    stored_numel_by_position=stored_numel,
                     stable_key=(layout.fqn, chunk_index),
                 )
             )
 
+    # Per position: (bucket load, cumulative load, bytes).
     loads = [
-        (load, 0, cumulative_loads[position] + load)
+        (load, cumulative_loads[position] + load, 0)
         for position, load in enumerate(bucket_loads)
     ]
+    heap = [
+        (*position_loads, position) for position, position_loads in enumerate(loads)
+    ]
+    heapq.heapify(heap)
     assignments: list[list[_ComputeRegionMapping]] = [[] for _layout in compute_layouts]
     for job in sorted(
         jobs, key=lambda entry: (-entry.cost, -entry.num_bytes, entry.stable_key)
     ):
-        *_key, position = min(
-            (load, cumulative, -stored_numel, num_bytes, position)
-            for position, ((load, num_bytes, cumulative), stored_numel) in enumerate(
-                zip(loads, job.stored_numel_by_position, strict=True)
-            )
+        while heap[0][:3] != loads[heap[0][3]]:
+            heapq.heappop(heap)
+        # Positions that store none of the chunk differ only in loads and bytes,
+        # so the heap's top is the best of them; only positions that store part
+        # of the chunk can beat it, on locality.
+        position = min(
+            {heap[0][3], *job.stored_numel_by_position},
+            key=lambda candidate: (
+                loads[candidate][0],
+                loads[candidate][1],
+                -job.stored_numel_by_position.get(candidate, 0),
+                loads[candidate][2],
+                candidate,
+            ),
         )
         assignments[job.item_index].append((participants[position], job.region))
-        load, num_bytes, cumulative = loads[position]
+        load, cumulative, num_bytes = loads[position]
         loads[position] = (
             load + job.cost,
-            num_bytes + job.num_bytes,
             cumulative + job.cost,
+            num_bytes + job.num_bytes,
         )
+        heapq.heappush(heap, (*loads[position], position))
 
-    updated_cumulative_loads = [cumulative for _load, _num_bytes, cumulative in loads]
+    updated_cumulative_loads = [cumulative for _load, cumulative, _num_bytes in loads]
     return (
         tuple(
             tuple(sorted(regions, key=lambda entry: entry[1].offsets))
