@@ -43,25 +43,6 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         hf_assets_path: str | None,
     ):
         super().__init__(model_config, hf_assets_path)
-        # fqn_to_index_mapping lists the tensors an HF save writes. hf_assets_path
-        # may hold the released FP8 index, whose X.weight_scale_inv tensors are not
-        # saved, and whose MTP layer (61) is not saved by a config without MTP.
-        if self.fqn_to_index_mapping is not None:
-            num_hf_layers = len(model_config.layers) + len(
-                getattr(model_config, "mtp_layers", None) or []
-            )
-            fqn_to_index_for_save = {}
-            for key, index in self.fqn_to_index_mapping.items():
-                is_fp8_scale = key.endswith(".weight_scale_inv")
-                layer_match = re.match(r"model\.layers\.(\d+)\.", key)
-                is_layer_not_in_config = (
-                    layer_match is not None
-                    and int(layer_match.group(1)) >= num_hf_layers
-                )
-                if is_fp8_scale or is_layer_not_in_config:
-                    continue
-                fqn_to_index_for_save[key] = index
-            self.fqn_to_index_mapping = fqn_to_index_for_save
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention Module
