@@ -186,6 +186,57 @@ def test_replay_detects_semantic_state_mismatch(corruption, expected):
         replayer.run_fwd_bwd(execute, step=9, get_loss=lambda loss: loss)
 
 
+@pytest.mark.parametrize("prior_draws", [0, 1, 2, 3, 4, 623, 624, 625])
+def test_replay_detects_cpu_rng_advancement_after_prior_draws(prior_draws):
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        torch.rand(prior_draws)
+        module = _BufferModule()
+        replayer = SDCReplayer(
+            SDCReplayer.Config(), modules=[module], device=torch.device("cpu")
+        )
+        calls = 0
+
+        def execute():
+            nonlocal calls
+            calls += 1
+            loss = module.weight.square().sum()
+            loss.backward()
+            if calls == 2:
+                torch.rand(1)
+            return loss
+
+        with pytest.raises(SDCReplayMismatch, match="rng:cpu"):
+            replayer.run_fwd_bwd(execute, step=9, get_loss=lambda loss: loss)
+
+
+def test_signature_detects_accelerator_rng_advancement():
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        torch.rand(2)
+        before = torch.get_rng_state()
+        torch.rand(1)
+        after = torch.get_rng_state()
+        module = _BufferModule()
+        replayer = SDCReplayer(
+            SDCReplayer.Config(), modules=[module], device=torch.device("cpu")
+        )
+        loss = module.weight.square().sum()
+        with patch(
+            "torchtitan.observability.sdc_replayer._accelerator_rng_states",
+            return_value=[before],
+        ):
+            reference = replayer._signature(loss)
+        with patch(
+            "torchtitan.observability.sdc_replayer._accelerator_rng_states",
+            return_value=[after],
+        ):
+            candidate = replayer._signature(loss)
+
+        assert _compare_signature(reference, candidate).item()
+        assert _find_signature_mismatch(reference, candidate) == "rng:accelerator:0"
+
+
 @pytest.mark.parametrize(
     ("num_steps", "expected_checked"),
     [

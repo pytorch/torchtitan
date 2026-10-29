@@ -385,11 +385,12 @@ class SDCReplayer(Configurable):
         return result
 
     def _signature(self, loss: torch.Tensor) -> _ReplaySignature:
-        """Capture hashes and Python RNG state after one forward/backward execution.
+        """Capture tensor hashes and exact RNG states after one execution.
 
-        Tensor digests remain on the loss device for batched comparison. Schema
+        Tensor digests remain on the loss device for batched comparison. Signature
         names identify the first differing loss, RNG state, buffer, or gradient
-        only when a mismatch is detected.
+        only when a mismatch is detected. Small RNG states are compared exactly:
+        the order-insensitive tensor hash can miss changes to RNG counters.
         """
         schema: list[tuple[str, tuple[int, ...], str, str]] = []
         digests: list[torch.Tensor] = []
@@ -403,11 +404,15 @@ class SDCReplayer(Configurable):
             digests.append(_hash_tensor(local).to(digest_device))
 
         add_tensor("loss", loss)
-        add_tensor("rng:cpu", torch.get_rng_state())
+        state: list[tuple[str, Any]] = [
+            ("rng:cpu", bytes(torch.get_rng_state().tolist()))
+        ]
         accelerator_rng_states = _accelerator_rng_states(self._device)
         if accelerator_rng_states is not None:
             for index, rng_state in enumerate(accelerator_rng_states):
-                add_tensor(f"rng:accelerator:{index}", rng_state)
+                state.append(
+                    (f"rng:accelerator:{index}", bytes(rng_state.cpu().tolist()))
+                )
 
         seen_buffers: set[tuple[int, str]] = set()
         for module_index, root in enumerate(self._modules):
@@ -446,8 +451,8 @@ class SDCReplayer(Configurable):
                     continue
                 add_tensor(f"gradient:{module_index}:{name}", grad)
 
-        state = (("state:python_rng", random.getstate()),)
-        return _ReplaySignature(tuple(schema), tuple(digests), state)
+        state.append(("state:python_rng", random.getstate()))
+        return _ReplaySignature(tuple(schema), tuple(digests), tuple(state))
 
     def _execute(
         self,
