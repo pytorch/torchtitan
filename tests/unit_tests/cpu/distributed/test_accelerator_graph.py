@@ -119,6 +119,7 @@ def test_wrap_with_accelerator_graph_captures_first_invocation() -> None:
         patch.object(accelerator_graph_manager, "_stream", MagicMock()),
         patch("torch.accelerator.current_stream", return_value=MagicMock()),
         patch("torch.cuda.CUDAGraph", return_value=graph) as graph_constructor,
+        patch("torch.accelerator.empty_cache"),
         patch("torch.cuda.graph", return_value=nullcontext()),
         patch(
             "torchtitan.distributed.accelerator_graph.get_kernel_annotations",
@@ -182,6 +183,7 @@ def test_accelerator_graph_wrapper_collects_annotations() -> None:
         patch.object(accelerator_graph_manager, "_stream", stream),
         patch.object(accelerator_graph_manager, "all_annotations", {}),
         patch("torch.cuda.CUDAGraph", return_value=graph),
+        patch("torch.accelerator.empty_cache"),
         patch("torch.cuda.graph", return_value=nullcontext()) as cuda_graph,
         patch(
             "torchtitan.distributed.accelerator_graph.get_kernel_annotations",
@@ -318,6 +320,7 @@ def test_structured_wrapper_validates_and_copies_replay_inputs() -> None:
         patch.object(accelerator_graph_manager, "_stream", graph_stream),
         patch("torch.accelerator.current_stream", return_value=current_stream),
         patch("torch.cuda.CUDAGraph", return_value=graph),
+        patch("torch.accelerator.empty_cache"),
         patch("torch.cuda.graph", return_value=nullcontext()),
         patch(
             "torchtitan.distributed.accelerator_graph.get_kernel_annotations",
@@ -373,6 +376,7 @@ def test_accelerator_graph_wrapper_restores_capture_allocated_gradients() -> Non
         patch.object(accelerator_graph_manager, "_graph_pool", object()),
         patch.object(accelerator_graph_manager, "_stream", MagicMock()),
         patch("torch.cuda.CUDAGraph", return_value=graph),
+        patch("torch.accelerator.empty_cache"),
         patch("torch.cuda.graph", return_value=nullcontext()),
         patch(
             "torchtitan.distributed.accelerator_graph.get_kernel_annotations",
@@ -418,6 +422,7 @@ def test_accelerator_graph_wrapper_requires_cleared_owned_gradients(
         patch.object(accelerator_graph_manager, "_graph_pool", object()),
         patch.object(accelerator_graph_manager, "_stream", MagicMock()),
         patch("torch.cuda.CUDAGraph", return_value=graph),
+        patch("torch.accelerator.empty_cache"),
         patch("torch.cuda.graph", return_value=nullcontext()),
         patch(
             "torchtitan.distributed.accelerator_graph.get_kernel_annotations",

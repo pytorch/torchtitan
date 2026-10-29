@@ -1056,7 +1056,9 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
 
 @pytest.mark.parametrize("disable_accelerator_graphs", [False, True])
 @pytest.mark.parametrize("per_group", [False, True])
-def test_engine_prepares_pp_metadata_before_accelerator_graph(disable_accelerator_graphs, per_group):
+def test_engine_prepares_pp_metadata_before_accelerator_graph(
+    disable_accelerator_graphs, per_group
+):
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
         dist_moe_runtime=None,
