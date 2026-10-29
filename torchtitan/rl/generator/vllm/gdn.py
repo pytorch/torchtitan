@@ -456,6 +456,8 @@ def vllm_inner_gdn_sharding_config() -> ShardingConfig:
     parameter_placement = dense_param_placement(tp=spmd.S(0))
     input_shardings = {
         "x_TD": replicated_activation_placement(),
+        # Each rank's own [q|k|v|z|a|b] (and [q|k|v]) rows, not a shard of one global
+        # weight: S(0) is nominal, so never redistribute or gather the fused weights.
         "input_weight_CD": parameter_placement,
         "conv_weight_CW": parameter_placement,
         "A_log_H": parameter_placement,
