@@ -527,4 +527,5 @@ def apply_fsdp_to_decoder(
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
 
     if unshard_in_current_stream:
+        assert isinstance(model, FSDPModule)
         model.set_unshard_in_current_stream(True)
