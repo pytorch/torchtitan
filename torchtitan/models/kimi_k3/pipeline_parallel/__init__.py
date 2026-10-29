@@ -15,11 +15,12 @@ from torch.distributed.pipelining.schedules import (
     PipelineScheduleMulti,
     PipelineScheduleSingle,
 )
-from torch.distributed.pipelining.stage import _PipelineStageBase, PipelineStage
+from torch.distributed.pipelining.stage import _PipelineStageBase
 
 from torchtitan.distributed.pipeline_parallel import (
     get_module_fqns_per_model_part,
     pipeline_llm,
+    TorchTitanPipelineStage,
 )
 from torchtitan.models.base.model import BaseModel
 
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 def _as_attn_res_stage(stage: _PipelineStageBase) -> AttnResPipelineStage:
-    assert isinstance(stage, PipelineStage)
+    assert isinstance(stage, TorchTitanPipelineStage)
     rebuilt = AttnResPipelineStage(
         stage.submod,
         stage.stage_index,
@@ -42,6 +43,7 @@ def _as_attn_res_stage(stage: _PipelineStageBase) -> AttnResPipelineStage:
         group=stage.group,
         dw_builder=stage.dw_builder,
         get_mesh=stage._mesh_cache._get_mesh_cb,
+        empty_cache_before_first_backward=stage.empty_cache_before_first_backward,
     )
     # The schedule wrote its stage-to-rank map onto the stage it was handed.
     rebuilt.stage_index_to_group_rank = stage.stage_index_to_group_rank

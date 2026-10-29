@@ -1035,7 +1035,8 @@ def test_initialize_optim_seeds_accelerator_graph_stream_allocator() -> None:
     empty_cache.assert_not_called()
 
 
-def test_optim_step_waits_for_checkpoint() -> None:
+@pytest.mark.parametrize("release_cache", [False, True])
+def test_optim_step_waits_for_checkpoint(release_cache: bool) -> None:
     events = []
     loss = torch.tensor(1.0)
     optim = SimpleNamespace(
@@ -1054,13 +1055,22 @@ def test_optim_step_waits_for_checkpoint() -> None:
                 maybe_wait_for_staging=lambda: events.append("checkpoint")
             ),
             optim=optim,
+            config=SimpleNamespace(
+                training=SimpleNamespace(empty_device_cache_after_step=release_cache)
+            ),
         ),
     )
 
-    grad_norm = TrainingEngine.optim_step(engine)
+    with patch(
+        "torchtitan.training_engine.utils.device_module.empty_cache",
+        side_effect=lambda: events.append("empty_cache"),
+    ):
+        grad_norm = TrainingEngine.optim_step(engine)
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
-    assert events == ["checkpoint", "optimization_3"]
+    assert events == ["checkpoint", "optimization_3"] + (
+        ["empty_cache"] if release_cache else []
+    )
     assert engine.num_completed_steps == 3
 
 
@@ -1155,6 +1165,7 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
                 training=SimpleNamespace(
                     accelerator_graph_per_microbatch_group=False,
                     disable_accelerator_graphs=False,
+                    empty_device_cache_after_step=False,
                 ),
             ),
             optim=SimpleNamespace(

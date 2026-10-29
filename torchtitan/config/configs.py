@@ -103,6 +103,13 @@ class TrainingConfig:
     during training. Requires ``disable_accelerator_graphs=True`` and no SDC replay.
     """
 
+    empty_device_cache_after_step: bool = False
+    """Release unused device-caching-allocator blocks after each optimizer step.
+
+    This can preserve driver-visible memory for allocations made outside the
+    framework allocator, at the cost of allocator work once per training step.
+    """
+
     dtype: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype for training. In contrast to mixed precision training, setting training_dtype=bfloat16 will

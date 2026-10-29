@@ -56,6 +56,11 @@ def test_parallelism_config_rejects_unknown_schedule_when_pp_disabled() -> None:
         )
 
 
+def test_parallelism_config_rejects_startup_cache_release_without_pp() -> None:
+    with pytest.raises(ValueError, match="requires pipeline_parallel_degree > 1"):
+        ParallelismConfig(pipeline_parallel_empty_cache_before_first_backward=True)
+
+
 def test_parallelism_config_disables_fsdp_symm_mem_by_default() -> None:
     assert ParallelismConfig().fsdp_symm_mem_scope is None
 

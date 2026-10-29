@@ -6,6 +6,7 @@
 
 import dataclasses
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -24,8 +25,41 @@ from torchtitan.distributed.pipeline_parallel import (
     _get_pp_rank_to_stage_indices_mapping,
     _static_stage_metadata,
     _unsupported_static_split,
+    TorchTitanPipelineStage,
 )
 from torchtitan_recipes.tests.models.llama3 import build_model_config
+
+
+def test_pipeline_stage_releases_cache_only_before_first_backward():
+    """The startup cache release is bounded to one call per local stage."""
+    stage = TorchTitanPipelineStage.__new__(TorchTitanPipelineStage)
+    stage.empty_cache_before_first_backward = True
+    stage._emptied_cache_before_first_backward = False
+    stage._has_backward = True
+    stage.device = torch.device("cuda")
+    events = []
+    device_module = Mock()
+    device_module.empty_cache.side_effect = lambda: events.append("empty_cache")
+
+    with (
+        patch("torch.get_device_module", return_value=device_module),
+        patch.object(
+            pipeline_parallel.PipelineStage,
+            "backward_one_chunk",
+            side_effect=lambda chunk, **kwargs: events.append(f"backward_{chunk}"),
+        ) as backward,
+    ):
+        stage.backward_one_chunk(0)
+        stage.backward_one_chunk(1, last_backward=True)
+
+    assert events == ["empty_cache", "backward_0", "backward_1"]
+    assert [
+        (backward_call.args, backward_call.kwargs)
+        for backward_call in backward.call_args_list
+    ] == [
+        ((0,), {"loss": None, "full_backward": True, "last_backward": False}),
+        ((1,), {"loss": None, "full_backward": True, "last_backward": True}),
+    ]
 
 
 def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeypatch):

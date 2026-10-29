@@ -161,6 +161,14 @@ class ParallelismConfig:
     explicit send waits. None adds no hard limit.
     """
 
+    pipeline_parallel_empty_cache_before_first_backward: bool = False
+    """Release unused cached device memory before each PP stage's first backward.
+
+    This runs at most once per local stage for the process lifetime. It is
+    intended to reclaim startup and first-forward allocator fragments without
+    placing cache management on every pipeline action.
+    """
+
     pp_max_unsharded_active_stages: int | None = None
     """Maximum local pipeline stages whose parameters may remain unsharded.
 
@@ -209,6 +217,14 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
+        if (
+            self.pipeline_parallel_empty_cache_before_first_backward
+            and self.pipeline_parallel_degree == 1
+        ):
+            raise ValueError(
+                "pipeline_parallel_empty_cache_before_first_backward requires "
+                "pipeline_parallel_degree > 1"
+            )
         cpu_offload_layer_fqns = self.fsdp_cpu_offload_layer_fqns
         if len(cpu_offload_layer_fqns) != len(set(cpu_offload_layer_fqns)):
             raise ValueError(
