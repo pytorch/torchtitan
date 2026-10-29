@@ -1288,6 +1288,11 @@ class HFTransformerModel(BaseModel):
                 ] = AllGatherKVFlexInnerAttention.prepare_cp_metadata(
                     input_dict["attention_metadata"],
                     permutation=permutation,
+                    max_num_fragments=(
+                        load_balancer.max_num_fragments
+                        if load_balancer is not None
+                        else 1
+                    ),
                 )
             input_dict = context_parallel.shard_tensors(
                 input_dict,

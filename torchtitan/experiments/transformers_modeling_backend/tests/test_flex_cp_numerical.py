@@ -186,6 +186,9 @@ def main():
         batch["attention_metadata"] = AllGatherKVFlexInnerAttention.prepare_cp_metadata(
             batch["attention_metadata"],
             permutation=permutation,
+            max_num_fragments=(
+                load_balancer.max_num_fragments if load_balancer is not None else 1
+            ),
         )
         batch = context_parallel.shard_tensors(
             batch,

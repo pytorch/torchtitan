@@ -8,12 +8,18 @@
 
 import importlib.util
 import unittest
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
 import torch
 from attn_gym.linear.context_parallel import ContextParallelRouting
+
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_teardown,
+    wrap_fwd_bwd_with_accelerator_graph,
+)
 
 from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, Sigmoid
 from torchtitan.models.common.attention import (
@@ -114,6 +120,7 @@ class TestKDAContextParallelMetadata(unittest.TestCase):
             kda_metadata = ContextParallelInnerKDA.prepare_cp_metadata(
                 attention_metadata,
                 permutation=permutation,
+                max_num_fragments=2,
             )
 
         self.assertIs(kda_metadata.cp_routing, routing)
@@ -122,6 +129,8 @@ class TestKDAContextParallelMetadata(unittest.TestCase):
             fragments=[[(0, 1), (3, 4)], [(1, 3)]],
             cp_rank=0,
             device=varlen.cu_seq_q.device,
+            slots=2,
+            max_subsequences=3,
             conv_history=3,
         )
 
@@ -157,10 +166,10 @@ class TestKDAContextParallelMetadata(unittest.TestCase):
     _HAS_ATTENTION_GYM_KDA, "KDA requires Attention Gym on CUDA capability 9.0+"
 )
 class TestKDA(unittest.TestCase):
-    def _make_kda(self):
+    def _make_kda(self, seed: int = 1):
         model = _kda_config().build()
         model = model.to(device="cuda", dtype=torch.bfloat16)
-        torch.manual_seed(1)
+        torch.manual_seed(seed)
         with torch.no_grad():
             for param in model.parameters():
                 param.normal_(mean=0.0, std=0.02)
@@ -215,6 +224,72 @@ class TestKDA(unittest.TestCase):
             rtol=2e-2,
             atol=2e-2,
         )
+
+    def test_graph_replay_refreshes_packed_documents(self):
+        """Changing padded offsets must preserve exact eager loss and updates."""
+        deterministic = torch.are_deterministic_algorithms_enabled()
+        torch.use_deterministic_algorithms(True)
+        accelerator_graph_teardown()
+        try:
+            model = self._make_kda(seed=42)
+            reference = deepcopy(model)
+            optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+            reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.01)
+
+            def forward_backward(inputs, metadata):
+                loss = model(inputs, metadata).float().square().sum()
+                loss.backward()
+                return loss.detach()
+
+            run = wrap_fwd_bwd_with_accelerator_graph(
+                forward_backward,
+                parameters=model.parameters(),
+                num_warmup_iterations=2,
+            )
+            gradient_addresses = None
+            for step in range(5):
+                inputs = self._inputs(seed=42 + step, tokens=96)
+                lengths = (96,) if step % 2 == 0 else (17, 31, 48)
+                positions = torch.tensor(
+                    [index for length in lengths for index in range(length)],
+                    device="cuda",
+                    dtype=torch.int32,
+                )
+                metadata = LinearAttentionMetadata(
+                    varlen=create_varlen_metadata_for_document(
+                        positions, max_num_documents=4, max_context_length=96
+                    ),
+                    num_conv_history_tokens=3,
+                )
+                optimizer.zero_grad(set_to_none=True)
+                reference_optimizer.zero_grad(set_to_none=True)
+                expected = reference(inputs, metadata).float().square().sum()
+                expected.backward()
+                actual = run(inputs, metadata).clone()
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                for parameter, expected_parameter in zip(
+                    model.parameters(), reference.parameters(), strict=True
+                ):
+                    torch.testing.assert_close(
+                        parameter.grad, expected_parameter.grad, rtol=0, atol=0
+                    )
+                if step >= 2:
+                    addresses = [
+                        parameter.grad.data_ptr() for parameter in model.parameters()
+                    ]
+                    gradient_addresses = gradient_addresses or addresses
+                    self.assertEqual(addresses, gradient_addresses)
+                optimizer.step()
+                reference_optimizer.step()
+                for parameter, expected_parameter in zip(
+                    model.parameters(), reference.parameters(), strict=True
+                ):
+                    torch.testing.assert_close(
+                        parameter, expected_parameter, rtol=0, atol=0
+                    )
+        finally:
+            accelerator_graph_teardown()
+            torch.use_deterministic_algorithms(deterministic)
 
 
 if __name__ == "__main__":
