@@ -53,6 +53,69 @@ class TestUlyssesNCCL(TestCase):
     def test_skips_non_ulysses_model(self):
         self.assertIsNone(self.configure(self.model))
 
+    @parametrize("backend", ("compact_mla", "kda", "gdn"))
+    def test_disables_registration_for_other_ulysses_backends(self, backend):
+        from torchtitan.config.parallelism import ParallelismConfig
+        from torchtitan.models.common.attention import MLAAttention
+        from torchtitan.models.common.attention.cp_attention import (
+            AllGatherKVFlexInnerAttention,
+            Ulysses,
+        )
+        from torchtitan.models.common.attention.cp_gdn import UlyssesInnerGDN
+        from torchtitan.models.common.attention.cp_kda import (
+            ContextParallelInnerKDA,
+            UlyssesInnerKDA,
+        )
+        from torchtitan.models.common.attention.cp_mla import (
+            AllGatherKVMLAFlexAttention,
+            UlyssesMLAAttention,
+        )
+        from torchtitan.models.common.attention.gdn import InnerGDN
+        from torchtitan.models.common.attention.kda import InnerKDA
+        from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3
+        from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5
+
+        if backend == "gdn":
+            model = build_qwen3_5(
+                "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+            )
+            attention_map = {
+                FlexInnerAttention: AllGatherKVFlexInnerAttention,
+                InnerGDN: UlyssesInnerGDN,
+            }
+            ulysses_type = UlyssesInnerGDN
+        else:
+            model = build_kimi_k3(
+                "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+            )
+            attention_map = {
+                MLAAttention: (
+                    UlyssesMLAAttention
+                    if backend == "compact_mla"
+                    else AllGatherKVMLAFlexAttention
+                ),
+                InnerKDA: (
+                    ContextParallelInnerKDA
+                    if backend == "compact_mla"
+                    else UlyssesInnerKDA
+                ),
+            }
+            ulysses_type = (
+                UlyssesMLAAttention if backend == "compact_mla" else UlyssesInnerKDA
+            )
+        model = ContextParallelTransform(inner_attention_map=attention_map).transform(
+            model
+        )
+        ulysses_configs = [config for _, config, _, _ in model.traverse(Ulysses.Config)]
+        self.assertTrue(ulysses_configs)
+        # Another Ulysses implementation must not mask a missed backend match.
+        self.assertTrue(
+            all(isinstance(config, ulysses_type.Config) for config in ulysses_configs)
+        )
+        self.assertEqual(self.configure(model), "0")
+        os.environ.clear()
+        self.assertIsNone(self.configure(model, version=(2, 32, 3)))
+
     @parametrize("kwargs", ({"comm_backend": "fake"}, {"device_type": "cpu"}))
     def test_skips_unsupported_runtime(self, kwargs):
         self.assertIsNone(self.configure(self.ulysses_model, **kwargs))
