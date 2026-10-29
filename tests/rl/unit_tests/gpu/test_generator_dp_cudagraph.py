@@ -22,10 +22,12 @@ import torch.distributed as dist
 from torchtitan.config import CommConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.qwen3 import build_model_config
+from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.registry import register_to_vllm
 from torchtitan_recipes.tests.rl.alphabet_sort import (
+    rl_grpo_qwen3_5_debug_varlen,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 from vllm import SamplingParams
@@ -190,3 +192,56 @@ def test_vllm_dp_decode_graphs_with_prefilling_peer():
                 and not uniform
                 for mode, num_tokens, uniform in records
             ), records
+
+
+@requires_sm90
+def test_vllm_dp_linear_attention_full_graphs():
+    """At DP>1, GDN steps with prefill tokens replay a FULL graph instead of running eager.
+
+    Rank 0 prefills a long prompt; every other rank, decoding or idle (dummy batch),
+    is padded to it and replays the same mixed graph.
+    """
+    world_size = _world_size()
+    config = rl_grpo_qwen3_5_debug_varlen()
+    generator = config.generator
+    # Every DP rank holds every expert: the local MoE path captures in FULL graphs.
+    generator.parallelism = InferenceParallelismConfig(data_parallel_degree=world_size)
+    generator.model = build_qwen3_5_model_config(
+        "debugmodel_moe",
+        seq_len=2048,
+        attn_backend="varlen",
+        parallelism=generator.parallelism.to_training(),
+    )
+    # Local compile is not under test.
+    generator.model.local_compile.regions = []
+    generator.engine.cuda_graph = VLLMCudaGraphConfig(mode="FULL")
+    generator.gpu_memory_limit = 0.5
+
+    with _dp_engine(config) as (engine, records, max_decode_capture_size):
+        tokenizer = engine.get_tokenizer()
+        prompts = _make_prompt_tokens(3, 64, tokenizer)
+        long_prompt = None
+        if dist.get_rank() == 0:
+            long_prompt = _make_prompt_tokens(1, LONG_PROMPT_TOKENS, tokenizer)[0]
+        _run(engine, "busy", prompts, _greedy_params(), long_prompt=long_prompt)
+        busy_records = records[:]
+        records.clear()
+        engine.reset_prefix_cache()
+        _run(
+            engine,
+            "idle",
+            prompts if dist.get_rank() == 0 else [],
+            _greedy_params(),
+            long_prompt=long_prompt,
+        )
+
+        # Every rank replays the mixed graph for rank 0's long-prompt chunk: its own
+        # prefill, or padded to it while decoding (busy) or idle (dummy batch).
+        assert max_decode_capture_size < LONG_PROMPT_TOKENS
+        for phase_records in (busy_records, records):
+            assert any(
+                mode == CUDAGraphMode.FULL
+                and num_tokens >= LONG_PROMPT_TOKENS
+                and not uniform
+                for mode, num_tokens, uniform in phase_records
+            ), phase_records
