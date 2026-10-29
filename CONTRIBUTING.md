@@ -11,11 +11,19 @@ pip install -r requirements.txt -r requirements-dev.txt
 We actively welcome your pull requests.
 
 1. Fork the repo and create your branch from `main`.
-2. If you've added code that should be tested, add tests.
+2. Keep the PR to one concern, and as small as it can be.
 3. If you've changed APIs, update the documentation.
 4. Ensure the test suite passes.
 5. Make sure your code lints (`pre-commit run --all-files`).
-6. If you haven't already, complete the Contributor License Agreement ("CLA").
+6. Fill in the PR template: the concrete problem with a simple example, what
+   changed, numerics/performance evidence, and testing. Reviewers need to be
+   convinced, not just informed.
+7. If you haven't already, complete the Contributor License Agreement ("CLA").
+
+Area experts are requested as reviewers automatically from
+[.github/area_reviewers.yml](.github/area_reviewers.yml). Maintainers can ask for
+an AI review by commenting `@claude review`; it follows
+[.claude/skills/pr-review](.claude/skills/pr-review/SKILL.md).
 
 ### Contributor License Agreement ("CLA")
 In order to accept your pull request, we need you to submit a CLA. You only need
@@ -72,7 +80,7 @@ It is the contributor’s responsibility to justify the change. The requirements
 
 When appropriate, one should consider
 
-- Adding CPU/GPU unit/integration tests.
+- Adding CPU/GPU unit/integration tests that guard a real invariant. CI capacity is limited, so prefer extending an existing test or integration configuration over adding a new one, and say which regression a new test catches.
   - To add a unit test, put it in the [tests](tests/) folder and follow the existing test files.
   - To add a GPU integration test, add a configuration function and an `IntegrationTestDefinition` naming it to the matching suite module in [tests/integration_tests](tests/integration_tests/). Reusable model debug configurations live in [torchtitan_recipes/tests/models](torchtitan_recipes/tests/models/).
 - Updating [README](README.md) and documenting the feature next to its code: usage in the package's `README.md` and design notes in an UPPERCASE `.md` file, similar to [MXFP8](torchtitan/quantization/mxfp8/README.md).

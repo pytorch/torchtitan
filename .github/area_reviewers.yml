@@ -1,0 +1,130 @@
+# Points of contact (PoCs) per area, auto-requested as reviewers by
+# .github/workflows/area_reviewers.yml. Unlike CODEOWNERS, a PoC's approval is
+# not required to merge; the request just routes the PR to people who know the
+# area. Areas with their own code owners (graph_trainer, torchft) are not listed:
+# GitHub already requests code owners.
+#
+# A PR gets reviewers from the areas whose path prefixes match the most changed
+# files, at most `max_reviewers` in total. Order reviewers by priority within an
+# area. Seeded from Apr-Oct 2026 authorship, approvals and review cc's.
+
+max_reviewers: 3
+
+areas:
+  - name: rl
+    paths:
+      - torchtitan/rl/
+      - torchtitan_recipes/rl/
+      - torchtitan_recipes/tests/rl/
+      - tests/rl/
+      - scripts/rl/
+    reviewers: [felipemello1, pzhan9, wwwjn]
+
+  - name: moe
+    paths:
+      - torchtitan/models/common/moe/
+      - torchtitan/models/common/dist_moe/
+      - torchtitan/distributed/deepep/
+      - torchtitan/config/transform/dist_moe.py
+    reviewers: [sanketpurandare, acisseJZhong]
+
+  - name: attention
+    paths:
+      - torchtitan/models/common/attention/
+      - torchtitan/models/common/attn_gym.py
+    reviewers: [acisseJZhong, drisspg]
+
+  - name: linear
+    paths:
+      - torchtitan/models/common/linear/
+    reviewers: [anijain2305]
+
+  - name: quantization
+    paths:
+      - torchtitan/quantization/
+      - torchtitan/config/transform/quantization.py
+    reviewers: [anijain2305, andrewor14]
+
+  - name: remat
+    paths:
+      - torchtitan/distributed/activation_remat.py
+      - torchtitan/distributed/REMAT.md
+    reviewers: [anijain2305]
+
+  - name: pipeline_parallel
+    paths:
+      - torchtitan/distributed/pipeline_parallel.py
+      - torchtitan/distributed/PIPELINE_PARALLEL.md
+    reviewers: [sanketpurandare]
+
+  - name: context_parallel
+    paths:
+      - torchtitan/distributed/context_parallel.py
+      - torchtitan/config/transform/context_parallel.py
+    reviewers: [fegin, acisseJZhong]
+
+  - name: fsdp
+    paths:
+      - torchtitan/distributed/fsdp.py
+      - torchtitan/distributed/FSDP.md
+      - torchtitan/distributed/flex_shard/
+    reviewers: [weifengpy]
+
+  - name: spmd_types
+    paths:
+      - torchtitan/distributed/spmd_types.py
+      - torchtitan/models/base/sharding.py
+    reviewers: [pianpwk]
+
+  - name: cuda_graph
+    paths:
+      - torchtitan/distributed/cuda_graph.py
+      - torchtitan/distributed/CUDA_GRAPH.md
+    reviewers: [fegin]
+
+  - name: checkpoint
+    paths:
+      - torchtitan/components/checkpointer/
+      - scripts/checkpoint_conversion/
+    reviewers: [ivy-zhou, fegin]
+
+  - name: data
+    paths:
+      - torchtitan/components/data/
+      - torchtitan/components/tokenizer.py
+      - torchtitan/components/renderer.py
+    reviewers: [felipemello1]
+
+  - name: optimizer
+    paths:
+      - torchtitan/components/optim/
+    reviewers: [shuhuayu, weifengpy]
+
+  - name: observability
+    paths:
+      - torchtitan/observability/
+    reviewers: [felipemello1, pzhan9]
+
+  - name: models
+    paths:
+      - torchtitan/models/deepseek_v4/
+      - torchtitan/models/kimi_k2_7/
+      - torchtitan/models/kimi_k3/
+      - torchtitan/models/qwen3_5/
+      - torchtitan/models/qwen3_6/
+      - torchtitan/models/qwen3_8/
+      - torchtitan/models/muse_glimmer/
+      - torchtitan/models/common/vision_encoder.py
+      - torchtitan/models/common/multimodal.py
+    reviewers: [shuhuayu]
+
+  - name: flux
+    paths:
+      - torchtitan/models/flux/
+    reviewers: [fegin, wwwjn]
+
+  - name: ci
+    paths:
+      - .github/
+      - .ci/
+    reviewers: [wwwjn]
