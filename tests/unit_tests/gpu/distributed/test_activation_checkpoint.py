@@ -62,12 +62,14 @@ class TransformerBlock(Module):
 
 
 class ToyModel(Module):
-    def __init__(self):
+    def __init__(self, layer_ids: tuple[str, ...] = ("0",)):
         super().__init__()
-        self.layers = ModuleDict({"0": TransformerBlock()})
+        self.layers = ModuleDict(
+            {layer_id: TransformerBlock() for layer_id in layer_ids}
+        )
 
     def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
-        return self.layers["0"](x_BD)
+        return sum(block(x_BD) for block in self.layers.values())
 
 
 def _run_forward_backward(
@@ -220,11 +222,66 @@ class TestActivationCheckpointing(unittest.TestCase):
                 "default recompute",
                 lambda: DefaultActivationRematConfig(recompute_regions=[]),
             ),
+            (
+                "full block save",
+                lambda: FullActivationRematConfig(
+                    block_save_regions={"layers.0": ["inner_compute"]}
+                ),
+            ),
         ):
             with self.subTest(name), self.assertRaisesRegex(
                 ValueError, "Use ActivationRematConfig"
             ):
                 config_factory()
+
+    def test_block_save_regions_follow_original_layer_ids(self):
+        # Keys are original layer ids, which PP keeps: with blocks 81/82/91 here,
+        # "layers.1" (the second block's position) must match nothing.
+        model = ToyModel(("81", "82", "91"))
+        ActivationRematConfig(
+            save_regions=["output_projection*"],
+            block_save_regions={
+                "layers.82": ["inner_compute*"],
+                "layers.1": ["input_projection*"],
+            },
+        ).apply(model)
+        _run_forward_backward(model, torch.randn(8, 32))
+
+        counts = {}
+        for layer_id, block in model.layers.items():
+            assert isinstance(block, TransformerBlock)
+            counts[layer_id] = (
+                block.input_projection.num_forwards,
+                block.inner_compute.num_forwards,
+                block.output_projection.num_forwards,
+            )
+        self.assertEqual(counts, {"81": (2, 2, 1), "82": (2, 1, 1), "91": (2, 2, 1)})
+
+        # Encoders are applied separately; their keys carry the encoder FQN, so a
+        # decoder key never matches an encoder block with the same layer id.
+        encoder = ToyModel(("82",))
+        ActivationRematConfig(
+            save_regions=[],
+            block_save_regions={
+                "layers.82": ["inner_compute*"],
+                "vision_encoder.layers.82": ["output_projection*"],
+            },
+        ).apply(encoder, module_fqn="vision_encoder")
+        _run_forward_backward(encoder, torch.randn(8, 32))
+        encoder_block = encoder.layers["82"]
+        assert isinstance(encoder_block, TransformerBlock)
+        self.assertEqual(
+            (
+                encoder_block.input_projection.num_forwards,
+                encoder_block.inner_compute.num_forwards,
+                encoder_block.output_projection.num_forwards,
+            ),
+            (2, 2, 1),
+        )
+
+        # A typo would otherwise match no block and silently save nothing extra.
+        with self.assertRaisesRegex(ValueError, "layers.<id>"):
+            ActivationRematConfig(save_regions=[], block_save_regions={"layer.91": []})
 
     def test_recompute_regions_override_save_regions(self):
         model = ToyModel()

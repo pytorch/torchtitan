@@ -9,6 +9,7 @@
 # but distributed module is the best place to put it.
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -42,9 +43,8 @@ class ActivationRematConfig:
     call sites in model code. Everything outside a retained region is
     recomputed.
 
-    NB: Save-region names are relative to a transformer block, so the same
-    policy applies to every transformer block. Per-block remat policies are
-    not currently supported.
+    Save-region names are relative to a transformer block and apply to every
+    block; ``block_save_regions`` adds saves to selected blocks only.
     """
 
     recompute_regions: list[str] = field(default_factory=list)
@@ -54,6 +54,19 @@ class ActivationRematConfig:
     example, with ``save_regions=["*"]``, this lists the few regions to
     recompute, which suits starting from no remat and recomputing just enough
     to fit a memory budget.
+    """
+
+    block_save_regions: dict[str, list[str]] = field(default_factory=dict)
+    """
+    Additional save regions for selected transformer blocks, keyed by the
+    block's original model FQN, such as ``{"layers.31": ["attention.inner_attention"]}``.
+    Keys are exact names (no globs): ``layers.<id>`` for the decoder and
+    ``<encoder>.layers.<id>`` for an encoder, e.g. ``vision_encoder.layers.3``.
+    They keep their meaning after PP partitioning. Values are region patterns
+    relative to the block, added to ``save_regions`` for that block only;
+    ``recompute_regions`` still takes precedence. Keys are not checked against
+    the model's layers, since each PP stage holds only some of them. Retention
+    follows the block checkpoint's saved-tensor hooks.
     """
 
     preserve_rng_state: bool = False
@@ -84,6 +97,13 @@ class ActivationRematConfig:
                 "torch_remat activation checkpointing does not support the debug "
                 "option."
             )
+        for block_fqn in self.block_save_regions:
+            if re.fullmatch(r"([A-Za-z_]\w*\.)?layers\.\d+", block_fqn) is None:
+                raise ValueError(
+                    "block_save_regions keys must be transformer block FQNs of "
+                    f"the form 'layers.<id>' or '<encoder>.layers.<id>'; got "
+                    f"{block_fqn!r}."
+                )
 
     def _check_fixed_regions(
         self, save_regions: list[str], recompute_regions: list[str]
@@ -91,6 +111,7 @@ class ActivationRematConfig:
         if (
             self.save_regions != save_regions
             or self.recompute_regions != recompute_regions
+            or self.block_save_regions
         ):
             raise ValueError(
                 f"{type(self).__name__} is a fixed policy. Use "
@@ -102,6 +123,7 @@ class ActivationRematConfig:
         self,
         model: Module,
         *,
+        module_fqn: str = "",
         saved_tensors_hooks: (
             Callable[[nn.Module, str], tuple[_PackHook, _UnpackHook] | None] | None
         ) = None,
@@ -110,6 +132,9 @@ class ActivationRematConfig:
 
         Args:
             model: Model whose ``layers`` children are the transformer blocks.
+            module_fqn: FQN of ``model`` within the full model, such as
+                ``"vision_encoder"``; empty for the root model. Prefixes the
+                block FQNs that ``block_save_regions`` keys are matched against.
             saved_tensors_hooks: Optional callable returning the saved-tensor
                 hook pair for one block, given the block and its FQN
                 (``layers.<id>``), or None to leave that block unhooked. The
@@ -139,10 +164,12 @@ class ActivationRematConfig:
         # regions across all pipeline stages instead of only this model part.
         for layer_id, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
-            transformer_block.configure_remat_regions(
-                self.save_regions, self.recompute_regions
-            )
             base_fqn = f"layers.{layer_id}"
+            block_fqn = f"{module_fqn}.{base_fqn}" if module_fqn else base_fqn
+            transformer_block.configure_remat_regions(
+                [*self.save_regions, *self.block_save_regions.get(block_fqn, [])],
+                self.recompute_regions,
+            )
             transformer_block.forward = remat.checkpoint(
                 region_name=base_fqn,
                 determinism_check=self.determinism_check,
@@ -161,6 +188,8 @@ class ActivationRematConfig:
             self.save_regions or "none",
             self.recompute_regions or "none",
         )
+        if self.block_save_regions:
+            logger.info("Block-specific save patterns: %s", self.block_save_regions)
 
 
 @dataclass(kw_only=True, slots=True)
