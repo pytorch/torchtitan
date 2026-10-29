@@ -10,13 +10,84 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, cast, TypeVar
 
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 
-__all__ = ["BlockShard", "BucketConfig", "ComputeLayout", "Owned"]
+__all__ = [
+    "BlockShard",
+    "BucketConfig",
+    "ComputeLayout",
+    "Owned",
+    "build_transport_mesh",
+]
+
+
+def build_transport_mesh(
+    storage_mesh: DeviceMesh,
+    mesh_axis_names: tuple[str, ...],
+    *,
+    pg_options: object | None = None,
+) -> DeviceMesh:
+    """Build one ordered optimizer transport group on the selected storage axes.
+
+    All members of that subgroup must call in the same order. Other storage
+    mesh ranks need not participate. A single axis reuses its existing group
+    unless options request an independent child; multiple axes create one group
+    in storage-rank order. The returned 1D mesh has a joined-axis name.
+
+    Device-bound NCCL requires PyTorch's lazy process-group initialization for
+    a new multi-axis group, so creation does not split the world communicator.
+    """
+    transport_mesh = storage_mesh[
+        mesh_axis_names[0] if len(mesh_axis_names) == 1 else mesh_axis_names
+    ]
+    if transport_mesh.ndim == 1 and pg_options is None:
+        return transport_mesh
+    ranks = transport_mesh.mesh.flatten().tolist()
+    parent_group = storage_mesh.get_group(mesh_axis_names[0])
+    backend = dist.get_backend(parent_group)
+    if transport_mesh.ndim == 1:
+        group = dist.split_group(
+            parent_pg=parent_group,
+            split_ranks=[list(range(len(ranks)))],
+            pg_options=cast(Any, pg_options),
+            group_desc="optimizer_redistribution_" + "_".join(mesh_axis_names),
+            backend=backend,
+        )
+    else:
+        if backend == dist.Backend.NCCL:
+            if pg_options is None:
+                pg_options = dist.ProcessGroupNCCL.Options()
+            if hasattr(pg_options, "lazy_init"):
+                cast(Any, pg_options).lazy_init = True
+            elif (
+                dist.group.WORLD is not None
+                and dist.group.WORLD.bound_device_id is not None
+            ):
+                raise NotImplementedError(
+                    "Device-bound multi-axis NCCL optimizer transport requires "
+                    "ProcessGroupNCCL.Options.lazy_init; supply an already-built "
+                    "BucketConfig.mesh or use a PyTorch build with that support"
+                )
+        group = dist.new_group(
+            ranks=ranks,
+            backend=backend,
+            pg_options=pg_options,
+            use_local_synchronization=True,
+            sort_ranks=False,
+            group_desc="optimizer_redistribution_" + "_".join(mesh_axis_names),
+        )
+    assert isinstance(group, dist.ProcessGroup)
+    return DeviceMesh.from_group(
+        group,
+        storage_mesh.device_type,
+        mesh=ranks,
+        mesh_dim_names=("_".join(mesh_axis_names),),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,10 +360,11 @@ class BucketConfig:
     """Ordered optimizer-work bucket selected by canonical FQN patterns.
 
     ``mesh`` may override the process groups used for redistribution. It must
-    have a named axis matching the storage-mesh axis that the bucket
-    redistributes along, with the same ranks in the same order. It may be a 1D
-    mesh or a storage-shaped mesh. DistMuon communicates on
-    ``mesh[axis].get_group()``. ``None`` uses the parameter storage mesh.
+    have the same ranks in the same order as the selected storage axes. For
+    one transport axis, its name must match and a storage-shaped mesh is also
+    accepted. For multiple axes, supply a 1D mesh named by joining the axis
+    names, for example ``dp_shard_tp``, as returned by ``build_transport_mesh``.
+    ``None`` reuses one storage axis or builds a combined transport group.
     """
 
     patterns: tuple[str, ...]
