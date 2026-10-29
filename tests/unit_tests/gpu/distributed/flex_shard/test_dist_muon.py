@@ -454,10 +454,13 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             self.assertEqual(parameter.placements, storage_placements)
 
     @with_comms
-    def test_replicated_storage_matches_per_parameter_buckets(self):
-        # Replicated storage sends each update back to every holder, so its
-        # return layout differs from its receive layout. Parameters after it in
-        # the same bucket must still compute on their own inputs.
+    def test_shared_bucket_matches_per_parameter_buckets(self):
+        # Sharing a bucket must not change results:
+        # - Replicated storage sends each update back to every holder, so its
+        #   return layout differs from its receive layout, and parameters after
+        #   it must still compute on their own inputs.
+        # - Fixed work on ranks 0-2 packs several chunks of each other parameter
+        #   onto rank 3, which must compute on the right rows.
         mesh = init_device_mesh(
             self.device_type,
             (self.world_size,),
@@ -468,13 +471,28 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             "layers.0.a": (Shard(1),),
             "layers.0.b": (Replicate(),),
             "layers.0.c": (Shard(1),),
+            "layers.0.fixed": (Shard(0),),
+            "layers.0.blocks": (Shard(0),),
+        }
+        compute_shardings = {
+            "layers.0.a": Shard(0),
+            "layers.0.b": Shard(0),
+            "layers.0.c": Shard(0),
+            # Three matrices on four ranks: compute-ready work on ranks 0-2.
+            "layers.0.fixed": Shard(0),
+            "layers.0.blocks": BlockShard(dim=0, block_sizes=(4, 2)),
+        }
+        shapes = {
+            "layers.0.a": (4, 6, 5),
+            "layers.0.b": (4, 6, 5),
+            "layers.0.c": (4, 6, 5),
+            "layers.0.fixed": (3, 64, 64),
+            "layers.0.blocks": (12, 6),
         }
         torch.manual_seed(0)
-        values = {
-            fqn: torch.randn(4, 6, 5, device=device) for fqn in storage_placements
-        }
+        values = {fqn: torch.randn(shape, device=device) for fqn, shape in shapes.items()}
         gradients = [
-            {fqn: torch.randn(4, 6, 5, device=device) for fqn in storage_placements}
+            {fqn: torch.randn(shape, device=device) for fqn, shape in shapes.items()}
             for _step in range(2)
         ]
 
@@ -494,7 +512,7 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
                 ],
                 compute_sharding_by_fqn={
                     fqn: ComputeLayout(
-                        shardings_by_mesh_axis={"dp_shard": Shard(0)},
+                        shardings_by_mesh_axis={"dp_shard": compute_shardings[fqn]},
                         compute_dtype=torch.bfloat16,
                     )
                     for fqn in parameters
@@ -509,6 +527,20 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
 
         shared_bucket = build(["layers.0.*"])
         per_parameter_buckets = build(list(storage_placements))
+        (shared_plan,) = shared_bucket[1]._bucket_plans
+        assert isinstance(shared_plan, _RedistributionBucketPlan)
+        packed = {
+            item.fqn
+            for item, plan in zip(
+                shared_plan.redistributed_items,
+                shared_plan.redistribution_plans,
+                strict=True,
+            )
+            if len(plan.compute_partition(self.world_size - 1).logical_regions) > 1
+        }
+        self.assertEqual(
+            packed, {"layers.0.a", "layers.0.b", "layers.0.c", "layers.0.blocks"}
+        )
         for step_gradients in gradients:
             for parameters, optimizer in (shared_bucket, per_parameter_buckets):
                 optimizer.zero_grad()
