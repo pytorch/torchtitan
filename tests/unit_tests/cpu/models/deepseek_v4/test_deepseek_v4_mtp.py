@@ -71,6 +71,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
             enable_cpu_offload=False,
         )
         parallelism = SimpleNamespace(
+            fsdp_cpu_offload_layer_fqns=("layers.7",),
             fsdp_reshard_after_forward="default",
             fsdp_symm_mem_scope=None,
         )
@@ -89,6 +90,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
             reduce_dtype=torch.float32,
             pp_enabled=False,
             cpu_offload=False,
+            cpu_offload_layer_fqns=("layers.7",),
             reshard_after_forward_policy="default",
             ep_degree=2,
             edp_mesh=edp_mesh,

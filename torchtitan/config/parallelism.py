@@ -61,6 +61,16 @@ class ParallelismConfig:
     fsdp_defer_gradient_reduction: bool = False
     """Defer FSDP gradient reduction until the last accumulation step."""
 
+    fsdp_cpu_offload_layer_fqns: tuple[str, ...] = ()
+    """Decoder-layer FQNs whose FSDP parameters and gradients live on CPU.
+
+    Each entry must name a transformer-block FSDP unit, for example
+    ``"layers.7"``. This selective policy is mutually exclusive with
+    ``training.enable_cpu_offload``, which offloads the complete model.
+    Requires ``training.disable_accelerator_graphs=True`` because FSDP CPU
+    gradient offload synchronizes with the host during backward.
+    """
+
     fsdp_symm_mem_scope: FSDPSymmMemScope = None
     """
     Which FSDP modules use symmetric-memory communication. None disables it.
@@ -196,6 +206,21 @@ class ParallelismConfig:
             raise ValueError(
                 "parallelism.pipeline_parallel_layers_per_stage must be positive "
                 f"when set; got {layers_per_stage}."
+            )
+        cpu_offload_layer_fqns = self.fsdp_cpu_offload_layer_fqns
+        if len(cpu_offload_layer_fqns) != len(set(cpu_offload_layer_fqns)):
+            raise ValueError(
+                "parallelism.fsdp_cpu_offload_layer_fqns must not contain duplicates"
+            )
+        if any(
+            not isinstance(module_fqn, str)
+            or not module_fqn.startswith("layers.")
+            or not module_fqn.removeprefix("layers.").isdigit()
+            for module_fqn in cpu_offload_layer_fqns
+        ):
+            raise ValueError(
+                "parallelism.fsdp_cpu_offload_layer_fqns entries must be "
+                "decoder-layer FQNs such as 'layers.7'"
             )
         if (
             self.pipeline_parallel_module_fqns_per_model_part is not None

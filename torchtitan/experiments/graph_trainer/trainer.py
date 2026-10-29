@@ -71,6 +71,11 @@ class GraphTrainingEngine(TrainingEngine):
                 "model.local_compile.regions = [] "
                 f"(got {model_config.local_compile.regions})."
             )
+        if config.parallelism.fsdp_cpu_offload_layer_fqns:
+            raise ValueError(
+                "GraphTrainer's SimpleFSDP does not support "
+                "parallelism.fsdp_cpu_offload_layer_fqns."
+            )
         if config.parallelism.fsdp_symm_mem_scope is not None:
             raise ValueError(
                 "GraphTrainer's SimpleFSDP does not support "
