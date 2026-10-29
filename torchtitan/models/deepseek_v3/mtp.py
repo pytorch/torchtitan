@@ -237,6 +237,7 @@ class MTPDecoder(Decoder):
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             pp_enabled=parallelism_context.pp_enabled,
             cpu_offload=training.enable_cpu_offload,
+            cpu_offload_layer_fqns=parallelism.fsdp_cpu_offload_layer_fqns,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             enable_explicit_backward_prefetch=(
                 parallelism.fsdp_enable_explicit_backward_prefetch
@@ -467,7 +468,10 @@ def apply_fsdp_to_mtp_decoder(
     dp_mesh_dims: DataParallelMeshDims | None = None,
     edp_mesh_dims: DataParallelMeshDims | None = None,
     symm_mem_scope: FSDPSymmMemScope = None,
+    *,
+    cpu_offload_layer_fqns: tuple[str, ...] = (),
 ) -> None:
+    """Shard decoder and MTP blocks using the shared layer-offload policy."""
     mtp_layer_keys = []
     try:
         if model.mtp_layers is not None:
@@ -484,6 +488,7 @@ def apply_fsdp_to_mtp_decoder(
             reduce_dtype=reduce_dtype,
             pp_enabled=pp_enabled,
             cpu_offload=cpu_offload,
+            cpu_offload_layer_fqns=cpu_offload_layer_fqns,
             reshard_after_forward_policy=reshard_after_forward_policy,
             enable_explicit_backward_prefetch=enable_explicit_backward_prefetch,
             ep_degree=ep_degree,

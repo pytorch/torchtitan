@@ -162,6 +162,7 @@ class DeepSeekV4Model(Decoder):
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             pp_enabled=parallelism_context.pp_enabled,
             cpu_offload=training.enable_cpu_offload,
+            cpu_offload_layer_fqns=parallelism.fsdp_cpu_offload_layer_fqns,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             enable_explicit_backward_prefetch=(
                 parallelism.fsdp_enable_explicit_backward_prefetch
