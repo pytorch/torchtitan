@@ -1074,7 +1074,11 @@ class FusedMLAAttention(DeepSeekMLAAttention):
         # kv_norm and the fused kernel read the wkv_a projection output with bare ops.
         remat.recompute_needs_tensor(kv_down)
 
-        positions_T = _resolve_positions(positions, k_pe.unsqueeze(0)).squeeze(0)
+        positions_T = (
+            torch.arange(num_tokens, device=k_pe.device, dtype=torch.int32)
+            if positions is None
+            else positions.reshape(-1).contiguous()
+        )
         if isinstance(self.inner_attention, CPInnerAttention):
             # Gather positions in the same rank/token order as the shared key,
             # including packed documents and CP load-balancing permutations.
