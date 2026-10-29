@@ -67,7 +67,7 @@ class ForwardBackwardResult(NamedTuple):
 
 
 _ForwardBackwardFn: TypeAlias = Callable[
-    [list[Any], torch.Tensor], ForwardBackwardResult
+    [list[Any], torch.Tensor | None], ForwardBackwardResult
 ]
 
 
@@ -567,7 +567,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             # without duplicating the gradient accumulation logic.
             def run_forward_backward_groups(
                 microbatch_groups: list[tuple[Any, ...]],
-                global_loss_token_counts: torch.Tensor,
+                global_loss_token_counts: torch.Tensor | None,
             ) -> ForwardBackwardResult:
                 accumulated_loss: torch.Tensor | None = None
                 loss_metrics: list[list[dict[str, torch.Tensor]]] = []
@@ -615,20 +615,44 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         *,
         microbatch_groups: list[list[TrainingMicrobatch]],
-        global_loss_token_counts: int | torch.Tensor,
+        global_loss_token_counts: int | torch.Tensor | None,
         global_routing_token_counts: torch.Tensor,
     ) -> ForwardBackwardResult:
-        """Run all microbatch groups for one optimizer update."""
+        """Run one optimizer update with explicit loss-denominator ownership.
+
+        Args:
+            microbatch_groups: Groups accumulated into one optimizer update.
+            global_loss_token_counts: Global target-token counts on loss-owning
+                ranks (the final pipeline stage, or every rank without PP).
+                Ignored on other pipeline ranks, where None may be supplied.
+            global_routing_token_counts: Global routed-token counts, required
+                on every MoE stage independently of loss ownership.
+
+        Returns:
+            The accumulated loss and detached per-microbatch loss metrics.
+
+        Raises:
+            ValueError: If groups are empty or loss-owning ranks have no counts,
+                before any optimizer-step state is mutated.
+        """
         if not microbatch_groups:
             raise ValueError("microbatch_groups must not be empty.")
+        owns_loss = not self.parallelism_context.pp_enabled or self.pp_has_last_stage
+        if not owns_loss:
+            global_loss_token_counts = None
+        elif global_loss_token_counts is None:
+            raise ValueError(
+                "global_loss_token_counts must be provided on loss-owning ranks"
+            )
         self.num_accumulation_steps = len(microbatch_groups)
         self.garbage_collector.run(self.num_completed_steps + 1)
         self.optim.zero_grad(
             set_to_none=not self._cuda_graph_per_microbatch_group_enabled
         )
-        global_loss_token_counts = torch.as_tensor(
-            global_loss_token_counts, device=self.device
-        )
+        if global_loss_token_counts is not None:
+            global_loss_token_counts = torch.as_tensor(
+                global_loss_token_counts, device=self.device
+            )
         global_routing_token_counts = global_routing_token_counts.to(self.device)
         if self.config.training.preprocess_microbatch_groups_lazily:
             # _forward_backward_body preprocesses each group just before its forward/backward.
@@ -725,7 +749,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def _forward_backward_body(
         self,
         microbatch_groups: list[Any],
-        global_loss_token_counts: torch.Tensor,
+        global_loss_token_counts: torch.Tensor | None,
         *,
         defer_fsdp_gradient_reduction: bool,
         preprocess_microbatch_groups_lazily: bool = False,

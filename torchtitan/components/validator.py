@@ -369,8 +369,11 @@ class Validator(BaseValidator):
             accumulated_loss: torch.Tensor | None = None
             evaluate = None
             device_type = utils.device_type
-            total_global_valid_tokens = torch.zeros(
-                (), dtype=torch.int64, device=device_type
+            owns_loss = not parallelism_context.pp_enabled or self.pp_has_last_stage
+            total_global_valid_tokens = (
+                torch.zeros((), dtype=torch.int64, device=device_type)
+                if owns_loss
+                else None
             )
             num_steps = 0
             num_pp_microbatches = self._validation_num_microbatches or (
@@ -410,15 +413,19 @@ class Validator(BaseValidator):
                 except StopIteration:
                     break
 
-                # All-reduce token count across DP ranks while keeping it on device.
-                local_loss_token_count = local_loss_token_count.to(device_type)
-                if parallelism_context.dp_enabled:
-                    dp_mesh = parallelism_context.get_mesh("dp")
-                    global_valid_tokens = dist_utils.dist_sum_tensor(
-                        local_loss_token_count, dp_mesh, None
+                if owns_loss:
+                    local_loss_token_count = local_loss_token_count.to(device_type)
+                    global_valid_tokens = (
+                        dist_utils.dist_sum_tensor(
+                            local_loss_token_count,
+                            parallelism_context.get_mesh("dp"),
+                            None,
+                        )
+                        if parallelism_context.dp_enabled
+                        else local_loss_token_count
                     )
-                else:
-                    global_valid_tokens = local_loss_token_count
+                    assert total_global_valid_tokens is not None
+                    total_global_valid_tokens.add_(global_valid_tokens)
 
                 prepared = []
                 for input_dict in microbatch_group:
@@ -439,7 +446,6 @@ class Validator(BaseValidator):
                     accumulated_loss = loss_sum.clone()
                 else:
                     accumulated_loss.add_(loss_sum)
-                total_global_valid_tokens.add_(global_valid_tokens)
                 num_steps += 1
 
             if accumulated_loss is None:
@@ -451,20 +457,22 @@ class Validator(BaseValidator):
                     "training.num_tokens_per_microbatch_per_dp_rank or use a larger "
                     "validation dataset."
                 )
-            num_global_valid_tokens = int(total_global_valid_tokens.item())
-            if num_global_valid_tokens == 0:
-                raise ValueError(
-                    "Validation ran on zero valid tokens; cannot compute an average "
-                    "validation loss. Ensure the validation batches contain unmasked "
-                    "labels."
-                )
-            if parallelism_context.dp_cp_enabled:
-                global_loss_sum = dist_utils.dist_sum(
-                    accumulated_loss, parallelism_context.get_optional_mesh("loss")
-                )
-            else:
-                global_loss_sum = float(accumulated_loss.item())
-            global_avg_loss = global_loss_sum / num_global_valid_tokens
+            global_avg_loss = -1.0
+            if total_global_valid_tokens is not None:
+                num_global_valid_tokens = int(total_global_valid_tokens.item())
+                if num_global_valid_tokens == 0:
+                    raise ValueError(
+                        "Validation ran on zero valid tokens; cannot compute an average "
+                        "validation loss. Ensure the validation batches contain unmasked "
+                        "labels."
+                    )
+                if parallelism_context.dp_cp_enabled:
+                    global_loss_sum = dist_utils.dist_sum(
+                        accumulated_loss, parallelism_context.get_optional_mesh("loss")
+                    )
+                else:
+                    global_loss_sum = float(accumulated_loss.item())
+                global_avg_loss = global_loss_sum / num_global_valid_tokens
 
             self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
         except Exception:
