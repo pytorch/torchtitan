@@ -44,7 +44,10 @@ from torchtitan.experiments.graph_trainer.configs import (
     validate_ep_overlap_config,
 )
 
-from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
+from torchtitan.experiments.graph_trainer.cpu_offload import (
+    apply_cpu_offload_pass,
+    schedule_activation_reloads_pass,
+)
 from torchtitan.experiments.graph_trainer.cuda_graph import (
     insert_kernel_annotations_pass,
 )
@@ -239,7 +242,7 @@ def compile_time_passes(
             ),
             functools.partial(
                 apply_cpu_offload_pass,
-                prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+                prefetch_lookahead=0,
                 defer_n_layers=config.compile.cpu_offload_defer_n_layers,
             ),
             selective_activation_remat_pass,
@@ -369,6 +372,18 @@ def compile_time_passes(
 
     if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
+
+    passes.append(
+        functools.partial(
+            schedule_activation_reloads_pass,
+            prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+            module_bucket_plans=get_default_transformer_block_buckets(
+                n_layers,
+                num_mtp_layers=num_mtp_layers,
+                chunked_loss_enabled=uses_chunked_loss,
+            ),
+        )
+    )
 
     if not include_inductor:
         return passes

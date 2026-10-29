@@ -35,7 +35,7 @@ applies NUMA binding (``AffinityMode.NODE``) on CUDA hardware at init
 
 import logging
 import operator
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import NamedTuple
 
 import torch
@@ -44,11 +44,13 @@ import torch
 # Registering the ops is a side-effect of importing the module.
 import torch._functorch._activation_offloading.offload_ops  # noqa: F401
 import torch.fx
+from torch._inductor.fx_passes.overlap_scheduling import is_compute_node
 from torch.fx import Node
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
+    _get_module_fqn,
     _is_backward_node,
     _NOT_IN_LAYERS,
 )
@@ -64,7 +66,7 @@ aten = torch.ops.aten
 # ============================================================
 
 
-def _find_last_tensor_consumer(node: Node) -> Node | None:
+def _find_last_forward_use_arg(node: Node) -> Node | None:
     """Return a Tensor-producing node for wait_tensor's last_use_of_storage arg.
 
     If *node* itself produces a Tensor, return it directly.  Otherwise search
@@ -74,8 +76,10 @@ def _find_last_tensor_consumer(node: Node) -> Node | None:
     if isinstance(node.meta.get("val"), torch.Tensor):
         return node
     for user in node.users:
-        if user.op == "call_function" and isinstance(
-            user.meta.get("val"), torch.Tensor
+        if (
+            user.op == "call_function"
+            and not _is_backward_node(user)
+            and isinstance(user.meta.get("val"), torch.Tensor)
         ):
             return user
     return None
@@ -572,27 +576,30 @@ def apply_cpu_offload_pass(
         # Find the last forward consumer of this node's storage (including
         # through views) so the defer pass knows the earliest safe point.
         chain_nodes, _ = _get_storage_chain(node)
-        last_consumer = node
-        last_consumer_pos = node_to_index[node]
+        last_forward_use = node
+        last_forward_use_pos = node_to_index[node]
         for c in chain_nodes:
             if c.target in _AO_OPS:
                 continue
             c_pos = node_to_index.get(c)
-            if c_pos is not None and c_pos > last_consumer_pos:
-                last_consumer = c
-                last_consumer_pos = c_pos
+            if c_pos is not None and c_pos > last_forward_use_pos:
+                last_forward_use = c
+                last_forward_use_pos = c_pos
 
         # ao::wait_tensor's last_use_of_storage arg enforces a topo edge
         # so GPU storage stays alive until the last consumer finishes.
         # The schema requires Optional[Tensor], so if the last consumer
         # produces a non-Tensor (e.g. sort returns a tuple), find a
         # Tensor-producing child (e.g. getitem) to preserve the edge.
-        last_use_arg = _find_last_tensor_consumer(last_consumer)
+        last_forward_use_arg = _find_last_forward_use_arg(last_forward_use)
 
-        with gm.graph.inserting_after(offload_node):
+        wait_anchor = last_forward_use_arg or last_forward_use
+        if wait_anchor is node:
+            wait_anchor = offload_node
+        with gm.graph.inserting_after(wait_anchor):
             wait_offload_node = gm.graph.call_function(
                 torch.ops.ao.wait_tensor.default,
-                args=(offload_node, node, last_use_arg),
+                args=(offload_node, node, last_forward_use_arg),
             )
             wait_offload_node.meta.update(src_meta)
             wait_offload_node.meta["val"] = offload_node.meta["val"]
@@ -604,7 +611,7 @@ def apply_cpu_offload_pass(
             reload_node = gm.graph.call_function(
                 torch.ops.ao.reload.default,
                 args=(
-                    wait_offload_node,
+                    offload_node,
                     device,
                     list(val.size()),
                     list(val.stride()),
@@ -653,11 +660,6 @@ def apply_cpu_offload_pass(
     return gm
 
 
-def _get_reload_layer(reload_node: Node) -> int:
-    """Get the layer ID of an offloaded activation from the reload node's metadata."""
-    return _get_layer_id(reload_node)
-
-
 _AO_OPS = {
     torch.ops.ao.offload.default,
     torch.ops.ao.reload.default,
@@ -703,6 +705,9 @@ def defer_offload_waits(
             break
         if n.op != "call_function":
             continue
+        if n.target in _AO_OPS:
+            node_to_region_idx[n] = region_idx
+            continue
         lid = _get_layer_id(n)
         if lid != current_layer:
             if last_node is not None:
@@ -725,7 +730,9 @@ def defer_offload_waits(
         # forward consumer of the offloaded node's storage (set during
         # insertion).
         last_use = wait_node.args[2] if len(wait_node.args) > 2 else node
-        last_use_idx = node_to_region_idx.get(last_use, node_idx)
+        last_use_idx = node_to_region_idx.get(wait_node, node_idx)
+        if isinstance(last_use, Node):
+            last_use_idx = node_to_region_idx.get(last_use, last_use_idx)
 
         # Defer at least n_layers past the node for D2H overlap, but
         # never before the last consumer (correctness).
@@ -740,6 +747,8 @@ def defer_offload_waits(
 def prefetch_reloads(
     gm: torch.fx.GraphModule,
     n_layers: int,
+    *,
+    module_bucket_plans: Sequence[str | Sequence[str]] | None = None,
 ) -> int:
     """Move ao.reload nodes N layers earlier in the backward for prefetching.
 
@@ -754,70 +763,104 @@ def prefetch_reloads(
     The corresponding ao.wait_tensor stays in place, so synchronization
     still happens just before the data is needed.
     """
-    # Build backward region anchors: first compute node per contiguous region.
-    bwd_anchors: list[Node] = []
-    layer_to_bwd_idx: dict[int, int] = {}
-    current_layer = None
-
-    for n in gm.graph.nodes:
-        if n.op != "call_function" or not _is_backward_node(n):
-            continue
-        if n.target in _AO_OPS:
-            continue
-        lid = _get_layer_id(n)
-        if lid != current_layer:
-            bwd_anchors.append(n)
-            if lid != _NOT_IN_LAYERS and lid not in layer_to_bwd_idx:
-                layer_to_bwd_idx[lid] = len(bwd_anchors) - 1
-            current_layer = lid
-
-    if not bwd_anchors:
+    if n_layers < 0:
+        raise ValueError("CPU offload prefetch lookahead must be nonnegative")
+    nodes = list(gm.graph.nodes)
+    reloads = [
+        node
+        for node in nodes
+        if node.target == torch.ops.ao.reload.default and _is_backward_node(node)
+    ]
+    if not reloads:
         return 0
+    positions = {node: index for index, node in enumerate(nodes)}
+    module_to_bucket = {}
+    for index, bucket in enumerate(module_bucket_plans or ()):
+        for prefix in [bucket] if isinstance(bucket, str) else bucket:
+            module_to_bucket.setdefault(prefix, index)
 
-    # Build layer order for counting by layer transitions.
-    # Sorted by bwd_idx ascending = backward execution order (descending layer ID).
-    bwd_layer_order = sorted(
-        layer_to_bwd_idx.keys(), key=lambda lid: layer_to_bwd_idx[lid]
-    )
-    layer_pos_in_bwd = {lid: i for i, lid in enumerate(bwd_layer_order)}
+    def region_key(node: Node):
+        fqn = _get_module_fqn(node)
+        scope = fqn
+        while scope not in module_to_bucket and "." in scope:
+            scope = scope.rpartition(".")[0]
+        bucket = module_to_bucket.get(scope, fqn)
+        if module_bucket_plans is None:
+            layer = _get_layer_id(node)
+            if layer != _NOT_IN_LAYERS:
+                bucket = layer
+        return (_is_backward_node(node), bucket)
 
-    reload_info: list[tuple[Node, int]] = []
-    for node in gm.graph.nodes:
-        if not (
-            node.op == "call_function"
-            and node.target == torch.ops.ao.reload.default
-            and _is_backward_node(node)
-        ):
+    anchors: list[Node] = []
+    region_keys = []
+    preceding_region: dict[Node, int] = {}
+    for node in nodes:
+        preceding_region[node] = len(anchors) - 1
+        if node.op != "call_function" or not is_compute_node(node):
             continue
-        layer_id = _get_reload_layer(node)
-        if layer_id in layer_to_bwd_idx:
-            reload_info.append((node, layer_id))
-
-    if not reload_info:
-        return 0
+        key = region_key(node)
+        if not region_keys or key != region_keys[-1]:
+            anchors.append(node)
+            region_keys.append(key)
 
     moved = 0
-    for reload_node, layer_id in reload_info:
-        pos = layer_pos_in_bwd[layer_id]
-        target_layer_pos = pos - n_layers
-
-        if target_layer_pos < 0:
-            # Gone past all layers — use the first backward region
-            # (e.g. loss_bw), enabling cross-layer-boundary prefetch.
-            target_idx = 0
-        else:
-            target_layer = bwd_layer_order[target_layer_pos]
-            target_idx = layer_to_bwd_idx[target_layer]
-
-        current_idx = layer_to_bwd_idx[layer_id]
-        if target_idx >= current_idx:
+    if n_layers and not anchors:
+        logger.warning(
+            "CPU offload prefetch has no registered compute anchors; "
+            "reloads will run at first use. Register FLOP formulas for custom "
+            "compute operators to enable prefetch."
+        )
+    for reload in reloads:
+        waits = list(reload.users)
+        assert len(waits) == 1 and waits[0].target == torch.ops.ao.wait_tensor.default
+        wait = waits[0]
+        if not wait.users:
             continue
+        consumer = min(wait.users, key=positions.__getitem__)
+        non_view_users = set()
+        pending = list(wait.users)
+        visited = set()
+        while pending:
+            user = pending.pop()
+            if user in visited:
+                continue
+            visited.add(user)
+            if _is_view(user):
+                pending.extend(user.users)
+            else:
+                non_view_users.add(user)
+        scoped_consumer = min(
+            non_view_users, key=positions.__getitem__, default=consumer
+        )
+        anchor = consumer
+        region_index = preceding_region[consumer]
+        if n_layers and region_index >= 0:
+            if region_keys[region_index] != region_key(scoped_consumer):
+                region_index += 1
+            anchor = anchors[max(0, region_index - n_layers)]
 
-        bwd_anchors[target_idx].prepend(reload_node)
+        last_input = max(reload.all_input_nodes, key=positions.__getitem__)
+        if positions[last_input] >= positions[anchor]:
+            last_input.append(reload)
+        else:
+            anchor.prepend(reload)
+        consumer.prepend(wait)
         moved += 1
-
-    if moved > 0:
+    if moved:
         logger.info(
-            f"CPU offload prefetch: moved {moved} reloads {n_layers} layer(s) ahead"
+            "CPU offload: scheduled %s reloads with lookahead %s", moved, n_layers
         )
     return moved
+
+
+def schedule_activation_reloads_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    prefetch_lookahead: int = 1,
+    module_bucket_plans: Sequence[str | Sequence[str]] | None = None,
+) -> torch.fx.GraphModule:
+    prefetch_reloads(gm, prefetch_lookahead, module_bucket_plans=module_bucket_plans)
+    gm.graph.lint()
+    gm.recompile()
+    return gm
