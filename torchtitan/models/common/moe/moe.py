@@ -793,6 +793,42 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
             return self.inject(loss, carrier=carrier, denominator=denominator)
 
 
+_SIDE_STREAMS: dict[int, torch.cuda.Stream] = {}
+
+
+def _shared_experts_side_stream(x_TD: torch.Tensor) -> torch.cuda.Stream | None:
+    """Side stream for the shared experts, or None to run them inline.
+
+    CUDA-graph only, so it uses ``torch.cuda`` streams: the capture query has no
+    ``torch.accelerator`` equivalent.
+
+    None when:
+    - ``x_TD`` is not on CUDA (asking about capture would fail without a CUDA device),
+    - grad is enabled: the shared backward would run on the side stream too,
+    - torch.compile is tracing,
+    - no CUDA graph is being captured: the overlap was measured only under graphs, or
+    - dense SP is on: the shared experts would all-gather and reduce-scatter on it.
+
+    No collective runs on it: EP dispatch/combine and the final TP all-reduce launch from
+    the main stream.
+    - EP = 1, Dist-MoE, DeepEP with ``cuda_graph_compatible=True``, HybridEP non-blocking:
+      capturable -> side stream.
+    - all-to-all dispatcher at EP > 1: copies its splits to the host, can't be captured -> inline.
+    """
+    if (
+        not x_TD.is_cuda
+        or torch.is_grad_enabled()
+        or torch.compiler.is_compiling()
+        or not torch.cuda.is_current_stream_capturing()
+        or spmd_dense_sp_enabled()
+    ):
+        return None
+    device = torch.cuda.current_device()
+    if device not in _SIDE_STREAMS:
+        _SIDE_STREAMS[device] = torch.cuda.Stream(device)
+    return _SIDE_STREAMS[device]
+
+
 class MoE(FeedForward):
     """Mixture of Experts layer.
 
@@ -808,7 +844,8 @@ class MoE(FeedForward):
           - AllToAll: all-to-all communication, then scatter_add.
           - DeepEP: combine_tokens followed by backend synchronization.
           - HybridEP: synchronous combine_tokens.
-    3. Shared experts compute their output.
+    3. Shared experts compute their output: in captured no-grad forwards, on a side
+       stream right after step 1, overlapped with step 2.
     4. Routed and shared expert outputs are summed.
     """
 
@@ -899,6 +936,16 @@ class MoE(FeedForward):
             **router_kwargs,
         )
 
+        # Under CUDA graph capture without grad, run the shared experts on a side stream so
+        # they overlap with the routed experts; the main stream waits for them before the add.
+        side_stream = shared_TD = None
+        if self.shared_experts is not None:
+            side_stream = _shared_experts_side_stream(x_TD)
+            if side_stream is not None:
+                side_stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(side_stream):
+                    shared_TD = self.shared_experts(x_TD)
+
         out_TD = self.routed_experts(
             routed_x_TD,
             topk_scores_TK,
@@ -908,7 +955,10 @@ class MoE(FeedForward):
         )
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
-            shared_TD = self.shared_experts(x_TD)
+            if side_stream is not None:
+                torch.cuda.current_stream().wait_stream(side_stream)
+            else:
+                shared_TD = self.shared_experts(x_TD)
             # Trailing add, always saved: it saves nothing for backward, so replay skips
             # it and its inputs need no persisting, matching checkpoint early stop.
             out_TD = remat.region(
