@@ -294,6 +294,46 @@ def _dist_muon_optimizer(
             bucket_configs.append(
                 BucketConfig(name=f"{name}.routed-experts", patterns=routed_fqns)
             )
+
+    vision_config = model_config.vision_encoder
+    if vision_config is not None:
+        # Vision is CP-invariant and uses a dp_shard-only FSDP mesh. Keep its
+        # buckets separate from the decoder's dp_shard_cp transport under CP.
+        vision_projections = {
+            f"vision_encoder.{projection}.weight": owned
+            for projection in (
+                "patch_embed",
+                "projector.linear_1",
+                "projector.linear_2",
+            )
+        }
+        compute_sharding_by_fqn.update(vision_projections)
+        bucket_configs.append(
+            BucketConfig(
+                name="vision_encoder.projections", patterns=tuple(vision_projections)
+            )
+        )
+        vision_attention = vision_config.block.attn
+        per_vision_head = blocks_of(vision_attention.dim // vision_attention.num_heads)
+        vision_shardings = {
+            "attn.wq.weight": per_vision_head,
+            "attn.wk.weight": per_vision_head,
+            "attn.wv.weight": per_vision_head,
+            "attn.proj.weight": owned,
+            "mlp.linear_fc1.weight": owned,
+            "mlp.linear_fc2.weight": owned,
+        }
+        for layer_id in range(vision_config.num_layers):
+            prefix = f"vision_encoder.layers.{layer_id}"
+            layer_shardings = {
+                f"{prefix}.{projection}": compute_sharding
+                for projection, compute_sharding in vision_shardings.items()
+            }
+            compute_sharding_by_fqn.update(layer_shardings)
+            bucket_configs.append(
+                BucketConfig(name=prefix, patterns=tuple(layer_shardings))
+            )
+
     adamw_kwargs = {
         "lr": adamw_lr,
         "betas": (0.9, 0.95),
@@ -313,7 +353,9 @@ def _dist_muon_optimizer(
         r"feed_forward\.w(?:13|2)\.weight|"
         r"feed_forward\.router\.gate\.weight|"
         r"feed_forward\.shared_experts\.w(?:13|2)\.weight|"
-        r"feed_forward\.routed_(?:down|up)\.weight"
+        r"feed_forward\.routed_(?:down|up)\.weight|"
+        r"vision_encoder\.(?:patch_embed|projector\.linear_[12]|"
+        r"layers\.\d+\.(?:attn\.(?:wq|wk|wv|proj)|mlp\.linear_fc[12]))\.weight"
         r")$"
     )
     return OptimizersContainer.Config(
@@ -328,7 +370,7 @@ def _dist_muon_optimizer(
                 ns_device="accelerator",
             ),
             # The remaining parameters are embeddings, norms, biases, the LM
-            # head, the KDA scalars/convolutions, and the vision tower.
+            # head, the KDA scalars/convolutions, and vision position embeddings.
             AdamW.Config(
                 pattern=r".*",
                 foreach=True,
