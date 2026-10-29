@@ -176,8 +176,8 @@ each with the diff paths, the applicable rule files, and its checklist sections:
 - **Tests, CI, docs, scope**: test value and placement, golden files, docs
   location, unrelated changes, description accuracy.
 Sub-agents return candidate findings as `(file:line, claim, evidence)`. Tell
-every sub-agent not to post anything to GitHub: no `gh pr review`, and never call
-the inline-comment tool. Only you post, after Step 5.
+every sub-agent not to post anything to GitHub: no `gh pr review`, no pending-review
+tools, and never call the inline-comment tool. Only you post, after Step 5.
 
 ### Step 4: Consolidate
 Flatten all candidates into `(file:line, one-line claim)` and collapse them before
@@ -243,7 +243,7 @@ Not verified: <claims that need a GPU run or that you couldn't confirm>.
 ```
 
 In GitHub Actions mode, findings anchored to a changed line are also posted as
-inline comments (see "Posting"). In the review body, list each of them as a
+inline comments in the same review (see "Posting"). In the review body, list each of them as a
 one-line pointer (`path/file.py:123` -- short claim) so the verdict and the full
 must-fix list stay readable in one place; put the full explanation in the inline
 comment, not in both.
@@ -265,34 +265,42 @@ Verdict rules (match how maintainers use them):
 
 ## Posting (GitHub Actions mode)
 
-### Inline comments
-Post inline comments first, using `mcp__github_inline_comment__create_inline_comment`,
-only for fact-checked findings (must-fix and should-consider) that point at a
-specific changed line:
-- Always pass `confirmed: true`. Unconfirmed calls are buffered and posted
-  unfiltered after the session ends, so never call the tool to test it.
-- Use `line` (and `startLine` for a range) numbered on the new side (`RIGHT`) of
-  `gh pr diff`. The line must be inside a diff hunk; if the tool reports a
-  validation error, keep that finding in the review body instead of retrying with
-  guessed lines.
-- One finding per comment, in the same voice as the review: problem,
-  consequence, smallest fix. When the fix is a small drop-in replacement, include
-  a ```suggestion block that replaces exactly the selected lines.
-- At most ~10 inline comments. Design-level findings, gate findings, and things
-  that are missing (no specific line) go only in the review body.
-- On a re-review, don't re-post comments for issues that are still open; list them
-  in the body as "still open". Post inline comments only for new problems.
-- In local CLI and branch modes, don't post; print `file:line` findings instead.
+Post everything as **one** review: the body, the verdict, and the inline comments
+grouped together. Use the pending-review tools (`mcp__github__*`):
 
-### Formal review
-Then post exactly one formal review, mapped from the verdict:
-```bash
-gh pr review <N> --approve --body-file <file>           # Approve
-gh pr review <N> --request-changes --body-file <file>   # Request changes
-gh pr review <N> --comment --body-file <file>           # Needs discussion / answers to questions
-```
-Use `--comment` when you were asked a question or to review someone's review,
-rather than for a full review. Then update your tracking comment with the
-one-line verdict and a link to the review. An automated approval never replaces a
-maintainer's review; say "a maintainer still needs to review" if the PR touches
-core code.
+1. `create_pending_pull_request_review(owner="pytorch", repo="torchtitan",
+   pullNumber=N)`. If it fails because a pending review already exists (left
+   over from an interrupted run), call `delete_pending_pull_request_review` once
+   and retry.
+2. For each fact-checked finding (must-fix or should-consider) that points at a
+   specific changed line, `add_comment_to_pending_review(..., path, body,
+   subjectType="LINE", line, side="RIGHT")`, plus `startLine`/`startSide` for a
+   range. Rules:
+   - `line` is numbered on the new side of `gh pr diff` and must be inside a diff
+     hunk. If a comment is rejected, keep that finding in the review body instead
+     of retrying with guessed lines.
+   - One finding per comment, in the review's voice: problem, consequence,
+     smallest fix. For a small drop-in fix, include a ```suggestion block that
+     replaces exactly the selected lines.
+   - At most ~10 comments. Design-level findings, gate findings, and things that
+     are missing (no specific line) go only in the body.
+   - On a re-review, don't re-comment on issues that are still open; list them in
+     the body as "still open". Comment inline only on new problems.
+3. `submit_pending_pull_request_review(..., event, body)` with the review body
+   from "Output Format" and the event mapped from the verdict: `APPROVE`,
+   `REQUEST_CHANGES`, or `COMMENT` (for Needs discussion, and when you were asked
+   a question or to review someone's review rather than for a full review).
+
+Fallback, only if the pending-review tools are unavailable or keep failing:
+delete any pending review you created, post each inline comment with
+`mcp__github_inline_comment__create_inline_comment` (always `confirmed: true`;
+unconfirmed calls are posted unfiltered after the session, so never call it to
+test it), then post the body with `gh pr review <N> --approve|--request-changes|--comment
+--body-file <file>`. Never post the same finding through both paths.
+
+Finally, replace the content of your tracking comment with one line: the verdict
+and a link to the review. Don't repeat the summary there.
+
+An automated approval never replaces a maintainer's review; say "a maintainer
+still needs to review" if the PR touches core code. In local CLI and branch
+modes, don't post anything; print the review with `file:line` findings.
