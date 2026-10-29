@@ -586,7 +586,7 @@ def _fetch_on_torchstore_loop(state_dict, get_state_dict, current_stream):
 
 
 def test_direct_fetch_runs_on_torchstore_loop():
-    state_dict = {"weight": torch.zeros(2)}
+    state_dict = {"weight": torch.zeros(2), "scale": torch.ones(1)}
     calls = []
     current_stream = Mock()
 
@@ -594,7 +594,9 @@ def test_direct_fetch_runs_on_torchstore_loop():
         # Queued GPU work on the weights must finish before the read writes them.
         current_stream.return_value.synchronize.assert_called_once_with()
         calls.append((asyncio.get_running_loop(), args, kwargs))
-        return kwargs["user_state_dict"]
+        # The trainer does not publish every generator key, e.g. vLLM attention
+        # scales.
+        return {"weight": kwargs["user_state_dict"]["weight"]}
 
     torchstore_loop, fetched = _fetch_on_torchstore_loop(
         state_dict, get_state_dict, current_stream
@@ -605,7 +607,8 @@ def test_direct_fetch_runs_on_torchstore_loop():
     assert args == ("model_state_dict",)
     assert kwargs["user_state_dict"] is state_dict
     assert kwargs["direct_rdma"] is False
-    assert fetched is state_dict
+    # Returns the fetched keys without raising; the model wrapper checks them.
+    assert set(fetched) == {"weight"}
 
 
 def test_prefetch_model_state_dict_is_noop_with_fetch_to_gpu():

@@ -87,7 +87,8 @@ class InterGeneratorRouter(Configurable):
         hot_swap: bool = True
         """When True, pulls model's state dict concurrently with in-flight
         generation (no draining). When False, each generator is drained before
-        its pull.
+        its pull. With ``fetch_model_state_dict_to_gpu``, the load includes the
+        network transfer, so in-flight requests stall for it.
 
         Draining only waits for a generator's in-flight ``_route`` call (one
         turn) to finish; between turns of a multi-turn rollout the generator is
@@ -240,7 +241,9 @@ class InterGeneratorRouter(Configurable):
             if self._config.hot_swap:
                 # Hot swap: pull concurrently with in-flight generation, without
                 # draining. Whether the pull is genuinely concurrent and safe is
-                # up to the generator's implementation.
+                # up to the generator's implementation; with
+                # fetch_model_state_dict_to_gpu, in-flight requests stall for
+                # the transfer.
                 await h.rank0_actor.load_model_state_dict.call_one(policy_version)
             else:
                 # Drain: stop routing to this generator and wait for in-flight
