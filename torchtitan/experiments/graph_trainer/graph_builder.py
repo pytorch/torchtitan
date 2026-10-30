@@ -62,6 +62,9 @@ from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
 
 if TYPE_CHECKING:
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+    from torchtitan.experiments.graph_trainer.traced_optimizer import (
+        TracedOptimizerUpdate,
+    )
     from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 
 
@@ -181,12 +184,15 @@ class GraphTrainerStageGraphProvider:
         config: Full Trainer configuration for SPMD, or its compile,
             parallelism, and model fields for PP.
         plan: Resolved FSDP placement and gradient accumulation choices.
+        optimizer_update: Optimizer update traced into the SPMD joint graph
+            without gradient accumulation, or None to leave it eager.
     """
 
     loss_fn: Callable
     config: "GraphTrainer.Config | GraphTrainerConfigView"
     plan: GraphExecutionPlan
     parallelism_context: ParallelismContext | None = None
+    optimizer_update: TracedOptimizerUpdate | None = None
     # Calling convention:
     # key = (forward_stage_index, backward_stage_index); the graph is reused
     # across microbatches for that stage pair.
@@ -271,6 +277,7 @@ class GraphTrainerStageGraphProvider:
                         loss_fn=self.loss_fn,
                         trainer_config=trainer_config,
                         parallelism_context=self.parallelism_context,
+                        optimizer_update=self.optimizer_update,
                     )
             return {}
 
