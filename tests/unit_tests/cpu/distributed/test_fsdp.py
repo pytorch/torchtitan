@@ -12,8 +12,8 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import Shard
 
-from torchtitan.config import ParallelismConfig, TrainingConfig
-from torchtitan.config.parallelism import FSDPSymmMemScope
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     enable_fsdp_symm_mem,

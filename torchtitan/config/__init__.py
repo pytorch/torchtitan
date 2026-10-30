@@ -24,7 +24,6 @@ from .override import (
     override,
     OverrideConfig,
 )
-from .parallelism import FSDPSymmMemScope, ParallelismConfig
 
 __all__ = [
     "ConfigLoader",
@@ -36,8 +35,6 @@ __all__ = [
     "CommConfig",
     "TrainingConfig",
     "DebugConfig",
-    "FSDPSymmMemScope",
-    "ParallelismConfig",
     # Override mechanism
     "OverrideConfig",
     "Override",

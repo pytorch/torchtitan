@@ -4,10 +4,32 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import subprocess
+import sys
+
 import pytest
 
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
+
+
+def test_cp_import_before_parallelism_config() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from torchtitan.distributed.context_parallel import "
+            "ContextParallelLoadBalancer\n"
+            "from torchtitan.config.parallelism import ParallelismConfig\n"
+            "from typing import get_type_hints\n"
+            "load_balancer_type = get_type_hints(ParallelismConfig)["
+            "'context_parallel_load_balancer']\n"
+            "assert load_balancer_type == ContextParallelLoadBalancer.Config | None\n",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_parallelism_config_default_load_balancer() -> None:
