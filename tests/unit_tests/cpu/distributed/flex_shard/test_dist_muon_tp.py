@@ -40,7 +40,7 @@ from torchtitan.distributed.flex_shard.dist_muon import (
     DistMuon,
 )
 from torchtitan.models.kimi_k2_7.qk_clip import _scale_mla_heads
-from torchtitan_recipes.tests.models.kimi_k2_7 import _per_expert_compute_layout
+from torchtitan_recipes.models.dist_muon import per_expert_compute_layout
 
 
 class TensorParallelParity:
@@ -128,7 +128,7 @@ class TensorParallelParity:
                     },
                     compute_dtype=torch.bfloat16,
                 ),
-                "layers.0.experts": _per_expert_compute_layout(
+                "layers.0.experts": per_expert_compute_layout(
                     ParallelismConfig(
                         data_parallel_shard_degree=mesh["dp_shard"].size(),
                         tensor_parallel_degree=mesh["tp"].size(),

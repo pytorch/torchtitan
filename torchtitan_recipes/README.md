@@ -22,6 +22,7 @@ The package is organized by ownership:
 | --- | --- | --- |
 | `torchtitan_recipes.models.llama3` | Llama 3 pretraining | `torchtitan/models/llama3/README.md`, `docs/benchmarks/` |
 | `torchtitan_recipes.models.deepseek_v3` | DeepSeek V3 pretraining | `torchtitan/models/deepseek_v3/README.md` |
+| `torchtitan_recipes.models.kimi_k3` | Full-scale text-only Kimi K3 MXFP8 throughput recipes | `torchtitan_recipes/models/KIMI_K3.md` |
 | `torchtitan_recipes.models.qwen3` | Qwen3 pretraining and SFT | `torchtitan/models/qwen3/README.md` |
 | `torchtitan_recipes.models.flux` | Flux pretraining | `torchtitan/models/flux/README.md` |
 | `torchtitan_recipes.models.muse_glimmer` | Muse Glimmer pretraining | `torchtitan/models/muse_glimmer/README.md` |
