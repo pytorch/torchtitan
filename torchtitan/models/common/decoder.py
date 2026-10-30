@@ -184,6 +184,7 @@ class Decoder(BaseModel):
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            unshard_in_current_stream=parallelism.fsdp_unshard_in_current_stream,
         )
 
     def __init__(self, config: Config):

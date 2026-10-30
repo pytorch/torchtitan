@@ -73,6 +73,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         parallelism = SimpleNamespace(
             fsdp_reshard_after_forward="default",
             fsdp_symm_mem_scope=None,
+            fsdp_unshard_in_current_stream=False,
         )
 
         DeepSeekV4Model._apply_fsdp(
@@ -95,6 +96,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=None,
+            unshard_in_current_stream=False,
         )
 
 
