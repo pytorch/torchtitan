@@ -126,6 +126,8 @@ class TorchTitanLinearAttentionMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        stage_packed: bool = False,
     ) -> TorchTitanLinearAttentionMetadata:
         m = common_attn_metadata
         capacity = min(self.num_reqs_capacity, m.num_actual_tokens)
@@ -157,7 +159,12 @@ class TorchTitanLinearAttentionMetadataBuilder(
         self.state_indices[m.num_reqs :].zero_()
         # Past max_num_seqs tokens there is no decode graph, so a padded one-token
         # step (DP>1) replays the mixed-batch graph, which reads query_start_loc.
-        if not single_token or m.num_actual_tokens > self.num_reqs_capacity:
+        # A FULL dummy run can too (stage_packed).
+        if (
+            stage_packed
+            or not single_token
+            or m.num_actual_tokens > self.num_reqs_capacity
+        ):
             self.query_start_loc[: m.num_reqs + 1].copy_(
                 m.query_start_loc[: m.num_reqs + 1]
             )
@@ -216,7 +223,9 @@ class TorchTitanLinearAttentionMetadataBuilder(
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TorchTitanLinearAttentionMetadata:
-        metadata = self.build(0, common_attn_metadata)
+        # vLLM's FULL dummy runs build here too. At DP>1 a one-token dummy can replay
+        # the mixed-batch graph at any padded size, so stage the packed buffers.
+        metadata = self.build(0, common_attn_metadata, stage_packed=True)
         self.state_indices.zero_()
         self.has_initial_state.zero_()
         return metadata

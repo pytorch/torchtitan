@@ -166,7 +166,10 @@ def test_full_metadata_and_native_dispatch_variants():
     assert decode_metadata.non_spec_query_start_loc.tolist() == [0, 1, 2]
     assert decode_metadata.non_spec_state_indices_tensor.tolist() == [1, 0]
     single_token = replace(common, max_query_len=1, num_actual_tokens=2)
+    # A one-token FULL dummy (2 <= max_num_seqs) can replay the mixed-batch graph,
+    # so capture restages the packed offsets: 2, not the stale 4 from above.
     decode_capture = builder.build_for_cudagraph_capture(single_token)
+    assert builder.query_start_loc.tolist() == [0, 1, 2, 2]
     assert not decode_capture.has_initial_state.any()
     actual = builder.build(0, single_token)
     assert actual.execution_path is LinearAttentionExecutionPath.SINGLE_TOKEN
