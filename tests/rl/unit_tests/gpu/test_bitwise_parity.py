@@ -304,7 +304,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine, *, direct: bool) -> Non
         def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
             copied = copy_trainer_weights(state_dict)
             # As TorchStore reads do, finish writing before returning.
-            torch.cuda.current_stream().synchronize()
+            torch.accelerator.current_stream().synchronize()
             return copied
 
         wrapper.load_state_dict_direct(fetch)

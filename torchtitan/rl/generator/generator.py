@@ -158,6 +158,8 @@ class Generator(Configurable):
         Enable this to clear prefix-cache entries and preempt running requests; the engine
         then recomputes their KV under the new weights when they resume."""
 
+        # TODO: unify with the pinned CPU prefetch into one load path (e.g.
+        # direct fetch overlapped with generation) and drop this flag.
         fetch_model_state_dict_to_gpu: bool = False
         """Read the StorageVolume snapshot directly into the engine's GPU
         weights, one FSDP group at a time, instead of first prefetching a full

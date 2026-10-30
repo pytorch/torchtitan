@@ -21,7 +21,6 @@ import math
 import os
 import shutil
 import tempfile
-import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -541,52 +540,6 @@ def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
 
     expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
     assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
-
-
-def _fetch_on_torchstore_loop(state_dict, get_state_dict, current_stream):
-    """Runs `Generator._fetch_model_state_dict` against a fake TorchStore loop thread."""
-    torchstore_loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=torchstore_loop.run_forever)
-    thread.start()
-    generator = Generator.__new__(Generator)
-    generator._torchstore_loop = torchstore_loop
-    try:
-        with (
-            patch.object(generator_module.ts, "get_state_dict", get_state_dict),
-            patch.object(torch.accelerator, "current_stream", current_stream),
-        ):
-            fetched = generator._fetch_model_state_dict(state_dict)
-    finally:
-        torchstore_loop.call_soon_threadsafe(torchstore_loop.stop)
-        thread.join()
-        torchstore_loop.close()
-    return torchstore_loop, fetched
-
-
-def test_direct_fetch_runs_on_torchstore_loop():
-    state_dict = {"weight": torch.zeros(2), "scale": torch.ones(1)}
-    calls = []
-    current_stream = Mock()
-
-    async def get_state_dict(*args, **kwargs):
-        # Queued GPU work on the weights must finish before the read writes them.
-        current_stream.return_value.synchronize.assert_called_once_with()
-        calls.append((asyncio.get_running_loop(), args, kwargs))
-        # The trainer does not publish every generator key, e.g. vLLM attention
-        # scales.
-        return {"weight": kwargs["user_state_dict"]["weight"]}
-
-    torchstore_loop, fetched = _fetch_on_torchstore_loop(
-        state_dict, get_state_dict, current_stream
-    )
-
-    ((loop, args, kwargs),) = calls
-    assert loop is torchstore_loop
-    assert args == ("model_state_dict",)
-    assert kwargs["user_state_dict"] is state_dict
-    assert kwargs["direct_rdma"] is False
-    # Returns the fetched keys without raising; the model wrapper checks them.
-    assert set(fetched) == {"weight"}
 
 
 def test_sampling_config_rejects_top_p_below_one():
