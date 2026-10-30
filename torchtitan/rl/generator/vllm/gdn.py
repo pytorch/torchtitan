@@ -288,16 +288,57 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             cu_seqlens=cu_seqlens,
             has_initial_state=has_initial_state,
         ).squeeze(0)
-        output = self._forward_gdn(
-            conv_output,
-            a[:num_actual_tokens],
-            b[:num_actual_tokens],
-            A_log,
-            dt_bias,
-            cu_seqlens,
-            state_indices,
-            has_initial_state,
-        )
+        if is_in_batch_invariant_mode():
+            output = self._forward_gdn(
+                conv_output,
+                a[:num_actual_tokens],
+                b[:num_actual_tokens],
+                A_log,
+                dt_bias,
+                cu_seqlens,
+                state_indices,
+                has_initial_state,
+            )
+        else:
+            # Decode rows: decode kernel; the rest: chunk kernel (see _stage_decode_split).
+            decode_state_indices = gdn_metadata.decode_state_indices
+            # A captured graph replays with any decode count, so capture runs every request row.
+            # Capture may be this kernel's first launch at a packed size: fine, it picks its
+            # launch config by heuristic and never autotunes.
+            num_decode_rows = (
+                decode_state_indices.numel()
+                if torch.cuda.is_current_stream_capturing()
+                else gdn_metadata.num_decodes
+            )
+            output = self._forward_gdn(
+                conv_output,
+                a[:num_actual_tokens],
+                b[:num_actual_tokens],
+                A_log,
+                dt_bias,
+                gdn_metadata.prefill_query_start_loc,
+                gdn_metadata.prefill_state_indices,
+                has_initial_state,
+            )
+            if num_decode_rows:
+                # TODO: Attention Gym's decode kernel launches programs for null rows
+                # (14-57 us over 256 rows); a capped grid looping over rows makes them cheap.
+                decode_output = output.new_empty(num_decode_rows, *output.shape[1:])
+                recurrent_gdn_decode(
+                    conv_output[:num_decode_rows],
+                    a[:num_decode_rows].unsqueeze(0),
+                    b[:num_decode_rows].unsqueeze(0),
+                    A_log.float(),
+                    dt_bias.float(),
+                    self.kv_cache[1],
+                    decode_state_indices[:num_decode_rows],
+                    has_initial_state=has_initial_state[:num_decode_rows],
+                    scale=self.head_k_dim**-0.5,
+                    out=decode_output.unsqueeze(0),
+                )
+                # Adding keeps each row's one kernel result: both kernels give null slots
+                # zero output (Attention Gym's paged GDN contract).
+                output[:num_decode_rows].add_(decode_output)
         # Zero the rows past the metadata (eager SP/model-input rounding; see above).
         if num_actual_tokens < num_tokens:
             padding = output.new_zeros(
