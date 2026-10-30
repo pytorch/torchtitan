@@ -27,6 +27,12 @@ Usage:
 
 Add ``--force-hf-routing`` to isolate arithmetic after imposing Moonshot's
 expert IDs.
+
+Add ``--num_frames N`` to replace the image with an N-frame clip, split into
+chunks of the vision encoder's ``max_num_frames`` frames, the longest item the
+encoder takes. The released processor has no video branch, so both sides take
+TorchTitan's chunk patches, and the prompt spells each chunk the way the
+released Kimi K2.5 processor does.
 """
 
 import argparse
@@ -41,6 +47,10 @@ from torchtitan.components.data.multimodal.utils.image import (
     process_image,
     resize_to_navit_patch_grid,
     vision_to_patches,
+)
+from torchtitan.components.data.multimodal.utils.video import (
+    format_video_timestamp,
+    process_video,
 )
 
 from torchtitan.config.parallelism import ParallelismConfig
@@ -67,6 +77,12 @@ _MAX_PATCHES_PER_SIDE = 512
 _PROMPT = (
     "<|kimi_image_placeholder|>\n" "What is shown in this image? Describe it briefly."
 )
+_VIDEO_FPS = 8.0
+_MAX_PATCHES_PER_FRAME = 16384
+_VIDEO_MAX_PIXELS = 16777216
+_VIDEO_MIN_PIXELS = 65536
+_VIDEO_CHUNK = "{}<|media_begin|>video<|media_content|><|media_pad|><|media_end|>"
+_VIDEO_PROMPT = "\nWhat happens in this video? Describe it briefly."
 
 
 def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
@@ -247,6 +263,7 @@ def run_hf(
     tt_config,
     hf_state_dict: dict[str, Any],
     image_size: int,
+    num_frames: int,
     dtype: torch.dtype,
     device: torch.device,
 ) -> dict[str, Any]:
@@ -264,17 +281,36 @@ def run_hf(
         .reshape(image_size, image_size, 3)
         .to(torch.uint8)
     )
-    pil_image = Image.fromarray(raw_image.numpy())
-    batch = processor(
-        medias=[{"type": "image", "image": pil_image}],  # codespell:ignore medias
-        text=_PROMPT,
-        return_tensors="pt",
-    )
+    if num_frames:
+        frames_per_chunk = tt_config.vision_encoder.max_num_frames
+        patches, grids = _video_chunks(raw_image, num_frames, frames_per_chunk)
+        prompt = "".join(
+            _VIDEO_CHUNK.format(
+                format_video_timestamp(i * frames_per_chunk / _VIDEO_FPS)
+            )
+            for i in range(len(grids))
+        )
+        text = processor.tokenizer(prompt + _VIDEO_PROMPT, return_tensors="pt")
+        batch = {
+            "input_ids": text["input_ids"],
+            "attention_mask": text["attention_mask"],
+            "pixel_values": patches.reshape(-1, 3, _PATCH_SIZE, _PATCH_SIZE),
+            "grid_thws": grids,
+        }
+    else:
+        pil_image = Image.fromarray(raw_image.numpy())
+        batch = processor(
+            medias=[{"type": "image", "image": pil_image}],  # codespell:ignore medias
+            text=_PROMPT,
+            return_tensors="pt",
+        )
 
     vision_features: dict[str, torch.Tensor] = {}
 
     def record_vision_features(_module, _inputs, output) -> None:
-        features = output[0] if isinstance(output, (list, tuple)) else output
+        features = (
+            torch.cat(list(output)) if isinstance(output, (list, tuple)) else output
+        )
         vision_features["output"] = features.detach().float().cpu()
 
     model.mm_projector.register_forward_hook(record_vision_features)
@@ -301,6 +337,7 @@ def run_hf(
     ref = {
         "input_ids": batch["input_ids"].cpu(),
         "raw_image": raw_image,
+        "num_frames": num_frames,
         "last_logits": output.logits[:, -1, :].float().cpu(),
         "pixel_values": batch["pixel_values"].float().cpu(),
         "grid_thws": batch["grid_thws"].cpu(),
@@ -315,20 +352,50 @@ def run_hf(
 def _expand_image_placeholder(
     input_ids: torch.Tensor,
     image_token_id: int,
-    num_vision_tokens: int,
+    num_vision_tokens: list[int],
 ) -> torch.Tensor:
-    """Expand the single HF media placeholder for TorchTitan's scatter path."""
+    """Expand each HF media placeholder for TorchTitan's scatter path."""
     if input_ids.shape[0] != 1:
         raise ValueError("The Kimi K3 numerical test expects a batch size of one.")
-    positions = (input_ids[0] == image_token_id).nonzero().flatten()
-    if positions.numel() != 1:
-        raise ValueError(f"Expected one image placeholder, found {positions.numel()}.")
-    position = positions.item()
-    image_tokens = input_ids.new_full((1, num_vision_tokens), image_token_id)
-    return torch.cat(
-        (input_ids[:, :position], image_tokens, input_ids[:, position + 1 :]),
-        dim=1,
-    ).squeeze(0)
+    positions = (input_ids[0] == image_token_id).nonzero().flatten().tolist()
+    if len(positions) != len(num_vision_tokens):
+        raise ValueError(
+            f"Expected {len(num_vision_tokens)} media placeholders, found "
+            f"{len(positions)}."
+        )
+    pieces, start = [], 0
+    for position, count in zip(positions, num_vision_tokens, strict=True):
+        pieces += [
+            input_ids[0, start:position],
+            input_ids.new_full((count,), image_token_id),
+        ]
+        start = position + 1
+    return torch.cat(pieces + [input_ids[0, start:]])
+
+
+def _video_chunks(
+    raw_image: torch.Tensor, num_frames: int, frames_per_chunk: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """TorchTitan's chunk patches and grids for a clip that shifts ``raw_image``."""
+    shifts = 23 * torch.arange(num_frames).view(-1, 1, 1, 1)
+    frames = ((raw_image.unsqueeze(0).int() + shifts) % 256).to(torch.uint8)
+    video = process_video(
+        frames,
+        patch_size=_PATCH_SIZE,
+        merge_size=_MERGE_SIZE,
+        max_pixels=_VIDEO_MAX_PIXELS,
+        min_pixels=_VIDEO_MIN_PIXELS,
+        resize_fn=resize_to_navit_patch_grid,
+        max_patches=_MAX_PATCHES_PER_FRAME,
+        max_patches_per_side=_MAX_PATCHES_PER_SIDE,
+    )
+    chunks = [
+        vision_to_patches(chunk, _PATCH_SIZE, 1, _MERGE_SIZE, patch_order="raster")
+        for chunk in video.split(frames_per_chunk)
+    ]
+    return torch.cat([patches for patches, _ in chunks]), torch.stack(
+        [grid for _, grid in chunks]
+    )
 
 
 def _print_routing_comparison(
@@ -422,32 +489,38 @@ def run_tt(
                 )
             )
 
-    image = process_image(
-        Image.fromarray(ref["raw_image"].numpy()),
-        patch_size=_PATCH_SIZE,
-        merge_size=_MERGE_SIZE,
-        resize_fn=resize_to_navit_patch_grid,
-        max_patches=_MAX_PATCHES,
-        max_patches_per_side=_MAX_PATCHES_PER_SIDE,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-    )
-    if image is None:
-        raise ValueError("TorchTitan failed to process the numerical test image.")
-    patches, grid = vision_to_patches(
-        image,
-        patch_size=_PATCH_SIZE,
-        temporal_patch_size=1,
-        merge_size=_MERGE_SIZE,
-        patch_order="raster",
-    )
+    if ref["num_frames"]:
+        patches, grid_thw = ref["pixel_values"].flatten(1), ref["grid_thws"]
+    else:
+        image = process_image(
+            Image.fromarray(ref["raw_image"].numpy()),
+            patch_size=_PATCH_SIZE,
+            merge_size=_MERGE_SIZE,
+            resize_fn=resize_to_navit_patch_grid,
+            max_patches=_MAX_PATCHES,
+            max_patches_per_side=_MAX_PATCHES_PER_SIDE,
+            image_mean=(0.5, 0.5, 0.5),
+            image_std=(0.5, 0.5, 0.5),
+        )
+        if image is None:
+            raise ValueError("TorchTitan failed to process the numerical test image.")
+        patches, grid = vision_to_patches(
+            image,
+            patch_size=_PATCH_SIZE,
+            temporal_patch_size=1,
+            merge_size=_MERGE_SIZE,
+            patch_order="raster",
+        )
+        grid_thw = grid.unsqueeze(0)
     pixel_values = patches.to(device=device, dtype=vision_dtype)
-    grid_thw = grid.unsqueeze(0).to(device)
-    num_vision_tokens = (grid[1] // _MERGE_SIZE) * (grid[2] // _MERGE_SIZE)
+    num_vision_tokens = (grid_thw[:, 1] // _MERGE_SIZE) * (
+        grid_thw[:, 2] // _MERGE_SIZE
+    )
+    grid_thw = grid_thw.to(device)
     tokens = _expand_image_placeholder(
         ref["input_ids"],
         _MEDIA_TOKEN_ID,
-        int(num_vision_tokens.item()),
+        num_vision_tokens.tolist(),
     ).to(device)
     positions = torch.arange(
         tokens.shape[0],
@@ -458,16 +531,17 @@ def run_tt(
 
     print(
         f"tokens={tuple(tokens.shape)} pixel_values={tuple(pixel_values.shape)} "
-        f"grid_thw={grid_thw.tolist()} vision_tokens={num_vision_tokens.item()}"
+        f"grid_thw={grid_thw.tolist()} vision_tokens={num_vision_tokens.tolist()}"
     )
 
-    hf_pixels = ref["pixel_values"].flatten(1)
-    pixel_diff = (hf_pixels - patches.float()).abs()
-    pixel_max_diff = pixel_diff.max().item()
-    print(
-        f"pixel values: max_diff={pixel_max_diff:.3e} "
-        f"num_differ={(pixel_diff > 1e-6).sum().item()}/{pixel_diff.numel()}"
-    )
+    if not ref["num_frames"]:
+        hf_pixels = ref["pixel_values"].flatten(1)
+        pixel_diff = (hf_pixels - patches.float()).abs()
+        pixel_max_diff = pixel_diff.max().item()
+        print(
+            f"pixel values: max_diff={pixel_max_diff:.3e} "
+            f"num_differ={(pixel_diff > 1e-6).sum().item()}/{pixel_diff.numel()}"
+        )
 
     tt_features = model.vision_encoder(pixel_values, grid_thw=grid_thw)
     hf_features = ref["vision_features"].reshape(-1, tt_features.shape[-1])
@@ -521,6 +595,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_flavor", default="debugmodel")
     parser.add_argument("--image_size", type=int, default=336)
+    parser.add_argument("--num_frames", type=int, default=0)
     parser.add_argument(
         "--force-hf-routing",
         action="store_true",
@@ -560,6 +635,7 @@ def main() -> None:
         tt_config,
         hf_state_dict,
         args.image_size,
+        args.num_frames,
         dtype,
         device,
     )
