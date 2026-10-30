@@ -83,10 +83,10 @@ class FakeMoEBlock(TransformerBlock):
         self.feed_forward = FakeMoE(load_balance_coeff, tokens)
 
 
-class FakeOutOfTreeMoEBlock(nn.Module):
+class FakeMlpMoEBlock(nn.Module):
     def __init__(self, load_balance_coeff, tokens):
         super().__init__()
-        self.feed_forward = FakeMoE(load_balance_coeff, tokens)
+        self.mlp = FakeMoE(load_balance_coeff, tokens)
 
 
 class FakeMoEModel(nn.Module):
@@ -241,9 +241,9 @@ class TestOptimizerConfig(unittest.TestCase):
             torch.tensor([0, 0]),
         )
 
-    def test_moe_load_balancing_updates_an_out_of_tree_block(self):
+    def test_moe_load_balancing_updates_a_block_with_its_moe_as_mlp(self):
         model = FakeMoEModel()
-        model.layers["0"] = FakeOutOfTreeMoEBlock(0.1, [10, 0])
+        model.layers["0"] = FakeMlpMoEBlock(0.1, [10, 0])
         config = OptimizersContainer.Config(
             optimizers=[
                 AdamW.Config(pattern=r".*", fused=False, lr=0.0, weight_decay=0.0),
@@ -259,7 +259,7 @@ class TestOptimizerConfig(unittest.TestCase):
         container.step()
 
         torch.testing.assert_close(
-            model.layers["0"].feed_forward.expert_bias_E,
+            model.layers["0"].mlp.expert_bias_E,
             torch.tensor([-0.1, 0.1]),
         )
 

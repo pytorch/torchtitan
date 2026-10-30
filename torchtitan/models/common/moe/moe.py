@@ -977,8 +977,9 @@ def register_moe_load_balancing_hook(
             for layers in layer_containers:
                 assert isinstance(layers, (nn.ModuleDict, nn.ModuleList))
                 for transformer_block in layers.children():
-                    if isinstance(moe := transformer_block.feed_forward, MoE):
-                        yield transformer_block, cast(_MoELike, moe)
+                    for moe in transformer_block.children():
+                        if isinstance(moe, MoE):
+                            yield transformer_block, cast(_MoELike, moe)
 
     # for MoE auxiliary-loss-free load balancing
     def _update_expert_bias(
