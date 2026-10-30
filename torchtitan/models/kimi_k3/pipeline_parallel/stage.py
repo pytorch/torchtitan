@@ -15,6 +15,7 @@ from typing import Any, cast
 
 import torch
 from torch.distributed.fsdp import FSDPModule
+from torch.distributed.pipelining import PipelineStageInfo
 from torch.distributed.pipelining._utils import flatten_args
 
 from torchtitan.distributed.pipeline_parallel import TorchTitanPipelineStage
@@ -29,13 +30,15 @@ def _assemble_stack(
     delta_blocks: list[int],
     store_blocks: dict[int, torch.Tensor],
 ) -> tuple[torch.Tensor, list[int]]:
-    """The block stack as a fresh autograd leaf, with each column's block index."""
+    """Assemble the ordered block stack as an independent autograd leaf."""
     if delta_TND.shape[1] != len(delta_blocks):
         raise ValueError(
             f"received {delta_TND.shape[1]} block(s) but the routing expects "
             f"{delta_blocks}"
         )
     order = sorted(set(delta_blocks) | set(store_blocks))
+    if not store_blocks and order == delta_blocks:
+        return delta_TND.detach().requires_grad_(True), order
     pieces = [
         store_blocks[b] if b in store_blocks else delta_TND[:, delta_blocks.index(b)]
         for b in order
@@ -52,13 +55,16 @@ def _pack_outgoing_delta(
     order_out: list[int],
     out_blocks: list[int],
 ) -> torch.Tensor:
-    """The blocks the next hop carries, copied out of the model's stack."""
+    """Select the model-stack blocks carried to the next pipeline hop."""
     if stack_out_TND.shape[1] != len(order_out):
         raise ValueError(
             f"the model returned {stack_out_TND.shape[1]} block(s); the routing "
             f"expects {len(order_out)} ({order_out})"
         )
-    pieces = [stack_out_TND[:, order_out.index(b)] for b in out_blocks]
+    column_indices = [order_out.index(b) for b in out_blocks]
+    if column_indices == list(range(stack_out_TND.shape[1])):
+        return stack_out_TND
+    pieces = [stack_out_TND[:, column] for column in column_indices]
     if pieces:
         return torch.stack(pieces, dim=1)
     num_tokens, _, dim = stack_out_TND.shape
@@ -180,7 +186,18 @@ class AttnResPipelineStage(TorchTitanPipelineStage):
         if isinstance(self.submod, FSDPModule) and self.has_backward:
             self.submod.set_manual_backward_finalization(True)
 
-        output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
+        if self._forward_contexts:
+            output = self._call_with_forward_context(
+                PipelineStageInfo(
+                    stage_index=self.stage_index,
+                    microbatch_index=fwd_chunk_id,
+                ),
+                self.forward_maybe_with_nosync,
+                *composite_args,
+                **composite_kwargs,
+            )
+        else:
+            output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
 
         if self.is_last:
             output_tuple = (

@@ -96,7 +96,7 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
     engine.model_parts = [Mock()]
     engine.parallelism_context = SimpleNamespace(pp_enabled=True)
     engine.pp_schedule = graph_runtime
-    engine.device = torch.device("cuda")
+    engine.device = torch.device("cpu")
     engine._dist_moe_runtime = None
     engine._forward_backward_body = Mock()
 
@@ -361,7 +361,10 @@ def _assert_common_recipe(
     assert config.training.mixed_precision_reduce == "bfloat16"
     assert all(not expert.inplace_wgrad_accum for _, expert, _, _ in experts)
     assert all(
-        isinstance(layer.attention.inner_attention, VarlenInnerAttention.Config)
+        isinstance(
+            layer.attention.inner_attention.inner_attention,
+            VarlenInnerAttention.Config,
+        )
         for layer in config.model.layers
     )
     assert config.dataloader.max_num_documents == max_documents

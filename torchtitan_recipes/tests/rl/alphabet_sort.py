@@ -1086,9 +1086,9 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     the plan holds faults instead of raising. Needs an SM100+ GPU and the optional
     ``dist_moe`` package.
     """
-    from torchtitan_recipes.models.deepseek_v3 import _require_dist_moe
+    from torchtitan_recipes.models.dist_moe import require_dist_moe
 
-    _require_dist_moe()
+    require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
     from torchtitan.distributed.activation_remat import ActivationRematConfig
     from torchtitan.models.common.dist_moe import DistMoeRuntime

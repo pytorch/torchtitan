@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from torchtitan.models.base.module import Module
 
-from torchtitan.models.common.activation import ClampedSwiGLU, SwiGLU
+from torchtitan.models.common.activation import ClampedSwiGLU, SiTUGLU, SwiGLU
 from torchtitan.models.common.dist_moe import (
     _dist_moe as dist_moe,
     DistMoeRoutedExperts,
@@ -46,16 +46,25 @@ def _replace_routed_experts(
         ):
             raise TypeError("Dist-MoE requires stock GroupedLinear W13/W2 projections")
         if isinstance(source.activation_fn, SwiGLU.Config):
-            activation = "swiglu"
-            swiglu_alpha = None
-            swiglu_limit = None
+            activation_values: dict[str, Any] = {"activation": "swiglu"}
         elif isinstance(source.activation_fn, ClampedSwiGLU.Config):
-            activation = "swiglu_clamped"
-            swiglu_alpha = source.activation_fn.swiglu_alpha
-            swiglu_limit = source.activation_fn.swiglu_limit
+            activation_values = {
+                "activation": "swiglu_clamped",
+                "swiglu_alpha": source.activation_fn.swiglu_alpha,
+                "swiglu_limit": source.activation_fn.swiglu_limit,
+            }
+        elif isinstance(source.activation_fn, SiTUGLU.Config):
+            if source.activation_fn.linear_beta is None:
+                raise ValueError("Dist-MoE SiTU-GLU requires linear_beta")
+            activation_values = {
+                "activation": "situglu",
+                "situglu_beta": source.activation_fn.beta,
+                "situglu_linear_beta": source.activation_fn.linear_beta,
+            }
         else:
             raise TypeError(
-                "Dist-MoE supports SwiGLU.Config or ClampedSwiGLU.Config; "
+                "Dist-MoE supports SwiGLU.Config, ClampedSwiGLU.Config, or "
+                "SiTUGLU.Config; "
                 f"got {type(source.activation_fn).__qualname__} at {fqn!r}"
             )
         if not isinstance(source.token_dispatcher, AllToAllTokenDispatcher.Config):
@@ -70,9 +79,7 @@ def _replace_routed_experts(
             w2=source.w2,
             top_k=source.token_dispatcher.top_k,
             output_postprocess=source.output_postprocess,
-            activation=activation,
-            swiglu_alpha=swiglu_alpha,
-            swiglu_limit=swiglu_limit,
+            **activation_values,
             **values,
         )
         if parent is None:
@@ -88,7 +95,7 @@ def _replace_routed_experts(
 
 @dataclass(kw_only=True, slots=True)
 class DistMoeTransform(ModelConfigTransform):
-    """Replace stock routed experts with BF16 or MXFP8 Dist-MoE execution.
+    """Replace SwiGLU or SiTU-GLU experts with Dist-MoE execution.
 
     Expert activation semantics come from each source
     ``RoutedExperts.Config.activation_fn``. The transform translates supported

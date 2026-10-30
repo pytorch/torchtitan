@@ -6,8 +6,6 @@
 
 """Verified DeepSeek V3 model recipes."""
 
-from importlib import import_module
-from types import ModuleType
 from typing import cast
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
@@ -19,7 +17,7 @@ from torchtitan.components.optim import (
     Optim,
     OptimizersContainer,
 )
-from torchtitan.config import Configurable, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -35,30 +33,7 @@ from torchtitan.models.deepseek_v3 import build_model_config, DeepSeekV3Model
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 from torchtitan.trainer import Trainer
 
-
-def _require_dist_moe() -> ModuleType:
-    """Import the optional Dist-MoE package for a selected Dist-MoE recipe."""
-    try:
-        return import_module("dist_moe")
-    except ModuleNotFoundError as error:
-        if error.name != "dist_moe":
-            raise
-        raise ModuleNotFoundError(
-            "This recipe requires the optional dist_moe package. Install "
-            "it from git+https://github.com/meta-pytorch/dist_moe.git@main "
-            "before selecting it.",
-            name="dist_moe",
-        ) from error
-
-
-def _dist_moe_runtime_config(*, scratch_capacity_factor: float) -> Configurable.Config:
-    """Build the rank-wide activation and scratch policy for Dist-MoE."""
-    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
-
-    return DistMoeRuntime.Config(
-        activation_slot_capacity_factor=1.0,
-        scratch_capacity_factor=scratch_capacity_factor,
-    )
+from torchtitan_recipes.models.dist_moe import dist_moe_runtime_config, require_dist_moe
 
 
 def deepseek_v3_mxfp8_linear_converter_config(
@@ -132,7 +107,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
 
 def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
     """Build the verified 671B BF16 Dist-MoE training recipe."""
-    _require_dist_moe()
+    require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_671b(seq_len=seq_len)
@@ -168,13 +143,13 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
-    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(config, [DistMoeTransform()])
 
 
 def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
     """Build the verified 671B MXFP8 Dist-MoE training recipe."""
-    dist_moe = _require_dist_moe()
+    dist_moe = require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_671b(seq_len=seq_len)
@@ -213,7 +188,7 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
-    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(
         config,
         [
