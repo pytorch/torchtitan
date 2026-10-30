@@ -12,6 +12,7 @@ the ordering that makes the overlap safe.
 """
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -64,6 +65,9 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         events.append(f"optim {version}")
         return _RankValues(SimpleNamespace(policy_version=version, metrics={}))
 
+    async def save_checkpoint(*, last_step):
+        events.append(f"save {version} last_step={last_step}")
+
     async def push():
         events.append("push start")
         if on_push is not None:
@@ -92,6 +96,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         sync_log_step=_Endpoint(),
         forward_backward=_Endpoint(forward_backward),
         optim_step=_Endpoint(optim_step),
+        save_checkpoint=_Endpoint(save_checkpoint),
         push_model_state_dict=_Endpoint(push),
     )
     # DP degree 1: every trainer rank is at DP rank 0.
@@ -157,6 +162,7 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
     assert events == [
         "fwd_bwd 1",
         "optim 1",
+        "save 1 last_step=False",
         # Step 1's push -> pull -> release starts in the background. The per-DP-rank
         # forward_backward calls run as tasks, so with these instant fakes it finishes first ...
         "push start",
@@ -166,6 +172,7 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
         "fwd_bwd 2",
         # ... and lands before step 2's optimizer step.
         "optim 2",
+        "save 2 last_step=True",
         "push start",
         "push end",
         "pull 2",
@@ -217,6 +224,46 @@ def test_push_and_pull_times_are_logged_one_step_late() -> None:
     # Step 2 logs step 1's push and pull, which have run by then.
     assert second[TRAINER_PUSH_KEY].value.value > 0.0
     assert second[GENERATOR_PULL_KEY].value.value > 0.0
+
+
+def test_step_total_covers_the_save_and_the_previous_metrics_log(monkeypatch) -> None:
+    now = 0.0
+    monkeypatch.setattr(time, "perf_counter", lambda: now)
+
+    def takes(seconds):
+        async def on_call(*args, **kwargs):
+            nonlocal now
+            now += seconds
+
+        return on_call
+
+    controller = _controller([])
+    controller.trainer.all_ranks.sync_log_step = _Endpoint(takes(1.0))
+    controller.trainer.all_ranks.save_checkpoint = _Endpoint(takes(30.0))
+    log = controller.metrics_processor.log
+
+    def slow_log(**kwargs):
+        nonlocal now
+        now += 2.0
+        log(**kwargs)
+
+    controller.metrics_processor.log = slow_log
+    _run(controller, num_training_steps=2)
+
+    first, second = (
+        {key: metric.value.value for key, metric in logged.items()}
+        for logged in controller.logged_metrics
+    )
+    # The save is its own phase, not part of the optimizer's.
+    assert first["timing/step/save_checkpoint"] == 30.0
+    assert first["timing/step/optimizer"] == 0.0
+    # Step 1: sync_log_step + save. No earlier metrics log, so no `unaccounted`.
+    assert first["timing/step/total"] == 31.0
+    assert "perf/trainer/step_time_ratio/unaccounted" not in first
+    # Step 2 starts at step 1's metrics log: 2 + 1 + 30, all inside a phase.
+    assert second["timing/step/metrics_log"] == 2.0
+    assert second["timing/step/total"] == 33.0
+    assert second["perf/trainer/step_time_ratio/unaccounted"] == pytest.approx(0.0)
 
 
 def test_push_failure_fails_the_loop() -> None:

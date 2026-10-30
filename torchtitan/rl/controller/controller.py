@@ -1094,20 +1094,21 @@ class Controller(Configurable):
         # The previous step's push and pull, each returning its wall time; None before the first.
         push_task: asyncio.Task[float] | None = None
         pull_task: asyncio.Task[float] | None = None
+        step_timer = MetricsTimer()
+        step_start = time.perf_counter()
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
-            with sl.log_trace_span("sync_log_step"):
+            with (
+                sl.log_trace_span("sync_log_step"),
+                step_timer.record("timing/step/sync_log_step"),
+            ):
                 await self.trainer.all_ranks.sync_log_step.call(step)
                 await self.generator_router.sync_log_step.call_one(step)
                 # Not awaited: it would wait behind an in-flight add_group.
                 self.batcher.sync_log_step.broadcast(step)
                 await self._rollouter.sync_log_step(step)
-            step_timer = MetricsTimer()
 
-            with (
-                sl.log_trace_span("train_step"),
-                step_timer.record("timing/step/total"),
-            ):
+            with sl.log_trace_span("train_step"):
                 # Waits for a TrainerStepBatch to be ready (or None on shutdown).
                 with (
                     sl.log_trace_span("wait_for_training_batch"),
@@ -1196,11 +1197,19 @@ class Controller(Configurable):
                     }
                     optimizer_result = self._get_rank_0_value(
                         await self.trainer.all_ranks.optim_step.call(
-                            controller_state=controller_state,
-                            last_step=(step == num_training_steps),
+                            controller_state=controller_state
                         )
                     )
                 self._trainer_policy_version = optimizer_result.policy_version
+
+                # Its own phase, so `timing/step/optimizer` excludes the save.
+                with (
+                    sl.log_trace_span("save_checkpoint"),
+                    step_timer.record("timing/step/save_checkpoint"),
+                ):
+                    await self.trainer.all_ranks.save_checkpoint.call(
+                        last_step=(step == num_training_steps)
+                    )
 
                 # Await the generator model state dict pull to finish before the trainer's next push.
                 with (
@@ -1221,8 +1230,21 @@ class Controller(Configurable):
 
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
             # rollout related metrics here, or move all of them to the rollouter.
-            time_metrics = step_timer.flush()
-            with sl.log_trace_span("metrics_log"):
+            # `timing/step/total` runs from the previous step's metrics log to here, so totals cover the loop.
+            step_end = time.perf_counter()
+            time_metrics = [
+                *step_timer.flush(),
+                m.Metric(
+                    "timing/step/total", m.Mean.from_list([step_end - step_start])
+                ),
+            ]
+            step_start = step_end
+
+            # Recorded after the flush: this log's time is the next step's `timing/step/metrics_log`.
+            with (
+                sl.log_trace_span("metrics_log"),
+                step_timer.record("timing/step/metrics_log"),
+            ):
                 self.metrics_processor.log(
                     step=step,
                     is_validation=False,
