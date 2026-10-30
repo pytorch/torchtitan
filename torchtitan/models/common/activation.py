@@ -176,36 +176,19 @@ class SwiGLU(BinaryActivationFn):
         return F.silu(gate) * up
 
 
-class LimitedSwiGLU(BinaryActivationFn):
-    """SwiGLU that clamps gate above and up on both sides (DeepSeek-V4 ``swiglu_limit``)."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(BinaryActivationFn.Config):
-        swiglu_limit: float
-
-        def __post_init__(self) -> None:
-            if not math.isfinite(self.swiglu_limit) or self.swiglu_limit <= 0:
-                raise ValueError(
-                    "swiglu_limit must be finite and positive, got "
-                    f"{self.swiglu_limit}"
-                )
-
-    def __init__(self, config: Config) -> None:
-        self.limit = config.swiglu_limit
-
-    def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-        gate = gate.clamp(max=self.limit)
-        up = up.clamp(min=-self.limit, max=self.limit)
-        return F.silu(gate) * up
-
-
 class ClampedSwiGLU(BinaryActivationFn):
-    """Clamped SwiGLU with configurable sigmoid scale and input bound."""
+    """Clamped ``gate * sigmoid(alpha * gate) * (up + offset)``.
+
+    Clamp gate above and up on both sides before applying the activation.
+    Only offset=1 (GPT-OSS, configurable alpha) and offset=0
+    (DeepSeek V4, alpha=1) are supported.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BinaryActivationFn.Config):
         swiglu_alpha: float = 1.702
         swiglu_limit: float = 7.0
+        swiglu_offset: float = 1.0
 
         def __post_init__(self) -> None:
             if not math.isfinite(self.swiglu_alpha) or self.swiglu_alpha <= 0:
@@ -218,14 +201,27 @@ class ClampedSwiGLU(BinaryActivationFn):
                     "swiglu_limit must be finite and positive, got "
                     f"{self.swiglu_limit}"
                 )
+            if self.swiglu_offset not in (0.0, 1.0):
+                raise ValueError(
+                    f"swiglu_offset must be 0.0 or 1.0, got {self.swiglu_offset}"
+                )
+            if self.swiglu_offset == 0.0 and self.swiglu_alpha != 1.0:
+                raise ValueError(
+                    "swiglu_offset=0.0 requires swiglu_alpha=1.0, got "
+                    f"{self.swiglu_alpha}"
+                )
 
     def __init__(self, config: Config) -> None:
         self.alpha = config.swiglu_alpha
         self.limit = config.swiglu_limit
+        self.offset = config.swiglu_offset
 
     def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         gate = gate.clamp(max=self.limit)
         up = up.clamp(min=-self.limit, max=self.limit)
+        # Keep the existing SiLU and addcmul paths to preserve model numerics.
+        if self.offset == 0.0:
+            return F.silu(gate) * up
         silu = gate * torch.sigmoid(self.alpha * gate)
         return torch.addcmul(silu, silu, up)
 
