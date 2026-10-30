@@ -238,6 +238,13 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         with lower-memory redistribution, such as a pull-based symmetric-memory
         implementation.
         """
+        persistent_redistribution_buffers: bool = True
+        """Keep exchange and compute scratch allocated between eager updates.
+
+        False releases only redistribution tensors, not parameters, optimizer
+        state, communicators, streams, or events. The next step reserves scratch
+        again; optimizer updates themselves must remain outside graph capture.
+        """
 
     def __init__(
         self,
@@ -306,6 +313,9 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
             ns_device=config.ns_device,
+            persistent_redistribution_buffers=(
+                config.persistent_redistribution_buffers
+            ),
         )
 
 
@@ -487,6 +497,11 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
     def zero_grad(self, set_to_none: bool = True) -> None:
         for optimizer in self.optimizers:
             optimizer.zero_grad(set_to_none=set_to_none)
+
+    def initialize_state(self) -> None:
+        """Materialize every inner optimizer's lazily created state."""
+        for optimizer in self.optimizers:
+            init_optim_state(optimizer)
 
     def state_dict(self) -> dict[str, Any]:
         """Return a flat, FQN-keyed optimizer state dict for all optimizers.

@@ -44,6 +44,39 @@ _NUM_PIPELINE_SLOTS = 2
 _BufferKey: TypeAlias = tuple[torch.device, torch.dtype]
 
 
+def _initialize_all_to_all_communicators(
+    schedules: Sequence[_PackedAllToAllSchedule],
+    device: torch.device,
+) -> None:
+    """Initialize CUDA all-to-all peer connections before training starts."""
+    if device.type != "cuda":
+        return
+
+    initialized_process_groups: set[int] = set()
+    for schedule in schedules:
+        process_group = schedule.process_group
+        process_group_id = id(process_group)
+        if (
+            not schedule.has_remote_transfers
+            or process_group_id in initialized_process_groups
+        ):
+            continue
+
+        # NCCL_RUNTIME_CONNECT=0 eagerly connects an initialized communicator,
+        # but PyTorch still creates that communicator on its first collective.
+        # Match DistMuon's all-to-all so NCCL establishes every peer connection
+        # before backward and optimizer state consume the remaining memory.
+        num_participants = len(schedule.participants)
+        input = torch.empty(num_participants, dtype=torch.uint8, device=device)
+        output = torch.empty_like(input)
+        torch.distributed.all_to_all_single(
+            output,
+            input,
+            group=process_group,
+        )
+        initialized_process_groups.add(process_group_id)
+
+
 @dataclass(slots=True)
 class _BufferRequirements:
     storage_exchange_numel: int | None = None
@@ -323,6 +356,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         self._device = device
         self._context: _CommunicationContext | None = None
         self._local_slot = _BufferSlot()
+        self._initialized_process_group_ids: set[int] = set()
 
     def reserve_buffers(
         self,
@@ -333,6 +367,19 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         ],
     ) -> None:
         """Eagerly grow runtime-owned tensors to the plans' maximum sizes."""
+        schedules = tuple(
+            plan.storage_to_compute_schedule
+            for plan in plans
+            if isinstance(plan, _RedistributionBucketPlan)
+            and id(plan.storage_to_compute_schedule.process_group)
+            not in self._initialized_process_group_ids
+        )
+        _initialize_all_to_all_communicators(schedules, self._device)
+        self._initialized_process_group_ids.update(
+            id(schedule.process_group)
+            for schedule in schedules
+            if schedule.has_remote_transfers
+        )
         context = self._context
         created_context = False
         if context is None and any(
@@ -421,6 +468,15 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                     slot.compute_done.record(compute_stream)
                     slot.done.record(context.transfer_stream)
             self._context = context
+
+    def release_buffers(self) -> None:
+        """Release optimizer-only tensors while preserving runtime resources."""
+        self._local_slot.buffers.clear()
+        self._local_slot._recorded_compute_streams.clear()
+        if self._context is not None:
+            for slot in self._context.slots:
+                slot.buffers.buffers.clear()
+                slot.buffers._recorded_compute_streams.clear()
 
     def run(
         self,

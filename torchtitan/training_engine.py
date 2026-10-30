@@ -28,6 +28,7 @@ from torchtitan.distributed.accelerator_graph import (
     accelerator_graph_teardown,
     accelerator_graphs_supported,
     NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+    run_eager_on_accelerator_graph_stream,
     wrap_fwd_bwd_with_accelerator_graph,
     wrap_with_accelerator_graph,
 )
@@ -526,6 +527,23 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             pp_has_last_stage=self.pp_has_last_stage,
             cuda_graph_annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
         )
+        if self.config.optim.initialize_state_before_training:
+            initialize_state = self.optim.optimizers.initialize_state
+            uses_accelerator_graph_stream = (
+                not self.config.training.disable_accelerator_graphs
+                and accelerator_graphs_supported()
+            )
+            if uses_accelerator_graph_stream:
+                run_eager_on_accelerator_graph_stream(initialize_state)
+            else:
+                initialize_state()
+            if self.device.type != "cpu":
+                # State initialization uses temporary gradients and may also use
+                # optimizer scratch. Graph training retains those idle blocks on
+                # its warmup stream for reuse; eager training releases them.
+                utils.device_module.synchronize()
+                if not uses_accelerator_graph_stream:
+                    utils.device_module.empty_cache()
         self.model_cls._register_optimizer_hooks(
             self.optim.optimizers,
             self.model_parts,

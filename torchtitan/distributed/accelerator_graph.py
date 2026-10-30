@@ -396,7 +396,7 @@ def get_cuspy_cuda_graph_annotation_config(
     return config
 
 
-def _run_eager_on_accelerator_graph_stream(
+def run_eager_on_accelerator_graph_stream(
     fn: Callable[..., Any], *args: Any, **kwargs: Any
 ) -> Any:
     """Run a callable eagerly on the stream reserved for accelerator graph capture."""
@@ -543,11 +543,11 @@ class AcceleratorGraphWrapper:
             self._graph is None and not accelerator_graph_manager.capture_allowed
         ):
             self._warmup_remaining = max(0, self._warmup_remaining - 1)
-            return _run_eager_on_accelerator_graph_stream(self._fn, *args)
+            return run_eager_on_accelerator_graph_stream(self._fn, *args)
 
         if self._graph is None:
             if self._prepare_for_capture is not None:
-                _run_eager_on_accelerator_graph_stream(self._prepare_for_capture, *args)
+                run_eager_on_accelerator_graph_stream(self._prepare_for_capture, *args)
             accelerator_graph_manager.log_memory(self.name, "before_empty_cache")
             torch.accelerator.empty_cache()
             accelerator_graph_manager.log_memory(self.name, "after_empty_cache")
