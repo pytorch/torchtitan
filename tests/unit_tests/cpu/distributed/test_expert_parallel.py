@@ -151,8 +151,11 @@ class TestPermute(unittest.TestCase):
         dispatcher = self._make_dispatcher()
         total = tokens_per_expert_group.sum().item()
         dummy_input = torch.zeros(total, 1)
-        _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
-            dummy_input, tokens_per_expert_group, ep_size=num_ranks
+        _, permuted_indices, num_tokens_per_expert, _ = dispatcher._permute(
+            dummy_input,
+            tokens_per_expert_group,
+            ep_size=num_ranks,
+            routed_scores_R=None,
         )
         return permuted_indices, num_tokens_per_expert
 

@@ -533,15 +533,12 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 routed_input_RD,
                 permuted_indices,
                 num_global_tokens_per_local_expert_e,
+                routed_scores_R,
             ) = self._permute(
-                routed_input_RD, num_global_tokens_per_local_expert_E, ep_size
-            )
-            routed_scores_R = (
-                None
-                if routed_scores_rank_major_R is None
-                else self._gather_routed_scores(
-                    routed_scores_rank_major_R, permuted_indices
-                )
+                routed_input_RD,
+                num_global_tokens_per_local_expert_E,
+                ep_size,
+                routed_scores_R=routed_scores_rank_major_R,
             )
 
         return (
@@ -555,18 +552,13 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_scores_R,
         )
 
-    def _gather_routed_scores(
-        self,
-        routed_scores_rank_major_R: torch.Tensor,
-        permuted_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        return routed_scores_rank_major_R[permuted_indices]
-
     def _permute(
         self,
         routed_input_RD,
         num_global_tokens_per_local_expert_E,
         ep_size: int,
+        *,
+        routed_scores_R: torch.Tensor | None,
     ):
         """Reorder tokens from rank-major to expert-major layout.
 
@@ -612,6 +604,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_input_RD[permuted_indices, :],
             permuted_indices,
             num_global_tokens_per_local_expert_e,
+            None if routed_scores_R is None else routed_scores_R[permuted_indices],
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):
@@ -754,13 +747,15 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             routed_input_RD,
             permuted_indices,
             num_tokens_per_local_expert_padded_e,
-        ) = self._permute(routed_input_ND, num_local_tokens_per_expert_E, ep_size=1)
-
-        routed_scores_R = None
-        if self.absorb_router_scores:
-            routed_scores_R = self._gather_routed_scores(
-                topk_scores_experts_sorted_N, permuted_indices
-            )
+            routed_scores_R,
+        ) = self._permute(
+            routed_input_ND,
+            num_local_tokens_per_expert_E,
+            ep_size=1,
+            routed_scores_R=(
+                topk_scores_experts_sorted_N if self.absorb_router_scores else None
+            ),
+        )
 
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
@@ -826,24 +821,13 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             x_TD,
         )
 
-    def _gather_routed_scores(
-        self,
-        routed_scores_rank_major_R: torch.Tensor,
-        permuted_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        # Pad rows gather index -1; append one zero score so they read 0.
-        return torch.cat(
-            [
-                routed_scores_rank_major_R,
-                routed_scores_rank_major_R.new_zeros(1),
-            ]
-        )[permuted_indices]
-
     def _permute(
         self,
         routed_input_RD,
         num_global_tokens_per_local_expert_E,
         ep_size: int,
+        *,
+        routed_scores_R: torch.Tensor | None,
     ):
         # MXFP8 requires groups to be permuted to expert major order AND
         # padded to nearest multiple of 16.
@@ -870,10 +854,16 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             e,
             self.pad_multiple,
         )
+        if routed_scores_R is not None:
+            # Pad rows gather index -1; append one zero score so they read 0.
+            routed_scores_R = torch.cat(
+                [routed_scores_R, routed_scores_R.new_zeros(1)]
+            )[permuted_indices]
         return (
             routed_input_RD,
             permuted_indices,
             num_global_tokens_per_local_expert_padded_e,
+            routed_scores_R,
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):
