@@ -140,7 +140,11 @@ def _replace_vllm_layer_configs(model_config):
 
         elif isinstance(attention_cfg, GDN.Config):
             delta_net_cfg = attention_cfg
-            from torchtitan.rl.generator.vllm.gdn import VLLMInnerGDN
+            from torchtitan.rl.generator.vllm.gdn import (
+                vllm_inner_gdn_sharding_config,
+                VLLMGDN,
+                VLLMInnerGDN,
+            )
 
             vllm_inner_gdn_cfg = VLLMInnerGDN.Config(
                 layer_idx=layer_idx,
@@ -153,14 +157,16 @@ def _replace_vllm_layer_configs(model_config):
                 head_k_dim=delta_net_cfg.key_head_dim,
                 head_v_dim=delta_net_cfg.value_head_dim,
                 conv_kernel_size=delta_net_cfg.conv_kernel_size,
-                sharding_config=delta_net_cfg.inner_attention.sharding_config,
+                sharding_config=vllm_inner_gdn_sharding_config(),
             )
+            # Same fields (and parameters) as the GDN config; VLLMGDN fuses the projections.
+            vllm_gdn_fields = {
+                field.name: getattr(delta_net_cfg, field.name)
+                for field in dataclasses.fields(delta_net_cfg)
+            }
+            vllm_gdn_fields["inner_attention"] = vllm_inner_gdn_cfg
             new_layer_cfg = dataclasses.replace(
-                new_layer_cfg,
-                attention=dataclasses.replace(
-                    delta_net_cfg,
-                    inner_attention=vllm_inner_gdn_cfg,
-                ),
+                new_layer_cfg, attention=VLLMGDN.Config(**vllm_gdn_fields)
             )
 
         elif isinstance(attention_cfg, KDA.Config):
@@ -327,6 +333,7 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
         after:   sharded: freed         unsharded: new weights (what CUDA graphs read)
 
     The unshard is explicit because CUDA graph replays skip FSDP's forward pre-hook.
+    Then refreshes the fused weights of the group's GDN layers (``VLLMGDN.refresh_fused_weights``).
     """
     from torch.distributed.fsdp._fully_shard._fsdp_param import free_storage
 
@@ -335,6 +342,19 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
         # TODO: replace this with FSDPModule._free_sharded_params()
         for sharded_data in _sharded_param_storages(module):
             free_storage(sharded_data)
+    # Each GDN layer owns A_log, so it is in `held`. The init loop calls this once per
+    # module of a group: skip layers an earlier call already refreshed and freed.
+    held = {
+        fsdp_param._module_info.module
+        for param_group in module._get_fsdp_state()._fsdp_param_groups
+        for fsdp_param in param_group.fsdp_params
+    }
+    for layer in held:
+        if (
+            isinstance(layer, GDN)
+            and layer.in_proj_q.weight.untyped_storage().size() > 0
+        ):
+            layer.refresh_fused_weights()
 
 
 @support_torch_compile(
@@ -461,11 +481,27 @@ class VLLMModelWrapper(Module):
                 self.model.state_dict(), pin_memory=True
             )
 
+        # vLLM's load_model caps max_split_size at 20 MiB: the allocator won't split
+        # a free block of 20 MiB or more. So the projections each GDN layer frees in
+        # this loop (e.g. 80 MiB at 27B TP2) fit none of the next layer's tensors,
+        # and with expandable segments the holes stay mapped (~1% of the KV cache).
+        # Lift the cap (PyTorch's default: none) for the loop, in GDN models only.
+        has_gdn = any(isinstance(module, GDN) for module in self.model.modules())
+        # TODO: drop this once vLLM's load_model lets the loader opt out of its 20 MiB cap.
+        # The binding is private; vLLM's _scoped_allocator_max_split uses the same one:
+        # https://github.com/vllm-project/vllm/blob/262eefc9f2ce6c4a04997757397e68b00b8de1f9/vllm/v1/worker/gpu_worker.py#L419-L446
+        allocator_settings = torch._C._accelerator_getAllocatorSettings()
+        if has_gdn:
+            torch._C._accelerator_setAllocatorSettings(
+                f"max_split_size_mb:{(2**64 - 1) // 2**20}"
+            )
         # Unshard the model here so vLLM performs its GPU memory profiling
         # based on the model's actual representation used during forward
         for module in self.model.modules():
             if isinstance(module, FSDPModule):
                 _unshard_and_free_sharded_params(module)
+        if has_gdn:
+            torch._C._accelerator_setAllocatorSettings(allocator_settings)
 
     def load_state_dict(self, state_dict: Mapping[str, Any]):
         """Copy new weights into `self.model`, allocating about one FSDP group's sharded buffers at a time.
