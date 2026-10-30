@@ -77,7 +77,7 @@ Design references:
 - CUDA-graph-compatible GraphPP RFC: https://github.com/pytorch/torchtitan/issues/3820
 
 ```python
-config.training.disable_cuda_graphs = True
+config.training.disable_accelerator_graphs = True
 config.parallelism.pipeline_parallel_degree = 2
 config.parallelism.num_pp_microbatches = 8
 config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
@@ -130,7 +130,7 @@ The graph-level CUDA graph and kernel annotation passes remain available in
 can apply them explicitly with `construct_cuda_graph_passes`. By default, CUDA
 graph capture is owned by the client around the complete forward/backward
 execution. Users can disable CUDA graphs with
-`config.training.disable_cuda_graphs = True`.
+`config.training.disable_accelerator_graphs = True`.
 
 ### Expert Parallel Overlap
 

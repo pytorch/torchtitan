@@ -19,11 +19,9 @@ from vllm.config import AttentionConfig
 from vllm.exceptions import VLLMClientError
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import GenerationEngine
@@ -42,6 +40,7 @@ from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
+    vllm_attention_backend,
 )
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.stat_logger import (
@@ -221,16 +220,6 @@ class VLLMEngine(GenerationEngine):
         seed: int | None,
     ) -> EngineArgs:
         """Build the vLLM ``EngineArgs`` (see ``GenerationEngine`` for the arguments)."""
-        attention = model.first_full_attention
-        if attention is None:
-            raise ValueError("No full attention layer found in the model spec.")
-        inner_attention_config = attention.inner_attention
-        if not isinstance(
-            inner_attention_config,
-            (VarlenInnerAttention.Config, FlexInnerAttention.Config),
-        ):
-            raise ValueError("Only varlen and flex attention backends are supported.")
-
         enable_ep = parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
@@ -259,13 +248,7 @@ class VLLMEngine(GenerationEngine):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=gpu_memory_limit,
             enforce_eager=self.config.cuda_graph.mode == "NONE",
-            attention_config=AttentionConfig(
-                backend=(
-                    AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(inner_attention_config, FlexInnerAttention.Config)
-                    else AttentionBackendEnum.CUSTOM
-                ),
-            ),
+            attention_config=AttentionConfig(backend=vllm_attention_backend(model)),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
             enable_cumem_allocator=False,

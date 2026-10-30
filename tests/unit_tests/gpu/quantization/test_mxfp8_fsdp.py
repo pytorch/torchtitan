@@ -20,9 +20,9 @@ pytest.importorskip("torchao")
 pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
 
 import torchtitan.quantization.mxfp8.tensor as mxfp8_tensor  # noqa: E402
-from torchtitan.distributed.cuda_graph import (  # noqa: E402
-    cuda_graph_teardown,
-    CUDAGraphWrapper,
+from torchtitan.distributed.accelerator_graph import (  # noqa: E402
+    accelerator_graph_teardown,
+    AcceleratorGraphWrapper,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import (  # noqa: E402
     data_parallel,
@@ -271,7 +271,7 @@ def _run_pp_cache_lifecycle(
         dist.destroy_process_group()
 
 
-def _run_cuda_graph_cache_lifecycle(
+def _run_accelerator_graph_cache_lifecycle(
     rank: int,
     world_size: int,
     port: int,
@@ -353,7 +353,7 @@ def _run_cuda_graph_cache_lifecycle(
             for tensor in weight_param._unsharded_inner_tensors
         )
 
-        graphed_step = CUDAGraphWrapper(
+        graphed_step = AcceleratorGraphWrapper(
             forward_backward,
             (input_MK,),
             static_input_indices=(0,),
@@ -392,7 +392,7 @@ def _run_cuda_graph_cache_lifecycle(
         )
     finally:
         mxfp8_tensor._quantize_mxfp8_weight = original_quantize_weight
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
         dist.destroy_process_group()
 
 
@@ -471,7 +471,7 @@ def _run_simple_fsdp(
     [
         _run_reshard_after_forward,
         _run_pp_cache_lifecycle,
-        _run_cuda_graph_cache_lifecycle,
+        _run_accelerator_graph_cache_lifecycle,
         _run_simple_fsdp,
     ],
     ids=[

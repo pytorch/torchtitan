@@ -157,7 +157,7 @@ class TestKVAllGatherVarlenInnerAttention(TestCase):
             )
 
     @torch.no_grad()
-    def test_cuda_graph_replays_with_new_document_boundaries(self) -> None:
+    def test_accelerator_graph_replays_with_new_document_boundaries(self) -> None:
         for head_tail in (False, True):
             torch.manual_seed(1)
             seq_len = 16

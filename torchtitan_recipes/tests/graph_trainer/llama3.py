@@ -41,7 +41,7 @@ def graph_trainer_llama3_debugmodel_sdc_replay() -> GraphTrainer.Config:
     config = graph_trainer_llama3_debugmodel()
     config.debug.deterministic = True
     config.debug.seed = 42
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.steps = 2
     config.sdc_replayer = SDCReplayer.Config()
     return config

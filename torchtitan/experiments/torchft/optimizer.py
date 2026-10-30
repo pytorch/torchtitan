@@ -36,12 +36,12 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         config: Config,
         *,
         model_parts: list[nn.Module],
-        enable_cuda_graph: bool = False,
+        enable_accelerator_graph: bool = False,
     ) -> None:
         super().__init__(
             config,
             model_parts=model_parts,
-            enable_cuda_graph=enable_cuda_graph,
+            enable_accelerator_graph=enable_accelerator_graph,
         )
 
         # Force to initialize the optimizer state so that `optim.step()`

@@ -180,7 +180,7 @@ def _qwen3_4b_dapo_math_config(
             ),
             # A minimum factor of 1 keeps the learning rate constant.
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
                 max_context_length=max_total_tokens,
             ),
@@ -333,7 +333,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
                 max_context_length=max_total_tokens,
                 dtype="float32",
@@ -481,7 +481,7 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 # Pack several rollouts per microbatch (a multiple of
                 # max_total_tokens).
                 num_tokens_per_microbatch_per_dp_rank=4 * max_total_tokens,
