@@ -171,8 +171,12 @@ class TorchTitanLinearAttentionMetadataBuilder(
             else (0, 0, 0, 0)
         )
         # If every request is processing one token, use the single-token
-        # (decode-style) path.
-        single_token = m.max_query_len == 1
+        # (decode-style) path. Past max_num_seqs tokens there is no decode graph, so
+        # a one-token step padded that far replays the mixed-batch graph: build it as
+        # the packed step, so update_block_table restages its offsets too.
+        single_token = (
+            m.max_query_len == 1 and m.num_actual_tokens <= self.num_reqs_capacity
+        )
         return TorchTitanLinearAttentionMetadata(
             execution_path=(
                 LinearAttentionExecutionPath.SINGLE_TOKEN
