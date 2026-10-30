@@ -26,8 +26,6 @@ from torchtitan_recipes.tests.graph_trainer.qwen3 import (
 )
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
-    deepseek_v3_debugmodel_alltoall,
-    deepseek_v3_debugmodel_deepep,
     deepseek_v3_debugmodel_hybridep,
     deepseek_v3_debugmodel_mtp,
     deepseek_v3_debugmodel_mxfp8,
@@ -92,8 +90,6 @@ DebugConfigFactory = Callable[..., Trainer.Config]
 
 _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     deepseek_v3_debugmodel,
-    deepseek_v3_debugmodel_alltoall,
-    deepseek_v3_debugmodel_deepep,
     deepseek_v3_debugmodel_hybridep,
     deepseek_v3_debugmodel_mtp,
     deepseek_v3_debugmodel_mxfp8,

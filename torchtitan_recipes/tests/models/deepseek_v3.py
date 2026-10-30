@@ -30,10 +30,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.common.moe.token_dispatcher import (
-    DeepEPTokenDispatcher,
-    HybridEPTokenDispatcher,
-)
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 
 from torchtitan.models.deepseek_v3 import build_model_config
 from torchtitan.models.deepseek_v3.mtp import MTPCrossEntropyLoss
@@ -155,41 +152,6 @@ def deepseek_v3_debugmodel_mxfp8(
         ],
     )
     return config
-
-
-def deepseek_v3_debugmodel_alltoall(
-    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> Trainer.Config:
-    """DeepSeek V3 debug pretraining with the stock all-to-all dispatcher, EP=2."""
-    return deepseek_v3_debugmodel(
-        seq_len=seq_len,
-        parallelism=ParallelismConfig(expert_parallel_degree=2),
-    )
-
-
-def deepseek_v3_debugmodel_deepep(
-    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> Trainer.Config:
-    """DeepSeek V3 debug pretraining with the DeepEP v2 backend (compact path), EP=2; needs deep_ep v2."""
-    config = deepseek_v3_debugmodel(
-        seq_len=seq_len, parallelism=ParallelismConfig(expert_parallel_degree=2)
-    )
-    return apply_transforms(
-        config,
-        [
-            TokenDispatcherTransform(
-                dispatcher=DeepEPTokenDispatcher,
-                # Each EP rank dispatches one CP x TP shard of a microbatch.
-                num_max_tokens_per_rank=(
-                    config.training.num_tokens_per_microbatch_per_dp_rank
-                    // (
-                        config.parallelism.context_parallel_degree
-                        * config.parallelism.tensor_parallel_degree
-                    )
-                ),
-            )
-        ],
-    )
 
 
 def deepseek_v3_debugmodel_hybridep(
