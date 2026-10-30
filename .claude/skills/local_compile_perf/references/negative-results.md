@@ -16,3 +16,4 @@ Check these before spending time on them; each was measured, not guessed. Each w
 - **Making a rewrite the single path because it won under compile:** check eager with inputs requiring grad; one "single path" verdict reversed (+5.75 ms eager) once the harness stopped detaching inputs.
 - **Wrapping compiled regions for SAC** (`wrap_inductor_compiled_regions`): crashed MoE models after recompiles (SAC storage keyed per cache entry).
 - **Block compile as a deliverable:** a measurement baseline only (not a ceiling: rewrites plus regions beat it); production configs use regions or CUDA graphs.
+- **`triton.decompose_sort_ops=True` for top-8 of 256:** slower than ATen `topk` (747 vs 579 µs, Qwen3.5 router at 16k). Masked argmax rounds win instead (patterns: router).
