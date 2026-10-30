@@ -15,8 +15,9 @@ from typing import Any, cast
 
 import torch
 from torch.distributed.fsdp import FSDPModule
-from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining._utils import flatten_args
+
+from torchtitan.distributed.pipeline_parallel import TorchTitanPipelineStage
 
 from .cache import PPRankLocalCache
 from .layout import BlockLayoutTables
@@ -84,7 +85,7 @@ def _split_stack_grad(
     return grad_delta, deposits
 
 
-class AttnResPipelineStage(PipelineStage):
+class AttnResPipelineStage(TorchTitanPipelineStage):
     """``PipelineStage`` whose hops carry the block residual's delta."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:

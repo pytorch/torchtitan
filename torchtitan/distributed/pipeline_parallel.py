@@ -45,7 +45,44 @@ __all__ = [
     "prepare_pipeline_schedule_for_accelerator_graph",
     "pipeline_llm",
     "pipeline_with_first_last_stage_modules",
+    "TorchTitanPipelineStage",
 ]
+
+
+class TorchTitanPipelineStage(PipelineStage):
+    """Pipeline stage with an opt-in cache release before its first training backward."""
+
+    def __init__(
+        self,
+        *args: Any,
+        empty_cache_before_first_backward: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.empty_cache_before_first_backward = empty_cache_before_first_backward
+        self._emptied_cache_before_first_backward = False
+
+    def backward_one_chunk(
+        self,
+        bwd_chunk_id: int,
+        loss: torch.Tensor | None = None,
+        full_backward: bool = True,
+        last_backward: bool = False,
+    ) -> None:
+        """Run backward after the optional one-time allocator cache release."""
+        if (
+            self.has_backward
+            and self.empty_cache_before_first_backward
+            and not self._emptied_cache_before_first_backward
+        ):
+            torch.get_device_module(self.device).empty_cache()
+            self._emptied_cache_before_first_backward = True
+        return super().backward_one_chunk(
+            bwd_chunk_id,
+            loss=loss,
+            full_backward=full_backward,
+            last_backward=last_backward,
+        )
 
 
 def _build_get_mesh_callback(
@@ -133,6 +170,9 @@ def pipeline_llm(
         module_names_per_stage,
         get_mesh=get_mesh_cb,
         stage_io=stage_io,
+        empty_cache_before_first_backward=(
+            parallelism.pipeline_parallel_empty_cache_before_first_backward
+        ),
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -841,6 +881,7 @@ def _pipeline_module_split(
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
     stage_io: _DecoderStageIO | None = None,
+    empty_cache_before_first_backward: bool = False,
 ) -> tuple[list[PipelineStage], list[BaseModel]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -867,6 +908,8 @@ def _pipeline_module_split(
         get_mesh: Callback used to reconstruct DTensor inputs after PP receives.
         stage_io: Static tensors describing decoder stage boundaries. Fake PP
             requires these because it cannot exchange metadata dynamically.
+        empty_cache_before_first_backward: Release cached device memory once
+            before the first training backward action of each local stage.
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -890,13 +933,14 @@ def _pipeline_module_split(
     for stage_idx in pp_rank_to_stage_indices:
         module_names = module_names_per_stage[stage_idx]
         model_chunk = _split_module(whole_model, module_names)
-        stage = PipelineStage(
+        stage = TorchTitanPipelineStage(
             model_chunk,
             stage_idx,
             num_stages,
             device,
             group=pp_mesh.get_group("pp"),
             get_mesh=get_mesh,
+            empty_cache_before_first_backward=empty_cache_before_first_backward,
             **(
                 _static_stage_metadata(stage_io, stage_idx, num_stages)
                 if stage_io is not None

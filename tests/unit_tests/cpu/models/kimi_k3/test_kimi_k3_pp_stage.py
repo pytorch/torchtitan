@@ -8,15 +8,16 @@
 the swap of core's stages for AttnRes ones."""
 
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
-from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import Schedule1F1B, ScheduleInterleaved1F1B
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.distributed.pipeline_parallel import TorchTitanPipelineStage
 
 from torchtitan.models.kimi_k3.pipeline_parallel import _swap_in_attn_res_stages
 from torchtitan.models.kimi_k3.pipeline_parallel.cache import PPRankLocalCache
@@ -89,11 +90,17 @@ class TestForwardOnly(unittest.TestCase):
     def test_eval_backward_routes_nothing_and_forgets_the_chunk(self):
         stage = AttnResPipelineStage.__new__(AttnResPipelineStage)
         stage._has_backward = False
+        stage.empty_cache_before_first_backward = True
+        stage._emptied_cache_before_first_backward = False
+        stage.device = torch.device("cpu")
         stage._forward_chunk_states = {0: object()}
         stage.bwd_cache = {}
         stage._order = {0: [0, 1]}
         stage._delta_in = {0: [1]}
-        AttnResPipelineStage.backward_one_chunk(stage, 0)
+        with patch("torch.get_device_module") as get_device_module:
+            AttnResPipelineStage.backward_one_chunk(stage, 0)
+        get_device_module.assert_not_called()
+        self.assertFalse(stage._emptied_cache_before_first_backward)
         self.assertEqual(
             (stage._forward_chunk_states, stage._order, stage._delta_in),
             ({}, {}, {}),
@@ -120,16 +127,19 @@ class TestStageSwap(DTensorTestBase):
         return 1
 
     @staticmethod
-    def _stage(index: int, num_stages: int) -> PipelineStage:
-        return PipelineStage(
+    def _stage(index: int, num_stages: int) -> TorchTitanPipelineStage:
+        return TorchTitanPipelineStage(
             nn.Linear(2, 2),
             index,
             num_stages,
             torch.device("cpu"),
             get_mesh=_get_mesh,
+            empty_cache_before_first_backward=True,
         )
 
-    def _assert_rebuilt(self, old: PipelineStage, new: AttnResPipelineStage) -> None:
+    def _assert_rebuilt(
+        self, old: TorchTitanPipelineStage, new: AttnResPipelineStage
+    ) -> None:
         self.assertIsInstance(new, AttnResPipelineStage)
         self.assertIsNot(new, old)
         # The same module object, so the model parts core returned stay valid.
@@ -141,6 +151,7 @@ class TestStageSwap(DTensorTestBase):
         self.assertIs(new.group, old.group)
         self.assertIs(new._mesh_cache._get_mesh_cb, old._mesh_cache._get_mesh_cb)
         self.assertEqual(new.stage_index_to_group_rank, old.stage_index_to_group_rank)
+        self.assertTrue(new.empty_cache_before_first_backward)
 
     @with_comms
     def test_single_stage_schedule(self):
@@ -153,7 +164,7 @@ class TestStageSwap(DTensorTestBase):
     @with_comms
     def test_multi_stage_schedule(self):
         old = [self._stage(index, 2) for index in range(2)]
-        schedule = ScheduleInterleaved1F1B(old, n_microbatches=2, loss_fn=_loss)
+        schedule = ScheduleInterleaved1F1B([*old], n_microbatches=2, loss_fn=_loss)
         new = _swap_in_attn_res_stages(schedule)
         self.assertEqual(len(new), 2)
         for old_stage, new_stage in zip(old, new, strict=True):

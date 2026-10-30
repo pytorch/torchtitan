@@ -423,6 +423,11 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
+            if self.parallelism.pipeline_parallel_empty_cache_before_first_backward:
+                raise ValueError(
+                    "GraphTrainer does not support "
+                    "pipeline_parallel_empty_cache_before_first_backward."
+                )
             if self.training.accelerator_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."

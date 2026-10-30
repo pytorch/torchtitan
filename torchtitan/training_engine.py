@@ -972,6 +972,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             current_step=current_step,
         )
         self.num_completed_steps = current_step
+        if self.config.training.empty_device_cache_after_step:
+            utils.device_module.empty_cache()
         return grad_norm
 
     def state_dict(self) -> dict[str, Any]:
