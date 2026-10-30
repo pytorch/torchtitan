@@ -1,0 +1,3 @@
+== python kb_maybe_mark_dynamic_traced.py
+unguarded: AssertionError: Attempt to trace forbidden callable <function maybe_mark_dynamic at 0xfadb08bbb380>
+guarded by is_compiling(): compiled fine

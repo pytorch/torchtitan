@@ -1,0 +1,10 @@
+== python ask01_grouped_mm_small_groups.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+w13 T=   1 rows/expert= 0.03:    24.8 us, roofline    4.2 us ( 17%)
+w13 T=   8 rows/expert= 0.25:    68.6 us, roofline   30.4 us ( 44%)
+w13 T=  34 rows/expert= 1.06:   151.7 us, roofline   91.8 us ( 60%)
+w13 T= 128 rows/expert= 4.00:   209.9 us, roofline  134.2 us ( 64%)
+w2 T=   1 rows/expert= 0.03:    21.3 us, roofline    2.1 us ( 10%)
+w2 T=   8 rows/expert= 0.25:    41.3 us, roofline   15.2 us ( 37%)
+w2 T=  34 rows/expert= 1.06:    93.7 us, roofline   45.9 us ( 49%)
+w2 T= 128 rows/expert= 4.00:   121.3 us, roofline   67.1 us ( 55%)
