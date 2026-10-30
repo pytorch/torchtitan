@@ -235,8 +235,8 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     DeepEP v2 runs multi-node on H100 (NVLink intra-node + IB/RoCE inter-node), so unlike
     a HybridEP generator (whose all-to-all is intra-node only) this generator may span
     nodes. Qwen3-30B-A3B has 4 KV heads, so the generator TP must be <=4. The trainer
-    keeps the compact (host-synced, backward-able) DeepEP path; the generator's model
-    uses the CUDA-graph-compatible EXPAND layout. Applies the same ``fused_swiglu``
+    keeps the host-synced, backward-able DeepEP dispatch; the generator's model dispatches
+    without a host sync, so CUDA graphs can capture it. Applies the same ``fused_swiglu``
     performance override as ``rl_grpo_qwen3_30b_a3b_varlen_perf`` to both models.
     """
     seq_len = 4096
