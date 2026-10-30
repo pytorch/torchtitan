@@ -197,17 +197,23 @@ def _check_inference_operands(engine) -> None:
 
     # Reuse the trainer weight sync, which loads through the generator's
     # weight-load path.
-    _sync_trainer_weights_to_vllm(SimpleNamespace(state_dict=lambda: weights_a), engine)
+    _sync_trainer_weights_to_vllm(
+        SimpleNamespace(state_dict=lambda: weights_a), engine, direct=False
+    )
     contents_a = [(q.clone(), s.clone()) for q, s in _operands(experts)]
     logprobs_a = _generate(engine, prompt_ids, "weights_a")
 
-    _sync_trainer_weights_to_vllm(SimpleNamespace(state_dict=lambda: weights_b), engine)
+    _sync_trainer_weights_to_vllm(
+        SimpleNamespace(state_dict=lambda: weights_b), engine, direct=False
+    )
     for (q, s), (q_a, s_a) in zip(_operands(experts), contents_a, strict=True):
         assert not torch.equal(q, q_a)
         assert not torch.equal(s, s_a)
     logprobs_b = _generate(engine, prompt_ids, "weights_b")
 
-    _sync_trainer_weights_to_vllm(SimpleNamespace(state_dict=lambda: weights_a), engine)
+    _sync_trainer_weights_to_vllm(
+        SimpleNamespace(state_dict=lambda: weights_a), engine, direct=False
+    )
     logprobs_a_again = _generate(engine, prompt_ids, "weights_a_again")
 
     for (q, s), (q_0, s_0), ptrs in zip(
