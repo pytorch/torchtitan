@@ -6,7 +6,7 @@
 
 # Shape suffixes: T = packed tokens.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast, Self
 
 import spmd_types as spmd
@@ -85,7 +85,8 @@ def _get_attention_metadata(
         max_context_length=seq_len,
     )
     cp_size = spmd_mesh_size(MeshAxisName.CP)
-    return metadata._replace(
+    return replace(
+        metadata,
         cu_seq_k=metadata.cu_seq_k * cp_size,
         max_k=metadata.max_k * cp_size,
         window_size=(-1, -1),

@@ -13,12 +13,13 @@
 #   K = query/key head dimension, V = value head dimension.
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
+from dataclasses import dataclass, field, replace
+from typing import Any, ClassVar, Generic, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
+from torch.export import register_dataclass
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -39,6 +40,7 @@ from torch.nn.attention.varlen import (
     AuxRequest as VarlenAuxRequest,
     varlen_attn as _varlen_attn,
 )
+from typing_extensions import TypeVar
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import compile
@@ -294,7 +296,8 @@ class GQAttention(Attention):
         return self.wo(out_TD)
 
 
-class VarlenAttentionMetadata(NamedTuple):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VarlenAttentionMetadata:
     """Packed document offsets and attention window limits."""
 
     cu_seq_q: torch.Tensor
@@ -330,7 +333,15 @@ class VarlenAttentionMetadata(NamedTuple):
             spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
 
 
-class VarlenInnerAttention(InnerAttention):
+# Register as a pytree so CUDA Graph input updates can copy document offsets.
+register_dataclass(VarlenAttentionMetadata)
+
+_VarlenMetadataT = TypeVar(
+    "_VarlenMetadataT", bound=VarlenAttentionMetadata, default=VarlenAttentionMetadata
+)
+
+
+class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
         sdpa_backends: list[SDPBackend] = field(
@@ -382,6 +393,47 @@ class VarlenInnerAttention(InnerAttention):
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
+        attention_metadata: _VarlenMetadataT,
+        scale: float | None = None,
+        out_transform: (
+            Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
+        ) = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Run varlen attention with this module's metadata type.
+
+        Args:
+            q_THK: Q with shape ``[T, H, K]``.
+            k_THK: K with shape ``[T, H, K]``.
+            v_THV: V with shape ``[T, H, V]``.
+            attention_metadata: Document offsets, length bounds, and window.
+            scale: Softmax scale. ``None`` uses the kernel default.
+            out_transform: Optional function applied to the output and LSE.
+            **kwargs: Additional attention arguments, including ``enable_gqa``.
+
+        Returns:
+            Attention output, optionally processed by ``out_transform``.
+        """
+        assert isinstance(attention_metadata, VarlenAttentionMetadata), (
+            "Varlen attention requires VarlenAttentionMetadata, "
+            f"but got {type(attention_metadata).__name__}."
+        )
+        return self._forward_varlen(
+            q_THK,
+            k_THK,
+            v_THV,
+            attention_metadata=attention_metadata,
+            scale=scale,
+            out_transform=out_transform,
+            **kwargs,
+        )
+
+    def _forward_varlen(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        *,
         attention_metadata: VarlenAttentionMetadata,
         scale: float | None = None,
         out_transform: (
@@ -389,10 +441,7 @@ class VarlenInnerAttention(InnerAttention):
         ) = None,
         **kwargs,
     ) -> torch.Tensor:
-        assert isinstance(
-            attention_metadata, VarlenAttentionMetadata
-        ), f"attention_metadata must be instance of VarlenAttentionMetadata but got {type(attention_metadata)}"
-
+        """Run the varlen kernel with query and K/V document offsets."""
         cu_seq_q = attention_metadata.cu_seq_q
         cu_seq_k = attention_metadata.cu_seq_k
         max_q = attention_metadata.max_q
@@ -451,7 +500,7 @@ class VarlenInnerAttention(InnerAttention):
         return out_transform(out_THV, lse_TH)
 
 
-class SlidingWindowVarlenInnerAttention(VarlenInnerAttention):
+class SlidingWindowVarlenInnerAttention(VarlenInnerAttention[_VarlenMetadataT]):
     """Varlen attention with a causal sliding window."""
 
     @dataclass(kw_only=True, slots=True)
@@ -490,7 +539,7 @@ class SlidingWindowVarlenInnerAttention(VarlenInnerAttention):
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
-            return metadata._replace(window_size=(self.sliding_window_size - 1, 0))
+            return replace(metadata, window_size=(self.sliding_window_size - 1, 0))
 
 
 FlexAttentionMetadata: TypeAlias = BlockMask
