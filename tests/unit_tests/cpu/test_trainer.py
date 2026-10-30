@@ -1079,6 +1079,44 @@ def no_registered_aux_losses():
     AuxLoss._group_counts.update(saved_group_counts)
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_train_preserves_oom_for_profiler_close(wrapped: bool) -> None:
+    oom = torch.OutOfMemoryError("test OOM")
+    failure = RuntimeError("pipeline failure") if wrapped else oom
+    if wrapped:
+        failure.__cause__ = oom
+    profiler = Profiler(Profiler.Config())
+    memory_profiler = MagicMock()
+    profiler.memory_profiler = memory_profiler
+    engine = SimpleNamespace(
+        num_completed_steps=0,
+        load_checkpoint=MagicMock(),
+        start_profiler=MagicMock(),
+        profiler=profiler,
+    )
+    engine.close_profiler = partial(TrainingEngine.close_profiler, engine)
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(),
+            engine=engine,
+            dataloader=object(),
+            microbatch_generator=MagicMock(return_value=iter(())),
+            should_continue_training=MagicMock(return_value=True),
+            train_step=MagicMock(side_effect=failure),
+        ),
+    )
+
+    with pytest.raises(type(failure), match=str(failure)):
+        Trainer.train.__wrapped__(trainer)
+
+    memory_profiler.step.assert_called_once_with(exit_ctx=True)
+    assert profiler.memory_profiler is None
+    assert not hasattr(engine, "profiler")
+    engine.close_profiler()
+    memory_profiler.step.assert_called_once_with(exit_ctx=True)
+
+
 @pytest.mark.parametrize(
     ("loss_token_counts", "routing_token_counts"),
     (

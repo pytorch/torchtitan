@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -1005,9 +1006,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.profiler.step()
 
     def close_profiler(self) -> None:
-        """Close the profiler if it was started."""
+        """Close the profiler and preserve any active failure context."""
         if hasattr(self, "profiler"):
-            self.profiler.__exit__(None, None, None)
+            self.profiler.__exit__(*sys.exc_info())
             del self.profiler
 
     def close(self) -> None:
