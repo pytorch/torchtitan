@@ -175,6 +175,12 @@ python -m torchtitan.rl.train \
   --output-dir outputs/rl/my_experiment
 ```
 
+On a single host, set `CUDA_VISIBLE_DEVICES` on this command to select physical
+GPUs. The trainer receives the first GPUs in the list, followed by the
+generators. For a recipe with two trainer and two generator GPUs, setting
+`CUDA_VISIBLE_DEVICES=4,5,6,7` assigns GPUs 4-5 to training and 6-7 to
+generation. Without the variable, allocation starts at GPU 0 as before.
+
 ## Experiments
 
 ### DAPO Math: reference experiment
