@@ -25,7 +25,7 @@ from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_c
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
-from torchtitan_recipes.tests.models.kimi_k3 import _dist_muon_optimizer
+from torchtitan_recipes.models.kimi_k3 import dist_muon_optimizer
 
 
 def _small_model_config(*, attn_backend: str = "flex") -> KimiK3Model.Config:
@@ -163,7 +163,7 @@ class TestKimiK3(unittest.TestCase):
     def test_dist_muon_config_uses_native_grouped_linear_fqns(self):
         """DistMuon buckets reference the native routed W13 and W2 parameters."""
         model_config = _small_model_config()
-        optimizer = _dist_muon_optimizer(
+        optimizer = dist_muon_optimizer(
             model_config,
             muon_lr=1e-3,
             adamw_lr=1e-3,
