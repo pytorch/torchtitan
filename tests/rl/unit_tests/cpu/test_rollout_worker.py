@@ -10,11 +10,14 @@ import asyncio
 import random
 from types import SimpleNamespace
 
+import pytest
 from renderers import ParsedResponse, Qwen3RendererConfig
 
 from torchtitan.components.renderer import from_renderers
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.rl.generator.generation_server import GenerationServer
+from torchtitan.rl.generator.http_client import GeneratorClient
 
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout import RolloutGroup, RolloutStatus
@@ -24,6 +27,7 @@ from torchtitan.rl.rollout.rollouter import RolloutWorker
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.routing.inter_generator import GeneratorEndpoint
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 
@@ -281,6 +285,59 @@ def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage() -> None:
     assert [rollout.advantage for rollout in scored] == [-0.5, 0.5]
 
 
+def test_cancelled_group_waits_for_every_sibling_release() -> None:
+    """A cancelled group returns only after each sibling released its session: the controller
+    releases the group next, and no sibling's router call may still be in flight."""
+
+    async def run() -> None:
+        started = asyncio.Semaphore(0)
+
+        async def generate_fn(prompt_token_ids, **kwargs) -> Completion:
+            started.release()
+            await asyncio.Event().wait()
+
+        # Router round trips of different lengths: the slow one must finish too.
+        delays = iter([0.01, 0.3])
+        released = []
+
+        async def release_session_fn(*, routing_session_id: str) -> None:
+            await asyncio.sleep(next(delays))
+            released.append(routing_session_id)
+
+        worker = _CustomWorker(
+            SimpleNamespace(
+                custom_setting="custom",
+                rubric=_Config(_Rubric()),
+                message_env=_MessageEnvConfig(),
+                token_env=_TokenEnvConfig(),
+                advantage=_Config(_AdvantageEstimator()),
+            )
+        )
+        await worker.setup_async(
+            tokenizer_config=HuggingFaceTokenizer.Config(),
+            renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
+            hf_assets_path="tests/assets/tokenizer",
+        )
+        group = asyncio.create_task(
+            worker.run_group(
+                generate_fn=generate_fn,
+                release_session_fn=release_session_fn,
+                sample="sample",
+                group_id=7,
+                group_size=2,
+                sampling=SamplingConfig(),
+            )
+        )
+        for _ in range(2):
+            await asyncio.wait_for(started.acquire(), timeout=10)
+        group.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await group
+        assert sorted(released) == ["group=7/rollout=0", "group=7/rollout=1"]
+
+    asyncio.run(run())
+
+
 def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
     # TokenEnv returns each prompt as a delta. Delta prompts must pack into the same samples as full
     # prompts: a turn joins the last sample iff its prompt extends the previous turn's prompt + completion.
@@ -342,5 +399,92 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             assert [
                 (s.rollout_id.turn_id, s.token_ids.tolist()) for s in samples
             ] == expected
+
+    asyncio.run(run())
+
+
+def _bare_worker() -> RolloutWorker:
+    return RolloutWorker(
+        SimpleNamespace(
+            rubric=_Config(None),
+            message_env=None,
+            token_env=None,
+            advantage=_Config(None),
+        )
+    )
+
+
+def test_failing_session_release_does_not_fail_the_rollout() -> None:
+    async def release_session_fn(**kwargs) -> None:
+        raise RuntimeError("router unreachable")
+
+    rollout = asyncio.run(
+        _bare_worker()._run_single_rollout(
+            generate_fn=_GenerateFn(),
+            release_session_fn=release_session_fn,
+            env=_TokenEnv(),
+            sampling=SamplingConfig(),
+            group_id=7,
+            rollout_id=0,
+        )
+    )
+
+    assert rollout.status == RolloutStatus.COMPLETED
+
+
+def test_stopped_rollout_cancels_its_call_and_releases_lease_and_session() -> None:
+    """A rollout cancelled mid-call closes its HTTP call (the server cancels the handler), gives the
+    lease back and releases its routing session."""
+
+    async def run() -> None:
+        started, server_call_cancelled = asyncio.Event(), asyncio.Event()
+
+        async def generate(prompt_token_ids, **kwargs) -> Completion:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                server_call_cancelled.set()
+                raise
+
+        server = GenerationServer(generate=generate, max_context_length=64)
+        await server.start()
+        leases, released = [], []
+
+        async def acquire(session_id, *, group_id):
+            leases.append(("acquire", group_id))
+            return GeneratorEndpoint(index=0, url=server.url)
+
+        async def release(index, *, group_id):
+            leases.append(("release", group_id))
+
+        async def release_session_fn(**kwargs) -> None:
+            released.append(kwargs)
+
+        router = SimpleNamespace(
+            acquire=SimpleNamespace(call_one=acquire),
+            release=SimpleNamespace(call_one=release),
+        )
+        try:
+            rollout = asyncio.create_task(
+                _bare_worker()._run_single_rollout(
+                    generate_fn=GeneratorClient(router=router),
+                    release_session_fn=release_session_fn,
+                    env=_TokenEnv(),
+                    sampling=SamplingConfig(stop_token_ids=[99]),
+                    group_id=7,
+                    rollout_id=0,
+                )
+            )
+            await asyncio.wait_for(started.wait(), timeout=10)
+            rollout.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await rollout
+            await asyncio.wait_for(server_call_cancelled.wait(), timeout=10)
+        finally:
+            await server.close()
+
+        assert leases == [("acquire", 7), ("release", 7)]
+        assert released == [{"routing_session_id": "group=7/rollout=0"}]
 
     asyncio.run(run())
