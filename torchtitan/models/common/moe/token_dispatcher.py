@@ -15,7 +15,7 @@ from torch.distributed._functional_collectives import all_to_all_single
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_group
 from torchtitan.models.base.module import Module
-from torchtitan.ops.scatter_add import deterministic_scatter_add
+from torchtitan.ops.scatter_add import score_and_scatter_add
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -145,31 +145,11 @@ class LocalTokenDispatcher(Module):
         """
         # The scatter-add reads the expert outputs with bare ops.
         remat.recompute_needs_tensor(routed_output_RD)
-        return self._score_and_scatter_add(
+        return score_and_scatter_add(
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
             metadata.token_indices_experts_sorted_N,
-            x_TD,
-        )
-
-    def _score_and_scatter_add(
-        self,
-        routed_output_ND: torch.Tensor,
-        topk_scores_N: torch.Tensor,
-        token_indices_N: torch.Tensor,
-        x_TD: torch.Tensor,
-    ) -> torch.Tensor:
-        """Weight expert-sorted outputs by their router scores and sum them per token."""
-        # Type promotion computes the product in float32 without materializing a
-        # float32 copy of the routed output, which the multiply would save for
-        # backward (twice the bytes of the routed output itself).
-        routed_output_ND = (
-            routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
-        ).to(routed_output_ND.dtype)
-        return deterministic_scatter_add(
-            torch.zeros_like(x_TD),
-            token_indices_N.reshape(-1, 1).expand(-1, x_TD.shape[-1]),
-            routed_output_ND,
+            x_TD.shape[0],
         )
 
 
@@ -642,11 +622,11 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD = spmd.reinterpret_mesh(
                 routed_output_RD, spmd.current_mesh()
             )
-        return self._score_and_scatter_add(
+        return score_and_scatter_add(
             routed_output_RD,
             topk_scores_experts_sorted_N,
             token_indices_experts_sorted_N,
-            x_TD,
+            x_TD.shape[0],
         )
 
 
@@ -741,11 +721,11 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             routed_output_RD, metadata.input_shape, metadata.permuted_indices
         )
 
-        return self._score_and_scatter_add(
+        return score_and_scatter_add(
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
             metadata.token_indices_experts_sorted_N,
-            x_TD,
+            x_TD.shape[0],
         )
 
     def _permute(
