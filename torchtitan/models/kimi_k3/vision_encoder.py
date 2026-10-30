@@ -17,10 +17,10 @@ from dataclasses import dataclass, field
 import torch
 
 from torchtitan.models.base.module import Module
-
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
-from torchtitan.models.kimi_k2_7.vision_encoder import MoonViTEncoder
+
+from .vision_cp import MoonViTCPEncoder
 
 
 class KimiK3VisionProjector(Module):
@@ -45,9 +45,9 @@ class KimiK3VisionProjector(Module):
         return self.post_norm(projected_MO)
 
 
-class KimiK3VisionEncoder(MoonViTEncoder):
+class KimiK3VisionEncoder(MoonViTCPEncoder):
     @dataclass(kw_only=True, slots=True)
-    class Config(MoonViTEncoder.Config):
+    class Config(MoonViTCPEncoder.Config):
         patch_size: int
         in_channels: int
         merge_kernel_size: tuple[int, int]  # pyrefly: ignore [bad-override]
