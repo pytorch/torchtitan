@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 import torch
 
-from torchtitan.rl.generator.vllm import gdn
+from torchtitan.rl.generator.vllm import gdn, linear_attention
 from torchtitan.rl.generator.vllm.linear_attention import (
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionMetadata,
@@ -24,7 +24,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import ForwardContext, override_forward_context
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -68,6 +68,26 @@ def test_gdn_supports_eager_and_full_decode_only_modes(graph_mode):
         else CUDAGraphMode.NONE
     )
     assert (decode_mode, prefill_mode) == (expected_decode, CUDAGraphMode.NONE)
+
+
+@pytest.mark.parametrize(
+    "data_parallel_size,batch_invariant,expected",
+    [
+        (2, False, AttentionCGSupport.ALWAYS),
+        (2, True, AttentionCGSupport.UNIFORM_BATCH),
+        (1, True, AttentionCGSupport.ALWAYS),
+    ],
+)
+def test_dp_support_level(monkeypatch, data_parallel_size, batch_invariant, expected):
+    config = VllmConfig()
+    config.parallel_config.data_parallel_size = data_parallel_size
+    monkeypatch.setattr(
+        linear_attention, "is_in_batch_invariant_mode", lambda: batch_invariant
+    )
+    support = TorchTitanLinearAttentionMetadataBuilder.get_cudagraph_support(
+        config, None
+    )
+    assert support == expected
 
 
 def test_full_metadata_and_native_dispatch_variants():
