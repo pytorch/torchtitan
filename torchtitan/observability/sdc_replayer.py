@@ -388,9 +388,10 @@ class SDCReplayer(Configurable):
         """Capture tensor hashes and exact RNG states after one execution.
 
         Tensor digests remain on the loss device for batched comparison. Signature
-        names identify the first differing loss, RNG state, buffer, or gradient
-        only when a mismatch is detected. Small RNG states are compared exactly:
-        the order-insensitive tensor hash can miss changes to RNG counters.
+        names identify the first differing loss, buffer, gradient, or RNG state
+        only when a mismatch is detected. RNG states are compared exactly
+        because the XOR-reduced tensor hash cancels the paired counter updates
+        of a CPU draw (one torch.rand(1) collides about half the time).
         """
         schema: list[tuple[str, tuple[int, ...], str, str]] = []
         digests: list[torch.Tensor] = []
@@ -405,14 +406,12 @@ class SDCReplayer(Configurable):
 
         add_tensor("loss", loss)
         state: list[tuple[str, Any]] = [
-            ("rng:cpu", bytes(torch.get_rng_state().tolist()))
+            ("rng:cpu", torch.get_rng_state().numpy().tobytes())
         ]
         accelerator_rng_states = _accelerator_rng_states(self._device)
         if accelerator_rng_states is not None:
             for index, rng_state in enumerate(accelerator_rng_states):
-                state.append(
-                    (f"rng:accelerator:{index}", bytes(rng_state.cpu().tolist()))
-                )
+                state.append((f"rng:accelerator:{index}", rng_state.numpy().tobytes()))
 
         seen_buffers: set[tuple[int, str]] = set()
         for module_index, root in enumerate(self._modules):

@@ -160,40 +160,17 @@ def test_replay_mismatch_is_fatal():
     ),
 )
 def test_replay_detects_semantic_state_mismatch(corruption, expected):
-    module = _BufferModule()
-    replayer = SDCReplayer(
-        SDCReplayer.Config(),
-        modules=[module],
-        device=torch.device("cpu"),
-    )
-    calls = 0
-
-    def execute():
-        nonlocal calls
-        calls += 1
-        loss = module.weight.square().sum()
-        loss.backward()
-        if calls == 2:
-            if corruption == "buffer":
-                module.counter.add_(1)
-            elif corruption == "cpu_rng":
-                torch.rand(1)
-            elif corruption == "python_rng":
-                random.random()
-        return loss
-
-    with pytest.raises(SDCReplayMismatch, match=expected):
-        replayer.run_fwd_bwd(execute, step=9, get_loss=lambda loss: loss)
-
-
-@pytest.mark.parametrize("prior_draws", [0, 1, 2, 3, 4, 623, 624, 625])
-def test_replay_detects_cpu_rng_advancement_after_prior_draws(prior_draws):
     with torch.random.fork_rng(devices=[]):
+        # Start from an RNG position where one extra torch.rand(1) leaves
+        # torch.hash_tensor of the CPU RNG state unchanged: the draw's two
+        # counter updates cancel under XOR.
         torch.manual_seed(0)
-        torch.rand(prior_draws)
+        torch.rand(2)
         module = _BufferModule()
         replayer = SDCReplayer(
-            SDCReplayer.Config(), modules=[module], device=torch.device("cpu")
+            SDCReplayer.Config(),
+            modules=[module],
+            device=torch.device("cpu"),
         )
         calls = 0
 
@@ -203,10 +180,15 @@ def test_replay_detects_cpu_rng_advancement_after_prior_draws(prior_draws):
             loss = module.weight.square().sum()
             loss.backward()
             if calls == 2:
-                torch.rand(1)
+                if corruption == "buffer":
+                    module.counter.add_(1)
+                elif corruption == "cpu_rng":
+                    torch.rand(1)
+                elif corruption == "python_rng":
+                    random.random()
             return loss
 
-        with pytest.raises(SDCReplayMismatch, match="rng:cpu"):
+        with pytest.raises(SDCReplayMismatch, match=expected):
             replayer.run_fwd_bwd(execute, step=9, get_loss=lambda loss: loss)
 
 
