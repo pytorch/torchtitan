@@ -6,6 +6,7 @@
 
 """TorchTitan-owned vLLM worker and model runner customizations."""
 
+import functools
 from collections.abc import Set
 from contextlib import nullcontext
 
@@ -14,13 +15,14 @@ from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.utils.math_utils import round_up
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
+from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner, mamba_utils
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 
 from torchtitan.rl.generator.vllm.linear_attention import (
     TorchTitanLinearAttentionBackend,
 )
+from torchtitan.rl.generator.vllm.mamba_state_copy import chunked_mamba_copy_block
 
 
 class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
@@ -92,6 +94,14 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         ):
             assert not self.cudagraph_dispatcher.keys_initialized
             self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
+        if self.cache_config.mamba_cache_mode == "align" and not isinstance(
+            mamba_utils.do_mamba_copy_block, functools.partial
+        ):
+            # Swap in the chunked state-block copy (see mamba_state_copy). The partial check
+            # keeps a second load_model in this process from wrapping it twice.
+            mamba_utils.do_mamba_copy_block = functools.partial(
+                chunked_mamba_copy_block, fallback=mamba_utils.do_mamba_copy_block
+            )
 
     def _determine_batch_execution_and_padding(self, num_tokens: int, *args, **kwargs):
         """Tell the model how many of this step's tokens are real, before padding.
