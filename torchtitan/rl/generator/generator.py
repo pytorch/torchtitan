@@ -495,7 +495,7 @@ class Generator(Configurable):
         """
         # The read writes outside the current stream; wait for queued work that
         # still uses state_dict's storage, e.g. its reallocation.
-        torch.cuda.current_stream().synchronize()
+        torch.accelerator.current_stream().synchronize()
         return asyncio.run_coroutine_threadsafe(
             ts.get_state_dict(
                 "model_state_dict",

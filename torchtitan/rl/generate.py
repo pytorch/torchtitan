@@ -125,6 +125,7 @@ def generate() -> None:
             initial_load_path=model_path,
         ),
         dist_moe_runtime=gen_config.dist_moe_runtime,
+        fetch_model_state_dict_to_gpu=False,
     )
     logger.info("Registered TorchTitan model with vLLM")
 

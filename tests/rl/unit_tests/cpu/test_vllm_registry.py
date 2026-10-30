@@ -244,7 +244,10 @@ def test_compressed_mla_configures_vllm_native_mla(monkeypatch, build_config):
         MODEL_ARCH_CONFIG_CONVERTORS, registry.TORCHTITAN_MODEL_TYPE, raising=False
     )
     registry.register_to_vllm(
-        config, parallelism=InferenceParallelismConfig(), checkpointer_config=None
+        config,
+        parallelism=InferenceParallelismConfig(),
+        checkpointer_config=None,
+        fetch_model_state_dict_to_gpu=False,
     )
     hf_config = PretrainedConfig.from_dict(hf)
     assert MODEL_ARCH_CONFIG_CONVERTORS[hf_config.model_type](

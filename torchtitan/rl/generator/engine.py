@@ -94,6 +94,7 @@ class GenerationEngine(Configurable, abc.ABC):
         """Load the prefetched model state dict into the model, and reset the KV cache when
         configured."""
 
+    @abc.abstractmethod
     def load_model_state_dict_direct(
         self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
     ) -> None:
@@ -104,9 +105,6 @@ class GenerationEngine(Configurable, abc.ABC):
             fetch: Fills each tensor of the given subset of the model state dict in place
                 with the new weights and returns the keys it filled.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support fetch_model_state_dict_to_gpu"
-        )
 
     @property
     def holds_session_kv(self) -> bool:

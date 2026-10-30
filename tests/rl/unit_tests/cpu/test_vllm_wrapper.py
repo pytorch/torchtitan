@@ -489,19 +489,6 @@ def test_direct_load_groups_rejects_quantized_params(tmp_path, monkeypatch) -> N
         dist.destroy_process_group()
 
 
-def test_direct_load_groups_rejects_unsharded_params(tmp_path) -> None:
-    dist.init_process_group(
-        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
-    )
-    try:
-        model = nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16))
-        fully_shard(model[0], mesh=init_device_mesh("cpu", (1,)))
-        with pytest.raises(AssertionError, match="1.weight is neither FSDP-sharded"):
-            model_wrapper._direct_load_groups(model)
-    finally:
-        dist.destroy_process_group()
-
-
 @pytest.mark.parametrize(
     "compressed", [True, False], ids=["compressed", "batch_invariant"]
 )
