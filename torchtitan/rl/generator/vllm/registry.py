@@ -81,9 +81,8 @@ def uses_compressed_mla_cache(inner_attention: InnerAttention.Config) -> bool:
 def vllm_attention_backend(cfg: Decoder.Config) -> AttentionBackendEnum | None:
     """Return the vLLM attention backend for ``cfg``'s full attention layers.
 
-    Returns ``None`` for MLA with a compressed cache: vLLM auto-selects one of
-    its MLA backends for the hardware, since vLLM's MLA kernel runs on that path
-    rather than a TorchTitan inner attention.
+    Returns ``None`` for MLA with a compressed cache: each compressed MLA layer
+    passes TorchTitan's decode and prefill backends to vLLM directly.
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 

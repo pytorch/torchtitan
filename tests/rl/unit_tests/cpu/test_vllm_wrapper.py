@@ -22,12 +22,15 @@ from torchtitan.models.deepseek_v3 import build_model_config as build_deepseek_c
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
 from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.generator.vllm import model_wrapper, registry
+from torchtitan.rl.generator.vllm import mla, model_wrapper, registry
 from torchtitan.rl.generator.vllm.attention import VLLMInnerAttention
 
 from torchtitan.rl.generator.vllm.mla import (
     _VLLMKVBProj,
     _VLLMNativeMLAAttention,
+    TorchTitanMLABackend,
+    TorchTitanMLAImpl,
+    TorchTitanMLAPrefillBackend,
     VLLMMLAAttention,
     VLLMMLAInnerAttention,
 )
@@ -301,6 +304,33 @@ def test_vllm_compressed_mla_owns_wkv_b():
 
     build.assert_called_once_with(config.inner_attention, kv_b_proj=attention.wkv_b)
     assert "wkv_b.weight" in attention.state_dict()
+
+
+def test_vllm_mla_inner_attention_runs_torchtitan_kernels():
+    """vLLM keeps the compressed cache; decode and prefill run TorchTitan's backends."""
+    config = VLLMMLAInnerAttention.Config(
+        num_heads=4,
+        kv_lora_rank=5,
+        qk_nope_head_dim=4,
+        qk_rope_head_dim=2,
+        v_head_dim=3,
+        scale=0.5,
+    )
+    vllm_config = mock.Mock()
+    vllm_config.parallel_config.tensor_parallel_size = 1
+    with (
+        mock.patch("vllm.config.get_current_vllm_config", return_value=vllm_config),
+        mock.patch.object(mla, "_VLLMNativeMLAAttention") as native_mla,
+    ):
+        VLLMMLAInnerAttention(
+            config, kv_b_proj=Linear.Config(in_features=5, out_features=28).build()
+        )
+
+    kwargs = native_mla.call_args.kwargs
+    assert kwargs["attn_backend"] is TorchTitanMLABackend
+    assert kwargs["prefill_backend_cls"] is TorchTitanMLAPrefillBackend
+    assert TorchTitanMLABackend.is_mla()
+    assert TorchTitanMLABackend.get_impl_cls() is TorchTitanMLAImpl
 
 
 def test_vllm_mla_inner_attention_matches_vllm_mla_shapes():
