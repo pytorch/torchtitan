@@ -284,6 +284,7 @@ def apply_fsdp_to_decoder(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
+    enable_backward_prefetch: bool = True,
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
@@ -316,6 +317,10 @@ def apply_fsdp_to_decoder(
               "smart defaults" for known optimal scenarios.
             - "always" enables ``reshard_after_forward`` for all forward passes.
             - "never" disables ``reshard_after_forward`` for all forward passes.
+        enable_backward_prefetch: Whether expert-parallel models prefetch
+            FSDP parameters during backward. Disabling this also suppresses
+            FSDP's implicit fallback, reducing peak unsharded-parameter memory
+            at the cost of communication overlap. It has no effect without EP.
         ep_degree (int, optional): Expert-parallel degree. Defaults to 1 (no EP),
             in which case the MoE-specific sharding and prefetching are no-ops.
         edp_mesh (DeviceMesh | None, optional): The FSDP mesh for routed-expert
@@ -531,20 +536,30 @@ def apply_fsdp_to_decoder(
                 [model.norm, model.lm_head]
             )
 
-    # set up explicit prefetching when EP is enabled for backward
-    # pyrefly: ignore [no-matching-overload]
-    reversed_transformer_blocks = list(reversed(model.layers.values()))
-    prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
+    backward_prefetch_pairs: list[tuple[nn.Module, nn.Module]]
+    if enable_backward_prefetch:
+        # pyrefly: ignore [no-matching-overload]
+        backward_prefetch_order: list[nn.Module] = list(reversed(model.layers.values()))
+        if backward_prefetch_order:
+            if model.norm is not None and model.lm_head is not None:
+                backward_prefetch_order.insert(0, model.lm_head)
+            if model.tok_embeddings is not None:
+                backward_prefetch_order.append(model.tok_embeddings)
+        backward_prefetch_pairs = list(
+            zip(backward_prefetch_order, backward_prefetch_order[1:])
+        )
+    else:
+        # An empty explicit target list enables FSDP's implicit fallback
+        # prefetch. A self target keeps the list nonempty, but its own
+        # pre-backward hook has already prepared the parameters. This avoids
+        # an extra all-gather and live parameter unit.
+        backward_prefetch_pairs = [
+            (module, module)
+            for module in model.modules()
+            if isinstance(module, FSDPModule)
+        ]
 
-    if model.norm is not None and model.lm_head is not None and len(model.layers) > 0:
-        model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
-
-    for transformer_block, prev_transformer_block in zip(
-        reversed_transformer_blocks, prev_transformer_blocks
-    ):
-        if prev_transformer_block is not None:
-            # pyrefly: ignore [missing-attribute]
-            transformer_block.set_modules_to_backward_prefetch([prev_transformer_block])
-        elif model.tok_embeddings is not None:
-            # pyrefly: ignore [missing-attribute]
-            transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
+    for module, target in backward_prefetch_pairs:
+        cast(FSDPModule, module).set_modules_to_backward_prefetch(
+            [cast(FSDPModule, target)]
+        )

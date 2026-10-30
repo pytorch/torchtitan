@@ -66,6 +66,76 @@ def test_apply_fsdp_to_decoder_forwards_param_dtype_override_fn() -> None:
     assert mp_policy.param_dtype_override_fn is param_dtype_override_fn
 
 
+@pytest.mark.parametrize("enable_backward_prefetch", [True, False])
+@pytest.mark.parametrize("num_layers", [0, 1, 3])
+def test_apply_fsdp_to_decoder_configures_backward_prefetch_policy(
+    enable_backward_prefetch: bool,
+    num_layers: int,
+) -> None:
+    """EP models may trade backward communication overlap for peak memory."""
+    model = _FSDPModule()
+    model.enable_weight_tying = False
+    model.tok_embeddings = _FSDPModule()
+    model.norm = _FSDPModule()
+    model.lm_head = _FSDPModule()
+    layers = [_FSDPModule() for _ in range(num_layers)]
+    for layer in layers:
+        layer.feed_forward = nn.Identity()
+        layer.feed_forward.set_modules_to_backward_prefetch = mock.Mock()
+    model.layers = nn.ModuleDict(
+        {str(index): layer for index, layer in enumerate(layers)}
+    )
+    fsdp_modules = (model, model.tok_embeddings, model.norm, model.lm_head, *layers)
+    for module in fsdp_modules:
+        module.set_gradient_divide_factor = mock.Mock()
+        module.set_modules_to_forward_prefetch = mock.Mock()
+        module.set_modules_to_backward_prefetch = mock.Mock()
+    dp_mesh = mock.Mock(mesh_dim_names=("dp_shard",))
+
+    with (
+        mock.patch("torchtitan.distributed.fsdp.fully_shard"),
+        mock.patch("torchtitan.distributed.fsdp.FSDPModule", _FSDPModule),
+        mock.patch(
+            "torchtitan.distributed.fsdp._fsdp_unit_holds_only_embedding_weights",
+            return_value=False,
+        ),
+    ):
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=True,
+            ep_degree=2,
+            enable_backward_prefetch=enable_backward_prefetch,
+        )
+
+    if layers:
+        model.tok_embeddings.set_modules_to_forward_prefetch.assert_called_once_with(
+            [layers[0]]
+        )
+    else:
+        model.tok_embeddings.set_modules_to_forward_prefetch.assert_not_called()
+    for layer in layers:
+        layer.feed_forward.set_modules_to_backward_prefetch.assert_not_called()
+    if enable_backward_prefetch:
+        if layers:
+            model.lm_head.set_modules_to_backward_prefetch.assert_called_once_with(
+                [layers[-1]]
+            )
+        else:
+            model.lm_head.set_modules_to_backward_prefetch.assert_not_called()
+        for index, layer in enumerate(layers):
+            target = layers[index - 1] if index > 0 else model.tok_embeddings
+            layer.set_modules_to_backward_prefetch.assert_called_once_with([target])
+        model.set_modules_to_backward_prefetch.assert_not_called()
+        model.tok_embeddings.set_modules_to_backward_prefetch.assert_not_called()
+        model.norm.set_modules_to_backward_prefetch.assert_not_called()
+    else:
+        for module in fsdp_modules:
+            module.set_modules_to_backward_prefetch.assert_called_once_with([module])
+
+
 def test_stacked_linear_shard_placements_use_num_linears() -> None:
     module = nn.Module()
     stacked = Linear.Config(
