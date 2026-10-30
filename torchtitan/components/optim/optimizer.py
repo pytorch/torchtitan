@@ -9,25 +9,29 @@ from __future__ import annotations
 import fnmatch
 import logging
 import re
+import warnings
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, cast, Literal, overload
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
 from torchtitan.distributed.flex_shard import (
     BucketConfig,
+    build_transport_mesh,
     ComputeLayout,
     DistMuon as FlexShardDistMuon,
+    redistribution_mesh_axes,
 )
-from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
 from .utils import (
     get_flat_optim_state_dict,
@@ -192,7 +196,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
     Note:
         The CTA cap is disabled by default because it is a workload-dependent
         memory/performance tradeoff. Enabling it builds explicit redistribution
-        meshes backed by resource-independent NCCL child communicators and
+        meshes backed by resource-independent NCCL communicators and
         passes them through ``BucketConfig``. Each communicator adds fixed
         memory and may reduce throughput; the cap benefits workloads only when
         the reduction in all-peer connection state outweighs that overhead.
@@ -225,12 +229,12 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         """Limit NCCL CTAs for DistMuon redistribution only; ``<= 0`` disables.
 
         All-to-all opens connection buffers for every peer and channel. A lower
-        CTA cap reduces this connection state on dedicated child communicators
-        of the ``dp_shard``/``edp_shard`` groups, while FSDP keeps its original
+        CTA cap reduces this connection state on dedicated transport communicators,
+        including combined DP/TP groups, while FSDP keeps its original
         communicators. Each child adds fixed workspace memory, and fewer CTAs
         may reduce all-to-all bandwidth.
 
-        A positive value requires NCCL on the FSDP shard axes. Other backends
+        A positive value requires NCCL on the transport axes. Other backends
         raise ``ValueError``; fake warns and keeps the storage groups without
         modeling the cap.
 
@@ -268,34 +272,58 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             resolved_bucket_configs = []
             # OptimizersContainer builds this instance for one local model part;
             # reuse meshes across its buckets without keeping a run-wide cache.
-            redistribution_mesh_by_storage_mesh: dict[DeviceMesh, DeviceMesh] = {}
+            redistribution_meshes: dict[
+                tuple[DeviceMesh, tuple[str, ...]], DeviceMesh
+            ] = {}
             for bucket_config in bucket_configs:
-                matched_parameter = next(
+                matched_transport = next(
                     (
-                        parameter
+                        (parameter, axes)
                         for fqn, parameter in named_parameters
                         if any(
                             fnmatch.fnmatchcase(fqn, pattern)
                             for pattern in bucket_config.patterns
                         )
+                        if (
+                            axes := redistribution_mesh_axes(
+                                cast(DTensor, parameter),
+                                config.compute_sharding_by_fqn[fqn],
+                            )
+                        )
                     ),
                     None,
                 )
-                if matched_parameter is None:
+                if matched_transport is None:
                     resolved_bucket_configs.append(bucket_config)
                     continue
-                storage_mesh = cast(Any, matched_parameter).device_mesh
-                if storage_mesh not in redistribution_mesh_by_storage_mesh:
-                    redistribution_mesh_by_storage_mesh[
-                        storage_mesh
-                    ] = build_alternative_fsdp_mesh(
-                        storage_mesh,
-                        max_ctas=config.max_nccl_ctas_for_comms,
+                matched_parameter, axes = matched_transport
+                storage_mesh = cast(DTensor, matched_parameter).device_mesh
+                backend = dist.get_backend(storage_mesh.get_group(axes[0]))
+                if backend == "fake":
+                    warnings.warn(
+                        "Redistribution max_ctas is not modeled by the fake process "
+                        "group; using the storage-mesh process group",
+                        stacklevel=2,
+                    )
+                    resolved_bucket_configs.append(bucket_config)
+                    continue
+                if backend != dist.Backend.NCCL:
+                    raise ValueError(
+                        "Redistribution max_ctas requires an NCCL process group, "
+                        f"got {backend!r}"
+                    )
+                key = (storage_mesh, axes)
+                if key not in redistribution_meshes:
+                    options = dist.ProcessGroupNCCL.Options()
+                    options.config.max_ctas = config.max_nccl_ctas_for_comms
+                    cast(Any, options.config).split_share = 0
+                    redistribution_meshes[key] = build_transport_mesh(
+                        storage_mesh, axes, pg_options=options
                     )
                 resolved_bucket_configs.append(
                     replace(
                         bucket_config,
-                        mesh=redistribution_mesh_by_storage_mesh[storage_mesh],
+                        mesh=redistribution_meshes[key],
                     )
                 )
             bucket_configs = resolved_bucket_configs

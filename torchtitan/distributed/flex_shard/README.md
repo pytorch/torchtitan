@@ -50,14 +50,32 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   named DTensor parameters and plans their storage-to-compute transitions.
 
 Storage placements describe persistent ownership only; they do not define
-Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
-most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
-`Replicate`; every other non-unit storage mesh axis must be replicated.
+Muon matrix boundaries. Flat matrix-batch compute may use `BlockShard` on one
+or more non-unit mesh axes. FlexShard combines those axes into one optimizer
+transport group, routes complete matrices across the group, and restores the
+original DTensor storage layout after the update. This supports combined DP
+and TP storage, including the strided shards produced when TP and FSDP shard
+the same tensor dimension. Non-transport mesh axes retain their storage
+placement.
 
 Native `[..., R, C]` parameters can redistribute `Replicate()`, a shard of the
 matrix-row dimension, or a shard of the matrix-column dimension to `Shard(0)`
 compute on one mesh axis, with every other non-unit storage mesh axis
-replicated.
+preserving its existing batch ownership. Changed matrix axes may also combine
+into one transport group; complete matrices are assigned across that group.
+For example, expert storage `Shard(0), Shard(1)` on DP/TP preserves each DP
+rank's expert range while TP redistributes matrix rows to whole-expert compute.
+
+`redistribution_mesh_axes(parameter, compute_layout)` queries the exact
+transport axes without communication. `build_transport_mesh(storage_mesh,
+axis_names)` builds that group's 1D mesh, which can be supplied through
+`BucketConfig.mesh`. Explicit combined meshes use the joined name
+`dp_shard_tp` and preserve storage rank order. TorchTitan's DistMuon CTA cap
+applies to this actual group, not to FSDP's groups. Inferring a new combined
+NCCL group from a device-bound world group requires PyTorch's
+`ProcessGroupNCCL.Options.lazy_init`; otherwise supply an explicit mesh.
+For externally constructed transport groups, disable automatic CTA capping
+(`max_nccl_ctas_for_comms <= 0`) and set the group's options when creating it.
 
 Several mesh axes may shard the same tensor dimension. By default they apply
 in storage-mesh order; `shard_order_by_tensor_dim` states a different order,

@@ -21,7 +21,7 @@ from torchtitan.components.optim import (
     LRSchedulersContainer,
     OptimizersContainer,
 )
-from torchtitan.distributed.flex_shard import BucketConfig
+from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout, Owned
 from torchtitan.models.common import HiMidLoLinear, Sigmoid
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.moe import (
@@ -554,9 +554,9 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
 
 
 class TestDistMuonRedistributionMeshes(unittest.TestCase):
-    def test_builds_one_mesh_per_storage_mesh(self):
-        shared_storage_mesh = object()
-        other_storage_mesh = object()
+    def test_reuses_the_same_resolved_transport_mesh(self):
+        shared_storage_mesh = MagicMock()
+        other_storage_mesh = MagicMock()
         shared_redistribution_mesh = object()
         other_redistribution_mesh = object()
         parameters = [
@@ -565,8 +565,9 @@ class TestDistMuonRedistributionMeshes(unittest.TestCase):
             MagicMock(device_mesh=other_storage_mesh),
         ]
 
-        def build_mesh(storage_mesh, *, max_ctas):
-            self.assertEqual(max_ctas, 8)
+        def build_mesh(storage_mesh, axes, *, pg_options):
+            self.assertEqual(axes, ("dp_shard", "tp"))
+            self.assertEqual(pg_options.config.max_ctas, 8)
             return (
                 shared_redistribution_mesh
                 if storage_mesh is shared_storage_mesh
@@ -579,16 +580,27 @@ class TestDistMuonRedistributionMeshes(unittest.TestCase):
         )
         config = DistMuon.Config(
             pattern=r".*",
-            compute_sharding_by_fqn={},
+            compute_sharding_by_fqn={
+                name: ComputeLayout({"dp_shard": Owned(), "tp": Owned()})
+                for name in ("first", "second", "third")
+            },
             bucket_configs=bucket_configs,
             max_nccl_ctas_for_comms=8,
         )
 
         with (
             patch(
-                "torchtitan.components.optim.optimizer.build_alternative_fsdp_mesh",
+                "torchtitan.components.optim.optimizer.build_transport_mesh",
                 side_effect=build_mesh,
             ) as build_mesh_mock,
+            patch(
+                "torchtitan.components.optim.optimizer.redistribution_mesh_axes",
+                return_value=("dp_shard", "tp"),
+            ),
+            patch(
+                "torchtitan.components.optim.optimizer.dist.get_backend",
+                return_value="nccl",
+            ),
             patch(
                 "torchtitan.components.optim.optimizer.FlexShardDistMuon.__init__",
                 return_value=None,
