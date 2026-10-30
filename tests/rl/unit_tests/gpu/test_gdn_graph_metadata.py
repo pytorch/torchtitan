@@ -169,6 +169,9 @@ def test_full_metadata_and_native_dispatch_variants():
     assert decode_metadata.non_spec_state_indices_tensor.tolist() == [1, 0]
     single_token = replace(common, max_query_len=1, num_actual_tokens=2)
     decode_capture = builder.build_for_cudagraph_capture(single_token)
+    # A one-token FULL dummy (2 <= max_num_seqs) can replay the mixed-batch graph,
+    # so capture restages the decode split: 2, not the stale 4 from above.
+    assert builder.prefill_query_start_loc.tolist() == [0, 2, 2, 2]
     assert not decode_capture.has_initial_state.any()
     actual = builder.build(0, single_token)
     assert actual.execution_path is LinearAttentionExecutionPath.SINGLE_TOKEN
@@ -211,8 +214,8 @@ def test_full_metadata_and_native_dispatch_variants():
 
 
 @pytest.mark.parametrize("mode", ["align", "none"])
-@pytest.mark.parametrize("single_token", [False, True])
-def test_update_block_table_matches_build(single_token, mode):
+@pytest.mark.parametrize("step", ["packed", "single_token", "padded_single_token"])
+def test_update_block_table_matches_build(step, mode):
     """vLLM reuses one GDN group's metadata for the next; only the state slots differ."""
     config = VllmConfig()
     config.compilation_config = CompilationConfig(
@@ -239,8 +242,11 @@ def test_update_block_table_matches_build(single_token, mode):
         TorchTitanLinearAttentionMetadataBuilder(spec, [], config, torch.device("cpu"))
         for _ in range(3)
     )
-    offsets = torch.tensor([0, 1, 2] if single_token else [0, 1, 3], dtype=torch.int32)
-    num_tokens = int(offsets[-1])
+    offsets = torch.tensor(
+        [0, 1, 3] if step == "packed" else [0, 1, 2], dtype=torch.int32
+    )
+    # Padded past max_num_seqs (2), a one-token step replays the mixed-batch graph.
+    num_tokens = 4 if step == "padded_single_token" else int(offsets[-1])
     common = CommonAttentionMetadata(
         query_start_loc=offsets,
         query_start_loc_cpu=offsets,
@@ -248,7 +254,7 @@ def test_update_block_table_matches_build(single_token, mode):
         seq_lens=torch.tensor([16, 2], dtype=torch.int32),
         num_reqs=2,
         num_actual_tokens=num_tokens,
-        max_query_len=1 if single_token else 2,
+        max_query_len=2 if step == "packed" else 1,
         max_seq_len=16,
         block_table_tensor=torch.tensor([[1, 5], [2, 6]], dtype=torch.int32),
         slot_mapping=torch.zeros(num_tokens, dtype=torch.int64),
@@ -285,6 +291,9 @@ def test_update_block_table_matches_build(single_token, mode):
             assert (
                 got.data_ptr() == getattr(captured, field.name).data_ptr()
             ), field.name
+    if step == "padded_single_token":
+        # The mixed-batch graph reads this builder's offsets.
+        assert other.query_start_loc.tolist() == [0, 1, 2, 4]
 
 
 @pytest.mark.parametrize("decode", [False, True])
