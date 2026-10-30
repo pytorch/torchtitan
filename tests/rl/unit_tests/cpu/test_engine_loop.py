@@ -43,6 +43,7 @@ from torchtitan.rl.generator.engine_loop import (
     LoopAction,
     LoopDecision,
     ModelStateDictLoadMessage,
+    RequestAbortMessage,
     SessionReleaseMessage,
 )
 from torchtitan.rl.generator.generator import Generator
@@ -448,6 +449,54 @@ def test_calls_cancelled_on_the_queue_are_skipped(runner) -> None:
     assert engine_loop._request_dispatcher._rank0_outstanding_generations == {}
 
 
+@pytest.mark.parametrize("drain", [True, False])
+def test_parked_request_whose_caller_left_is_never_admitted(runner, drain) -> None:
+    # r1 is taken off the queue with a load and parked; its caller leaves before it is admitted.
+    # DP=2, so failing it through the DP router, which holds no reservation for it, would raise.
+    engine_loop = _bare_loop(event_loop=runner.get_loop(), inflight=drain, dp_size=2)
+    parked, load = _message(_request("r1")), _load(5, drain=drain)
+    pending_engine_requests: list[EngineRequest] = []
+    pending_load_messages: list[ModelStateDictLoadMessage] = []
+    decision = _decide(
+        runner,
+        engine_loop,
+        pending_engine_requests,
+        load,
+        parked,
+        pending_load_messages=pending_load_messages,
+    )
+    assert pending_engine_requests == [parked.engine_request]
+    if not drain:
+        # A non-draining load applies at once; `_run` then clears it.
+        assert decision.action is LoopAction.LOAD_MODEL_STATE_DICT
+        pending_load_messages.clear()
+
+    decision = _decide(
+        runner,
+        engine_loop,
+        pending_engine_requests,
+        RequestAbortMessage(request_id="r1"),
+        pending_load_messages=pending_load_messages,
+    )
+    # It reached no engine, so rank 0 fails it and no rank aborts it.
+    assert decision.action is LoopAction.STEP and decision.aborted_request_ids == []
+    assert pending_engine_requests == []
+    with pytest.raises(RuntimeError, match="r1 aborted: its caller left"):
+        parked.reply.result(timeout=0)
+
+    if drain:
+        # The admitted request finishes: the load lands, and nothing is left to admit after it.
+        del engine_loop._request_dispatcher._rank0_outstanding_generations["inflight"]
+        decision = _decide(
+            runner,
+            engine_loop,
+            pending_engine_requests,
+            pending_load_messages=pending_load_messages,
+        )
+        assert decision.action is LoopAction.LOAD_MODEL_STATE_DICT
+    assert engine_loop._request_dispatcher._rank0_outstanding_generations == {}
+
+
 def test_duplicate_request_id_is_fatal(runner) -> None:
     engine_loop = _bare_loop(event_loop=runner.get_loop())
     with pytest.raises(AssertionError, match="already in flight"):
@@ -622,7 +671,8 @@ def _finished(request_id: str) -> FinishedRequest:
 
 class _FakeEngine:
     """Every step finishes all admitted requests. `step_hook` runs inside each step;
-    `threads` records which threads admitted and stepped, and `shutdowns` which shut it down."""
+    `threads` records which threads admitted and stepped, `shutdowns` which shut it down,
+    and `abort_requested` / `aborted` the aborts asked for and the requests they stopped."""
 
     holds_session_kv = False
 
@@ -632,6 +682,8 @@ class _FakeEngine:
         self.threads: set[threading.Thread] = set()
         self.shutdowns: list[threading.Thread] = []
         self.released_sessions: list[tuple[list[str], list[int]]] = []
+        self.abort_requested: list[str] = []
+        self.aborted: list[str] = []
 
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
         self.released_sessions.append((session_ids, group_ids))
@@ -650,6 +702,17 @@ class _FakeEngine:
     def admit(self, request: EngineRequest) -> None:
         self.threads.add(threading.current_thread())
         self.running.append(request.request_id)
+
+    def abort_requests(self, request_ids: list[str]) -> list[str]:
+        self.abort_requested.extend(request_ids)
+        aborted = [
+            request_id for request_id in request_ids if request_id in self.running
+        ]
+        self.running = [
+            request_id for request_id in self.running if request_id not in aborted
+        ]
+        self.aborted.extend(aborted)
+        return aborted
 
     def has_unfinished_requests(self) -> bool:
         return bool(self.running)
@@ -773,6 +836,16 @@ async def _on_engine_loop(engine_loop: EngineLoop, fn: Callable[[], Any]) -> Any
     return await asyncio.wrap_future(
         asyncio.run_coroutine_threadsafe(call(), engine_loop._event_loop)
     )
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    """Wait until `condition()`, which reads state the engine loop thread writes."""
+
+    async def poll() -> None:
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), _TIMEOUT_S)
 
 
 def _bare_generator(
@@ -1014,6 +1087,30 @@ def test_close_fails_a_running_http_call_at_once(engine_thread) -> None:
     asyncio.run(run())
 
 
+def test_http_client_that_hangs_up_after_admission_aborts_its_request(
+    engine_thread,
+) -> None:
+    stepping = threading.Event()
+    engine = _HeldEngine(stepping.set)
+
+    async def run() -> None:
+        generator = _bare_generator(engine_thread(engine))
+        await generator.start_engine_loop()
+        async with aiohttp.ClientSession() as session:
+            posting = asyncio.create_task(
+                _post_generate(session, await generator.http_url())
+            )
+            assert await asyncio.to_thread(stepping.wait, _TIMEOUT_S)  # admitted
+            # Cancelling the request closes its connection, which cancels the server's handler.
+            posting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await posting
+        await _until(lambda: engine.aborted == ["group=0/rollout=0/http=0"])
+        await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
 def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
     engine_thread, monkeypatch
 ) -> None:
@@ -1175,8 +1272,9 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
         failing_load = asyncio.create_task(engine_loop.load_model_state_dict(3))
         assert await asyncio.to_thread(reading.wait, _TIMEOUT_S)
 
-        # A session release (no reply) queued ahead of the calls must not stop them from failing.
+        # Messages with no reply queued ahead of the calls must not stop them from failing.
         engine_loop._queue.put(SessionReleaseMessage(session_ids=["s"]))
+        engine_loop._queue.put(RequestAbortMessage(request_id="gone"))
         queued = [
             _generate(engine_loop, "r0"),
             asyncio.create_task(engine_loop.load_model_state_dict(4)),
@@ -1238,9 +1336,7 @@ def test_generate_cancelled_on_the_queue_never_reaches_the_engine(
     asyncio.run(run())
 
 
-def test_generate_cancelled_after_admission_leaves_the_loop_running(
-    engine_thread,
-) -> None:
+def test_generate_cancelled_after_admission_is_aborted(engine_thread) -> None:
     stepping = threading.Event()
     engine = _HeldEngine(stepping.set)
 
@@ -1252,14 +1348,67 @@ def test_generate_cancelled_after_admission_leaves_the_loop_running(
         cancelled.cancel()
         with pytest.raises(asyncio.CancelledError):
             await cancelled
-        engine.finish.set()
 
-        # r0 still finishes, and its reply is resolved without crashing the loop.
+        # The engine stops r0, which would never finish here, and rank 0 drops its reply.
+        await _until(lambda: engine.aborted == ["r0"])
+        await _until(
+            lambda: not engine_loop._request_dispatcher._rank0_outstanding_generations
+        )
+        # The loop keeps serving.
+        engine.finish.set()
         completion = await asyncio.wait_for(_generate(engine_loop, "r1"), _TIMEOUT_S)
         assert completion.request_id == "r1"
+
+        await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+def test_abort_of_a_request_that_already_finished_is_a_no_op(engine_thread) -> None:
+    gate = _StepGate()
+    engine = _FakeEngine(gate)
+
+    async def run() -> None:
+        engine_loop = engine_thread(engine)
+        engine_loop.start()
+        finishing = _generate(engine_loop, "r0")
+        # The step that finishes r0 is running when its caller leaves, so r0's abort lands after it.
+        assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
+        finishing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await finishing
+        gate.release()
+
+        # The engine no longer runs r0, so the abort skips it and nothing resolves twice.
+        completion = await asyncio.wait_for(_generate(engine_loop, "r1"), _TIMEOUT_S)
+        assert completion.request_id == "r1"
+        assert (engine.abort_requested, engine.aborted) == (["r0"], [])
         assert engine_loop._request_dispatcher._rank0_outstanding_generations == {}
 
         await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+def test_generate_cancelled_while_the_generator_closes_raises_its_cancel(
+    engine_thread,
+) -> None:
+    gate = _StepGate()
+
+    async def run() -> None:
+        engine_loop = engine_thread(_StuckEngine(gate))
+        engine_loop.start()
+        in_flight = _generate(engine_loop, "r0")
+        assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)  # r0 is admitted
+        closing = asyncio.create_task(engine_loop.close())
+        await asyncio.sleep(0)
+        assert engine_loop._queue.closed
+        # The abort can no longer be queued; closing fails every reply anyway.
+        in_flight.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await in_flight
+        gate.release()
+        await asyncio.wait_for(closing, _TIMEOUT_S)
 
     asyncio.run(run())
 
@@ -1469,6 +1618,69 @@ def test_drain_task_resolves_peer_results_on_the_engine_thread(
         assert dispatcher._rank0_dp_router._reservations == {"busy": 0}
         assert engine.threads == set()  # rank 0's own DP replica served nothing
         assert set(recv_threads) == {engine_loop.engine_thread.thread}
+
+        await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+def test_peer_dp_replica_aborts_a_request_whose_caller_left(
+    engine_thread, monkeypatch
+) -> None:
+    peer_results: asyncio.Queue = asyncio.Queue()
+
+    class ResultReceiver:
+        async def recv(self):
+            return await peer_results.get()
+
+    async def run() -> None:
+        engine = _FakeEngine()
+        dispatcher = _dispatcher(
+            dp_size=2, open_result_channel=lambda: ("port", ResultReceiver())
+        )
+        # Load DP rank 0, so the request goes to the peer, DP rank 1.
+        dispatcher._rank0_dp_router.reserve("busy", routing_session_id="busy")
+        engine_loop = engine_thread(engine, request_dispatcher=dispatcher)
+        # DP rank 1's TP rank 0: a real dispatcher whose port feeds rank 0's drain task, and an
+        # engine that never finishes a request on its own.
+        peer_engine = _HeldEngine()
+        peer = _dispatcher(rank=2, dp_size=2)
+        peer._result_port = SimpleNamespace(
+            send=lambda results: engine_loop._event_loop.call_soon_threadsafe(
+                peer_results.put_nowait, results
+            )
+        )
+
+        def broadcast_object_list(container, **kwargs):
+            # Stand-in for DP rank 1's `_run`, which meets rank 0 at every decision broadcast.
+            decision = container[0]
+            if not isinstance(decision, LoopDecision):
+                return
+            if decision.aborted_request_ids:
+                peer.process_aborted_requests(
+                    peer_engine.abort_requests(decision.aborted_request_ids)
+                )
+            if decision.action is LoopAction.STEP:
+                peer_engine.add_requests(decision.requests_per_dp_rank[1])
+
+        monkeypatch.setattr(
+            engine_loop_module.dist, "broadcast_object_list", broadcast_object_list
+        )
+        engine_loop.start()
+        cancelled = _generate(engine_loop, "r0")
+        await _until(lambda: peer_engine.running == ["r0"])
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        # Only the peer runs r0, so only the peer reports it; that frees its DP rank.
+        await _until(lambda: not dispatcher._rank0_outstanding_generations)
+        assert (peer_engine.aborted, engine.abort_requested, engine.aborted) == (
+            ["r0"],
+            ["r0"],
+            [],
+        )
+        assert dispatcher._rank0_dp_router._reservations == {"busy": 0}
 
         await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
 

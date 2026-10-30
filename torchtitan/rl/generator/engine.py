@@ -77,6 +77,12 @@ class GenerationEngine(Configurable, abc.ABC):
         """Admit ``requests`` in order and return the ``(request_id, error)`` of each request
         the engine rejected. A rejected request must leave no engine state."""
 
+    def abort_requests(self, request_ids: list[str]) -> list[str]:
+        """Stop the admitted requests among `request_ids`, free their KV, and return their ids;
+        `step()` never returns them. Skips ids this replica doesn't run (finished, or on another
+        DP replica). The default aborts none, so every request finishes through `step()`."""
+        return []
+
     @abc.abstractmethod
     def has_unfinished_requests(self) -> bool:
         """Whether any admitted request is still running."""

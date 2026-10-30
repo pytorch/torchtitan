@@ -15,8 +15,11 @@ The uneven-decode integration test requires four GPUs and a torchrun launcher.
 """
 
 import asyncio
+import collections
 import concurrent.futures
 import gc
+import inspect
+import logging
 import math
 import os
 import shutil
@@ -24,7 +27,7 @@ import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, call, Mock, patch
 
 import pytest
 import torch
@@ -68,6 +71,8 @@ from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.output_processor import OutputProcessor
 
 
 class _FakeRenderer:
@@ -405,6 +410,66 @@ def test_admission_rejects_only_the_invalid_request():
     assert "max_tokens must be at least 1" in str(exc)
     llm_engine = cast(_FakeLLMEngine, engine._engine)
     assert [kwargs["request_id"] for _, kwargs in llm_engine.add_requests] == ["valid"]
+
+
+def test_abort_requests_aborts_only_the_requests_this_replica_runs():
+    engine = _vllm_engine()
+    llm_engine = cast(_FakeLLMEngine, engine._engine)
+    # vLLM's external -> internal id map; "done" already finished, "peer" runs on another replica.
+    external_req_ids = collections.defaultdict(
+        list, {"r0": ["r0-internal"], "r1": ["r1-internal"]}
+    )
+    llm_engine.output_processor = SimpleNamespace(external_req_ids=external_req_ids)
+    llm_engine.abort_request = Mock()
+
+    assert engine.abort_requests(["r0", "done", "r1", "peer"]) == ["r0", "r1"]
+
+    # One id per call, in the given order, so every TP rank frees blocks in the same order.
+    assert llm_engine.abort_request.call_args_list == [call(["r0"]), call(["r1"])]
+    # Membership checks don't grow vLLM's defaultdict.
+    assert list(external_req_ids) == ["r0", "r1"]
+
+
+def test_vllm_still_has_the_internals_abort_requests_reads():
+    # `VLLMEngine.abort_requests` reads this map and calls this method; a vLLM upgrade that
+    # moves either fails here instead of on a GPU.
+    assert hasattr(OutputProcessor(None, log_stats=False), "external_req_ids")
+    inspect.signature(LLMEngine.abort_request).bind(None, ["r0"])
+
+
+def test_process_aborted_requests_fails_their_replies_without_warning(caplog):
+    async def main():
+        dispatcher = _dispatcher(dp_degree=2)
+        replies = {}
+        for request_id in ("r0", "r1"):
+            replies[request_id] = concurrent.futures.Future()
+            replies[request_id].set_running_or_notify_cancel()
+            dispatcher.rank0_register_generation(
+                request_id, "generator", replies[request_id]
+            )
+            dispatcher._rank0_dp_router.reserve(request_id, routing_session_id=None)
+
+        with caplog.at_level(logging.WARNING):
+            dispatcher.process_aborted_requests(["r0"])
+
+        with pytest.raises(RuntimeError, match="r0 aborted: its caller left"):
+            await asyncio.wrap_future(replies["r0"])
+        assert not replies["r1"].done()
+        # The aborted request's DP rank load is freed; a shutdown that aborts many logs nothing.
+        assert list(dispatcher._rank0_dp_router._reservations) == ["r1"]
+        assert caplog.records == []
+
+    asyncio.run(main())
+
+
+def test_peer_tp_rank_1_does_not_report_aborted_requests():
+    # DP=2, TP=2: global rank 3 is DP rank 1's tp_rank=1. Only tp_rank=0 reports to rank 0.
+    dispatcher = _dispatcher(rank=3, dp_degree=2, tp_degree=2)
+    dispatcher._result_port = Mock()
+
+    dispatcher.process_aborted_requests(["r0"])
+
+    dispatcher._result_port.send.assert_not_called()
 
 
 def test_process_rejected_requests_fails_only_their_replies():

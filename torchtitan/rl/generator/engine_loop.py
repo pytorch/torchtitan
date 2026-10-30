@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import enum
 import gc
 import logging
@@ -185,7 +186,8 @@ class EngineLoop:
         self, engine_request: EngineRequest, *, metrics_prefix: str
     ) -> Completion:
         """RANK 0: queue `engine_request` and wait for its `Completion`. If the engine rejects the
-        request at admission, only this call raises the engine's error."""
+        request at admission, only this call raises the engine's error. If this call is cancelled
+        after the loop took the request, the loop asks the engine to abort it."""
         self._rank0_check_running("generate")
         # Put the call on the queue; the loop will admit + process it, then resolve `reply`.
         reply: concurrent.futures.Future[Completion] = concurrent.futures.Future()
@@ -196,7 +198,18 @@ class EngineLoop:
                 reply=reply,
             )
         )
-        return await asyncio.wrap_future(reply)
+        try:
+            return await asyncio.wrap_future(reply)
+        except asyncio.CancelledError:
+            # The caller left. `cancel()` succeeds only while the request is still on the queue (the
+            # loop then skips it). Once the loop took it, abort it, unless it already finished.
+            if not reply.cancel() and not reply.done():
+                # A closed queue raises: the generator is closing and fails every reply anyway.
+                with contextlib.suppress(RuntimeError):
+                    self._queue.put(
+                        RequestAbortMessage(request_id=engine_request.request_id)
+                    )
+            raise
 
     async def load_model_state_dict(self, version: int, *, drain: bool = False) -> None:
         """RANK 0: queue a model state dict load for `version` and wait until the loop has applied
@@ -335,6 +348,10 @@ class EngineLoop:
                 self._engine.release_sessions(
                     decision.released_session_ids, decision.released_group_ids
                 )
+                if decision.aborted_request_ids:
+                    self._request_dispatcher.process_aborted_requests(
+                        self._engine.abort_requests(decision.aborted_request_ids)
+                    )
 
                 if decision.action is LoopAction.LOAD_MODEL_STATE_DICT:
                     await self._load_model_state_dict(decision.load_version)
@@ -395,7 +412,9 @@ class EngineLoop:
         await asyncio.sleep(0)
         while not self._queue.empty():
             message = self._queue.get_nowait()
-            if isinstance(message, (CloseMessage, SessionReleaseMessage)):
+            if isinstance(
+                message, (CloseMessage, SessionReleaseMessage, RequestAbortMessage)
+            ):
                 continue
             if message.reply.set_running_or_notify_cancel():
                 message.reply.set_exception(exc)
@@ -444,6 +463,7 @@ class EngineLoop:
 
         released_session_ids: list[str] = []
         released_group_ids: list[int] = []
+        aborted_request_ids: list[str] = []
         for message in messages:
             if isinstance(message, CloseMessage):
                 # Drops nothing: the queue rejects puts once closed, so the `CloseMessage` is the last message.
@@ -451,6 +471,9 @@ class EngineLoop:
             if isinstance(message, SessionReleaseMessage):
                 released_session_ids.extend(message.session_ids)
                 released_group_ids.extend(message.group_ids)
+                continue
+            if isinstance(message, RequestAbortMessage):
+                aborted_request_ids.append(message.request_id)
                 continue
             # Skip a call its caller already cancelled; once running, the reply ignores cancellation, so only
             # the loop resolves it.
@@ -465,6 +488,29 @@ class EngineLoop:
                     message.reply,
                 )
                 pending_engine_requests.append(message.engine_request)
+
+        # A request taken off the queue but not admitted yet (e.g. parked by a draining load) never
+        # reached an engine: fail it here, before it is counted or routed.
+        if aborted_request_ids and pending_engine_requests:
+            pending_request_ids = {
+                request.request_id for request in pending_engine_requests
+            }
+            parked_aborted_ids = [
+                request_id
+                for request_id in aborted_request_ids
+                if request_id in pending_request_ids
+            ]
+            pending_engine_requests[:] = [
+                request
+                for request in pending_engine_requests
+                if request.request_id not in parked_aborted_ids
+            ]
+            self._request_dispatcher.rank0_fail_pending_generations(parked_aborted_ids)
+            aborted_request_ids = [
+                request_id
+                for request_id in aborted_request_ids
+                if request_id not in pending_request_ids
+            ]
 
         # A model state dict load takes priority over admitting new requests. Loads taken off the queue
         # together are coalesced into one, at the highest version: every load reads the latest push from
@@ -508,6 +554,7 @@ class EngineLoop:
             )
         decision.released_session_ids = released_session_ids
         decision.released_group_ids = released_group_ids
+        decision.aborted_request_ids = aborted_request_ids
         return decision
 
     @sl.log_trace_span("load_model_state_dict_copy")
@@ -587,8 +634,21 @@ class SessionReleaseMessage:
     group_ids: list[int] = field(default_factory=list)
 
 
+@dataclass(kw_only=True, slots=True)
+class RequestAbortMessage:
+    """A request whose `generate` call was cancelled after the engine loop took it; no reply.
+    The HTTP server mints unique request ids, so a late abort can't hit a newer request that
+    came through it."""
+
+    request_id: str
+
+
 EngineLoopMessage = (
-    GenerationMessage | ModelStateDictLoadMessage | CloseMessage | SessionReleaseMessage
+    GenerationMessage
+    | ModelStateDictLoadMessage
+    | CloseMessage
+    | SessionReleaseMessage
+    | RequestAbortMessage
 )
 
 
@@ -675,3 +735,6 @@ class LoopDecision:
     released_session_ids: list[str] = field(default_factory=list)
     released_group_ids: list[int] = field(default_factory=list)
     # sessions (and groups) whose held KV every rank releases before acting (session_kv_holder)
+
+    aborted_request_ids: list[str] = field(default_factory=list)
+    # admitted requests every rank aborts before acting (their callers left)
