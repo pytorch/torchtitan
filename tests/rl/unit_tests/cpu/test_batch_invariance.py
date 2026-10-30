@@ -123,6 +123,9 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
 
     monkeypatch.setattr(loss_module, "compute_logprobs", recording_compute_logprobs)
     batch_invariance.force_logprobs_fn_for_batch_invariance()
+    patched_logprobs = modules[module_names[-1]].compute_token_logprobs
+    batch_invariance.force_logprobs_fn_for_batch_invariance()
+    assert modules[module_names[-1]].compute_token_logprobs is patched_logprobs
 
     logits = torch.tensor(
         [[1.0, -0.5, 0.25, 2.0], [-1.0, 0.0, 1.5, 0.5]],
@@ -140,3 +143,56 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
         assert call_logits is logits
         torch.testing.assert_close(call_labels, token_ids[:, column].to(torch.int64))
         assert call_kwargs == {"vocab_parallel_group": None}
+
+
+def test_rocm_flex_page_mapping_preserves_page_ownership(monkeypatch):
+    from torchtitan.rl.generator.vllm import batch_invariance
+
+    module_names = (
+        "vllm",
+        "vllm.v1",
+        "vllm.v1.attention",
+        "vllm.v1.attention.backends",
+        "vllm.v1.attention.backends.flex_attention",
+    )
+    modules = {name: ModuleType(name) for name in module_names}
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+        if name != module_names[-1]:
+            module.__path__ = []
+        if "." in name:
+            parent_name, child_name = name.rsplit(".", 1)
+            setattr(modules[parent_name], child_name, module)
+
+    class FakeFlexAttentionMetadata:
+        pass
+
+    modules[module_names[-1]].FlexAttentionMetadata = FakeFlexAttentionMetadata
+    batch_invariance.enable_rocm_batch_invariant_page_mapping()
+
+    metadata = FakeFlexAttentionMetadata()
+    metadata.num_reqs = 2
+    # Page 1 is shared; pages 2 and 3 belong to requests 0 and 1 respectively.
+    metadata.physical_to_logical = torch.tensor(
+        [
+            [-1, 0, 1, -1],
+            [-1, 0, -1, 1],
+        ]
+    )
+    metadata.doc_ids = torch.tensor([0, 0, 1, 1], dtype=torch.int32)
+    metadata.query_start_loc = torch.tensor([0, 2])
+    metadata.decode_offset = torch.tensor([0, 0])
+    metadata.seq_lens = torch.tensor([2, 2])
+    metadata.block_size = 1
+    metadata.logical_mask_mod = lambda _batch, _head, query_index, kv_index: (
+        kv_index <= query_index
+    )
+
+    mask = metadata.get_paged_mask_mod()
+    zero = torch.tensor(0)
+    assert mask(zero, zero, torch.tensor(1), torch.tensor(2))
+    assert not mask(zero, zero, torch.tensor(1), torch.tensor(3))
+    assert mask(zero, zero, torch.tensor(2), torch.tensor(1))
+    assert not mask(zero, zero, torch.tensor(2), torch.tensor(2))
+    metadata.seq_lens[0] = 1
+    assert not mask(zero, zero, torch.tensor(1), torch.tensor(2))
