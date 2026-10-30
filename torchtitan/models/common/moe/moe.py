@@ -145,7 +145,25 @@ class RoutedExperts(Module):
             remat.recompute_needs_tensor(routed_input_RD)
             gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
-            hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
+            # w2(h * s) == s * w2(h) for a bias-free w2, so the activation region can
+            # apply the routing scores without an extra pass. Exactly SwiGLU: another
+            # class may override __call__ without scores (FusedSwiGLU), and only SwiGLU
+            # is tested on this path. gpt-oss's w2 adds a bias, and a postprocess reads
+            # the unscaled w2 output.
+            # TODO: take scores in every BinaryActivationFn.__call__ (FusedSwiGLU too)
+            # and drop the type check; that changes the fused_swiglu recipes' numerics.
+            if (
+                type(self.activation_fn) is SwiGLU
+                and getattr(self.w2, "bias", None) is None
+                and self.output_postprocess is None
+            ):
+                hidden_RF = self.activation_fn(
+                    gate_up_R2F,
+                    offsets=offsets_E,
+                    scores=self.token_dispatcher.take_routed_scores(metadata),
+                )
+            else:
+                hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
             routed_output_RD = self.w2(hidden_RF, offsets_E)
             # A real dtype cast and the output postprocess read the w2 output with
             # bare ops, so pin it only then. In the common bf16 case without a

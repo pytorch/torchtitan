@@ -27,9 +27,14 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
     class Config(Function.Config):
         pass
 
-    # recompile_limit=16: ~3 graphs per static F; DeepSeek-V3 at TP8 needs 10 (default 8).
+    # recompile_limit=16: ~3 graphs per (static F, scores or not); DeepSeek-V3 at TP8
+    # needs 10 (default 8). The graphs double where shared and routed experts share an F
+    # (Qwen3.5).
     # Backward stacks the gate and up gradients into [..., 2, F]. Both limits at 0 make Inductor write
     # each gradient into its half, not one kernel that picks a half per element. Both are needed.
+    # TODO: keep the score gradient bitwise under a new expert row order without deterministic
+    # mode. With scores, these options make its per-row sum depend on the row's position, so a
+    # new order changes its bits; default options don't, at 1.6-1.8x this region's time.
     @local_compile(
         "fused_binary_activation",
         batch_invariant=True,
@@ -37,7 +42,11 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
         options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
     )
     def __call__(
-        self, gate_up: torch.Tensor, *, offsets: torch.Tensor | None = None
+        self,
+        gate_up: torch.Tensor,
+        *,
+        offsets: torch.Tensor | None = None,
+        scores: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Apply the activation to ``gate_up``: ``[..., 0, :]`` is gate, ``[..., 1, :]`` is up.
 
@@ -49,6 +58,9 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
             offsets: for routed experts, where each expert's rows end. Rows past
                 ``offsets[-1]`` are padding that a kernel may skip (FusedSwiGLU does).
                 This compiled path computes every row and never reads ``offsets``.
+            scores: optional ``(R,)``, one routing score per row; row ``r`` of the output
+                is multiplied by ``scores[r]``. fp32 scores multiply in fp32, then round
+                once to the output dtype.
 
         Example:
 
@@ -59,7 +71,10 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
         # a runtime F: ~1.9x slower fwd+bwd, ~1.25x slower no-grad forward.
         torch._dynamo.mark_static(gate_up, -1)
         gate, up = gate_up.unbind(-2)
-        return self._activation_fn(gate, up)
+        out = self._activation_fn(gate, up)
+        if scores is None:
+            return out
+        return (out * scores.unsqueeze(-1)).to(out.dtype)
 
     @abstractmethod
     def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor, /) -> torch.Tensor:
