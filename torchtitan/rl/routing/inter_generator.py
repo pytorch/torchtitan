@@ -21,6 +21,7 @@ from torchtitan.rl.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
+from torchtitan.tools.utils import device_type
 
 
 @dataclass(kw_only=True, slots=True)
@@ -94,6 +95,11 @@ class InterGeneratorRouter(Configurable):
         idle, so a model state dict load may land mid-rollout and successive turns can run
         under different policy versions. A turn whose session is pinned to a
         draining generator waits for it instead of moving to another one."""
+
+        sequential_initial_pull: bool = field(
+            default_factory=lambda: device_type == "xpu"
+        )
+        """Run the first pull one generator at a time (needed on XPU: oneCCL#225)."""
 
     def __init__(
         self,
@@ -226,11 +232,15 @@ class InterGeneratorRouter(Configurable):
 
         await asyncio.gather(*(wait(generator) for generator in self._generators))
 
-    async def pull_model_state_dict(self, policy_version: int) -> None:
+    async def pull_model_state_dict(
+        self, policy_version: int, *, initial: bool = False
+    ) -> None:
         """Pull the given policy version's state dict into every generator.
 
         Args:
             policy_version: Trainer policy version whose state dict to pull.
+            initial: Whether this is the first pull after setup, which runs one
+                generator at a time with ``Config.sequential_initial_pull``.
         """
 
         async def _pull_one(h: _GeneratorHandle) -> None:
@@ -260,7 +270,11 @@ class InterGeneratorRouter(Configurable):
         # TODO(perf): stagger the per-generator fetches when num_generators is large so they don't
         #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
         #   big models / many generators, not at small scale.
-        await asyncio.gather(*[_pull_one(h) for h in self._generators])
+        if initial and self._config.sequential_initial_pull:
+            for h in self._generators:
+                await _pull_one(h)
+        else:
+            await asyncio.gather(*[_pull_one(h) for h in self._generators])
 
     async def generate(
         self,

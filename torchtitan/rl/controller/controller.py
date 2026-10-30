@@ -695,7 +695,9 @@ class Controller(Configurable):
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.all_ranks.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
-            await self.generator_router.pull_model_state_dict.call_one(self.start_step)
+            await self.generator_router.pull_model_state_dict.call_one(
+                self.start_step, initial=True
+            )
 
     # TODO: fold validation into a Validator(Configurable) the controller attaches, instead of 4 methods.
     @sl.log_trace_span("_collect_validation_rollouts")

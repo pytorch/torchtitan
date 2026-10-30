@@ -291,6 +291,29 @@ def spawn_proc_mesh(
     return trainer_mesh, generator_meshes
 
 
+def spawn_storage_volume_mesh(
+    trainer_world_size: int, host_meshes: HostMeshes | None = None
+) -> ProcMesh:
+    """Spawn a twin of the trainer mesh for the TorchStore storage volumes: same
+    hosts, same per-host devices, same rank layout (see
+    ``MonarchActorSystem.Config.storage_volumes_in_own_procs``).
+
+    Relies on the trainer taking the first devices of each of its hosts, as
+    ``spawn_proc_mesh`` does (the trainer is allocated first on its host mesh);
+    a fresh provisioner starts at the same device.
+    """
+    if host_meshes is None:
+        host_mesh, gpus_per_node = this_host(), trainer_world_size
+    else:
+        host_mesh, gpus_per_node = host_meshes.trainer, host_meshes.gpus_per_node
+    return _spawn_proc_mesh(
+        host_mesh,
+        trainer_world_size,
+        PerHostProvisioner(total_gpus=gpus_per_node),
+        bootstrap=_preimport_torch,
+    )
+
+
 def spawn_cpu_procs(num_procs: int) -> ProcMesh:
     """Spawn ``num_procs`` CPU procs on the controller host."""
     return this_host().spawn_procs(per_host={"cpus": num_procs})

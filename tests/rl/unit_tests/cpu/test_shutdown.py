@@ -509,6 +509,82 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
     ]
 
 
+def test_storage_volume_mesh_is_a_twin_of_the_trainer_mesh(bootstrap_cmd_returns_env):
+    """The storage volume procs get the trainer's devices on the trainer's hosts."""
+    trainer_hosts, generator_hosts = _FakeHostMesh(), _FakeHostMesh()
+    host_meshes = provisioning.HostMeshes(
+        trainer=trainer_hosts,
+        generators=[trainer_hosts, generator_hosts],
+        gpus_per_node=4,
+    )
+
+    provisioning.spawn_proc_mesh(
+        trainer_world_size=2,
+        per_generator_world_size=1,
+        host_meshes=host_meshes,
+        num_generators=2,
+    )
+    provisioning.spawn_storage_volume_mesh(2, host_meshes)
+
+    assert trainer_hosts.visible_devices == ["0,1", "2", "0,1"]
+    assert generator_hosts.visible_devices == ["0"]
+
+
+@pytest.mark.parametrize("own_procs", [False, True])
+def test_monarch_actor_system_places_storage_volumes(monkeypatch, own_procs):
+    """Storage volumes go on the trainer mesh, or with storage_volumes_in_own_procs
+    on a twin mesh that gets its own torch elastic env and is stopped with the rest."""
+    events: list[str] = []
+
+    async def initialized():
+        events.append("volume mesh initialized")
+
+    volume_mesh = SimpleNamespace()
+
+    async def setup_torch_elastic_env(mesh):
+        events.append(f"torch elastic {mesh is volume_mesh}")
+
+    async def initialize(*, mesh, **kwargs):
+        events.append("volumes on " + ("twin" if mesh is volume_mesh else str(mesh)))
+
+    async def initialize_client(**kwargs):
+        pass
+
+    def spawn_storage_volume_mesh(trainer_world_size, host_meshes):
+        events.append(f"twin of {trainer_world_size} on {host_meshes}")
+        volume_mesh.initialized = initialized()
+        return volume_mesh
+
+    monkeypatch.setattr(
+        monarch_system, "spawn_storage_volume_mesh", spawn_storage_volume_mesh
+    )
+    monkeypatch.setattr(
+        monarch_system, "setup_torch_elastic_env", setup_torch_elastic_env
+    )
+    monkeypatch.setattr(monarch_system.ts, "initialize", initialize)
+    actor_system = MonarchActorSystem.Config(
+        storage_volumes_in_own_procs=own_procs
+    ).build(host_meshes="host_meshes")
+    actor_system._trainer_mesh, actor_system._trainer_world_size = "trainer_mesh", 2
+    actor_system._trainer = SimpleNamespace(
+        initialize_torchstore_client=SimpleNamespace(call=initialize_client)
+    )
+
+    asyncio.run(actor_system.initialize_torchstore())
+
+    if own_procs:
+        assert events == [
+            "twin of 2 on host_meshes",
+            "volume mesh initialized",
+            "torch elastic True",
+            "volumes on twin",
+        ]
+        assert actor_system._storage_volume_mesh is volume_mesh
+    else:
+        assert events == ["volumes on trainer_mesh"]
+        assert actor_system._storage_volume_mesh is None
+
+
 class _FakeTrainerRanks:
     """A trainer actor mesh of ranks laid out as (pp, dp, cp_tp); ``get_dp_rank``
     reports ``reported_dp_ranks`` for those ranks."""

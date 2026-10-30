@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torchstore as ts
@@ -26,6 +26,7 @@ from torchtitan.rl.actors.monarch.provisioning import (
     shutdown,
     spawn_cpu_procs,
     spawn_proc_mesh,
+    spawn_storage_volume_mesh,
 )
 from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.router import InterGeneratorRouterActor
@@ -38,6 +39,7 @@ from torchtitan.rl.rollout.rollouter import RolloutWorker
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.tools.utils import device_type
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,13 @@ class MonarchActorSystem(ActorSystem):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActorSystem.Config):
-        pass
+        storage_volumes_in_own_procs: bool = field(
+            default_factory=lambda: device_type == "xpu"
+        )
+        """Run the TorchStore storage volumes in their own procs, a twin of the
+        trainer mesh on the same devices, instead of in the trainer procs. Needed
+        on XPU: oneCCL 2022 hangs when a proc that hosts a storage volume also runs
+        FSDP collectives (oneCCL#222)."""
 
     def __init__(
         self,
@@ -72,6 +80,8 @@ class MonarchActorSystem(ActorSystem):
         self._host_meshes = host_meshes
         self._generator_env = generator_env
         self._trainer_mesh: ProcMesh | None = None
+        self._trainer_world_size = 0
+        self._storage_volume_mesh: ProcMesh | None = None
         self._generator_meshes: list[ProcMesh] = []
         self._router_mesh: ProcMesh | None = None
         self._batcher_mesh: ProcMesh | None = None
@@ -86,8 +96,9 @@ class MonarchActorSystem(ActorSystem):
         generator_parallelism: InferenceParallelismConfig,
         num_generators: int,
     ) -> None:
+        self._trainer_world_size = compute_trainer_world_size(trainer_parallelism)
         self._trainer_mesh, self._generator_meshes = spawn_proc_mesh(
-            compute_trainer_world_size(trainer_parallelism),
+            self._trainer_world_size,
             compute_generator_world_size(generator_parallelism),
             host_meshes=self._host_meshes,
             num_generators=num_generators,
@@ -190,11 +201,23 @@ class MonarchActorSystem(ActorSystem):
             await worker_mesh.stop()
 
     async def initialize_torchstore(self) -> None:
-        # StorageVolumes are spawned on the trainer mesh so they are colocated
-        # with the weight source for faster data access in the non-RDMA path.
+        # StorageVolumes are spawned on the trainer mesh (or, with
+        # storage_volumes_in_own_procs, on a twin mesh with the same hosts and
+        # devices) so they are colocated with the weight source for faster data
+        # access in the non-RDMA path.
         # https://github.com/meta-pytorch/torchstore
+        storage_volume_mesh = self._trainer_mesh
+        if self.config.storage_volumes_in_own_procs:
+            storage_volume_mesh = spawn_storage_volume_mesh(
+                self._trainer_world_size, self._host_meshes
+            )
+            self._storage_volume_mesh = storage_volume_mesh
+            await storage_volume_mesh.initialized
+            # Volumes pick their device from LOCAL_RANK.
+            await setup_torch_elastic_env(storage_volume_mesh)
+            logger.info("TorchStore storage volumes run in their own procs")
         await ts.initialize(
-            mesh=self._trainer_mesh,
+            mesh=storage_volume_mesh,
             strategy=ts.TorchStoreStrategy(),
             client_type=ts.ClientType.ROUTING,
         )
@@ -218,10 +241,12 @@ class MonarchActorSystem(ActorSystem):
                 self._router_mesh,
                 self._batcher_mesh,
                 self._trainer_mesh,
+                self._storage_volume_mesh,
                 *self._generator_meshes,
             )
             if mesh is not None
         ]
+        self._storage_volume_mesh = None
         self._router_mesh, self._batcher_mesh = None, None
         self._trainer_mesh, self._generator_meshes = None, []
         self._trainer, self._generators = None, []

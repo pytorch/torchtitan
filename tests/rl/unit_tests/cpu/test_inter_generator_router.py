@@ -61,11 +61,14 @@ class _Actor:
         return 1
 
 
-def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
+def _router(
+    actors, *, strategy=None, hot_swap=False, sequential_initial_pull=False
+) -> InterGeneratorRouter:
     return InterGeneratorRouter(
         InterGeneratorRouter.Config(
             strategy=strategy or LeastLoadedRoutingStrategy.Config(),
             hot_swap=hot_swap,
+            sequential_initial_pull=sequential_initial_pull,
         ),
         generators=[ServiceHandle(all_ranks=actor, rank0=actor) for actor in actors],
     )
@@ -432,6 +435,57 @@ def test_drain_excludes_syncing_generator_from_routes():
             [((1,), {})],
             [((1,), {})],
         ]
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("hot_swap", [False, True])
+def test_initial_pull_starts_next_generator_after_previous_finishes(hot_swap):
+    async def _run():
+        actors = [_Actor("gen0", wait_pull=True), _Actor("gen1", wait_pull=True)]
+        router = _router(actors, hot_swap=hot_swap, sequential_initial_pull=True)
+
+        pull_task = asyncio.create_task(router.pull_model_state_dict(3, initial=True))
+        await actors[0].load_model_state_dict.started.wait()
+        await asyncio.sleep(0)
+        assert actors[1].load_model_state_dict.calls == []
+
+        actors[0].load_model_state_dict.release.set()
+        await asyncio.wait_for(
+            actors[1].load_model_state_dict.started.wait(), timeout=1.0
+        )
+        actors[1].load_model_state_dict.release.set()
+        await pull_task
+        assert [actor.load_model_state_dict.calls for actor in actors] == [
+            [((3,), {})],
+            [((3,), {})],
+        ]
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("initial", "sequential_initial_pull"), [(False, True), (True, False)]
+)
+def test_pull_starts_every_generator_at_once(initial, sequential_initial_pull):
+    async def _run():
+        actors = [_Actor("gen0", wait_pull=True), _Actor("gen1", wait_pull=True)]
+        router = _router(
+            actors, hot_swap=True, sequential_initial_pull=sequential_initial_pull
+        )
+
+        pull_task = asyncio.create_task(
+            router.pull_model_state_dict(4, initial=initial)
+        )
+        await asyncio.wait_for(
+            asyncio.gather(
+                *[actor.load_model_state_dict.started.wait() for actor in actors]
+            ),
+            timeout=1.0,
+        )
+        for actor in actors:
+            actor.load_model_state_dict.release.set()
+        await pull_task
 
     asyncio.run(_run())
 
