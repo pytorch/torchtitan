@@ -918,15 +918,18 @@ def test_direct_load_reads_torchstore_on_the_actor_loop_during_the_load(
     engine_thread, monkeypatch
 ) -> None:
     reads: list[tuple] = []
+    current_stream = Mock()
 
     async def get_state_dict(*args, **kwargs):
+        # Queued GPU work on the weights must finish before the read writes them.
+        current_stream.return_value.synchronize.assert_called_once_with()
         reads.append(
             (threading.current_thread(), asyncio.get_running_loop(), args, kwargs)
         )
         return kwargs["user_state_dict"]
 
     monkeypatch.setattr(generator_module.ts, "get_state_dict", get_state_dict)
-    monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+    monkeypatch.setattr(torch.accelerator, "current_stream", current_stream)
     weights = {"weight": object()}
 
     class _DirectEngine(_FakeEngine):
