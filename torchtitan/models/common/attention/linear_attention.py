@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+from torch.utils import _pytree as pytree
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attn_gym import (
@@ -52,6 +53,12 @@ class LinearAttentionMetadata:
         """Annotate sequence offsets."""
         if self.varlen is not None:
             self.varlen.annotate_spmd_types()
+
+
+# Linear-attention metadata crosses compiler and whole-step CUDA graph
+# boundaries. Expose its tensor fields so fresh sequence offsets are copied
+# on replay.
+pytree.register_dataclass(LinearAttentionMetadata)
 
 
 def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:

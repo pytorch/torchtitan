@@ -32,6 +32,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import (
     Attention,
+    create_varlen_metadata_for_document,
     FlexInnerAttention,
     InnerAttention,
     LinearAttention,
@@ -52,9 +53,13 @@ from torchtitan.models.common.attention.cp_attention import (
     UlyssesSlidingWindowFlexInnerAttention,
     UlyssesVarlenInnerAttention,
 )
-from torchtitan.models.common.attention.cp_gdn import UlyssesInnerGDN
+from torchtitan.models.common.attention.cp_gdn import (
+    ContextParallelInnerGDN,
+    UlyssesInnerGDN,
+)
 from torchtitan.models.common.attention.cp_kda import UlyssesInnerKDA
 from torchtitan.models.common.attention.cp_linear_attention import (
+    ContextParallelLinearAttentionMetadata,
     UlyssesLinearAttentionMetadata,
 )
 from torchtitan.models.common.attention.cp_mla import (
@@ -64,6 +69,7 @@ from torchtitan.models.common.attention.cp_mla import (
 from torchtitan.models.common.attention.gdn import InnerGDN
 from torchtitan.models.common.attention.kda import InnerKDA
 from torchtitan.models.common.attention.linear_attention import LinearAttentionMetadata
+from torchtitan.models.common.attn_gym import ContextParallelRouting
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import (
@@ -378,7 +384,161 @@ class TestFluxCpSharding(unittest.TestCase):
             self.assertEqual(cp.dim, 1)
 
 
+class TestGatedDeltaNetContextParallel(unittest.TestCase):
+    def test_backend_builds_routing_from_varlen_metadata(self):
+        varlen = create_varlen_metadata_for_document(
+            torch.tensor([0, 1, 0, 1], dtype=torch.int32)
+        )
+        attention_metadata = LinearAttentionMetadata(
+            varlen=varlen,
+            num_conv_history_tokens=3,
+        )
+        cp_group = SimpleNamespace(size=lambda: 2)
+        routing = cast(ContextParallelRouting, object())
+
+        with (
+            mock.patch.object(
+                ContextParallelRouting,
+                "from_fragments",
+                return_value=routing,
+            ) as build_routing,
+            mock.patch(
+                "torchtitan.models.common.attention.cp_linear_attention.dist.get_rank",
+                return_value=0,
+            ),
+            mock.patch(
+                "torchtitan.models.common.attention.cp_linear_attention.spmd_mesh_group",
+                return_value=cp_group,
+            ),
+        ):
+            metadata = ContextParallelInnerGDN.prepare_cp_metadata(
+                attention_metadata,
+                permutation=None,
+            )
+
+        self.assertIs(metadata.cp_routing, routing)
+        build_routing.assert_called_once_with(
+            cu_seqlens_global=[0, 2, 4],
+            fragments=[[(0, 2)], [(2, 4)]],
+            cp_rank=0,
+            device=varlen.cu_seq_q.device,
+            slots=1,
+            max_subsequences=2,
+            conv_history=3,
+        )
+
+    def test_inner_gdn_uses_cp_convolution_history_and_routing(self):
+        num_tokens = 4
+        num_heads = 2
+        head_dim = 128
+        channels = num_heads * head_dim
+        local_offsets = torch.tensor([0, 2, 4], dtype=torch.int32)
+        routing = cast(
+            ContextParallelRouting,
+            SimpleNamespace(
+                cu_seqlens=local_offsets,
+                tail_sources=torch.zeros(1, 3, dtype=torch.int64),
+            ),
+        )
+        metadata = ContextParallelLinearAttentionMetadata(
+            varlen=None,
+            num_conv_history_tokens=3,
+            cp_routing=routing,
+        )
+        initial_state = torch.randn(2, 3, channels)
+        output_1THV = torch.randn(1, num_tokens, num_heads, head_dim)
+        cp_group = object()
+        inner_gdn = ContextParallelInnerGDN.Config(
+            conv_kernel_size=4,
+            kernel=mock.MagicMock(),
+        ).build()
+
+        with (
+            mock.patch(
+                "torchtitan.models.common.attention.cp_gdn.context_parallel_conv_history",
+                return_value=initial_state,
+            ) as conv_history,
+            mock.patch(
+                "torchtitan.models.common.attention.gdn.causal_conv1d",
+                side_effect=lambda x, _weight, **_kwargs: x,
+            ),
+            mock.patch(
+                "torchtitan.models.common.attention.cp_gdn.l2norm",
+                side_effect=lambda x, **_kwargs: x,
+            ),
+            mock.patch(
+                "torchtitan.models.common.attention.cp_gdn.context_parallel_gdn",
+                return_value=(output_1THV, None),
+            ) as cp_gdn,
+            mock.patch(
+                "torchtitan.models.common.attention.cp_gdn.spmd_mesh_group",
+                return_value=cp_group,
+            ),
+        ):
+            output_THV = inner_gdn(
+                torch.randn(num_tokens, channels),
+                torch.randn(num_tokens, channels),
+                torch.randn(num_tokens, channels),
+                torch.randn(num_tokens, num_heads),
+                torch.randn(num_tokens, num_heads),
+                torch.randn(channels, 1, 4),
+                torch.randn(channels, 1, 4),
+                torch.randn(channels, 1, 4),
+                torch.randn(num_heads),
+                torch.randn(num_heads),
+                key_head_dim=head_dim,
+                value_head_dim=head_dim,
+                attention_metadata=metadata,
+            )
+
+        self.assertEqual(output_THV.shape, (num_tokens, num_heads, head_dim))
+        self.assertEqual(conv_history.call_count, 3)
+        self.assertIs(cp_gdn.call_args.kwargs["routing"], routing)
+        self.assertIs(cp_gdn.call_args.kwargs["group"], cp_group)
+
+
 class TestDecoderCpSharding(unittest.TestCase):
+    def test_forwards_selected_load_balancer_capacity_to_linear_metadata(self):
+        from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
+
+        metadata = object()
+        permutation = torch.arange(1024).unsqueeze(0)
+        load_balancer = mock.Mock(max_num_fragments=4)
+        load_balancer.generate_permutation.return_value = permutation
+        model = SimpleNamespace(
+            config=SimpleNamespace(
+                first_full_attention=SimpleNamespace(
+                    inner_attention=AllGatherKVFlexInnerAttention.Config()
+                )
+            )
+        )
+        inputs = {
+            "input": torch.arange(1024),
+            "attention_metadata": {ContextParallelInnerKDA: metadata},
+        }
+        with mock.patch.object(
+            PTRRFlexAttentionCPLoadBalancer.Config,
+            "build",
+            return_value=load_balancer,
+        ), mock.patch.object(
+            ContextParallelInnerKDA, "prepare_cp_metadata"
+        ) as prepare, mock.patch.object(
+            context_parallel, "shard_tensors", return_value=inputs
+        ):
+            Decoder._cp_shard(
+                cast(Any, model),
+                inputs,
+                input_shardings=decoder_input_sharding(),
+                parallelism_context=mock.Mock(),
+                parallelism=ParallelismConfig(
+                    context_parallel_degree=2,
+                    context_parallel_load_balancer=PTRRFlexAttentionCPLoadBalancer.Config(),
+                ),
+            )
+        prepare.assert_called_once_with(
+            metadata, permutation=permutation, max_num_fragments=4
+        )
+
     def test_dispatches_linear_cp_metadata_and_leaves_non_cp_metadata_unchanged(self):
         from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
         from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
@@ -408,7 +568,9 @@ class TestDecoderCpSharding(unittest.TestCase):
                             context_parallel_load_balancer=None,
                         ),
                     )
-                prepare.assert_called_once_with(global_metadata, permutation=None)
+                prepare.assert_called_once_with(
+                    global_metadata, permutation=None, max_num_fragments=1
+                )
                 metadata = input_dict["attention_metadata"]
                 self.assertIs(metadata[backend], local_metadata)
                 self.assertIs(metadata[FlexInnerAttention], global_metadata)
@@ -538,7 +700,9 @@ class TestDecoderCpSharding(unittest.TestCase):
                         )
 
                     build_load_balancer.assert_not_called()
-                    prepare_metadata.assert_called_once_with(metadata, permutation=None)
+                    prepare_metadata.assert_called_once_with(
+                        metadata, permutation=None, max_num_fragments=1
+                    )
                     self.assertIsNone(shard_tensors.call_args.kwargs["permutation"])
                     warn.assert_called_once()
                     self.assertIn("no full attention", warn.call_args.args[1])
