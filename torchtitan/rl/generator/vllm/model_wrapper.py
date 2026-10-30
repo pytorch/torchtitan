@@ -22,7 +22,7 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import FSDPModule
-from torch.distributed._state_dict_utils import _create_cpu_state_dict
+from torch.distributed._state_dict_utils import _copy_state_dict
 from torch.distributed.tensor import DTensor, Replicate
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -456,10 +456,21 @@ class VLLMModelWrapper(Module):
         # is still sharded. Bind first so first-touch places them on the
         # NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
-        with torch.device("cpu"):
-            self._prefetched_model_state_dict = _create_cpu_state_dict(
-                self.model.state_dict(), pin_memory=True
-            )
+        # TODO: allocating pinned memory still takes 13.7 s per 64 GiB (H100 host). A background
+        # thread during vLLM's memory profiling would hide it, but joining it before graph capture
+        # needs a model-runner hook.
+        model_state_dict = self.model.state_dict()
+        self._prefetched_model_state_dict = {
+            name: _empty_pinned_like(tensor)
+            for name, tensor in model_state_dict.items()
+        }
+        # A sync overwrites only the keys the trainer publishes; the rest
+        # (e.g. vLLM's attention scales) keep the values copied here.
+        _copy_state_dict(model_state_dict, self._prefetched_model_state_dict)
+
+        # vLLM switches torch to 1 CPU thread when warmup ends, and torch.compile recompiles
+        # a region when the thread count changes. Switch now, before the first compile.
+        _torch_utils.set_torch_threads_for_runtime()
 
         # Unshard the model here so vLLM performs its GPU memory profiling
         # based on the model's actual representation used during forward
@@ -779,3 +790,23 @@ class VLLMModelWrapper(Module):
 
         # Return the names of all loaded parameters so vLLM knows they were handled
         return loaded_param_names
+
+
+def _empty_pinned_like(tensor: torch.Tensor) -> torch.Tensor:
+    """Allocate an uninitialized pinned CPU tensor for `tensor`'s local shard, with its DTensor spec.
+
+    Example:
+        DTensor [4096, 1024], Shard(0) over 2 ranks, on GPU
+        -> DTensor [4096, 1024], Shard(0); local tensor: pinned CPU [2048, 1024]
+        tensor [64] on GPU -> pinned CPU tensor [64]
+    """
+    if not isinstance(tensor, DTensor):
+        return torch.empty(
+            tensor.shape, dtype=tensor.dtype, device="cpu", pin_memory=True
+        )
+    local_tensor = tensor._local_tensor
+    buffer = torch.empty(
+        local_tensor.shape, dtype=local_tensor.dtype, device="cpu", pin_memory=True
+    )
+    # Not DTensor.from_local: it moves the local tensor to the mesh's device (GPU).
+    return DTensor(buffer, tensor._spec, requires_grad=False)
