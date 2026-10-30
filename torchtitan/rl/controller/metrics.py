@@ -10,10 +10,14 @@
 # but components/ may not be the right home either.
 
 import contextlib
+import functools
 import logging
+import os
 import time
 from collections import defaultdict
+from pathlib import Path
 
+from torchtitan.rl._env import RL_ROLE_ENV
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Rollout
 
@@ -302,3 +306,97 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         )
     )
     return out
+
+
+# TODO: tag the batcher, generator-router and rollout-worker procs too, as spawn_proc_mesh does:
+# pass `bootstrap_command` to the `this_host().spawn_procs` call in `spawn_cpu_procs`.
+# Until then they count as `other`, mixed with Monarch host agents and the env server.
+_PROCESS_ROLES = ("controller", "trainer", "generator", "env_server_worker", "other")
+
+
+def compute_host_memory_metrics() -> list[m.Metric]:
+    """Anonymous memory per process role on this host, plus the cgroup total.
+
+    Anonymous memory leaves out shared libraries, which summed RSS counts once per process.
+    It comes from `smaps_rollup`, a page-table walk (~1.5 ms per process). Before Linux 6.16,
+    `status`'s `RssAnon` misses memory each CPU hasn't reported yet: 2x low on GB300 (Linux 6.14).
+    Scans every process in the controller's cgroup: trainer ranks need not be the
+    controller's descendants. A process's role is `TORCHTITAN_RL_ROLE` in its spawn env:
+
+        controller           this process
+        trainer, generator   Monarch procs and their children
+        env_server_worker    processes the env server spawns, and their children
+        other                the rest, e.g. the batcher, router and rollout-worker procs,
+                             Monarch host agents and the env server itself
+
+    Example:
+        compute_host_memory_metrics()
+        # -> host_memory/rss_anon_gib/env_server_worker 230.5,
+        #    host_memory/num_processes/env_server_worker 611, ...,
+        #    host_memory/cgroup_memory_current_gib 655.0
+    """
+    cgroup_dir = _cgroup_dir()
+    if cgroup_dir is None:
+        return []
+    rss_anon_kib = dict.fromkeys(_PROCESS_ROLES, 0)
+    num_processes = dict.fromkeys(_PROCESS_ROLES, 0)
+    for pid in (cgroup_dir / "cgroup.procs").read_text().split():
+        # A process may exit after the cgroup listing, or be unreadable (hidepid, another user's).
+        try:
+            rollup = Path(f"/proc/{pid}/smaps_rollup").read_text()
+            role = "controller" if int(pid) == os.getpid() else _process_role(pid)
+        except OSError:
+            continue
+        # "Anonymous:   123456 kB"
+        for line in rollup.splitlines():
+            if line.startswith("Anonymous:"):
+                rss_anon_kib[role] += int(line.split()[1])
+                num_processes[role] += 1
+                break
+
+    metrics = [
+        m.Metric(f"host_memory/rss_anon_gib/{role}", m.NoReduce(kib / 2**20))
+        for role, kib in rss_anon_kib.items()
+    ]
+    metrics += [
+        m.Metric(f"host_memory/num_processes/{role}", m.NoReduce(count))
+        for role, count in num_processes.items()
+    ]
+    # The root cgroup has no memory.current.
+    with contextlib.suppress(FileNotFoundError):
+        memory_current = int((cgroup_dir / "memory.current").read_text())
+        metrics.append(
+            m.Metric(
+                "host_memory/cgroup_memory_current_gib",
+                m.NoReduce(memory_current / 2**30),
+            )
+        )
+    return metrics
+
+
+@functools.cache
+def _cgroup_dir() -> Path | None:
+    """The controller's cgroup v2 directory; cached, so a host without one warns once.
+
+    Example: "0::/user.slice/session-3.scope" -> /sys/fs/cgroup/user.slice/session-3.scope
+    """
+    for line in Path("/proc/self/cgroup").read_text().splitlines():
+        if line.startswith("0::"):
+            cgroup_dir = Path("/sys/fs/cgroup") / line[3:].lstrip("/")
+            if (cgroup_dir / "cgroup.procs").exists():
+                return cgroup_dir
+    logger.warning("No cgroup v2 found; host memory metrics are off")
+    return None
+
+
+def _process_role(pid: str) -> str:
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes()
+    except PermissionError:  # another user's process
+        return "other"
+    prefix = f"{RL_ROLE_ENV}=".encode()
+    for entry in environ.split(b"\0"):
+        if entry.startswith(prefix):
+            role = entry[len(prefix) :].decode(errors="replace")
+            return role if role in _PROCESS_ROLES else "other"
+    return "other"

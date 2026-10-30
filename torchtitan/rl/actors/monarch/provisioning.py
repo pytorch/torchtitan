@@ -20,7 +20,7 @@ from monarch.actor import (
 )
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.rl._env import apply_env_defaults
+from torchtitan.rl._env import apply_env_defaults, RL_ROLE_ENV
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
 logger = logging.getLogger(__name__)
@@ -223,6 +223,9 @@ def spawn_proc_mesh(
     """
     total_generator_gpus = num_generators * per_generator_world_size
     total_gpus = trainer_world_size + total_generator_gpus
+    # Role tags for host memory metrics; the procs' children inherit them.
+    trainer_env = {RL_ROLE_ENV: "trainer"}
+    generator_env = {**(generator_env or {}), RL_ROLE_ENV: "generator"}
     logger.info(
         f"{num_generators} generator(s) * {per_generator_world_size} GPUs + "
         f"{trainer_world_size} trainer GPUs = {total_gpus} total"
@@ -252,6 +255,7 @@ def spawn_proc_mesh(
             trainer_world_size,
             provisioners[id(trainer_host_mesh)],
             bootstrap=_preimport_torch,
+            extra_env=trainer_env,
         )
         generator_meshes = [
             _spawn_proc_mesh(
@@ -272,7 +276,7 @@ def spawn_proc_mesh(
             per_host={"gpus": trainer_world_size},
             bootstrap=_preimport_torch,
             bootstrap_command=default_bootstrap_cmd().with_env(
-                provisioner.allocate(trainer_world_size)
+                provisioner.allocate(trainer_world_size, extra_env=trainer_env)
             ),
         )
         generator_meshes = [
