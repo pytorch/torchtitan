@@ -167,14 +167,16 @@ class Rollouter(Configurable):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        worker_config: RolloutWorker.Config | None = None,
     ) -> None:
-        """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
+        """Spawn the rollout worker pool through `actor_system` and initialize it.
+        `worker_config` replaces `Config.worker`, for a worker config known only at setup."""
         if self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
 
         self._actor_system = actor_system
         self._worker_actors = await actor_system.spawn_rollout_workers(
-            self._config.worker,
+            worker_config if worker_config is not None else self._config.worker,
             num_workers=self._config.worker_pool_size,
             num_threads=self._config.num_threads_per_worker,
         )

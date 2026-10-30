@@ -30,20 +30,24 @@ package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
    ([`GenerationServer`](../../generator/generation_server.py)), so agents call
    generators directly. It also retains the policy-version span and metrics that
    are absent from Verifiers traces.
-4. `rollouter.py` picks a generator for each rollout, points the rollout's agent
-   at it, sends samples to Verifiers and converts the returned trace graph into
-   TitanRL `RolloutTurn` objects. TitanRL then applies its rubric and advantage
-   estimator normally.
+4. `rollouter.py` runs each group in a TitanRL rollout worker process
+   (`VerifiersRolloutWorker`), so the controller receives finished groups only, as
+   with native rollouts. Each worker connects to the environment server, picks a
+   generator for each rollout, points the rollout's agent at it, sends samples to
+   Verifiers and converts the returned trace graph into TitanRL `RolloutTurn`
+   objects. TitanRL then applies its rubric and advantage estimator normally.
 
 The training dataset is the single source of the environment taskset config.
 `VerifiersRollouter.Config` copies it into the environment-server config, so an
 experiment must not configure the same taskset a second time.
 
-For CPU-heavy environments, increase the Verifiers worker-pool size first. A
-future implementation could instead place the environment server in a Monarch
-actor. That would require routable ZMQ addresses plus actor-owned startup and
-shutdown; the current integration does not provide
-that placement mode.
+For CPU-heavy environments, increase the env server's process pool
+(`verifiers_env_server.serve.pool`) first. Each TitanRL rollout worker decodes one
+returned trace at a time, so at high rollout rates also raise the rollouter's
+`worker_pool_size`. A future implementation could instead place the environment
+server in a Monarch actor. That would require routable ZMQ addresses plus
+actor-owned startup and shutdown; the current integration does not provide that
+placement mode.
 
 ## Add an experiment
 
