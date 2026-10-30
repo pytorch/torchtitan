@@ -66,8 +66,10 @@ def make_train_step(model, loss_fn, *, fwd_kwargs=None):
 def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
     # make_fx traces the backward, which cannot add into weight.grad in place.
     disable_inplace_wgrad_accum(model_config)
-    model = config_cls(model_config)
-    model.to(device=device, dtype=dtype)
+    with torch.device("meta"):
+        model = config_cls(model_config)
+    model.to(dtype=dtype)
+    model.to_empty(device=device)
     with torch.no_grad():
         model.init_states(buffer_device=torch.device(device))
     return model
@@ -1945,16 +1947,21 @@ class TestTraceModels(unittest.TestCase):
                 self.proj = nn.Linear(dim, vocab_size)
 
             def init_states(self, buffer_device=None):
-                self.attn.rope._init_self_buffers(
+                self.embed.reset_parameters()
+                self.attn.init_states(
                     buffer_device=buffer_device or torch.device("cuda")
                 )
+                self.proj.reset_parameters()
 
             def forward(self, tokens, block_mask):
                 x = self.embed(tokens)
                 x = self.attn(x, block_mask)
                 return self.proj(x)
 
-        model = TinyFlexMLA().to(device=self.DEVICE, dtype=self.DTYPE)
+        with torch.device("meta"):
+            model = TinyFlexMLA()
+        model.to(dtype=self.DTYPE)
+        model.to_empty(device=self.DEVICE)
         with torch.no_grad():
             model.init_states(buffer_device=torch.device(self.DEVICE))
 
