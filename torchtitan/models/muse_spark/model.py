@@ -218,6 +218,7 @@ class MuseSparkRMSNorm(RMSNorm):
         # input and saves the same tensors. A float is baked into layer 0's graph, and remat
         # recompute of layer 0 can run layer 1's graph, which saves different tensors
         # (CheckpointError). Eager keeps the float: SPMD typechecking rejects untyped tensors.
+        # TODO(pytorch/pytorch#166926): drop the copy once recompute reuses the forward's graph.
         self._gain_center_tensor = torch.tensor(
             config.gain_center, dtype=torch.float32, device="cpu"
         )
