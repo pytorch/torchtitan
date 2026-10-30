@@ -23,6 +23,7 @@ from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
     DefaultActivationRematConfig,
 )
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
@@ -1153,6 +1154,52 @@ class TestRematRegions(unittest.TestCase):
             12,
         )
         self.assertIsNotNone(x_TD.grad)
+
+    def test_quantile_router_statistics_are_recorded_once_with_topk_region(self):
+        # The recompute replays the compiled region; a histogram update inside it would
+        # run again (12 -> 24), so the router updates the histogram in eager.
+        LocalCompileConfig(regions=["moe_router_topk"]).apply()
+        try:
+            self.test_quantile_router_statistics_are_recorded_once()
+        finally:
+            LocalCompileConfig(regions=[]).apply()
+
+    def test_router_grads_match_without_remat_with_topk_region(self):
+        # With the region on, remat recomputes the expert ids in backward instead of
+        # keeping them, so the grads are right only if the recompute picks the same
+        # experts. Many tokens, close scores: a non-bitwise recompute would flip a tie.
+        LocalCompileConfig(regions=["moe_router_topk"]).apply()
+        try:
+            grads = []
+            for use_remat in (False, True):
+                router = TokenChoiceTopKRouter.Config(
+                    num_experts=64,
+                    gate=HiMidLoLinear.Config(in_features=256, out_features=64),
+                    score_func=Sigmoid.Config(),
+                    top_k=8,
+                ).build()
+                router = router.to("cuda")
+                torch.manual_seed(0)
+                with torch.no_grad():
+                    for parameter in router.parameters():
+                        parameter.normal_(std=0.02)
+                x_TD = torch.randn(4096, 256, device="cuda", requires_grad=True)
+                weights_K = torch.arange(1, 9, device="cuda")
+
+                def forward(x_TD: torch.Tensor) -> torch.Tensor:
+                    topk_scores_TK, _, _ = router(x_TD)
+                    return (topk_scores_TK * weights_K).sum()
+
+                if use_remat:
+                    forward = remat.checkpoint(
+                        region_name="transformer_block", preserve_rng_state=False
+                    )(forward)
+                forward(x_TD).backward()
+                grads.append([x_TD.grad, *(p.grad for p in router.parameters())])
+            for with_remat, without_remat in zip(*reversed(grads), strict=True):
+                torch.testing.assert_close(with_remat, without_remat, rtol=0, atol=0)
+        finally:
+            LocalCompileConfig(regions=[]).apply()
 
     def test_forced_router_statistics_are_recorded_once(self):
         router = RoundRobinTokenChoiceTopKRouter.Config(
