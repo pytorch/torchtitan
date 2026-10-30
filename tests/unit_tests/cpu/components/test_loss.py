@@ -414,20 +414,19 @@ class TestGradAccumulator(unittest.TestCase):
         """Verify GradAccumulator produces the same result as torch.cat."""
         torch.manual_seed(42)
         T, D = 16, 16
-        num_chunks = 4
         reference = torch.randn(T, D)
-        chunks = torch.chunk(reference, num_chunks, dim=0)
+        # Equal chunks, and the unequal ones ChunkedLossWrapper uses for loss_mask tokens.
+        for chunks in (torch.chunk(reference, 4), torch.tensor_split(reference, 3)):
+            acc = GradAccumulator(
+                reference,
+                num_chunks=len(chunks),
+                dtype=reference.dtype,
+            )
+            for chunk in chunks:
+                acc.add(chunk)
 
-        acc = GradAccumulator(
-            reference,
-            num_chunks=num_chunks,
-            dtype=reference.dtype,
-        )
-        for chunk in chunks:
-            acc.add(chunk)
-
-        result = acc.buffer
-        torch.testing.assert_close(result, reference)
+            result = acc.buffer
+            torch.testing.assert_close(result, reference)
 
     def test_accumulate_with_dtype_conversion(self):
         """Verify fp32 accumulation from bf16 chunks."""
