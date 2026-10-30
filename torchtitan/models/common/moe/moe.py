@@ -168,7 +168,7 @@ class RoutedExperts(Module):
         return out_TD
 
 
-def _topk_ids_by_argmax(scores: torch.Tensor, k: int) -> torch.Tensor:
+def topk_ids_by_argmax(scores: torch.Tensor, k: int) -> torch.Tensor:
     """Return the ids of the ``k`` largest entries on the last dim; ties go to the lower id.
 
     Compiled replacement for ``torch.topk(...).indices``: Inductor lowers ``topk``
@@ -176,7 +176,7 @@ def _topk_ids_by_argmax(scores: torch.Tensor, k: int) -> torch.Tensor:
     fuse with the surrounding pointwise code into one kernel.
 
     Example:
-        >>> _topk_ids_by_argmax(torch.tensor([[0.1, 0.9, 0.5, 0.9]]), 2)
+        >>> topk_ids_by_argmax(torch.tensor([[0.1, 0.9, 0.5, 0.9]]), 2)
         tensor([[1, 3]])
     """
     ids = torch.arange(scores.size(-1), device=scores.device)
@@ -246,7 +246,7 @@ class TokenChoiceTopKRouter(Module):
             scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
         )
         if torch.compiler.is_compiling():
-            return _topk_ids_by_argmax(scores_for_choice_TE, self.top_k)
+            return topk_ids_by_argmax(scores_for_choice_TE, self.top_k)
         return torch.topk(
             scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
         ).indices

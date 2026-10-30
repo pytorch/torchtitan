@@ -15,6 +15,7 @@ from .moe import (
     RoundRobinTokenChoiceTopKRouter,
     RoutedExperts,
     TokenChoiceTopKRouter,
+    topk_ids_by_argmax,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "RoundRobinTokenChoiceTopKRouter",
     "RoutedExperts",
     "TokenChoiceTopKRouter",
+    "topk_ids_by_argmax",
 ]
