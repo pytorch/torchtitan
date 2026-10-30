@@ -35,7 +35,9 @@ from torchtitan.rl.generator.types import (
     SamplingConfig,
 )
 from torchtitan.rl.generator.vllm.batch_invariance import (
+    enable_rocm_batch_invariant_page_mapping,
     force_logprobs_fn_for_batch_invariance,
+    validate_flex_page_mapping_request_limit,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.registry import (
@@ -85,6 +87,32 @@ def add_extra_vllm_engine_args(
             f"extra_engine_args cannot set EngineArgs that TorchTitan controls: {details}"
         )
     engine_kwargs.update(extra_engine_args)
+
+
+def _configure_rocm_flex_batch_invariance(
+    model: Decoder.Config,
+    *,
+    batch_invariant: bool,
+    cuda_graph_mode: str,
+    max_num_seqs: int,
+) -> None:
+    attention = model.first_full_attention
+    if (
+        not batch_invariant
+        or torch.version.hip is None
+        or attention is None
+        or not isinstance(attention.inner_attention, FlexInnerAttention.Config)
+    ):
+        return
+
+    validate_flex_page_mapping_request_limit(max_num_seqs)
+    if cuda_graph_mode != "NONE":
+        # TODO: Support graph replay after
+        # https://github.com/pytorch/torchtitan/issues/5725 is resolved.
+        raise ValueError(
+            "ROCm FlexAttention batch invariance requires cuda_graph.mode='NONE'"
+        )
+    enable_rocm_batch_invariant_page_mapping()
 
 
 class VLLMEngine(GenerationEngine):
@@ -144,12 +172,14 @@ class VLLMEngine(GenerationEngine):
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
         )
-        self._setup(
+        self.configure_runtime(
             model,
             parallelism=parallelism,
             checkpointer=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             batch_invariant=debug.batch_invariant,
+            cuda_graph_mode=config.cuda_graph.mode,
+            max_num_seqs=max_num_seqs,
         )
         engine_args = self._build_engine_args(
             model,
@@ -186,16 +216,24 @@ class VLLMEngine(GenerationEngine):
             )
 
     @staticmethod
-    def _setup(
+    def configure_runtime(
         model: Decoder.Config,
         *,
         parallelism: InferenceParallelismConfig,
         checkpointer: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         batch_invariant: bool,
+        cuda_graph_mode: str,
+        max_num_seqs: int,
     ) -> None:
-        """Process-wide vLLM setup before the engine build: register the TorchTitan model
-        and config parser with vLLM, and select vLLM's model runner."""
+        """Configure process-wide vLLM state before building an engine."""
+        _configure_rocm_flex_batch_invariance(
+            model,
+            batch_invariant=batch_invariant,
+            cuda_graph_mode=cuda_graph_mode,
+            max_num_seqs=max_num_seqs,
+        )
+
         register_to_vllm(
             model,
             parallelism=parallelism,
