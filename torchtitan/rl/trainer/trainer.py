@@ -14,14 +14,12 @@ from typing import Any
 
 import torch
 import torchstore as ts
-from torch.distributed.tensor import DTensor
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
-from torchtitan.distributed.utils import get_local_tensor
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
@@ -110,8 +108,7 @@ class Trainer(Configurable):
         self._controller_state = MirroredState()
         maybe_apply_numa_binding(engine.device.index, engine.device.type)
 
-        # Only cast when the generator and training dtypes differ. A CPU
-        # staging snapshot is still required when no cast is needed.
+        # Only cast when the generator and training dtypes differ.
         training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
         gen_dtype = TORCH_DTYPE_MAP[generator_dtype] if generator_dtype else None
         self._transfer_dtype = gen_dtype if gen_dtype != training_dtype else None
@@ -132,12 +129,11 @@ class Trainer(Configurable):
         )
 
         engine.load_checkpoint()
-        self._staging_state_dict = self._setup_staging_model_state_dict()
         if engine.device.type == "cpu":
-            self._staging_model_state_dict_stream = None
+            self._push_model_state_dict_stream = None
         else:
-            self._staging_model_state_dict_stream = torch.Stream(device=engine.device)
-            self._mark_model_state_dict_ready_for_staging()
+            self._push_model_state_dict_stream = torch.Stream(device=engine.device)
+            self._mark_model_state_dict_ready_for_push()
         if config.checkpointer is None:
             logger.warning(
                 "Checkpoint disabled, skip weight loading and use random-initialized weights. "
@@ -168,15 +164,15 @@ class Trainer(Configurable):
         """Return controller state restored with the trainer checkpoint."""
         return self._controller_state.loaded
 
-    def _mark_model_state_dict_ready_for_staging(self) -> None:
-        """Order the staging stream after the latest model-weight updates."""
-        if self._staging_model_state_dict_stream is None:
+    def _mark_model_state_dict_ready_for_push(self) -> None:
+        """Order the push stream after the latest model-weight updates."""
+        if self._push_model_state_dict_stream is None:
             return
 
-        # Capture the dependency when weights become final: staging must wait
+        # Capture the dependency when weights become final: the push must wait
         # for optimizer updates, but not for next-step forward/backward kernels
         # that may be queued before the concurrent push starts.
-        self._staging_model_state_dict_stream.wait_stream(
+        self._push_model_state_dict_stream.wait_stream(
             torch.accelerator.current_stream(self.engine.device)
         )
 
@@ -350,7 +346,7 @@ class Trainer(Configurable):
         lr_metrics = engine.optim.lr_schedulers.get_metrics()
 
         grad_norm = engine.optim_step()
-        self._mark_model_state_dict_ready_for_staging()
+        self._mark_model_state_dict_ready_for_push()
         self._controller_state.value = controller_state
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
@@ -403,67 +399,56 @@ class Trainer(Configurable):
 
     @sl.log_trace_span("push_model_state_dict")
     async def push_model_state_dict(self) -> None:
-        """Publish a CPU snapshot of model weights for generators to pull.
+        """Publish model weights for generators to pull.
+
+        The live GPU tensors are put directly, so the trainer keeps no CPU
+        snapshot of its own. With the colocated SharedMemory transport,
+        TorchStore copies (and casts) each tensor straight into StorageVolume
+        memory; other transports make a GPU cast copy of each batch first.
 
         The controller overlaps this push with the next forward/backward (see
         `Controller._trainer_loop`), which is safe because:
-        - The staging stream waits for the last optimizer step before copying, and
-          forward/backward does not mutate persistent model state.
-        - The CUDA-event wait and the TorchStore put run together in an
-          `asyncio.to_thread` worker, so they progress while a synchronous
-          forward/backward blocks this actor's event loop.
+        - The worker synchronizes the push stream and runs the put with it
+          current, so TorchStore reads weights after the last optimizer step
+          without waiting on later forward/backward work, and forward/backward
+          does not mutate persistent model state.
+        - The TorchStore put runs in an `asyncio.to_thread` worker, so it
+          progresses while a synchronous forward/backward blocks this actor's
+          event loop.
         - The controller awaits this push before the next optimizer step mutates
           the model, and awaits the generators' pull of it before the next push
-          reuses the staging buffers and TorchStore key.
+          overwrites the TorchStore key.
         """
-
         model_state_dict = self._model_state_dict()
-        # Today we copy the model into reusable pinned CPU buffers before calling
-        # TorchStore. Parameter destinations use the generator dtype, so copy_()
-        # performs the cast; buffers keep their registered dtype.
-        # TODO(async-rl): add a TorchStore-owned staging API so the trainer can
-        # copy directly into the StorageVolume, eliminating the duplicate CPU
-        # snapshot while preserving this overlap and making buffer lifetime
-        # explicit.
-        staging_complete = await self._stage_model_state_dict(model_state_dict)
         await asyncio.to_thread(
-            self._wait_for_staging_and_put_model_state_dict,
-            staging_complete,
+            self._put_model_state_dict,
+            model_state_dict,
+            self._model_buffer_names(model_state_dict),
         )
 
-    @sl.log_trace_span("stage_model_state_dict")
-    async def _stage_model_state_dict(
-        self, model_state_dict: dict[str, torch.Tensor]
-    ) -> torch.Event | None:
-        """Enqueue model-state copies into pinned CPU buffers."""
-        stream = self._staging_model_state_dict_stream
-        stream_context = stream if stream is not None else nullcontext()
-        staging_complete: torch.Event | None = None
-        with stream_context:
-            for name, destination in self._staging_state_dict.items():
-                source = model_state_dict[name]
-                get_local_tensor(destination).copy_(
-                    get_local_tensor(source), non_blocking=stream is not None
-                )
-            if stream is not None:
-                staging_complete = torch.Event()
-                staging_complete.record(stream)
-
-        return staging_complete
-
-    def _wait_for_staging_and_put_model_state_dict(
-        self, staging_complete: torch.Event | None
+    def _put_model_state_dict(
+        self,
+        model_state_dict: dict[str, torch.Tensor],
+        buffer_names: frozenset[str],
     ) -> None:
-        """Wait for staging and publish without blocking the actor event loop."""
-        if staging_complete is not None:
-            staging_complete.synchronize()
-        asyncio.run(
-            ts.put_state_dict(
-                self._staging_state_dict,
-                "model_state_dict",
-                direct_rdma=False,
+        """Publish without blocking the actor event loop."""
+        # The current stream is thread-local; set it in this worker so TorchStore
+        # copies wait on the optimizer step rather than on later default-stream
+        # work. Synchronize because RDMA transports read outside stream order.
+        stream = self._push_model_state_dict_stream
+        with stream if stream is not None else nullcontext():
+            if stream is not None:
+                stream.synchronize()
+            asyncio.run(
+                ts.put_state_dict(
+                    model_state_dict,
+                    "model_state_dict",
+                    direct_rdma=False,
+                    transfer_dtype=self._transfer_dtype,
+                    # Buffers keep their registered dtype when weights are cast.
+                    preserve_dtype_keys=buffer_names,
+                )
             )
-        )
 
     def _model_state_dict(self) -> dict[str, torch.Tensor]:
         """Merge the state dicts of this rank's model parts.
@@ -477,34 +462,18 @@ class Trainer(Configurable):
             for name, tensor in model_part.state_dict().items()
         }
 
-    def _setup_staging_model_state_dict(self) -> dict[str, torch.Tensor]:
-        """Allocate a final-dtype pinned CPU mirror of the model state dict."""
-        buffer_names = {
+    def _model_buffer_names(
+        self, model_state_dict: dict[str, torch.Tensor]
+    ) -> frozenset[str]:
+        """Return the `model_state_dict` keys of this rank's buffers.
+
+        Non-persistent buffers (e.g. RoPE caches) are not in the state dict.
+        """
+        return frozenset(
             canonical_fqn(name)
             for model_part in self.engine.model_parts
             for name, _ in model_part.named_buffers()
-        }
-        model_state_dict = self._model_state_dict()
-        staging_state_dict = {}
-        for name, tensor in model_state_dict.items():
-            dtype = (
-                self._transfer_dtype
-                if self._transfer_dtype is not None and name not in buffer_names
-                else tensor.dtype
-            )
-            staging_tensor = torch.empty_like(
-                tensor,
-                dtype=dtype,
-                device="cpu",
-                pin_memory=not isinstance(tensor, DTensor),
-            )
-            if isinstance(staging_tensor, DTensor):
-                # DTensor does not support pin_memory(), so pin its local shard.
-                staging_tensor._local_tensor = torch.empty_like(
-                    get_local_tensor(staging_tensor), pin_memory=True
-                )
-            staging_state_dict[name] = staging_tensor
-        return staging_state_dict
+        ).intersection(model_state_dict)
 
     async def initialize_torchstore_client(self) -> None:
         """Initialize this process as a TorchStore routing publisher."""
