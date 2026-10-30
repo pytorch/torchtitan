@@ -35,7 +35,9 @@ from torchtitan.rl.generator.types import (
     SamplingConfig,
 )
 from torchtitan.rl.generator.vllm.batch_invariance import (
+    enable_rocm_batch_invariant_page_mapping,
     force_logprobs_fn_for_batch_invariance,
+    validate_flex_page_mapping_request_limit,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.registry import (
@@ -144,12 +146,14 @@ class VLLMEngine(GenerationEngine):
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
         )
-        self._setup(
+        self.configure_runtime(
             model,
             parallelism=parallelism,
             checkpointer=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             batch_invariant=debug.batch_invariant,
+            cuda_graph_mode=config.cuda_graph.mode,
+            max_num_seqs=max_num_seqs,
         )
         engine_args = self._build_engine_args(
             model,
@@ -186,16 +190,32 @@ class VLLMEngine(GenerationEngine):
             )
 
     @staticmethod
-    def _setup(
+    def configure_runtime(
         model: Decoder.Config,
         *,
         parallelism: InferenceParallelismConfig,
         checkpointer: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         batch_invariant: bool,
+        cuda_graph_mode: str,
+        max_num_seqs: int,
     ) -> None:
-        """Process-wide vLLM setup before the engine build: register the TorchTitan model
-        and config parser with vLLM, and select vLLM's model runner."""
+        """Configure process-wide vLLM state before building an engine."""
+        attention = model.first_full_attention
+        use_rocm_flex_page_mapping = (
+            batch_invariant
+            and torch.version.hip is not None
+            and attention is not None
+            and isinstance(attention.inner_attention, FlexInnerAttention.Config)
+        )
+        if use_rocm_flex_page_mapping:
+            validate_flex_page_mapping_request_limit(max_num_seqs)
+            if cuda_graph_mode != "NONE":
+                raise ValueError(
+                    "ROCm FlexAttention batch invariance requires "
+                    "cuda_graph.mode='NONE'"
+                )
+
         register_to_vllm(
             model,
             parallelism=parallelism,
@@ -207,6 +227,8 @@ class VLLMEngine(GenerationEngine):
             # The vLLM v2 logprob Triton kernel bypasses the batch-invariant aten
             # overrides; route it through trainer's function to match the trainer exactly.
             force_logprobs_fn_for_batch_invariance()
+            if use_rocm_flex_page_mapping:
+                enable_rocm_batch_invariant_page_mapping()
 
     def _build_engine_args(
         self,
