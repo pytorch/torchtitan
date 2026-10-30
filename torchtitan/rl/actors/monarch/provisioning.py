@@ -8,6 +8,7 @@
 CPU meshes on the controller host, and the Monarch client's shutdown."""
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -124,6 +125,51 @@ def compute_trainer_world_size(p: ParallelismConfig) -> int:
 def compute_generator_world_size(p: InferenceParallelismConfig) -> int:
     """Number of GPU processes for one generator (vLLM) instance."""
     return p.data_parallel_degree * p.tensor_parallel_degree
+
+
+def plan_host_meshes(
+    hosts: HostMesh,
+    *,
+    trainer_world_size: int,
+    per_generator_world_size: int,
+    num_generators: int,
+    gpus_per_node: int,
+) -> HostMeshes:
+    """Split a job's hosts into the trainer's and one mesh per generator node.
+
+    One host is shared by every role. Otherwise the trainer takes the first
+    ``ceil(trainer_world_size / gpus_per_node)`` hosts and the generators the next
+    ones; generators on one node share its mesh, so they get disjoint GPUs.
+    """
+    if len(hosts) == 1:
+        return HostMeshes(
+            trainer=hosts,
+            generators=[hosts] * num_generators,
+            gpus_per_node=gpus_per_node,
+        )
+    if per_generator_world_size > gpus_per_node:
+        raise ValueError(
+            f"a generator needs {per_generator_world_size} GPUs; a node has {gpus_per_node}"
+        )
+    generators_per_node = gpus_per_node // per_generator_world_size
+    trainer_nodes = math.ceil(trainer_world_size / gpus_per_node)
+    generator_nodes = math.ceil(num_generators / generators_per_node)
+    if trainer_nodes + generator_nodes > len(hosts):
+        raise ValueError(
+            f"{trainer_nodes} trainer + {generator_nodes} generator nodes needed, "
+            f"the job has {len(hosts)}"
+        )
+    node_meshes = [
+        hosts.slice(hosts=slice(i, i + 1))
+        for i in range(trainer_nodes, trainer_nodes + generator_nodes)
+    ]
+    return HostMeshes(
+        trainer=hosts.slice(hosts=slice(0, trainer_nodes)),
+        generators=[
+            node_meshes[i // generators_per_node] for i in range(num_generators)
+        ],
+        gpus_per_node=gpus_per_node,
+    )
 
 
 def _spawn_proc_mesh(
