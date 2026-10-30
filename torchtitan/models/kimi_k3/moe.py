@@ -66,6 +66,7 @@ class KimiLatentMoE(MoE):
             routed_x_TD,
             routed_padding_mask_T,
         ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+        shared_input_ready = self._record_shared_expert_input_ready(x_TD)
 
         weights_TK, expert_ids_TK, routing_map_TE = self.router(
             routed_x_TD,
@@ -92,7 +93,7 @@ class KimiLatentMoE(MoE):
         remat.recompute_needs_tensor(out_TD)
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
-            shared_TD = self.shared_experts(x_TD)
+            shared_TD = self._run_shared_experts(x_TD, shared_input_ready)
             # Trailing add, always saved: it saves nothing for backward, so replay skips
             # it and its inputs need no persisting, matching checkpoint early stop.
             out_TD = remat.region(

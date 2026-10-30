@@ -101,6 +101,7 @@ def _forward_with_routed_mask(
         remat_should_recompute=lambda name: False,
         _maybe_zero_fill_routed_output_to_tp_partial=lambda out: out,
         shared_experts=None,
+        _record_shared_expert_input_ready=lambda x: None,
         _maybe_all_reduce_moe_output_across_tp=lambda out: out,
     )
     moe_cls.forward(cast(Any, moe), torch.zeros(4, 3), padding_mask_T=padding_mask_T)
@@ -161,6 +162,39 @@ class _IdentityW2(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
+    def test_shared_overlap_rejects_unsupported_cpu_and_missing_branch(self):
+        """The CUDA opt-in raises instead of silently ignoring unsupported modes."""
+        config = make_moe_config(
+            num_experts=2,
+            router=make_router_config(
+                dim=4,
+                num_experts=2,
+                gate_param_init={},
+                score_func=Sigmoid.Config(),
+            ),
+            routed_experts=make_routed_experts_config(
+                dim=4,
+                hidden_dim=8,
+                num_experts=2,
+                top_k=1,
+                param_init={},
+                enable_ep=False,
+            ),
+            shared_experts=make_shared_expert_ffn_config(
+                dim=4,
+                hidden_dim=8,
+                w13_param_init={},
+                w2_param_init={},
+                enable_sp=False,
+            ),
+            enable_sp=False,
+        )
+        enabled = replace(config, overlap_shared_experts=True)
+        with self.assertRaisesRegex(ValueError, "requires CUDA inputs"):
+            enabled.build()(torch.randn(2, 4))
+        with self.assertRaisesRegex(ValueError, "requires shared experts"):
+            replace(enabled, shared_experts=None)
+
     def test_make_router_config_requires_score_func(self):
         with self.assertRaisesRegex(TypeError, "score_func"):
             make_router_config(
