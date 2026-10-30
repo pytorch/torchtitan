@@ -109,7 +109,7 @@ if __name__ == "__main__":
     hf_model_name = "meta-llama/Meta-Llama-3-8B"
 
     # tt params
-    model_name = "llama3"
+    model_name = "torchtitan_recipes.models.llama3"
     config_name = "llama3_8b"
     checkpoint_path = "outputs/test_checkpoint/step-0-fromhf"  # dcp checkpoint from convert_from_hf.py
     # dcp checkpoint from convert_from_hf.py without using sd_adapter's permute
@@ -123,8 +123,8 @@ if __name__ == "__main__":
 
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
-    # pyrefly: ignore [missing-argument, missing-attribute]
-    tokenizer = HuggingFaceTokenizer(config.hf_assets_path)
+    # pyrefly: ignore [missing-attribute]
+    tokenizer = HuggingFaceTokenizer(tokenizer_path=config.hf_assets_path)
 
     # Build test set of randomly generated token ids
     test_set = [
