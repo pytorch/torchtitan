@@ -258,7 +258,7 @@ def deepseek_v4_debugmodel_fsdp4_ep4() -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 1
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
