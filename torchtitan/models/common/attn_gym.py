@@ -47,6 +47,7 @@ if TYPE_CHECKING:
         paged_causal_conv1d,
     )
     from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
+    from attn_gym.mla import paged_mla_decode
     from attn_gym.sparse import lightning_indexer
     from attn_gym.sparse.gather_attn import AuxRequest, gather_attn
 
@@ -79,6 +80,7 @@ __all__ = [
     "paged_causal_conv1d",
     "paged_chunk_gdn",
     "paged_chunk_kda",
+    "paged_mla_decode",
     "recurrent_gdn",
     "recurrent_gdn_decode",
     "recurrent_kda_decode",
@@ -115,6 +117,7 @@ _EXPORTS = {
     "paged_causal_conv1d": "attn_gym.linear.short_conv",
     "paged_chunk_gdn": "attn_gym.linear",
     "paged_chunk_kda": "attn_gym.linear.kda",
+    "paged_mla_decode": "attn_gym.mla",
     "recurrent_gdn": "attn_gym.linear",
     "recurrent_gdn_decode": "attn_gym.linear",
     "recurrent_kda_decode": "attn_gym.linear.kda",

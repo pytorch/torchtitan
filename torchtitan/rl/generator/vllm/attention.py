@@ -43,6 +43,28 @@ from torchtitan.tools.utils import get_cuda_flash_attention_impl
 logger = logging.getLogger(__name__)
 
 
+def activate_cuda_flash_attention_impl() -> None:
+    """Route torch's varlen attention to the FlashAttention build for this GPU."""
+    flash_attention_impl = get_cuda_flash_attention_impl()
+    if flash_attention_impl is not None:
+        # activate_flash_attention_impl() will restore internal global state
+        # and re-run register function, so we want to only call it once.
+        if current_flash_attention_impl() != flash_attention_impl:
+            try:
+                activate_flash_attention_impl(flash_attention_impl)
+            except (ImportError, RuntimeError, ValueError) as error:
+                capability = torch.cuda.get_device_capability()
+                raise RuntimeError(
+                    f"{flash_attention_impl} is required on detected SM "
+                    f"{capability[0]}.{capability[1]}, but activation failed."
+                ) from error
+    else:
+        warn_once(
+            logger,
+            "FA3/FA4 not available on this CUDA architecture, falling back to FA2. ",
+        )
+
+
 @register_backend(AttentionBackendEnum.CUSTOM)
 class TorchTitanVarlenInnerAttentionBackend(FlashAttentionBackend):
     """Custom vLLM attention backend using PyTorch's native FlashAttention kernel.
@@ -108,24 +130,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
 
         self.enable_gqa = self.num_heads > self.num_kv_heads
 
-        flash_attention_impl = get_cuda_flash_attention_impl()
-        if flash_attention_impl is not None:
-            # activate_flash_attention_impl() will restore internal global state
-            # and re-run register function, so we want to only call it once.
-            if current_flash_attention_impl() != flash_attention_impl:
-                try:
-                    activate_flash_attention_impl(flash_attention_impl)
-                except (ImportError, RuntimeError, ValueError) as error:
-                    capability = torch.cuda.get_device_capability()
-                    raise RuntimeError(
-                        f"{flash_attention_impl} is required on detected SM "
-                        f"{capability[0]}.{capability[1]}, but activation failed."
-                    ) from error
-        else:
-            warn_once(
-                logger,
-                "FA3/FA4 not available on this CUDA architecture, falling back to FA2. ",
-            )
+        activate_cuda_flash_attention_impl()
 
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
