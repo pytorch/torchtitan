@@ -1,0 +1,53 @@
+# config: qwen38_flash_next_debugmodel_tp2
+# ngpu: 2
+# parallelism: FSDP=1, TP=2, EP=2
+# hardware: NVIDIA GB200, SM100, two GPUs on one MAST host
+# execution_mode: real_pg; sequence_parallel=True; spmd_typechecking=True
+# date: 2026-10-27
+# source_base: upstream/main 72a3a126fe732317d1ebaecab566933dca769758
+# export_workspace: metaconda_demo:5c740da5bd5b4ac0b9848110bf5f7904
+# source_ast_sha256: 199ae9c1ed85c0e29675554a40260d371915e82327dc8ade0214f466901be486
+# source_ast_scope: torchtitan/, torchtitan_recipes/, scripts/_checkpoint_test_config.py, scripts/loss_compare.py
+# source_ast_algorithm: sorted Python filename, NUL, ast.dump(include_attributes=False), NUL
+# conda_image: torchx_base_conda_env:9195bda55b1445a2a161b34121d13687
+# python: 3.12.13
+# torch: 2.16.0.dev20261006+cu132, 1a66f68165eb1685c14874588d9a2e0cd475e116
+# cuda: 13.2; driver: 580.126.20
+# dependencies: spmd_types=0.3.1, attn-gym=0.0.17, torch_remat=0.2.2, torch_checkpointing=0.1.1
+# dependencies: nvidia-cutlass-dsl=4.6.2, triton=3.9.0+gitaad2a60d, torchao=0.19.0.dev20261007+cu132
+# precision: FP32 parameters/optimizer, BF16 mixed-precision compute, FP32 reduction
+# attention: QSA SDPA MATH, fused GDN, L2-norm backward autotune=False
+# initialization: independently recreated CPU FP32 DCP seed checkpoint; seed=42
+# seed_config: torchtitan_recipes.tests.models.qwen3_8_flash_next.qwen38_flash_next_debugmodel
+# state: fresh optimizer, scheduler and dataloader; strict deterministic=True
+# features: four residual streams, PLE, GDN, QSA top-4 blocks, MoE 8 experts/top-2
+# auxiliary_loss_coefficients: qsa_indexer=1.0, moe_load_balance=0.001
+# optimizer: fused AdamW, lr=0.0008, betas=(0.9,0.95), eps=1e-8, weight_decay=0.1, max_norm=1.0
+# scheduler: warmup_steps=2, linear decay_ratio=0.8, min_lr_factor=0.0
+# compile: off; activation_remat: off; cuda_graphs: off
+# input: context_length=64, tokens_per_train_step=128, shuffle=False, ConcatThenSplitPacking
+# dataset: tests/assets/c4_test/data.json
+# dataset_sha256: 07a274d2f6c903fd1c491260be302f99383930d31656f50de33ef467af6643b1
+# tokenizer: tests/assets/tokenizer/tokenizer.json
+# tokenizer_sha256: a9eb477ec2c2520fa45c2e73078e930ca57d316fe8cce2f45842ac3cc48f5271
+# tokenizer_config_sha256: acf745f72b6b8f4dd11ee38fa1931022978d408c0a3477495c8ab27086082697
+# repeatability: qwen38-flash-next-numerics-k-tv4bvsmb, qwen38-flash-next-numerics-l-mcss09v9
+# repeatability: all 10 full-precision loss and grad_norm values matched before export
+# export_job: qwen38-flash-next-numerics-export-m-xlhlt75f, registered b200 integration runner
+# outputs: torchtrain_datasets/tree/shuhuay/qwen38-flash-next/{numerics-k,numerics-l,numerics-export-m}
+# replay_job: qwen38-flash-next-numerics-replay-n-s2744wlm
+# replay_source_commit: 43aaf58ec68902d6fa79dd5d0bf9b787fec548a1
+# replay_workspace: metaconda_demo:ed3fe5acc5b44b32ae58a3cd313eb5d9
+# replay: committed golden imported without export; all 10 loss and grad_norm assertions passed
+# replay_outputs: torchtrain_datasets/tree/shuhuay/qwen38-flash-next/numerics-replay-n
+# step loss grad_norm
+1 12.54901123046875 28.565948486328125
+2 12.50203800201416 29.09236717224121
+3 12.403820991516113 24.297269821166992
+4 12.383222579956055 22.367778778076172
+5 12.275715827941895 22.03748893737793
+6 12.148893356323242 22.976648330688477
+7 11.972700119018555 21.21260643005371
+8 11.650921821594238 24.24357032775879
+9 11.311939239501953 14.75133228302002
+10 11.379443168640137 16.881601333618164

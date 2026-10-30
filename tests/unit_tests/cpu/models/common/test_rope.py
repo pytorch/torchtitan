@@ -94,6 +94,35 @@ class TestApplyRotaryEmbCosSin(unittest.TestCase):
         self.assertEqual((xq_out - xq_ref).abs().max().item(), 0.0)
         self.assertEqual((xk_out - xk_ref).abs().max().item(), 0.0)
 
+    def test_input_dtype_rotation_and_backward(self):
+        """Activation-dtype rotation matches the HF eager rounding boundaries."""
+        rope = CosSinRoPE.Config(
+            dim=self.head_dim,
+            max_context_length=self.num_tokens,
+            compute_in_float32=False,
+        ).build()
+        query = self.xq.clone().requires_grad_()
+        actual = rope(query)
+        cos, sin = rope.cache.chunk(2, -1)
+        pairs = query.reshape(self.num_tokens, self.n_heads, 2, -1)
+        # Each half of the rotation has its own BF16 multiplication and addition.
+        first = pairs[..., 0, :] * cos[:, None, : self.head_dim // 2].to(query.dtype)
+        first = first - pairs[..., 1, :] * sin[:, None, : self.head_dim // 2].to(
+            query.dtype
+        )
+        last = pairs[..., 1, :] * cos[:, None, : self.head_dim // 2].to(query.dtype)
+        last = last + pairs[..., 0, :] * sin[:, None, : self.head_dim // 2].to(
+            query.dtype
+        )
+        expected = torch.cat((first, last), -1)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        upstream = torch.randn_like(actual)
+        actual_grad = torch.autograd.grad(
+            (actual * upstream).sum(), query, retain_graph=True
+        )[0]
+        expected_grad = torch.autograd.grad((expected * upstream).sum(), query)[0]
+        torch.testing.assert_close(actual_grad, expected_grad, atol=0, rtol=0)
+
 
 class TestMaybeCheckMaxPos(unittest.TestCase):
     """Tests for the _maybe_check_max_pos bounds check."""

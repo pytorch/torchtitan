@@ -146,6 +146,59 @@ class TestEmbedding(DTensorTestBase):
         return 4
 
     @with_comms
+    def test_feature_parallel_embedding_and_checkpoint_chunks(self):
+        """Feature shards preserve lookup, gradients, and row-chunk conversion."""
+        from torchtitan.config.parallelism import ParallelismConfig
+        from torchtitan.models.qwen3_8_flash_next import build_model_config
+        from torchtitan.models.qwen3_8_flash_next.state_dict_adapter import (
+            Qwen38FlashNextStateDictAdapter,
+        )
+
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        torch.manual_seed(42)
+        reference = nn.Embedding(128, 32, padding_idx=3).to(self.device_type)
+        embedding = (
+            Embedding.Config(
+                num_embeddings=128,
+                embedding_dim=32,
+                padding_idx=3,
+                vocab_parallel=False,
+            )
+            .build()
+            .to(self.device_type)
+        )
+        weight = distribute_tensor(reference.weight.detach(), mesh, (Shard(1),))
+        embedding.weight = nn.Parameter(weight.to_local())
+        tokens = torch.tensor([[0, 3, 127, 5], [3, 5, 5, 63]], device=self.device_type)
+        with set_current_spmd_mesh(mesh):
+            output = embedding(tokens)
+        expected = reference(tokens)
+        expected.square().sum().backward()
+        output.square().sum().backward()
+        rank = mesh.get_local_rank("tp")
+        self.assertEqual(output, expected.chunk(4, -1)[rank], atol=0, rtol=0)
+        self.assertEqual(
+            embedding.weight.grad,
+            reference.weight.grad.chunk(4, -1)[rank],
+            atol=0,
+            rtol=0,
+        )
+
+        config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+        adapter = Qwen38FlashNextStateDictAdapter(config, None)
+        native_key = "layers.1.ple.ple_embedding.ngram_embedding.weight"
+        hf = adapter.to_hf({native_key: weight})
+        self.assertEqual(len(hf), 4)
+        for shard in hf.values():
+            self.assertEqual(shard.placements, (Shard(1),))
+            self.assertEqual(shard.shape, (32, 32))
+            self.assertEqual(shard.to_local().shape, (32, 8))
+        hf["lm_head.weight"] = reference.weight.new_zeros(64, config.dim)
+        restored = adapter.from_hf(dict(reversed(list(hf.items()))))[native_key]
+        self.assertEqual(restored.placements, (Shard(1),))
+        self.assertEqual(restored.to_local(), weight.to_local(), atol=0, rtol=0)
+
+    @with_comms
     def test_vocab_parallel_padding_forward_backward(self):
         """Preserve HF padding semantics through conversion and vocab sharding."""
         from torchtitan.experiments.transformers_modeling_backend.module_conversion import (
