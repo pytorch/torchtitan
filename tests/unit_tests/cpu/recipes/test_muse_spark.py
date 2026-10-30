@@ -7,6 +7,10 @@
 from unittest.mock import patch
 
 import pytest
+from torchtitan.models.common.attention.cp_attention import (
+    UlyssesSlidingWindowVarlenInnerAttention,
+    UlyssesVarlenInnerAttention,
+)
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 
 from torchtitan_recipes.models import muse_spark as recipes
@@ -46,6 +50,19 @@ def test_production_recipe_keeps_multimodal_tokenizer():
     assert isinstance(config.tokenizer, MuseSparkTokenizer.Config)
     for field, token in recipes.MUSE_SPARK_SPECIAL_TOKENS.items():
         assert getattr(config.tokenizer, field) == token
+
+
+def test_cp16_lora_recipe_uses_ulysses_varlen():
+    # Building raises if the Ulysses CP map misses a varlen layer type.
+    config = recipes.muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k()
+    for layer in config.model.layers:
+        assert isinstance(
+            layer.attention.inner_attention,
+            (
+                UlyssesVarlenInnerAttention.Config,
+                UlyssesSlidingWindowVarlenInnerAttention.Config,
+            ),
+        )
 
 
 @pytest.mark.parametrize("recipe", [muse_spark_debugmodel, muse_spark_debugmodel_mm])
