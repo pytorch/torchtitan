@@ -163,6 +163,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
     async def main():
         staging_state_dict = {"weight": "old"}
         generator = Generator.__new__(Generator)
+        generator.config = SimpleNamespace(fetch_weights_per_module=False)
         generator._prefetched_model_state_dict = staging_state_dict
 
         def fill_state_dict(*args, **kwargs):
@@ -191,6 +192,66 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
             direct_rdma=False,
         )
         load_state_dict.assert_called_once_with({"weight": "fetched"})
+
+    asyncio.run(main())
+
+
+def test_group_fqns_by_module_splits_each_layer():
+    fqns = [
+        "tok_embeddings.weight",
+        "layers.0.attention.wq.weight",
+        "layers.0.moe.experts.w1",
+        "layers.1.attention.wq.weight",
+        "norm.weight",
+        "output.weight",
+    ]
+    assert generator_module._group_fqns_by_module(fqns) == [
+        ["tok_embeddings.weight"],
+        ["layers.0.attention.wq.weight", "layers.0.moe.experts.w1"],
+        ["layers.1.attention.wq.weight"],
+        ["norm.weight"],
+        ["output.weight"],
+    ]
+
+
+def test_prefetch_model_state_dict_per_module_fetches_in_place():
+    async def main():
+        buffers = {
+            "layers.0.w": torch.zeros(1),
+            "layers.1.w": torch.zeros(1),
+            "norm.weight": torch.zeros(1),
+        }
+        generator = Generator.__new__(Generator)
+        generator.config = SimpleNamespace(fetch_weights_per_module=True)
+        generator._prefetched_model_state_dict = buffers
+
+        # The store also holds a key this rank has no buffer for.
+        stored = {"layers.0.w": 0, "layers.1.w": 1, "norm.weight": 2, "other.w": 3}
+        client = SimpleNamespace(
+            get_layouts=AsyncMock(),
+            get=AsyncMock(return_value=stored),
+            get_batch=AsyncMock(),
+        )
+        get_state_dict = AsyncMock()
+        with (
+            patch.object(generator_module.ts, "client", AsyncMock(return_value=client)),
+            patch.object(generator_module.ts, "get_state_dict", get_state_dict),
+        ):
+            await generator.prefetch_model_state_dict()
+
+        get_state_dict.assert_not_awaited()
+        client.get_layouts.assert_awaited_once_with(
+            buffers, "model_state_dict", strict=False
+        )
+        requests = [call.args[0] for call in client.get_batch.await_args_list]
+        assert [list(request) for request in requests] == [
+            [generator_module._state_dict_storage_key("model_state_dict", fqn)]
+            for fqn in ["layers.0.w", "layers.1.w", "norm.weight"]
+        ]
+        # Each request writes into the pinned buffer itself.
+        targets = [next(iter(request.values())) for request in requests]
+        expected = [buffers[fqn] for fqn in ["layers.0.w", "layers.1.w", "norm.weight"]]
+        assert all(t is e for t, e in zip(targets, expected, strict=True))
 
     asyncio.run(main())
 

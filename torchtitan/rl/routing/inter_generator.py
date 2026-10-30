@@ -84,6 +84,12 @@ class InterGeneratorRouter(Configurable):
         Other options: ``LeastLoadedRoutingStrategy.Config()``,
         ``RoundRobinRoutingStrategy.Config()``."""
 
+        max_concurrent_prefetches: int = 0
+        """How many generators fetch new weights from TorchStore at once; 0 means
+        all. Each fetch reads the trainer's CPU-staged weights, so concurrent
+        fetches multiply the trainer host RAM they need; bound this for big models
+        with many generators. The local CPU-to-GPU apply stays concurrent."""
+
         hot_swap: bool = True
         """When True, pulls model's state dict concurrently with in-flight
         generation (no draining). When False, each generator is drained before
@@ -233,9 +239,16 @@ class InterGeneratorRouter(Configurable):
             policy_version: Trainer policy version whose state dict to pull.
         """
 
+        limit = self._config.max_concurrent_prefetches
+        prefetch_slots = asyncio.Semaphore(limit) if limit > 0 else None
+
         async def _pull_one(h: _GeneratorHandle) -> None:
             # Transfer over RDMA while the generator remains available
-            await h.actor.prefetch_model_state_dict.call()
+            if prefetch_slots is None:
+                await h.actor.prefetch_model_state_dict.call()
+            else:
+                async with prefetch_slots:
+                    await h.actor.prefetch_model_state_dict.call()
             if self._config.hot_swap:
                 # Hot swap: pull concurrently with in-flight generation, without
                 # draining. Whether the pull is genuinely concurrent and safe is
@@ -254,12 +267,10 @@ class InterGeneratorRouter(Configurable):
                 finally:
                     self._set_serving(h, serving=True)
 
-        # Start the pulls in parallel. Technically we could do rolling sync to
-        # maintain availability during model state dict loads, but that's not a priority
+        # Start the pulls in parallel; max_concurrent_prefetches bounds how many
+        # fetch at once. Technically we could do rolling sync to maintain
+        # availability during model state dict loads, but that's not a priority
         # for now.
-        # TODO(perf): stagger the per-generator fetches when num_generators is large so they don't
-        #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
-        #   big models / many generators, not at small scale.
         await asyncio.gather(*[_pull_one(h) for h in self._generators])
 
     async def generate(
