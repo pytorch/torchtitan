@@ -87,7 +87,8 @@ class InterGeneratorRouter(Configurable):
         hot_swap: bool = True
         """When True, pulls model's state dict concurrently with in-flight
         generation (no draining). When False, each generator is drained before
-        its pull.
+        its pull. With ``fetch_model_state_dict_to_gpu``, the load includes the
+        network transfer, so in-flight requests stall for it.
 
         Draining only waits for a generator's in-flight ``_route`` call (one
         turn) to finish; between turns of a multi-turn rollout the generator is
@@ -234,18 +235,22 @@ class InterGeneratorRouter(Configurable):
         """
 
         async def _pull_one(h: _GeneratorHandle) -> None:
-            # Transfer over RDMA while the generator remains available
+            # Transfer over RDMA while the generator remains available. A no-op
+            # with fetch_model_state_dict_to_gpu, where the load does the transfer.
             await h.actor.prefetch_model_state_dict.call()
             if self._config.hot_swap:
                 # Hot swap: pull concurrently with in-flight generation, without
                 # draining. Whether the pull is genuinely concurrent and safe is
-                # up to the generator's implementation.
+                # up to the generator's implementation; with
+                # fetch_model_state_dict_to_gpu, in-flight requests stall for
+                # the transfer.
                 await h.rank0_actor.load_model_state_dict.call_one(policy_version)
             else:
                 # Drain: stop routing to this generator and wait for in-flight
                 # work to finish before pulling, then re-admit it.
                 # Draining starts only for the local CPU-to-GPU apply rather
-                # than the network transfer
+                # than the network transfer, except with
+                # fetch_model_state_dict_to_gpu, where the load includes it.
                 self._set_serving(h, serving=False)
                 try:
                     with sl.log_trace_span("router_drain_wait"):

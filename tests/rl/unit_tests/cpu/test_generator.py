@@ -155,6 +155,7 @@ def test_initialize_torchstore_client_uses_requester_index():
             await generator.initialize_torchstore_client(requester_index=3)
 
         client.assert_awaited_once_with(role=RankRole.REQUESTER, group=3)
+        assert generator._torchstore_loop is asyncio.get_running_loop()
 
     asyncio.run(main())
 
@@ -163,6 +164,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
     async def main():
         staging_state_dict = {"weight": "old"}
         generator = Generator.__new__(Generator)
+        generator.config = SimpleNamespace(fetch_model_state_dict_to_gpu=False)
         generator._prefetched_model_state_dict = staging_state_dict
 
         def fill_state_dict(*args, **kwargs):
@@ -635,6 +637,7 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             dist_moe_runtime=None,
             debug=DebugConfig(),
             reset_kv_cache_on_model_state_dict_load=True,
+            fetch_model_state_dict_to_gpu=False,
             rank=0,
             generator_name="generator",
             output_dir=str(tmp_path),
@@ -682,6 +685,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         dist_moe_runtime=None,
         debug=config.debug,
         reset_kv_cache_on_model_state_dict_load=False,
+        fetch_model_state_dict_to_gpu=False,
         rank=0,
         generator_name="generator",
         output_dir=str(tmp_path),
@@ -949,6 +953,7 @@ def test_vllm_uneven_decode_tp_padding():
         config.generator.model,
         parallelism=config.generator.parallelism,
         checkpointer_config=None,
+        fetch_model_state_dict_to_gpu=False,
     )
 
     engine = build_inference_engine(config)

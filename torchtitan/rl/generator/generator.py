@@ -8,10 +8,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -66,6 +67,9 @@ class Generator(Configurable):
     `prefetch_model_state_dict` runs on the caller's event loop and writes the staging buffers the
     engine loop reads on a load: the router awaits it before `load_model_state_dict`, and the
     controller awaits that load before the trainer's next push, so the two never overlap.
+    With `fetch_model_state_dict_to_gpu`, the prefetch is a no-op and the load reads the
+    StorageVolume snapshot directly into the engine's weights; it resolves only after every
+    rank finishes reading, so the trainer's next push cannot overwrite it mid-read.
 
     Args:
         config: Generator-specific configuration, including its model.
@@ -154,6 +158,21 @@ class Generator(Configurable):
         Enable this to clear prefix-cache entries and preempt running requests; the engine
         then recomputes their KV under the new weights when they resume."""
 
+        # TODO: unify with the pinned CPU prefetch into one load path (e.g.
+        # direct fetch overlapped with generation) and drop this flag.
+        fetch_model_state_dict_to_gpu: bool = False
+        """Read the StorageVolume snapshot directly into the engine's GPU
+        weights, one FSDP group at a time, instead of first prefetching a full
+        pinned CPU copy on the generator host.
+
+        Saves generator host memory (one full copy of the weights) on hosts with
+        little CPU memory, e.g. GB300. The transfer then happens inside the
+        model state dict load, while the engine is paused, instead of
+        overlapping generation: with hot_swap, in-flight requests stall for the
+        whole transfer; without it, the generator is drained for it. A failed
+        transfer leaves the weights partially loaded, so it stops the engine
+        loop on every generator rank."""
+
         def __post_init__(self):
             # The generator runs full expert parallelism: the engine forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -235,6 +254,7 @@ class Generator(Configurable):
                     reset_kv_cache_on_model_state_dict_load=(
                         config.reset_kv_cache_on_model_state_dict_load
                     ),
+                    fetch_model_state_dict_to_gpu=config.fetch_model_state_dict_to_gpu,
                     rank=self._rank,
                     generator_name=generator_name,
                     output_dir=output_dir,
@@ -273,6 +293,8 @@ class Generator(Configurable):
             )
 
         self._prefetched_model_state_dict = engine.prefetched_model_state_dict
+        # Set by `initialize_torchstore_client`: the event loop TorchStore reads run on.
+        self._torchstore_loop: asyncio.AbstractEventLoop | None = None
 
         broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
         # The engine loop owns the engine from here on and releases it on exit, so this
@@ -293,6 +315,11 @@ class Generator(Configurable):
             broadcast_group=broadcast_group,
             max_engine_steps_between_decisions=config.max_engine_steps_between_decisions,
             reset_kv_cache_on_model_state_dict_load=config.reset_kv_cache_on_model_state_dict_load,
+            fetch_model_state_dict=(
+                self._fetch_model_state_dict
+                if config.fetch_model_state_dict_to_gpu
+                else None
+            ),
         )
 
         logger.info("Generator initialized")
@@ -422,14 +449,16 @@ class Generator(Configurable):
             requester_index: Index used to namespace this generator mesh.
         """
         await ts.client(role=RankRole.REQUESTER, group=requester_index)
+        self._torchstore_loop = asyncio.get_running_loop()
 
     @sl.log_trace_span("load_model_state_dict")
     async def load_model_state_dict(self, version: int) -> None:
         """Queues a model state dict load for `version` and blocks until the engine loop has finished loading.
         Loads queued together are applied once, at the highest version.
 
-        The network transfer has already completed and this load applies the
-        prefetched weights to the GPU.
+        Without `fetch_model_state_dict_to_gpu`, the network transfer has already
+        completed and this load applies the prefetched weights to the GPU. With
+        it, this load also reads the weights from the StorageVolume.
 
         NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
         an idle engine holds off new `generate` calls until the queue drains, then calls this.
@@ -441,7 +470,12 @@ class Generator(Configurable):
 
     @sl.log_trace_span("prefetch_model_state_dict")
     async def prefetch_model_state_dict(self) -> None:
-        """Fetch weights into pinned CPU memory without interrupting generation."""
+        """Fetch weights into pinned CPU memory without interrupting generation.
+
+        A no-op with `fetch_model_state_dict_to_gpu`: the load reads the weights.
+        """
+        if self.config.fetch_model_state_dict_to_gpu:
+            return
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
         await ts.get_state_dict(
@@ -450,6 +484,29 @@ class Generator(Configurable):
             strict=False,
             direct_rdma=False,
         )
+
+    def _fetch_model_state_dict(
+        self, state_dict: dict[str, torch.Tensor]
+    ) -> Iterable[str]:
+        """Read `state_dict`'s weights in place from the StorageVolume snapshot.
+
+        Returns the keys read; strict=False skips unpublished keys.
+
+        Called on the engine loop thread during a load; blocks it while the read runs
+        on the TorchStore client's event loop.
+        """
+        # The read writes outside the current stream; wait for queued work that
+        # still uses state_dict's storage, e.g. its reallocation.
+        torch.accelerator.current_stream().synchronize()
+        return asyncio.run_coroutine_threadsafe(
+            ts.get_state_dict(
+                "model_state_dict",
+                user_state_dict=state_dict,
+                strict=False,
+                direct_rdma=False,
+            ),
+            self._torchstore_loop,
+        ).result()
 
     async def close(self) -> None:
         """Stop the engine loop, which releases the dispatcher and the engine on exit."""
