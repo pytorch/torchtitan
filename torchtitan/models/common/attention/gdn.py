@@ -121,9 +121,9 @@ def _recurrent_gdn_fwd(
         dtype=torch.bool,
         device=q_BTHK.device,
     )
-    # The recurrent operator consumes normalized Q/K.
-    normalized_q_BTHK = l2norm(q_BTHK, cu_seqlens=cu_seqlens)
-    normalized_k_BTHK = l2norm(k_BTHK, cu_seqlens=cu_seqlens)
+    # Normalize each row with the same layout used for batch-invariant decode.
+    normalized_q_BTHK = l2norm(q_BTHK)
+    normalized_k_BTHK = l2norm(k_BTHK)
     out_BTHV, _ = recurrent_gdn(
         normalized_q_BTHK,
         normalized_k_BTHK,
@@ -166,8 +166,9 @@ def _chunk_gdn_gradients(
         inputs = tuple(
             tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
         )
-        normalized_q = l2norm(inputs[0], cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(inputs[1], cu_seqlens=cu_seqlens)
+        # Pin the backward launch independently of the forward layout.
+        normalized_q = l2norm(inputs[0], autotune=False)
+        normalized_k = l2norm(inputs[1], autotune=False)
         output, _ = chunk_gdn(
             normalized_q,
             normalized_k,

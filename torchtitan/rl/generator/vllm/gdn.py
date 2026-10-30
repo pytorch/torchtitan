@@ -320,8 +320,10 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             impl="reference",
         )
         update_gate = torch.sigmoid(b).unsqueeze(0)
-        query = l2norm(query, cu_seqlens=cu_seqlens)
-        key = l2norm(key, cu_seqlens=cu_seqlens)
+        # Decode metadata selects a different normalization reduction layout.
+        norm_cu_seqlens = None if is_in_batch_invariant_mode() else cu_seqlens
+        query = l2norm(query, cu_seqlens=norm_cu_seqlens)
+        key = l2norm(key, cu_seqlens=norm_cu_seqlens)
 
         if is_in_batch_invariant_mode():
             recurrent_output, _ = recurrent_gdn(
