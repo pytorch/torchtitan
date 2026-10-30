@@ -24,7 +24,6 @@ from torchtitan.models.base.module import Module, ModuleDict
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     VisionTransformerBlock,
@@ -444,7 +443,6 @@ class Qwen35VisionEncoder(Module):
             x = layer(
                 x,
                 rope_cache=rope_cache,
-                rope_apply=CosSinRoPE.apply_rotary_emb,
                 attention_mask=attention_mask,
             )
 

@@ -8,10 +8,10 @@
 block-diagonal FlexInnerAttention mask helper and the pre-norm transformer block
 (attention + MLP) over token-major visual patches.
 
-RoPE differs per model, so each encoder passes it through the block to the
-attention as two per-forward args: ``rope_cache`` (a tensor, so config-based
-sharding can annotate it before it meets the head-sharded q/k) and
-``rope_apply`` (a pass-through callable ``(q, k, rope_cache) -> (q, k)``).
+RoPE differs per model, so each encoder passes ``rope_cache`` through the block
+to the attention as a per-forward arg (a tensor, so config-based sharding can
+annotate it before it meets the head-sharded q/k), and the attention applies it
+with its configured ``rope_apply``.
 
 Shape suffixes:
 - T = packed visual tokens
@@ -20,14 +20,15 @@ Shape suffixes:
 - Dh = head dim
 """
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import cast
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
+from torchtitan.config.function import Function
 from torchtitan.distributed.local_compile import compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
@@ -35,13 +36,52 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
+from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE
 
 compiled_create_block_mask = compile(create_block_mask)
 
-# Applies rotary position embedding: (query, key, rope_cache) -> (query, key).
-RopeApply = Callable[
-    [torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
-]
+
+class VisionRoPEApply(Function[tuple[torch.Tensor, torch.Tensor]]):
+    """Applies rotary position embedding: (query, key, rope_cache) -> (query, key)."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Function.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
+
+
+class ComplexVisionRoPEApply(VisionRoPEApply):
+    """Vision RoPE with a complex cache, via ``ComplexRoPE.apply_rotary_emb``."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(VisionRoPEApply.Config):
+        pass
+
+    def __call__(
+        self, query: torch.Tensor, key: torch.Tensor, rope_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return cast(
+            tuple[torch.Tensor, torch.Tensor],
+            ComplexRoPE.apply_rotary_emb(query, key, rope_cache),
+        )
+
+
+class CosSinVisionRoPEApply(VisionRoPEApply):
+    """Vision RoPE with a cos/sin cache, via ``CosSinRoPE.apply_rotary_emb``."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(VisionRoPEApply.Config):
+        pass
+
+    def __call__(
+        self, query: torch.Tensor, key: torch.Tensor, rope_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return cast(
+            tuple[torch.Tensor, torch.Tensor],
+            CosSinRoPE.apply_rotary_emb(query, key, rope_cache),
+        )
 
 
 class InvariantRowParallelLinear(Linear):
@@ -159,7 +199,7 @@ class VisionAttention(Module):
     """Multi-head self-attention with FlexInnerAttention over visual patches.
 
     Separate q/k/v projections (clean per-head ColwiseParallel under TP). RoPE is
-    applied via the injected ``rope_apply`` callable so this class is reused
+    applied via the configured ``rope_apply`` so this class is reused
     across models with different rotary formulations.
     """
 
@@ -171,6 +211,7 @@ class VisionAttention(Module):
         wk: Linear.Config
         wv: Linear.Config
         proj: Linear.Config
+        rope_apply: VisionRoPEApply.Config
         inner_attention: Module.Config = field(
             default_factory=FlexInnerAttention.Config
         )
@@ -188,6 +229,7 @@ class VisionAttention(Module):
         self.wk = config.wk.build()
         self.wv = config.wv.build()
         self.proj = config.proj.build()
+        self.rope_apply = config.rope_apply.build()
         self.flex_attention = config.inner_attention.build()
 
     def _qkv(
@@ -203,7 +245,6 @@ class VisionAttention(Module):
         x: torch.Tensor,
         *,
         rope_cache: torch.Tensor,
-        rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
         num_tokens = x.shape[0]
@@ -214,7 +255,7 @@ class VisionAttention(Module):
         q_THDh, k_THDh, v_THDh = self._qkv(x)
 
         remat.recompute_needs_tensor(q_THDh, k_THDh)
-        q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache)
+        q_THDh, k_THDh = self.rope_apply(q_THDh, k_THDh, rope_cache)
 
         out_THDh = remat.region(
             self.flex_attention,
@@ -249,13 +290,11 @@ class VisionTransformerBlock(Module):
         x: torch.Tensor,
         *,
         rope_cache: torch.Tensor,
-        rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
         attn_out = self.attn(
             self.norm1(x),
             rope_cache=rope_cache,
-            rope_apply=rope_apply,
             attention_mask=attention_mask,
         )
         # The residual add reads the attention output with bare ops.

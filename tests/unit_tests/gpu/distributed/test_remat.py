@@ -324,6 +324,7 @@ class _CountingVisionAttention(VisionAttention):
         self.wk = _CountingLinear(_linear_config(4, 4))
         self.wv = _CountingLinear(_linear_config(4, 4))
         self.proj = _CountingLinear(_linear_config(4, 4))
+        self.rope_apply = _vision_identity_rope
         self.flex_attention = _CountingOp(_vision_inner_attention)
 
 
@@ -352,7 +353,6 @@ class _VisionRematModel(Module):
         return self.layers["0"](
             x_TD,
             rope_cache=x_TD.new_empty(0),
-            rope_apply=_vision_identity_rope,
             attention_mask=None,  # pyrefly: ignore [bad-argument-type]
         ).sum()
 

@@ -21,7 +21,6 @@ Shape suffixes:
 
 import math
 from dataclasses import dataclass, field
-from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -30,22 +29,26 @@ import torch.nn.functional as F
 
 from torchtitan.models.base.module import Module, ModuleDict
 
-from torchtitan.models.common import ComplexRoPE, Linear
+from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
-    RopeApply,
+    VisionRoPEApply,
     VisionTransformerBlock,
 )
 
 
-def _identity_rope(
-    query_TNH: torch.Tensor,
-    key_TNH: torch.Tensor,
-    rope_cache: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    _ = rope_cache
-    return query_TNH, key_TNH
+class IdentityVisionRoPEApply(VisionRoPEApply):
+    """Leaves query and key unrotated, for NaViT with ``use_rope=False``."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(VisionRoPEApply.Config):
+        pass
+
+    def __call__(
+        self, query: torch.Tensor, key: torch.Tensor, rope_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return query, key
 
 
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
@@ -397,11 +400,6 @@ class NaViTEncoder(Module):
         x_TD = torch.cat(all_x, dim=0)
         freqs_cis_TD = torch.cat(all_freqs, dim=0)
         rope_cache = freqs_cis_TD.unsqueeze(1)
-        rope_apply = (
-            cast(RopeApply, ComplexRoPE.apply_rotary_emb)
-            if self.use_rope
-            else _identity_rope
-        )
         total_tokens = x_TD.shape[0]
 
         sp_slens_cat = torch.cat(all_sp_slens) if all_sp_slens else None
@@ -438,7 +436,6 @@ class NaViTEncoder(Module):
             x_TD = layer(
                 x_TD,
                 rope_cache=rope_cache,
-                rope_apply=rope_apply,
                 attention_mask=attention_mask,
             )
 
