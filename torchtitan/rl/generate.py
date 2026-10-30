@@ -42,7 +42,6 @@ from torchtitan.config import apply_overrides, ConfigLoader
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.rl.generator.vllm.engine import add_extra_vllm_engine_args, VLLMEngine
 from torchtitan.rl.generator.vllm.registry import (
-    register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
     vllm_attention_backend,
@@ -116,22 +115,23 @@ def generate() -> None:
     max_num_seqs = args.max_num_seqs
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
-    # Register TorchTitan model with vLLM before engine creation
-    register_to_vllm(
+    set_batch_invariance(gen_config.debug.batch_invariant)
+    VLLMEngine.configure_runtime(
         model_config,
         parallelism=gen_config.parallelism,
         precision=config.precision,
-        checkpointer_config=CheckpointManager.Config(
+        checkpointer=CheckpointManager.Config(
             initial_load_in_hf=True,
             initial_load_path=model_path,
         ),
         dist_moe_runtime=gen_config.dist_moe_runtime,
         model_state_dict_load_mode="cpu_prefetch",
+        batch_invariant=gen_config.debug.batch_invariant,
+        cuda_graph_mode=engine_config.cuda_graph.mode,
+        max_num_seqs=max_num_seqs,
     )
-    logger.info("Registered TorchTitan model with vLLM")
+    logger.info("Configured vLLM runtime for the TorchTitan model")
 
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
-    set_batch_invariance(gen_config.debug.batch_invariant)
     enable_ep = gen_config.parallelism.expert_parallel_degree > 1
 
     logger.debug("Initializing vLLM LLMEngine with TorchTitan model")
