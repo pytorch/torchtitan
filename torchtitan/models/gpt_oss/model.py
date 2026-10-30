@@ -226,8 +226,14 @@ class GptOssModel(Decoder):
                     "fused_binary_activation",
                     "rope",
                     "fp32_to_bf16_split",
-                    "moe_router_topk",
-                    "moe_aux_loss",
+                    # TODO: on ROCm (MI350X CI), GPT-OSS with these two regions gave a different
+                    # step-1 grad norm in two runs of the same model code; on CUDA the router's
+                    # fwd + bwd is bitwise across runs. Turn them on for ROCm once that is found.
+                    *(
+                        ["moe_router_topk", "moe_aux_loss"]
+                        if torch.version.hip is None
+                        else []
+                    ),
                 ]
             )
         )
