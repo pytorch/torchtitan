@@ -37,7 +37,7 @@ from torchtitan.components.optim import AdamW
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
-from torchtitan.models.common.attention import VarlenInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.rl.generator.dispatcher import (
     _prepare_generation_request_metrics,
     _RejectedRequests,
@@ -585,6 +585,9 @@ _MODEL_CONFIG = SimpleNamespace(
     first_full_attention=SimpleNamespace(inner_attention=VarlenInnerAttention.Config()),
     max_context_length=1024,
 )
+_FLEX_MODEL_CONFIG = SimpleNamespace(
+    first_full_attention=SimpleNamespace(inner_attention=FlexInnerAttention.Config()),
+)
 
 
 def test_generator_dp_requires_expert_parallelism():
@@ -617,6 +620,36 @@ def test_batch_invariant_requires_kv_cache_reset():
             parallelism=_PARALLELISM,
             debug=DebugConfig(batch_invariant=True),
         )
+
+
+def test_rocm_flex_batch_invariant_setup_installs_page_mapping(monkeypatch):
+    logprob_patch = Mock()
+    rocm_page_mapping_setup = Mock()
+    monkeypatch.setattr(vllm_engine_module, "register_to_vllm", Mock())
+    monkeypatch.setattr(
+        vllm_engine_module,
+        "force_logprobs_fn_for_batch_invariance",
+        logprob_patch,
+    )
+    monkeypatch.setattr(
+        vllm_engine_module,
+        "enable_rocm_batch_invariant_page_mapping",
+        rocm_page_mapping_setup,
+    )
+
+    with patch.object(torch.version, "hip", "10.0"):
+        VLLMEngine.configure_runtime(
+            _FLEX_MODEL_CONFIG,
+            parallelism=_PARALLELISM,
+            checkpointer=None,
+            dist_moe_runtime=None,
+            batch_invariant=True,
+            cuda_graph_mode="NONE",
+            max_num_seqs=8,
+        )
+
+    logprob_patch.assert_called_once_with()
+    rocm_page_mapping_setup.assert_called_once_with()
 
 
 def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_path):
