@@ -11,6 +11,7 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 
 import torch
 import torch.nn as nn
@@ -42,9 +43,10 @@ class ActivationRematConfig:
     call sites in model code. Everything outside a retained region is
     recomputed.
 
-    NB: Save-region names are relative to a transformer block, so the same
-    policy applies to every transformer block. Per-block remat policies are
-    not currently supported.
+    Save-region names are relative to a transformer block. Use
+    ``block_save_regions`` to retain additional regions only in selected
+    blocks, for example to spend a small activation budget on an expensive
+    attention kernel without retaining it in every pipeline stage.
     """
 
     recompute_regions: list[str] = field(default_factory=list)
@@ -54,6 +56,17 @@ class ActivationRematConfig:
     example, with ``save_regions=["*"]``, this lists the few regions to
     recompute, which suits starting from no remat and recomputing just enough
     to fit a memory budget.
+    """
+
+    block_save_regions: dict[str, list[str]] = field(default_factory=dict)
+    """
+    Additional save regions keyed by qualified transformer-block globs,
+    such as ``{"layers.31": ["attention.inner_attention"]}``.
+    Keys match the original layer FQN, including after PP partitioning.
+    Values remain relative to the matched block. Matching entries are
+    additive; ``recompute_regions`` still takes precedence. Unmatched
+    blocks use only ``save_regions``. Retention follows the block checkpoint's
+    saved-tensor hooks and is independent of backend-owned activation arenas.
     """
 
     preserve_rng_state: bool = False
@@ -91,6 +104,7 @@ class ActivationRematConfig:
         if (
             self.save_regions != save_regions
             or self.recompute_regions != recompute_regions
+            or self.block_save_regions
         ):
             raise ValueError(
                 f"{type(self).__name__} is a fixed policy. Use "
@@ -139,10 +153,14 @@ class ActivationRematConfig:
         # regions across all pipeline stages instead of only this model part.
         for layer_id, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
-            transformer_block.configure_remat_regions(
-                self.save_regions, self.recompute_regions
-            )
             base_fqn = f"layers.{layer_id}"
+            save_regions = list(self.save_regions)
+            for block_pattern, additional_regions in self.block_save_regions.items():
+                if fnmatch(base_fqn, block_pattern):
+                    save_regions.extend(additional_regions)
+            transformer_block.configure_remat_regions(
+                save_regions, self.recompute_regions
+            )
             transformer_block.forward = remat.checkpoint(
                 region_name=base_fqn,
                 determinism_check=self.determinism_check,
@@ -161,6 +179,8 @@ class ActivationRematConfig:
             self.save_regions or "none",
             self.recompute_regions or "none",
         )
+        if self.block_save_regions:
+            logger.info("Block-specific save patterns: %s", self.block_save_regions)
 
 
 @dataclass(kw_only=True, slots=True)
