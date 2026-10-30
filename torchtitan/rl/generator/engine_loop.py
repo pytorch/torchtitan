@@ -25,6 +25,7 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.generator.dispatcher import RequestDispatcher
 from torchtitan.rl.generator.engine import GenerationEngine
 from torchtitan.rl.generator.types import EngineRequest
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Completion
 
 logger = logging.getLogger(__name__)
@@ -226,6 +227,13 @@ class EngineLoop:
         engine = self._engine
         if engine is not None and self._rank == 0:
             engine.log_stats(step)
+
+    def session_kv_metrics(self) -> list[m.Metric]:
+        """RANK 0: the engine's session-KV metrics (see `GenerationEngine.session_kv_metrics`)."""
+        engine = self._engine
+        if engine is None or self._rank != 0:
+            return []
+        return engine.session_kv_metrics()
 
     async def close(self) -> None:
         """Stop the loop, which releases the dispatcher and the engine on exit.

@@ -32,6 +32,7 @@ from torchtitan.rl.generator.engine import GenerationEngine
 from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
@@ -414,6 +415,10 @@ class Generator(Configurable):
             session_ids: Routing session ids with no more generation calls.
         """
         self._engine_loop.release_sessions(session_ids)
+
+    async def get_session_kv_metrics(self) -> list[m.Metric]:
+        """Rank 0's session-KV metrics: levels now, counts since the last call; [] on other ranks."""
+        return self._engine_loop.session_kv_metrics()
 
     async def initialize_torchstore_client(self, requester_index: int) -> None:
         """Initialize this process as a TorchStore routing requester.
