@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
@@ -512,6 +513,16 @@ def _build_pipeline_schedule(
             "and _PipelineScheduleRuntime support csv schedules"
         )
         schedule._load_csv(pp_schedule_csv)
+
+    # Chunked partial backwards preserve deferred-reduction policies during
+    # metadata inference, leaving unsharded gradients outside param.grad.
+    # TODO: Move this reset into PipelineStage's metadata cleanup.
+    # https://github.com/pytorch/torchtitan/pull/5563#discussion_r4404643236
+    for stage in stages:
+        if isinstance(stage.submod, FSDPModule):
+            schedule.register_post_metadata_inference_cleanup(
+                stage.submod.reset_iter_state
+            )
 
     return schedule
 

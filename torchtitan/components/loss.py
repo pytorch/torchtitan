@@ -581,8 +581,12 @@ class ChunkedLossWrapper(Loss[LossInput]):
         The lm_head's FSDP reshard-after-forward and reshard-after-backward are
         temporarily disabled during the chunked loop so that the weight stays
         unsharded across all outputs and chunks (avoiding repeated all-gathers).
-        Gradient synchronization remains disabled until the final chunk, so one
-        reduce-scatter processes the accumulated lm_head parameter gradients.
+        The final chunk uses the caller's head synchronization policy. With
+        pending microbatch gradients, the decoder backward's group hooks or
+        root callback reduce the head instead, keeping each group's gradients
+        together. Inner backwards preserve the decoder's prefetch and
+        finalization state. Frozen decoders finish through the head backward
+        or the caller's manual finalization.
 
     TP / SP composability:
         The root decoder norm emits hidden states that are replicated on the
@@ -638,7 +642,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
         head gradients are already accumulated. The returned loss is a leaf
         whose backward accumulates only its own gradient.
         """
-        from torch.distributed._composable.fsdp import FSDPModule
+        from torchtitan.distributed.fsdp_lifecycle import fsdp_partial_backwards
 
         num_chunks = self.num_chunks
         lm_head = self.lm_head
@@ -723,75 +727,58 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 )
             metrics: dict[str, torch.Tensor] = {}
 
-            fsdp_enabled = isinstance(lm_head, FSDPModule)
-            # Disable FSDP reshard on lm_head to keep its weight unsharded across
-            # all outputs and chunks, avoiding repeated all-gathers. Coalesce
-            # gradient synchronization into one reduce-scatter at the final chunk
-            # by disabling it for chunks 0..N-2.
-            if fsdp_enabled:
-                lm_head.set_reshard_after_forward(False)
-                lm_head.set_reshard_after_backward(False)
-                lm_head.set_requires_gradient_sync(False, recurse=False)
-                # An implicit unshard stores an all-gather event in FSDP's shared
-                # all_gather_state for the next FSDP module to consume. Since
-                # lm_head is the final FSDP forward in this loop, eager warmup
-                # leaves that state uncleared, and CUDA graph capture cannot wait
-                # on its eager event. Explicitly unshard while FSDP is idle to
-                # avoid populating the shared state.
-                with spmd.no_typecheck():
-                    lm_head.unshard()
+            with fsdp_partial_backwards(
+                lm_head,
+                run_backward=run_backward,
+                outer_backward_follows=decoder_requires_grad,
+            ) as fsdp:
+                for chunk_index in range(num_chunks):
+                    if chunk_index == num_chunks - 1:
+                        fsdp.before_last_backward()
 
-            for chunk_index in range(num_chunks):
-                if fsdp_enabled and chunk_index == num_chunks - 1:
-                    lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
-                        True, recurse=False
+                    h_chunks = tuple(
+                        chunks[chunk_index] for chunks in hidden_state_chunks_per_output
                     )
+                    label_chunks: LossInput = tuple(
+                        chunks[chunk_index] for chunks in label_chunks_per_output
+                    )
+                    loss_inputs = {
+                        key: chunks[chunk_index]
+                        if isinstance(chunks, tuple)
+                        else chunks
+                        for key, chunks in input_chunks.items()
+                    }
+                    # TODO: compile lm_head together with loss_fn (only loss_fn is
+                    # compiled today): frees the fp32 dlogits right after the split, 1.2 GiB per
+                    # Qwen3-8B chunk. Blocked: compiling HiMidLoLinear rounds grad_weight to bf16
+                    # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
+                    # fails at lm_head's hooks, which can't be traced.
+                    logits: LossInput = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
+                    logits = fsdp.after_forward(logits)
+                    if not is_multi_output:
+                        logits = logits[0]
+                        label_chunks = label_chunks[0]
+                    chunk_loss, chunk_metrics = self.loss_fn(
+                        logits,
+                        label_chunks,
+                        global_loss_token_counts,
+                        **loss_inputs,
+                    )
+                    # Free logits before backward.
+                    del logits
+                    metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
+                    total_loss = total_loss + chunk_loss.detach()
 
-                h_chunks = tuple(
-                    chunks[chunk_index] for chunks in hidden_state_chunks_per_output
-                )
-                label_chunks: LossInput = tuple(
-                    chunks[chunk_index] for chunks in label_chunks_per_output
-                )
-                loss_inputs = {
-                    key: chunks[chunk_index] if isinstance(chunks, tuple) else chunks
-                    for key, chunks in input_chunks.items()
-                }
-                # TODO: compile lm_head together with loss_fn (only loss_fn is
-                # compiled today): frees the fp32 dlogits right after the split, 1.2 GiB per
-                # Qwen3-8B chunk. Blocked: compiling HiMidLoLinear rounds grad_weight to bf16
-                # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
-                # fails at lm_head's hooks, which can't be traced.
-                logits: LossInput = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
-                if not is_multi_output:
-                    logits = logits[0]
-                    label_chunks = label_chunks[0]
-                chunk_loss, chunk_metrics = self.loss_fn(
-                    logits,
-                    label_chunks,
-                    global_loss_token_counts,
-                    **loss_inputs,
-                )
-                # Free logits before backward.
-                del logits
-                metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
-                total_loss = total_loss + chunk_loss.detach()
-
-                if run_backward:
-                    with spmd.no_typecheck():
-                        chunk_loss.backward()
-                        if decoder_requires_grad:
-                            for h_chunk, grad_accumulator in zip(
-                                h_chunks, grad_accumulators, strict=True
-                            ):
-                                assert h_chunk.grad is not None
-                                grad_accumulator.add(h_chunk.grad)
-                                h_chunk.grad = None
-
-            if fsdp_enabled:
-                lm_head.set_reshard_after_forward(True)
-                lm_head.set_reshard_after_backward(True)
-                lm_head.reshard()
+                    if run_backward:
+                        with spmd.no_typecheck():
+                            chunk_loss.backward()
+                            if decoder_requires_grad:
+                                for h_chunk, grad_accumulator in zip(
+                                    h_chunks, grad_accumulators, strict=True
+                                ):
+                                    assert h_chunk.grad is not None
+                                    grad_accumulator.add(h_chunk.grad)
+                                    h_chunk.grad = None
             if not decoder_requires_grad:
                 # Scaling this leaf cannot rescale already accumulated head gradients.
                 return total_loss.requires_grad_(run_backward), metrics
