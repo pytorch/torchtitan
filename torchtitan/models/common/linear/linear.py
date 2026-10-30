@@ -422,6 +422,27 @@ class GroupedLinear(Module):
             torch.empty(config.group_size, *output_shape, config.in_features)
         )
 
+    def fsdp_shard_dim(self, param_name: str) -> int:
+        """Return the dimension FSDP shards when it cannot shard the group axis.
+
+        FSDP shards routed-expert parameters on the group (expert) axis. When
+        the shard group is larger than the group size, it shards the
+        output-feature axis instead. Only this class knows where that axis is,
+        because a subclass may store the weight in a kernel-native order.
+
+        The default matches the stock ``[E, N, F, D]`` weight and ``[E, N, F]``
+        bias layout, where ``in_features`` is last, so the output-feature axis
+        is second from the end for a weight and last for a bias.
+
+        Args:
+            param_name: ``"weight"`` or ``"bias"``.
+
+        Returns:
+            The index of the output-feature dimension of that parameter.
+        """
+        ndim = self.weight.ndim
+        return ndim - 2 if param_name == "weight" else ndim - 1
+
     def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
         """Apply each grouped linear to rows selected by cumulative offsets.
 
