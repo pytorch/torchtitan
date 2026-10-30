@@ -124,12 +124,58 @@ from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
+from torchtitan.rl.routing.strategies import (
+    RoutingStrategy,
+    StickySessionRoutingStrategy,
+)
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.trainer.controller_state import DATALOADER_STATE_KEY
 from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.tools.garbage_collector import GarbageCollector
 
 logger = logging.getLogger(__name__)
+
+
+def _peak_load_ratio(strategy: RoutingStrategy.Config) -> float:
+    """Return the routing skew factor used to size each generator's sequence cap.
+
+    Sticky sessions stay pinned until their candidate passes ``repin_load_ratio`` x the
+    mean load. Keep the previous even-share factor of 1.0 for other strategies
+    and sticky routing without repinning; 1.0 is not a bound on their load skew.
+    """
+    if (
+        isinstance(strategy, StickySessionRoutingStrategy.Config)
+        and strategy.repin_load_ratio is not None
+    ):
+        return strategy.repin_load_ratio
+    return 1.0
+
+
+def _generator_max_num_seqs(
+    *,
+    rollout_concurrency: int,
+    num_generators: int,
+    generator_dp_degree: int,
+    generator_router: InterGeneratorRouter.Config,
+    intra_generator_router: IntraGeneratorRouter.Config,
+) -> tuple[int, float]:
+    """Return each generator DP rank's ``max_num_seqs`` and its sizing factor.
+
+    An even share of the rollout concurrency, scaled by how far above an even share each
+    routing layer (across generators, then across one generator's DP ranks) lets a
+    candidate run before sessions move. Capped at 512.
+    """
+    peak_load_ratio = 1.0
+    if num_generators > 1:
+        peak_load_ratio *= _peak_load_ratio(generator_router.strategy)
+    if generator_dp_degree > 1:
+        peak_load_ratio *= _peak_load_ratio(intra_generator_router.strategy)
+    num_dp_ranks = num_generators * generator_dp_degree
+    max_num_seqs = min(
+        math.ceil(rollout_concurrency * peak_load_ratio / num_dp_ranks), 512
+    )
+    return max_num_seqs, peak_load_ratio
 
 
 @dataclass(kw_only=True, slots=True)
@@ -597,15 +643,25 @@ class Controller(Configurable):
 
         # Ceiling (not target) for the generator's max_num_seqs: the per-generator
         # upper bound on concurrently scheduled sequences. vLLM may admit fewer if KV
-        # is tight; this also sets CUDA-graph capture sizes.
-        max_num_seqs = min(
-            math.ceil(rollout_concurrency / num_generator_dp_shards), 512
+        # is tight; this also sets CUDA-graph capture sizes. Sticky-session routing
+        # keeps a session on its generator and DP rank until that one's in-flight load
+        # passes repin_load_ratio x the mean, so a rank can run that far above an even
+        # share; a cap at the even share queues requests there while its siblings have
+        # room.
+        max_num_seqs, peak_load_ratio = _generator_max_num_seqs(
+            rollout_concurrency=rollout_concurrency,
+            num_generators=config.num_generators,
+            generator_dp_degree=generator_dp_degree,
+            generator_router=config.generator_router,
+            intra_generator_router=config.generator.intra_generator_router,
         )
 
         logger.info(
-            "max_num_seqs=%d per generator (rollout_concurrency=%d / generator_dp_shards=%d)",
+            "max_num_seqs=%d per generator (rollout_concurrency=%d x peak_load_ratio=%g "
+            "/ generator_dp_shards=%d)",
             max_num_seqs,
             rollout_concurrency,
+            peak_load_ratio,
             num_generator_dp_shards,
         )
 
