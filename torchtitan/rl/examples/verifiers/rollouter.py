@@ -17,6 +17,10 @@ import numpy as np
 from verifiers.v1.configs.client import TrainClientConfig as VerifiersTrainClientConfig
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.dialects.chat import message_to_wire
+from verifiers.v1.errors import (
+    HarnessError as VerifiersHarnessError,
+    ProviderError as VerifiersProviderError,
+)
 from verifiers.v1.serve.client import EnvClient as VerifiersEnvClient
 from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 
@@ -35,7 +39,11 @@ from torchtitan.rl.examples.verifiers.generation_server import (
 )
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRLDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import (
+    Rollouter,
+    rollouts_from_gather,
+    RolloutWorker,
+)
 from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
     GenerateFn,
@@ -269,23 +277,24 @@ class VerifiersRollouter(Rollouter):
             ),
             return_exceptions=True,
         )
-        # Raise only after every sibling finished: the caller releases the group next, and a
-        # sibling still generating would pin the group again, with nothing left to release it.
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
-        rollouts = results
+        rollouts = rollouts_from_gather(results, group_id=group_id)
 
-        outputs = await self._rubric.score_group(rollouts, sample)
-        for rollout, output in zip(rollouts, outputs, strict=True):
+        scored = [
+            rollout
+            for rollout in rollouts
+            if rollout.status is not RolloutStatus.ERROR_SYSTEM
+        ]
+        outputs = await self._rubric.score_group(scored, sample)
+        for rollout, output in zip(scored, outputs, strict=True):
             rollout.reward = output.reward
             rollout.reward_breakdown = output.reward_breakdown
 
-        group = RolloutGroup(group_id=group_id, rollouts=rollouts)
-        advantages = self._advantage_estimator(group)
-        for rollout, advantage in zip(group.rollouts, advantages, strict=True):
+        advantages = self._advantage_estimator(
+            RolloutGroup(group_id=group_id, rollouts=scored)
+        )
+        for rollout, advantage in zip(scored, advantages, strict=True):
             rollout.advantage = advantage
-        return group
+        return RolloutGroup(group_id=group_id, rollouts=rollouts)
 
     async def _run_single_rollout(
         self,
@@ -349,7 +358,7 @@ class VerifiersRollouter(Rollouter):
             rollout_id=rollout_id,
         )
         status = self.rollout_status(verifiers_episode=verifiers_episode, trace=trace)
-        if not turns:
+        if not turns and status is not RolloutStatus.ERROR_SYSTEM:
             # Verifiers records an overlong first prompt as a failed model call; vLLM, the
             # renderer and the generation server all word it "maximum context length".
             first_prompt_too_long = any(
@@ -391,7 +400,25 @@ class VerifiersRollouter(Rollouter):
         if trace.is_timeout or verifiers_episode.is_timeout:
             return RolloutStatus.ERROR_TIMEOUT
         if not verifiers_episode.ok or not trace.ok:
-            return RolloutStatus.ERROR
+            # Verifiers records a failure as data instead of raising; the first error stopped the
+            # rollout. Only a generator 4xx (e.g. a prompt past the context) or the agent's own
+            # exit after the policy's first turn is the policy's doing. Any other error (a sandbox,
+            # env or tool failure, a generator 5xx or failed connection, a harness that failed
+            # before the first turn) makes the rollout ERROR_SYSTEM.
+            errors = trace.errors or verifiers_episode.errors
+            if not errors:
+                return RolloutStatus.ERROR
+            error = errors[0]
+            is_policy_error = (
+                error.type == VerifiersHarnessError.__name__ and trace.num_turns > 0
+            ) or (
+                error.type == VerifiersProviderError.__name__
+                and error.status_code is not None
+                and error.status_code < 500
+            )
+            return (
+                RolloutStatus.ERROR if is_policy_error else RolloutStatus.ERROR_SYSTEM
+            )
         if not trace.is_truncated:
             return RolloutStatus.COMPLETED
         if trace.stop_condition == "max_turns":
