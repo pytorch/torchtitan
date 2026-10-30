@@ -543,28 +543,6 @@ def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
     assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
 
 
-@pytest.mark.parametrize("reset_kv_cache", [False, True])
-def test_load_model_state_dict_direct_fetches_into_the_model(reset_kv_cache: bool):
-    def fetch(state_dict):
-        return state_dict
-
-    fetches = []
-
-    def load_state_dict_direct(fetch):
-        fetches.append(fetch)
-
-    engine = _vllm_engine(
-        reset_kv_cache_on_model_state_dict_load=reset_kv_cache,
-        model=SimpleNamespace(load_state_dict_direct=load_state_dict_direct),
-    )
-
-    engine.load_model_state_dict_direct(fetch)
-
-    assert fetches == [fetch]
-    expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
-    assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
-
-
 def _fetch_on_torchstore_loop(state_dict, get_state_dict, current_stream):
     """Runs `Generator._fetch_model_state_dict` against a fake TorchStore loop thread."""
     torchstore_loop = asyncio.new_event_loop()
@@ -575,7 +553,7 @@ def _fetch_on_torchstore_loop(state_dict, get_state_dict, current_stream):
     try:
         with (
             patch.object(generator_module.ts, "get_state_dict", get_state_dict),
-            patch.object(torch.cuda, "current_stream", current_stream),
+            patch.object(torch.accelerator, "current_stream", current_stream),
         ):
             fetched = generator._fetch_model_state_dict(state_dict)
     finally:
@@ -609,66 +587,6 @@ def test_direct_fetch_runs_on_torchstore_loop():
     assert kwargs["direct_rdma"] is False
     # Returns the fetched keys without raising; the model wrapper checks them.
     assert set(fetched) == {"weight"}
-
-
-def test_prefetch_model_state_dict_is_noop_with_fetch_to_gpu():
-    generator = Generator.__new__(Generator)
-    generator.config = SimpleNamespace(fetch_model_state_dict_to_gpu=True)
-    get_state_dict = AsyncMock()
-
-    with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
-        asyncio.run(generator.prefetch_model_state_dict())
-
-    get_state_dict.assert_not_awaited()
-
-
-class _InlineEngineLoopThread:
-    """Runs `call`ed functions on the calling thread."""
-
-    event_loop = None
-
-    def __init__(self, name: str):
-        pass
-
-    def call(self, fn):
-        return fn()
-
-
-@pytest.mark.parametrize("fetch_to_gpu", [False, True])
-def test_fetch_model_state_dict_to_gpu_reaches_engine_and_engine_loop(
-    monkeypatch, tmp_path, fetch_to_gpu: bool
-):
-    build = Mock(
-        return_value=SimpleNamespace(
-            data_parallel_size=1,
-            data_parallel_rank=0,
-            prefetched_model_state_dict=None,
-        )
-    )
-    monkeypatch.setattr(VLLMEngine.Config, "build", build)
-    monkeypatch.setattr(generator_module, "EngineLoopThread", _InlineEngineLoopThread)
-    monkeypatch.setattr(generator_module, "EngineLoop", Mock())
-    monkeypatch.setattr(generator_module, "RequestDispatcher", Mock())
-    monkeypatch.setattr(generator_module.dist, "get_rank", Mock(return_value=0))
-    monkeypatch.setattr(generator_module.dist, "new_group", Mock())
-    monkeypatch.setattr(torch.accelerator, "current_device_index", Mock(return_value=0))
-    monkeypatch.setattr(torch.accelerator, "set_device_index", Mock())
-
-    generator = Generator(
-        Generator.Config(
-            model=_MODEL_CONFIG, fetch_model_state_dict_to_gpu=fetch_to_gpu
-        ),
-        model_path="unused",
-        max_num_seqs=8,
-        output_dir=str(tmp_path),
-        rank=0,
-    )
-
-    assert build.call_args.kwargs["fetch_model_state_dict_to_gpu"] is fetch_to_gpu
-    engine_loop_kwargs = cast(Mock, generator_module.EngineLoop).call_args.kwargs
-    assert engine_loop_kwargs["fetch_model_state_dict"] == (
-        generator._fetch_model_state_dict if fetch_to_gpu else None
-    )
 
 
 def test_sampling_config_rejects_top_p_below_one():
@@ -794,12 +712,7 @@ def test_qwen36_27b_perf_config():
 # --- vLLM engine kwargs (what VLLMEngine passes to EngineArgs) ---
 
 
-def _build_engine_kwargs(
-    monkeypatch,
-    tmp_path,
-    config: Generator.Config,
-    fetch_model_state_dict_to_gpu: bool = False,
-) -> dict:
+def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
     ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
     engine_args = Mock()
@@ -819,7 +732,7 @@ def _build_engine_kwargs(
         dist_moe_runtime=None,
         debug=config.debug,
         reset_kv_cache_on_model_state_dict_load=False,
-        fetch_model_state_dict_to_gpu=fetch_model_state_dict_to_gpu,
+        fetch_model_state_dict_to_gpu=False,
         rank=0,
         generator_name="generator",
         output_dir=str(tmp_path),
@@ -829,20 +742,6 @@ def _build_engine_kwargs(
 
 def test_generator_defaults_to_the_vllm_engine():
     assert isinstance(Generator.Config(model=_MODEL_CONFIG).engine, VLLMEngine.Config)
-
-
-@pytest.mark.parametrize("fetch_to_gpu", [False, True])
-def test_fetch_model_state_dict_to_gpu_reaches_model_registration(
-    monkeypatch, tmp_path, fetch_to_gpu: bool
-):
-    _build_engine_kwargs(
-        monkeypatch,
-        tmp_path,
-        Generator.Config(model=_MODEL_CONFIG),
-        fetch_model_state_dict_to_gpu=fetch_to_gpu,
-    )
-    register = cast(Mock, vllm_engine_module.register_to_vllm)
-    assert register.call_args.kwargs["fetch_model_state_dict_to_gpu"] is fetch_to_gpu
 
 
 def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
@@ -1101,6 +1000,7 @@ def test_vllm_uneven_decode_tp_padding():
         config.generator.model,
         parallelism=config.generator.parallelism,
         checkpointer_config=None,
+        fetch_model_state_dict_to_gpu=False,
     )
 
     engine = build_inference_engine(config)

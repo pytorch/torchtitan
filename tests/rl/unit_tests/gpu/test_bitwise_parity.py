@@ -934,6 +934,14 @@ class TestBitwiseParityQwen35DebugVarlenDirect(TestBitwiseParityQwen35DebugVarle
 
     fetch_model_state_dict_to_gpu = True
 
+    @unittest.skip("does not depend on how weights are loaded")
+    def test_batch_invariance(self):
+        pass
+
+    @unittest.skip("does not depend on how weights are loaded")
+    def test_vllm_prefill_and_decode_batch_invariance(self):
+        pass
+
     def test_no_pinned_cpu_copy(self):
         wrapper = self.engine.model_executor.driver_worker.get_model()
         self.assertIsNone(wrapper._prefetched_model_state_dict)

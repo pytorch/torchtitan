@@ -196,7 +196,7 @@ def register_to_vllm(
     parallelism: InferenceParallelismConfig,
     checkpointer_config: CheckpointManager.Config | None,
     dist_moe_runtime: DistMoeRuntime.Config | None = None,
-    fetch_model_state_dict_to_gpu: bool = False,
+    fetch_model_state_dict_to_gpu: bool,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 

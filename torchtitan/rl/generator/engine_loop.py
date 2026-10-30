@@ -140,7 +140,7 @@ class EngineLoop:
         max_engine_steps_between_decisions: int,
         reset_kv_cache_on_model_state_dict_load: bool,
         fetch_model_state_dict: Callable[[dict[str, torch.Tensor]], Iterable[str]]
-        | None = None,
+        | None,
     ):
         self._engine: GenerationEngine | None = engine
         self._fetch_model_state_dict = fetch_model_state_dict

@@ -311,6 +311,7 @@ def _reshard(module: FSDPModule) -> None:
     reshard_after_forward=False, e.g. the tied [tok_embeddings, norm, lm_head]
     group after ``compute_logits`` calls lm_head alone.
     """
+    # TODO: replace with a public FSDP API that reshards regardless of training state.
     for param_group in module._get_fsdp_state()._fsdp_param_groups:
         param_group._to_sharded()
 
@@ -440,7 +441,7 @@ class VLLMModelWrapper(Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         dist_moe_runtime: DistMoeRuntime.Config | None = None,
-        fetch_model_state_dict_to_gpu: bool = False,
+        fetch_model_state_dict_to_gpu: bool,
     ):
         super().__init__()
 
