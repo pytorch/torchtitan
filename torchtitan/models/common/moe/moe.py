@@ -168,6 +168,27 @@ class RoutedExperts(Module):
         return out_TD
 
 
+@local_compile("router_postprocess", batch_invariant=True)
+def _gather_route(
+    scores_TE: torch.Tensor, topk_expert_ids_TK: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather selected weights and materialize their boolean routing map.
+
+    Args:
+        scores_TE: Router scores shaped (T, E), before bias-only selection.
+        topk_expert_ids_TK: Selected expert IDs shaped (T, K).
+
+    Returns:
+        Unnormalized weights shaped (T, K) and a boolean map shaped (T, E).
+    """
+    weights_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
+    # TP/SP shards tokens, not experts: this scatter needs no redistribution.
+    routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
+        -1, topk_expert_ids_TK, True
+    )
+    return weights_TK, routing_map_TE
+
+
 class TokenChoiceTopKRouter(Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
     routed to top K experts based on the router scores.
@@ -279,10 +300,11 @@ class TokenChoiceTopKRouter(Module):
             **router_kwargs,
         )
         remat.recompute_needs_tensor(topk_expert_ids_TK)
-        # The expert bias is only used for routing. The gating value is
-        # still derived from the original scores.
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
+        # Expert bias changes selection, not the weights gathered from scores.
+        topk_scores_TK, routing_map_TE = _gather_route(scores_TE, topk_expert_ids_TK)
+        # Preserve native FP32 reduction/scaling: fusing normalization changes
+        # routing weights and gradients even with deterministic execution.
         if self.route_norm:
             denominator_T1 = (
                 topk_scores_TK.sum(dim=-1, keepdim=True) + self.route_norm_epsilon
@@ -290,15 +312,6 @@ class TokenChoiceTopKRouter(Module):
             topk_scores_TK = topk_scores_TK / denominator_T1
         topk_scores_TK = topk_scores_TK * self.route_scale
 
-        # Build a one-hot boolean routing map (T, E) marking the experts each
-        # token is routed to. Under TP/SP the router outputs are sharded on the
-        # token dimension; scatter_ writes along the replicated expert
-        # dimension and therefore needs no redistribution.
-        routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
-            -1,
-            topk_expert_ids_TK,
-            True,
-        )
         # Keep the full routing map for dispatch, and build the masked view once
         # for all load-balancing statistics. The auxiliary-loss gradient is
         # injected into topk_scores_TK on backward; see ``AuxLoss.inject``.
