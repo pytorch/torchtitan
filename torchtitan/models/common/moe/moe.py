@@ -960,7 +960,6 @@ def register_moe_load_balancing_hook(
         model_parts: List of model parts that may contain MoE layers.
         parallelism_context: Parallel dimensions for distributed communication.
     """
-    from torchtitan.models.common.decoder import TransformerBlock
 
     def _iter_moe_layers(
         model_parts: list[nn.Module],
@@ -978,9 +977,7 @@ def register_moe_load_balancing_hook(
             for layers in layer_containers:
                 assert isinstance(layers, (nn.ModuleDict, nn.ModuleList))
                 for transformer_block in layers.children():
-                    if isinstance(transformer_block, TransformerBlock) and isinstance(
-                        moe := transformer_block.feed_forward, MoE
-                    ):
+                    if isinstance(moe := transformer_block.feed_forward, MoE):
                         yield transformer_block, cast(_MoELike, moe)
 
     # for MoE auxiliary-loss-free load balancing

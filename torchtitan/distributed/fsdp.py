@@ -193,8 +193,6 @@ def disable_fsdp_gradient_division(model: nn.Module) -> None:
 
 def enable_fsdp_symm_mem(model: nn.Module, scope: FSDPSymmMemScope) -> None:
     """Enable symmetric-memory communication for the FSDP modules ``scope`` selects."""
-    from torchtitan.models.common.decoder import TransformerBlock
-
     if scope is None:
         return
     for module in model.modules():
@@ -202,7 +200,7 @@ def enable_fsdp_symm_mem(model: nn.Module, scope: FSDPSymmMemScope) -> None:
             continue
         if (
             scope == "dense"
-            and isinstance(module, TransformerBlock)
+            and hasattr(module, "feed_forward")
             and isinstance(module.feed_forward, MoE)
         ):
             continue

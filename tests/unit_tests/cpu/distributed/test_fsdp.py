@@ -40,6 +40,10 @@ class _FSDPTransformerBlock(_FSDPModule, TransformerBlock):
     pass
 
 
+class _FSDPOutOfTreeBlock(_FSDPModule):
+    pass
+
+
 def test_apply_fsdp_to_decoder_forwards_param_dtype_override_fn() -> None:
     model = nn.Module()
     model.enable_weight_tying = False
@@ -88,6 +92,7 @@ def test_stacked_linear_shard_placements_use_num_linears() -> None:
     }
 
 
+@pytest.mark.parametrize("block_cls", [_FSDPTransformerBlock, _FSDPOutOfTreeBlock])
 @pytest.mark.parametrize(
     ("scope", "dense_enabled", "sparse_enabled"),
     [
@@ -97,13 +102,13 @@ def test_stacked_linear_shard_placements_use_num_linears() -> None:
     ],
 )
 def test_enable_fsdp_symm_mem_scope(
-    scope: FSDPSymmMemScope, dense_enabled: bool, sparse_enabled: bool
+    scope: FSDPSymmMemScope, dense_enabled: bool, sparse_enabled: bool, block_cls: type
 ) -> None:
     model = nn.Module()
-    dense = _FSDPTransformerBlock()
+    dense = block_cls()
     dense.feed_forward = DenseFeedForward.__new__(DenseFeedForward)
     nn.Module.__init__(dense.feed_forward)
-    sparse = _FSDPTransformerBlock()
+    sparse = block_cls()
     moe = MoE.__new__(MoE)
     nn.Module.__init__(moe)
     sparse.feed_forward = moe
