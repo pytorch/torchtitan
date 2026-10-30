@@ -896,7 +896,7 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
     min_world_size = 2
     sync_weights_from_trainer = True
     BATCH_SIZE = 3
-    PROMPT_LENGTH = 64
+    PROMPT_LENGTH = 127
     MAX_GEN_TOKENS = 16
 
     def test_vllm_prefill_and_decode_batch_invariance(self):

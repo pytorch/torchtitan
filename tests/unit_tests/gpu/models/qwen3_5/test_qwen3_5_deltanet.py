@@ -872,8 +872,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
         actual.float().square().mean().backward()
-        self.assertIsNotNone(decay.grad)
-        self.assertTrue(torch.isfinite(decay.grad).all())
+        for tensor in (q, k, v, decay, update_gate):
+            self.assertIsNotNone(tensor.grad)
+            self.assertTrue(torch.isfinite(tensor.grad).all())
 
 
 if __name__ == "__main__":
