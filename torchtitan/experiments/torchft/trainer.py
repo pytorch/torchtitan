@@ -87,7 +87,10 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         )
         topology = dist_utils.init_distributed(
             config.comm,
-            enable_cpu_backend=config.training.enable_cpu_offload,
+            enable_cpu_backend=(
+                config.training.enable_cpu_offload
+                or bool(config.parallelism.fsdp_cpu_offload_layer_fqns)
+            ),
             base_folder=self.output_dir,
             ranks=global_ranks,
             pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,

@@ -19,7 +19,9 @@ from torchtitan.components.data.types import (
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
 )
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import GradientClipper, Optim
+from torchtitan.config import TrainingConfig
 from torchtitan.distributed.accelerator_graph import wrap_with_accelerator_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.aux_loss import AuxLoss
@@ -62,6 +64,27 @@ else:
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_selected_cpu_offload_layer_must_exist_before_model_partitioning() -> None:
+    """A misspelled layer must not silently remain on the accelerator."""
+    from torchtitan.config import DebugConfig, ParallelismConfig
+
+    engine = TrainingEngine.__new__(TrainingEngine)
+    engine.config = TrainingEngine.Config(
+        loss=CrossEntropyLoss.Config(),
+        training=TrainingConfig(disable_accelerator_graphs=True),
+        parallelism=ParallelismConfig(fsdp_cpu_offload_layer_fqns=("layers.7",)),
+        debug=DebugConfig(distinct_seed_mesh_axes=["dp_shard"]),
+    )
+    engine.device = torch.device("cpu")
+    engine.parallelism_context = SimpleNamespace(activate_spmd=contextlib.nullcontext)
+    model = torch.nn.Module()
+    model.layers = torch.nn.ModuleDict({"0": torch.nn.Identity()})
+    engine.model_config = SimpleNamespace(build=lambda: model)
+
+    with pytest.raises(ValueError, match=r"layer does not exist: layers\.7"):
+        engine._initialize_model(hf_assets_path="unused")
 
 
 def _batch(

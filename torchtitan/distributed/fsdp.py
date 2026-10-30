@@ -291,6 +291,7 @@ def apply_fsdp_to_decoder(
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
     symm_mem_scope: FSDPSymmMemScope = None,
     *,
+    cpu_offload_layer_fqns: tuple[str, ...] = (),
     param_dtype_override_fn: Callable[[nn.Parameter], torch.dtype | None] | None = None,
 ):
     """
@@ -310,6 +311,9 @@ def apply_fsdp_to_decoder(
         pp_enabled (bool): Whether pipeline parallelism is enabled.
         cpu_offload (bool, optional): Whether to offload model parameters to
             CPU. Defaults to False.
+        cpu_offload_layer_fqns: Transformer-block FQNs whose individual FSDP
+            units use CPU offload. This is mutually exclusive with full-model
+            ``cpu_offload``. FQNs owned by remote pipeline stages are ignored.
         reshard_after_forward_policy (str, optional): The policy to use for
             resharding after the forward pass. Defaults to "default". Other
             options: "never", "always".
@@ -339,6 +343,20 @@ def apply_fsdp_to_decoder(
         param_dtype_override_fn: Optional callback that overrides ``param_dtype``
             for selected parameters.
     """
+    if cpu_offload and cpu_offload_layer_fqns:
+        raise ValueError(
+            "cpu_offload and cpu_offload_layer_fqns are mutually exclusive"
+        )
+    cpu_offload_layer_fqns_set = set(cpu_offload_layer_fqns)
+    if not pp_enabled and (
+        missing_fqns := cpu_offload_layer_fqns_set
+        - {f"layers.{layer_id}" for layer_id in model.layers}
+    ):
+        raise ValueError(
+            "Selective FSDP CPU-offload layers do not exist: "
+            + ", ".join(sorted(missing_fqns))
+        )
+
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
         reduce_dtype=reduce_dtype,
@@ -350,6 +368,12 @@ def apply_fsdp_to_decoder(
         fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+    def _layer_fsdp_config(layer_id: str) -> dict[str, Any]:
+        """Return the FSDP options for one local transformer block."""
+        if f"layers.{layer_id}" not in cpu_offload_layer_fqns_set:
+            return fsdp_config
+        return {**fsdp_config, "offload_policy": CPUOffloadPolicy()}
 
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled
@@ -436,7 +460,7 @@ def apply_fsdp_to_decoder(
                 param_placements.update(expert_param_placements)
                 fully_shard(
                     transformer_block,
-                    **fsdp_config,
+                    **_layer_fsdp_config(layer_id),
                     reshard_after_forward=reshard_after_forward,
                     # dict.get returns None for parameters that use the default
                     # Shard(0), matching shard_placement_fn's contract.
@@ -485,14 +509,14 @@ def apply_fsdp_to_decoder(
 
                 fully_shard(
                     transformer_block,
-                    **fsdp_config,
+                    **_layer_fsdp_config(layer_id),
                     reshard_after_forward=reshard_after_forward,
                     shard_placement_fn=_shard_placement_fn,
                 )
         else:
             fully_shard(
                 transformer_block,
-                **fsdp_config,
+                **_layer_fsdp_config(layer_id),
                 reshard_after_forward=reshard_after_forward,
                 shard_placement_fn=stacked_param_placements.get,
             )
@@ -511,6 +535,16 @@ def apply_fsdp_to_decoder(
         logger.info("Applied FSDP to the model")
     if cpu_offload:
         logger.info("Applied CPU Offloading to the model")
+    elif cpu_offload_layer_fqns_set:
+        local_layer_fqns = sorted(
+            cpu_offload_layer_fqns_set
+            & {f"layers.{layer_id}" for layer_id in model.layers}
+        )
+        if local_layer_fqns:
+            logger.info(
+                "Applied selective CPU offloading to FSDP layers: %s",
+                ", ".join(local_layer_fqns),
+            )
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
     # in EP could interfere with implicit prefetching in FSDP

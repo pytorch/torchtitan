@@ -227,3 +227,57 @@ def test_cpu_offload_requires_distinct_dp_shard_seeds() -> None:
         training=TrainingConfig(enable_cpu_offload=True),
         debug=DebugConfig(distinct_seed_mesh_axes=["pp", "dp_shard"]),
     )
+
+
+def test_selective_cpu_offload_requires_distinct_dp_shard_seeds() -> None:
+    parallelism = ParallelismConfig(
+        fsdp_cpu_offload_layer_fqns=("layers.7",),
+    )
+    with pytest.raises(ValueError, match="distinct_seed_mesh_axes"):
+        TrainingEngine.Config(parallelism=parallelism)
+
+    TrainingEngine.Config(
+        parallelism=parallelism,
+        training=TrainingConfig(disable_accelerator_graphs=True),
+        debug=DebugConfig(distinct_seed_mesh_axes=["pp", "dp_shard"]),
+    )
+    with pytest.raises(ValueError, match="disable_accelerator_graphs=True"):
+        TrainingEngine.Config(
+            parallelism=parallelism,
+            debug=DebugConfig(distinct_seed_mesh_axes=["pp", "dp_shard"]),
+        )
+
+
+def test_full_and_selective_cpu_offload_are_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        TrainingEngine.Config(
+            training=TrainingConfig(enable_cpu_offload=True),
+            parallelism=ParallelismConfig(
+                fsdp_cpu_offload_layer_fqns=("layers.7",),
+            ),
+            debug=DebugConfig(distinct_seed_mesh_axes=["dp_shard"]),
+        )
+
+
+def test_selective_cpu_offload_requires_decoder_layer_fqns() -> None:
+    with pytest.raises(ValueError, match="decoder-layer FQNs"):
+        ParallelismConfig(fsdp_cpu_offload_layer_fqns=("tok_embeddings",))
+    with pytest.raises(ValueError, match="duplicates"):
+        ParallelismConfig(
+            fsdp_cpu_offload_layer_fqns=("layers.7", "layers.7"),
+        )
+
+
+def test_selective_cpu_offload_must_appear_in_explicit_pipeline_parts() -> None:
+    with pytest.raises(ValueError, match="absent from the explicit pipeline"):
+        TrainingEngine.Config(
+            parallelism=ParallelismConfig(
+                pipeline_parallel_degree=2,
+                pipeline_parallel_module_fqns_per_model_part=[
+                    ["layers.0"],
+                    ["layers.1"],
+                ],
+                fsdp_cpu_offload_layer_fqns=("layers.7",),
+            ),
+            debug=DebugConfig(distinct_seed_mesh_axes=["dp_shard"]),
+        )
