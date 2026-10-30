@@ -92,3 +92,45 @@ def test_rmsnorm_region_matches_eager():
 
     for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
         torch.testing.assert_close(actual_tensor, expected_tensor, atol=2e-2, rtol=2e-2)
+
+
+# The input-scaled norm also runs on routed tokens, a different count per layer.
+@pytest.mark.parametrize(
+    "region, norm_name, layer1_tokens",
+    [
+        ("muse_spark_rmsnorm", "post_attention_norm", 64),
+        ("muse_spark_input_scaled_rmsnorm", "post_ffn_norm", 48),
+    ],
+)
+def test_norm_region_under_activation_checkpoint(region, norm_name, layer1_tokens):
+    # Two layers' post norms share one region and differ in gain_center.
+    torch.manual_seed(0)
+    layers = build_model_config("debugmodel").layers[:2]
+    norms = [getattr(layer, norm_name).build().cuda() for layer in layers]
+    assert norms[0].gain_center != norms[1].gain_center
+    for norm in norms:
+        torch.nn.init.normal_(norm.weight, std=0.1)
+    input_TD = torch.randn(64, norms[0].normalized_shape[0], device="cuda")
+
+    def two_norms(x):
+        return norms[1](norms[0](x)[:layer1_tokens])
+
+    def two_norms_checkpointed(x):
+        return torch.utils.checkpoint.checkpoint(two_norms, x, use_reentrant=False)
+
+    def output_and_grads(fn):
+        # Empty cache, so layer 0 compiles the region first, as in training.
+        torch._dynamo.reset()
+        for norm in norms:
+            norm.weight.grad = None
+        return [*_run(fn, (input_TD,)), *(norm.weight.grad for norm in norms)]
+
+    try:
+        LocalCompileConfig(regions=[region]).apply()
+        expected = output_and_grads(two_norms)
+        actual = output_and_grads(two_norms_checkpointed)
+    finally:
+        LocalCompileConfig().apply()
+
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_tensor, expected_tensor, atol=0, rtol=0)

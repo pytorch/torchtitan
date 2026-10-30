@@ -214,10 +214,20 @@ class MuseSparkRMSNorm(RMSNorm):
     def __init__(self, config: Config):
         super().__init__(config)
         self.gain_center = config.gain_center
+        # Compiled code reads gain_center from this tensor, so every graph takes it as an
+        # input and saves the same tensors. A float is baked into layer 0's graph, and remat
+        # recompute of layer 0 can run layer 1's graph, which saves different tensors
+        # (CheckpointError). Eager keeps the float: SPMD typechecking rejects untyped tensors.
+        # TODO(pytorch/pytorch#166926): drop the copy once recompute reuses the forward's graph.
+        self._gain_center_tensor = torch.tensor(
+            config.gain_center, dtype=torch.float32, device="cpu"
+        )
 
     def _get_effective_weight(self) -> torch.Tensor | None:
         if self.weight is None:
             return None
+        if torch.compiler.is_compiling():
+            return self.weight + self._gain_center_tensor
         return self.weight + self.gain_center
 
     # Limit 16, not the default 8: all residual-stream norms share this region and use 12 graphs.
