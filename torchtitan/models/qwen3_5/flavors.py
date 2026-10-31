@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 """Qwen3.5 model flavors."""
-
 import dataclasses
 from collections.abc import Callable
 from functools import partial
@@ -269,7 +268,7 @@ def _qwen35_vision_encoder_config(
                     sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
                 ),
                 proj=_vision_row_parallel_linear(dim, dim),
-                rope_apply=CosSinRoPE.apply_config(),
+                rope_apply=CosSinRoPE.Config(),
                 inner_attention=FlexInnerAttention.Config(
                     sharding_config=vision_inner_attention_sharding_config()
                 ),

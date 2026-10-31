@@ -15,7 +15,7 @@ from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
 
-from torchtitan.models.common.rope import CosSinRoPE
+from torchtitan.models.common.rope import CachedCosSinRoPE
 
 if TYPE_CHECKING:
     from .model import GptOssModel
@@ -183,7 +183,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         """
         Convert from hf format state dict to tt model state dict.
         """
-        self._validate_hf_rope_config(CosSinRoPE.Config)
+        self._validate_hf_rope_config(CachedCosSinRoPE.Config)
 
         from_hf_map = (
             self.from_hf_map_quantized if is_quantized_layout else self.from_hf_map

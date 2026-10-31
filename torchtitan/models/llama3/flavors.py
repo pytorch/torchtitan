@@ -18,12 +18,12 @@ from torchtitan.config.transform import (
 )
 
 from torchtitan.models.common import (
-    ComplexRoPE,
+    CachedComplexRoPE,
+    CachedRoPE,
     compute_ffn_hidden_dim,
     Embedding,
     Linear,
     RMSNorm,
-    RoPE,
     TransformerBlock,
 )
 from torchtitan.models.common.config_utils import (
@@ -78,7 +78,7 @@ def _build_llama3_layers(
     dim: int,
     n_heads: int,
     hidden_dim: int,
-    rope: RoPE.Config,
+    rope: CachedRoPE.Config,
     n_kv_heads: int | None = None,
     attn_backend: str,
     enable_sp: bool,
@@ -161,7 +161,7 @@ def _debugmodel(
             dim=dim,
             n_heads=n_heads,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
-            rope=ComplexRoPE.Config(
+            rope=CachedComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
@@ -218,7 +218,7 @@ def _1b(
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.5
             ),
-            rope=ComplexRoPE.Config(
+            rope=CachedComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
@@ -277,7 +277,7 @@ def _3b(
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.0
             ),
-            rope=ComplexRoPE.Config(
+            rope=CachedComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
@@ -335,7 +335,7 @@ def _8b(
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.3
             ),
-            rope=ComplexRoPE.Config(
+            rope=CachedComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
@@ -391,7 +391,7 @@ def _70b(
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=4096, ffn_dim_multiplier=1.3
             ),
-            rope=ComplexRoPE.Config(
+            rope=CachedComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
@@ -447,7 +447,7 @@ def _405b(
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=4096, ffn_dim_multiplier=1.2
             ),
-            rope=ComplexRoPE.Config(
+            rope=CachedComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,

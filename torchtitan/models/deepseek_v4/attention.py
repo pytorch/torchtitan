@@ -22,7 +22,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.attn_gym import AuxRequest, gather_attn
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import CachedRoPE
 
 from .compressor import compressed_cu_seqlens, Compressor, Indexer, SparseIndexerLoss
 
@@ -273,7 +273,7 @@ class DeepSeekV4Attention(Attention):
     class Config(Attention.Config):
         dim: int
         inner_attention: DSV4InnerAttention.Config  # pyrefly: ignore [bad-override]
-        rope: RoPE.Config
+        rope: CachedRoPE.Config
         head_dim: int = 512
         rope_head_dim: int = 64
         q_lora_rank: int = 1024

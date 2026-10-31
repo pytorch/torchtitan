@@ -46,7 +46,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import CachedRoPE
 from torchtitan.tools.utils import round_up
 
 if TYPE_CHECKING:
@@ -208,7 +208,7 @@ class GQAttention(Attention):
         qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
-        rope: RoPE.Config | None
+        rope: CachedRoPE.Config | None
 
         def __post_init__(self) -> None:
             Attention.Config.__post_init__(self)
@@ -237,7 +237,9 @@ class GQAttention(Attention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.rope: RoPE | None = None if config.rope is None else config.rope.build()
+        self.rope: CachedRoPE | None = (
+            None if config.rope is None else config.rope.build()
+        )
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()

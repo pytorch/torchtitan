@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from unittest.mock import patch
+
 import pytest
 import spmd_types as spmd
 import torch
@@ -76,19 +78,27 @@ def test_position_sampling_and_rope_spmd_types(grid_order):
     )
 
     config.num_layers = 1
-    query_THDh = torch.randn(24, 2, 16)
     for use_rope in (False, True):
         config.use_rope = use_rope
         encoder = config.build()
         encoder.init_states()
-        _, freqs_TD, *_ = encoder._embed_image(
+        x_TD, freqs_TD, *_ = encoder._embed_image(
             torch.randn(24, 24), 4, 6, device, torch.float32
         )
         rope_cache = freqs_TD.unsqueeze(1)
-        actual = encoder.layers["0"].attn.rope_apply(query_THDh, query_THDh, rope_cache)
-        expected = (
-            ComplexRoPE.apply_rotary_emb(query_THDh, query_THDh, rope_cache)
-            if use_rope
-            else (query_THDh, query_THDh)
-        )
+        attention = encoder.layers["0"].attn
+        query_THDh, key_THDh, _ = attention._qkv(x_TD)
+        if use_rope:
+            query_THDh, _ = ComplexRoPE.apply_rotary_emb(
+                query_THDh, key_THDh, rope_cache
+            )
+        expected = attention.proj(query_THDh.reshape(24, -1))
+        with patch.object(
+            attention.flex_attention,
+            "forward",
+            side_effect=lambda q, k, v, **kwargs: q,
+        ):
+            actual = attention(
+                x_TD, rope_cache=rope_cache, attention_mask=None, use_rope=use_rope
+            )
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)

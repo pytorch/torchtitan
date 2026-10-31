@@ -140,7 +140,7 @@ def _compute_2d_rope_cache(
 
     Returns a complex cache consumed by ``ComplexRoPE.apply_rotary_emb``; only
     the cache is 2D/per-grid, which is why it is built here rather than by the
-    1D ``ComplexRoPE`` cache machinery.
+    1D ``CachedComplexRoPE`` cache machinery.
 
     Args:
         freq_table: ``(max_hw, head_dim/4)`` position-to-frequency table, where

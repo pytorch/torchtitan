@@ -21,13 +21,13 @@ from torchtitan.config.transform import (
 )
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
-    ComplexRoPE,
+    CachedComplexRoPE,
+    CachedRoPE,
     Embedding,
     FeedForward,
     HiMidLoLinear,
     Linear,
     RMSNorm,
-    RoPE,
     RowParallelLinear,
     Sigmoid,
     Softmax,
@@ -163,7 +163,7 @@ def make_mla_attention_config(
     linear_init: dict[str, Callable],
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
-    rope: RoPE.Config,
+    rope: CachedRoPE.Config,
     attention_config_factory: Callable[
         [str], InnerAttention.Config
     ] = get_attention_config,
@@ -291,7 +291,7 @@ def build_mla_moe_layers(
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
     depth_experts_init: Callable[[int], dict[str, Callable]],
-    rope: RoPE.Config,
+    rope: CachedRoPE.Config,
     attention_config_factory: Callable[
         [str], InnerAttention.Config
     ] = get_attention_config,
@@ -504,7 +504,7 @@ def _debugmodel(
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        rope=ComplexRoPE.Config(
+        rope=CachedComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
@@ -589,7 +589,7 @@ def _16b(
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        rope=ComplexRoPE.Config(
+        rope=CachedComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
@@ -677,7 +677,7 @@ def _236b(
         router_route_scale=16.0,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        rope=ComplexRoPE.Config(
+        rope=CachedComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
@@ -766,7 +766,7 @@ def _671b(
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        rope=ComplexRoPE.Config(
+        rope=CachedComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,

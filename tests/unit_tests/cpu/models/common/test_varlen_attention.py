@@ -41,7 +41,7 @@ from torchtitan.models.common.attention.cp_attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rope import ComplexRoPE
+from torchtitan.models.common.rope import CachedComplexRoPE
 
 
 @pytest.mark.parametrize(
@@ -350,7 +350,7 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
             inner_attention=VarlenInnerAttention.Config(),
-            rope=ComplexRoPE.Config(dim=head_dim, max_context_length=num_tokens),
+            rope=CachedComplexRoPE.Config(dim=head_dim, max_context_length=num_tokens),
         ).build()
         x_TD = torch.randn(num_tokens, dim)
         positions_T = torch.tensor([0, 1, 0, 1, 2, 3])

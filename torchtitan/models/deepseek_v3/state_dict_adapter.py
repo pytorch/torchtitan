@@ -16,7 +16,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
 
-from torchtitan.models.common.rope import ComplexRoPE
+from torchtitan.models.common.rope import CachedComplexRoPE
 
 if TYPE_CHECKING:
     from .model import DeepSeekV3Model
@@ -248,7 +248,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         2. Convert between the HF shape and the torchtitan shape.
         3. Concatenate individual expert weights into grouped-linear weights.
         """
-        self._validate_hf_rope_config(ComplexRoPE.Config)
+        self._validate_hf_rope_config(CachedComplexRoPE.Config)
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}

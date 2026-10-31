@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import spmd_types as spmd
@@ -33,7 +33,7 @@ from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import CachedRoPE
 from torchtitan.observability.logging import warn_once
 
 __all__ = ["Decoder", "TransformerBlock"]
@@ -253,12 +253,12 @@ class Decoder(BaseModel):
             assert self.tok_embeddings is not None and self.lm_head is not None
             self.tok_embeddings.weight = self.lm_head.weight
         super().init_states(buffer_device=buffer_device)
-        # ``to_empty()`` and ``RoPE._init_self_buffers()`` give every layer its
+        # ``to_empty()`` and ``CachedRoPE._init_self_buffers()`` give every layer its
         # own cache again; point identical RoPEs back at one tensor.
         self._tie_rope_caches()
 
     def _tie_rope_caches(self) -> None:
-        """Share one cache tensor across RoPE modules with equal configs.
+        """Share one cache tensor across cached RoPE modules with equal cache configs.
 
         Every attention layer builds its own ``(max_context_length, ...)`` fp32
         RoPE cache, identical across layers with the same config; at long
@@ -270,19 +270,22 @@ class Decoder(BaseModel):
         memory but not correctness.
         """
         # TODO: this lowers steady-state memory only. ``to_empty()`` and each
-        # ``RoPE._init_self_buffers()`` still materialize one cache per RoPE
+        # ``CachedRoPE._init_self_buffers()`` still materialize one cache per RoPE
         # before they are tied here. If init-time peak memory becomes a problem,
         # have ``_init_self_buffers`` reuse a cache already built for an equal
         # config during the same ``init_states`` pass.
-        representatives: list[RoPE] = []
+        # The selected rotary operation does not affect cache generation.
+        representatives: list[CachedRoPE] = []
         for module in self.modules():
-            if not isinstance(module, RoPE):
+            if not isinstance(module, CachedRoPE):
                 continue
             rep = next(
                 (
                     r
                     for r in representatives
-                    if type(r) is type(module) and r.config == module.config
+                    if type(r) is type(module)
+                    and r.config
+                    == replace(module.config, rope_apply=r.config.rope_apply)
                 ),
                 None,
             )

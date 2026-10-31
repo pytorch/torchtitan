@@ -21,9 +21,11 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import (
     _maybe_check_max_pos,
     _yarn_inv_freq,
+    CachedComplexRoPE,
+    CachedCosSinRoPE,
+    CachedRoPE,
     ComplexRoPE,
     CosSinRoPE,
-    RoPE,
 )
 from torchtitan.models.qwen3_5.rope import MRoPE
 
@@ -43,7 +45,7 @@ class TestApplyRotaryEmbCosSin(unittest.TestCase):
         self.rope_cache = torch.randn(
             self.num_tokens, 1, self.head_dim * 2, dtype=torch.float32
         )
-        self.rope_apply = CosSinRoPE.apply_config().build()
+        self.rope_apply = CosSinRoPE.Config().build()
 
     def test_output_dtype_matches_input(self):
         xq_out, xk_out = self.rope_apply(
@@ -118,11 +120,11 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         torch.manual_seed(42)
         self.head_dim = 64
         self.max_context_length = 32
-        rope_cfg = ComplexRoPE.Config(
+        rope_cfg = CachedComplexRoPE.Config(
             dim=self.head_dim, max_context_length=self.max_context_length
         )
         self.rope = rope_cfg.build()
-        self.assertIsInstance(self.rope, ComplexRoPE)
+        self.assertIsInstance(self.rope, CachedComplexRoPE)
 
     def test_valid_positions(self):
         num_tokens = 16
@@ -130,21 +132,27 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         xk = torch.randn(num_tokens, 4, self.head_dim)
         positions = torch.arange(num_tokens) % 8
         expected = self.rope(xq, xk, positions)
-        apply_rope = ComplexRoPE.apply_config().build()
+        apply_rope = ComplexRoPE.Config().build()
         actual = apply_rope(xq, xk, self.rope._reshape_cache(xq, positions))
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
         class IdentityComplexRoPE(ComplexRoPE):
+            @dataclasses.dataclass(kw_only=True, slots=True)
+            class Config(ComplexRoPE.Config):
+                pass
+
             @staticmethod
             def apply_rotary_emb(query, key, rope_cache, *, inverse=False):
                 return query if key is None else (query, key)
 
-        identity_rope = IdentityComplexRoPE(self.rope.config)
+        identity_rope = dataclasses.replace(
+            self.rope.config, rope_apply=IdentityComplexRoPE.Config()
+        ).build()
         torch.testing.assert_close(
             identity_rope(xq, xk, positions), (xq, xk), rtol=0, atol=0
         )
         torch.testing.assert_close(
-            IdentityComplexRoPE.apply_config().build()(xq, xk, self.rope.cache),
+            IdentityComplexRoPE.Config().build()(xq, xk, self.rope.cache),
             (xq, xk),
             rtol=0,
             atol=0,
@@ -168,11 +176,11 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         torch.manual_seed(42)
         self.head_dim = 64
         self.max_context_length = 32
-        rope_cfg = CosSinRoPE.Config(
+        rope_cfg = CachedCosSinRoPE.Config(
             dim=self.head_dim, max_context_length=self.max_context_length
         )
         self.rope = rope_cfg.build()
-        self.assertIsInstance(self.rope, CosSinRoPE)
+        self.assertIsInstance(self.rope, CachedCosSinRoPE)
 
     def test_valid_positions(self):
         num_tokens = 16
@@ -279,14 +287,14 @@ class TestYaRNScaling(unittest.TestCase):
         torch.testing.assert_close(inv_freq[17], unscaled_inv_freq[17] / rope_factor)
 
     def test_complex_rope_applies_below_original_sequence_length(self):
-        yarn = ComplexRoPE.Config(
+        yarn = CachedComplexRoPE.Config(
             dim=64,
             max_context_length=2048,
             scaling="yarn",
             rope_factor=40.0,
             original_seq_len=4096,
         ).build()
-        unscaled = ComplexRoPE.Config(dim=64, max_context_length=2048).build()
+        unscaled = CachedComplexRoPE.Config(dim=64, max_context_length=2048).build()
 
         self.assertFalse(torch.equal(yarn.cache[1], unscaled.cache[1]))
 
@@ -335,7 +343,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
             inner_attention=VarlenInnerAttention.Config(),
-            rope=ComplexRoPE.Config(dim=head_dim, max_context_length=16),
+            rope=CachedComplexRoPE.Config(dim=head_dim, max_context_length=16),
         ).build()
         attention.bfloat16()
 
@@ -361,7 +369,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
         ).build()
         layer_ropes = [layer.attention.rope for layer in model.layers.values()]
 
-        self.assertTrue(all(isinstance(rope, RoPE) for rope in layer_ropes))
+        self.assertTrue(all(isinstance(rope, CachedRoPE) for rope in layer_ropes))
         self.assertEqual(len({id(rope) for rope in layer_ropes}), len(layer_ropes))
 
     def test_decoder_builds_distinct_rope_configs_per_attention_layer(self):

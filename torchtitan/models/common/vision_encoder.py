@@ -28,7 +28,6 @@ import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-from torchtitan.config.function import Function
 from torchtitan.distributed.local_compile import compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
@@ -36,6 +35,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
+from torchtitan.models.common.rope import RoPE
 
 compiled_create_block_mask = compile(create_block_mask)
 
@@ -172,7 +172,7 @@ class VisionAttention(Module):
         wk: Linear.Config
         wv: Linear.Config
         proj: Linear.Config
-        rope_apply: Function.Config
+        rope_apply: RoPE.Config
         inner_attention: Module.Config = field(
             default_factory=FlexInnerAttention.Config
         )
@@ -207,6 +207,7 @@ class VisionAttention(Module):
         *,
         rope_cache: torch.Tensor,
         attention_mask: BlockMask,
+        use_rope: bool = True,
     ) -> torch.Tensor:
         num_tokens = x.shape[0]
 
@@ -216,7 +217,8 @@ class VisionAttention(Module):
         q_THDh, k_THDh, v_THDh = self._qkv(x)
 
         remat.recompute_needs_tensor(q_THDh, k_THDh)
-        q_THDh, k_THDh = self.rope_apply(q_THDh, k_THDh, rope_cache)
+        if use_rope:
+            q_THDh, k_THDh = self.rope_apply(q_THDh, k_THDh, rope_cache)
 
         out_THDh = remat.region(
             self.flex_attention,
@@ -252,11 +254,13 @@ class VisionTransformerBlock(Module):
         *,
         rope_cache: torch.Tensor,
         attention_mask: BlockMask,
+        use_rope: bool = True,
     ) -> torch.Tensor:
         attn_out = self.attn(
             self.norm1(x),
             rope_cache=rope_cache,
             attention_mask=attention_mask,
+            use_rope=use_rope,
         )
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)

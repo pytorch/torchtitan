@@ -12,7 +12,7 @@ from typing import Any, TYPE_CHECKING
 
 from torchtitan.models.base.state_dict_adapter import dtensor_safe, StateDictAdapter
 
-from torchtitan.models.common.rope import ComplexRoPE
+from torchtitan.models.common.rope import CachedComplexRoPE
 
 if TYPE_CHECKING:
     from .model import Llama3Model
@@ -131,7 +131,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
                 f"{type(self).__name__} does not support loading quantized "
                 "HF checkpoints."
             )
-        self._validate_hf_rope_config(ComplexRoPE.Config)
+        self._validate_hf_rope_config(CachedComplexRoPE.Config)
         if (
             self.model_config.enable_weight_tying  # pyrefly: ignore [missing-attribute]
             and "lm_head.weight" not in hf_state_dict

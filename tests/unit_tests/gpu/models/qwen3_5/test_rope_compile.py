@@ -10,7 +10,11 @@ import unittest
 import torch
 
 from torchtitan.distributed.local_compile import LocalCompileConfig
-from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE
+from torchtitan.models.common.rope import (
+    CachedComplexRoPE,
+    CachedCosSinRoPE,
+    ComplexRoPE,
+)
 from torchtitan.models.qwen3_5.rope import MRoPE
 
 
@@ -26,7 +30,7 @@ class TestRoPELocalCompile(unittest.TestCase):
     def test_forward_and_backward_emit_triton(self):
         from torch._inductor.utils import run_fw_bw_and_get_code
 
-        rope = CosSinRoPE.Config(dim=128, max_context_length=2048).build().cuda()
+        rope = CachedCosSinRoPE.Config(dim=128, max_context_length=2048).build().cuda()
         query = torch.randn(
             256,
             8,
@@ -56,7 +60,7 @@ class TestRoPELocalCompile(unittest.TestCase):
     def test_forward_and_backward_match_eager(self):
         torch.manual_seed(42)
         compiled_rope = (
-            CosSinRoPE.Config(
+            CachedCosSinRoPE.Config(
                 dim=128,
                 max_context_length=128,
             )
@@ -92,7 +96,7 @@ class TestRoPELocalCompile(unittest.TestCase):
 
         LocalCompileConfig().apply()
         eager_rope = (
-            CosSinRoPE.Config(
+            CachedCosSinRoPE.Config(
                 dim=128,
                 max_context_length=128,
             )
@@ -117,7 +121,7 @@ class TestRoPELocalCompile(unittest.TestCase):
 
     def test_forward_and_backward_are_batch_invariant(self):
         torch.manual_seed(42)
-        rope = CosSinRoPE.Config(dim=128, max_context_length=128).build().cuda()
+        rope = CachedCosSinRoPE.Config(dim=128, max_context_length=128).build().cuda()
         query = torch.randn(
             64,
             8,
@@ -269,7 +273,7 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
 
     def test_compiled_matches_eager_complex(self):
         torch.manual_seed(42)
-        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        rope = CachedComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
         positions = torch.randperm(128, device="cuda")[:64]
 
         # bf16 and fp32; a contiguous query and a strided slice of a wider one (DeepSeek-V3's q_pe).
@@ -296,7 +300,7 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
         # A split key with an inserted head dim, and a query with transposed head strides:
         # the compiled path rotates these without the contiguous int32 shortcut.
         torch.manual_seed(42)
-        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        rope = CachedComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
         positions = torch.randperm(128, device="cuda")[:64]
         query_storage = torch.randn(8, 64, 64, device="cuda", dtype=torch.bfloat16)
         key_full = torch.randn(64, 96, device="cuda", dtype=torch.bfloat16)
@@ -321,7 +325,7 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
     def test_compiled_is_batch_invariant(self):
         torch.manual_seed(42)
         LocalCompileConfig(regions=["rope"]).apply()
-        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        rope = CachedComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
         query = torch.randn(64, 8, 64, device="cuda", dtype=torch.bfloat16)
         key = torch.randn(64, 1, 64, device="cuda", dtype=torch.bfloat16)
         positions = torch.randperm(128, device="cuda")[:64]
@@ -353,13 +357,13 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
     def test_compiled_accepts_complex_cache(self):
         # Direct callers (the vision encoders) pass the complex cache, not the real view.
         torch.manual_seed(42)
-        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        rope = CachedComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
         query, key = (
             torch.randn(64, 8, 64, device="cuda", dtype=torch.bfloat16)
             for _ in range(2)
         )
         cache = rope.cache[torch.randperm(128, device="cuda")[:64]].unsqueeze(1)
-        compiled = torch.compile(ComplexRoPE.apply_config().build(), fullgraph=True)
+        compiled = torch.compile(ComplexRoPE.Config().build(), fullgraph=True)
         for out, ref in zip(
             compiled(query, key, cache),
             ComplexRoPE.apply_rotary_emb(query, key, cache),

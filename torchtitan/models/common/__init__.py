@@ -46,17 +46,27 @@ from .moe import BatchWiseLoadBalanceLoss, MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
 from .nn_modules import Conv1d, Conv2d, GELU, GroupNorm, Identity, LayerNorm, RMSNorm
 from .norm import GatedRMSNorm
-from .rope import ComplexRoPE, CosSinRoPE, RoPE
+from .rope import (
+    CachedComplexRoPE,
+    CachedCosSinRoPE,
+    CachedRoPE,
+    ComplexRoPE,
+    CosSinRoPE,
+    RoPE,
+)
 
 __all__ = [
+    "ComplexRoPE",
+    "CosSinRoPE",
+    "RoPE",
     "AttentionMetadata",
     "AttentionMetadataMap",
     "Conv1d",
     "Conv2d",
-    "ComplexRoPE",
+    "CachedComplexRoPE",
     "ClampedSwiGLU",
     "ColumnParallelLinear",
-    "CosSinRoPE",
+    "CachedCosSinRoPE",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
@@ -88,7 +98,7 @@ __all__ = [
     "MicrobatchWiseLoadBalanceLoss",
     "MultimodalModel",
     "RMSNorm",
-    "RoPE",
+    "CachedRoPE",
     "RowParallelLinear",
     "SlidingWindowFlexInnerAttention",
     "SlidingWindowVarlenInnerAttention",

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import dataclass
 from unittest.mock import patch
 
 import torch
@@ -12,7 +13,6 @@ import torch.nn as nn
 from torch.nn.attention.flex_attention import create_block_mask
 
 from torchtitan.config import apply_overrides, derive, override, OverrideConfig
-from torchtitan.config.function import CallableFunction
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import VisionAttention
@@ -38,18 +38,24 @@ class TestVisionAttention(unittest.TestCase):
             wk=Linear.Config(in_features=dim, out_features=dim),
             wv=Linear.Config(in_features=dim, out_features=dim),
             proj=Linear.Config(in_features=dim, out_features=dim),
-            rope_apply=ComplexRoPE.apply_config(),
+            rope_apply=ComplexRoPE.Config(),
         )
 
-        def offset_query(query_THDh, key_THDh, rope_cache):
-            return query_THDh + 1, key_THDh
+        class OffsetRoPE(ComplexRoPE):
+            @dataclass(kw_only=True, slots=True)
+            class Config(ComplexRoPE.Config):
+                pass
+
+            @staticmethod
+            def apply_rotary_emb(query_THDh, key_THDh, rope_cache, *, inverse=False):
+                query_THDh = query_THDh + 1
+                return query_THDh if key_THDh is None else (query_THDh, key_THDh)
 
         with patch.dict("torchtitan.config.override._REGISTRY"):
 
-            @override(target=CallableFunction.Config, fqns=["rope_apply"], exact=True)
+            @override(target=ComplexRoPE.Config, fqns=["rope_apply"], exact=True)
             def replace_vision_rope(cfg):
-                self.assertIs(cfg.fn, ComplexRoPE.apply_rotary_emb)
-                return derive(cfg, CallableFunction.Config, fn=offset_query)
+                return derive(cfg, OffsetRoPE.Config)
 
             replacements = apply_overrides(
                 OverrideConfig(imports=[f"{__name__}.replace_vision_rope"]), config
@@ -80,6 +86,17 @@ class TestVisionAttention(unittest.TestCase):
         self.assertEqual(out_TD.shape, (num_tokens, dim))
         torch.testing.assert_close(
             out_TD, attention.proj(attention.wq(x_TD) + 1), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            attention(
+                x_TD,
+                rope_cache=torch.empty(0),
+                attention_mask=attention_mask,
+                use_rope=False,
+            ),
+            attention.proj(attention.wq(x_TD)),
+            rtol=0,
+            atol=0,
         )
 
 

@@ -1885,7 +1885,7 @@ class TestTraceModels(unittest.TestCase):
         )
         from torchtitan.models.common.linear import Linear
         from torchtitan.models.common.nn_modules import RMSNorm
-        from torchtitan.models.common.rope import ComplexRoPE
+        from torchtitan.models.common.rope import CachedComplexRoPE
         from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
         dim = 64
@@ -1911,7 +1911,7 @@ class TestTraceModels(unittest.TestCase):
                     qk_nope_head_dim=qk_nope_head_dim,
                     qk_rope_head_dim=rope_dim,
                     v_head_dim=v_head_dim,
-                    rope=ComplexRoPE.Config(
+                    rope=CachedComplexRoPE.Config(
                         dim=rope_dim,
                         max_context_length=seq_len,
                         scaling="none",

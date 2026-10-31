@@ -92,7 +92,11 @@ from torchtitan.models.common.attention.cp_mla import (
     UlyssesMLAAttention,
 )
 from torchtitan.models.common.linear import maybe_gather_tp_input
-from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
+from torchtitan.models.common.rope import (
+    _maybe_check_max_pos,
+    CachedComplexRoPE,
+    ComplexRoPE,
+)
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
 __all__ = [
@@ -1017,10 +1021,16 @@ class FusedMLAAttention(DeepSeekMLAAttention):
                 "UlyssesMLAAttention context-parallel backends."
             )
         super().__init__(config)
-        if not isinstance(self.rope, ComplexRoPE):
+        if not isinstance(self.rope, CachedComplexRoPE):
             raise TypeError(
-                "FusedMLAAttention currently requires ComplexRoPE, got "
+                "FusedMLAAttention currently requires CachedComplexRoPE, got "
                 f"{type(self.rope).__name__}."
+            )
+        if type(self.rope.rope_apply) is not ComplexRoPE:
+            raise ValueError(
+                "FusedMLAAttention implements the default ComplexRoPE and "
+                "cannot use a custom rope_apply. Disable the fused_mla override "
+                "to use a custom rotary implementation."
             )
 
     def forward(

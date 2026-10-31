@@ -19,13 +19,13 @@ from torchtitan.config.transform import (
 )
 from torchtitan.models.common import (
     BatchWiseLoadBalanceLoss,
+    CachedCosSinRoPE,
+    CachedRoPE,
     ColumnParallelLinear,
-    CosSinRoPE,
     Embedding,
     HiMidLoLinear,
     Linear,
     RMSNorm,
-    RoPE,
     RowParallelLinear,
     Softmax,
     TransformerBlock,
@@ -98,7 +98,7 @@ def _make_gptoss_attn_config(
     n_kv_heads: int = 8,
     head_dim: int = 64,
     sliding_window_size: int | None = None,
-    rope: RoPE.Config,
+    rope: CachedRoPE.Config,
     enable_sp: bool,
 ) -> GptOssAttention.Config:
     """Build a fully-specified, sharded GptOssAttention.Config for a layer.
@@ -221,7 +221,7 @@ def _build_gptoss_layers(
     top_k: int,
     load_balance_coeff: float | None,
     attn_backend: str = "varlen",
-    rope: RoPE.Config,
+    rope: CachedRoPE.Config,
     enable_sp: bool,
     enable_ep: bool,
 ) -> list[TransformerBlock.Config]:
@@ -333,7 +333,7 @@ def _debugmodel(
             top_k=4,
             load_balance_coeff=None,
             attn_backend=attn_backend,
-            rope=CosSinRoPE.Config(
+            rope=CachedCosSinRoPE.Config(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
@@ -392,7 +392,7 @@ def _20b(
             top_k=4,
             load_balance_coeff=None,
             attn_backend=attn_backend,
-            rope=CosSinRoPE.Config(
+            rope=CachedCosSinRoPE.Config(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
@@ -451,7 +451,7 @@ def _120b(
             top_k=4,
             load_balance_coeff=None,
             attn_backend=attn_backend,
-            rope=CosSinRoPE.Config(
+            rope=CachedCosSinRoPE.Config(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
