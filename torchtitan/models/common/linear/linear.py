@@ -191,7 +191,7 @@ class _LinearFunction(torch.autograd.Function):
         )
 
     @staticmethod
-    def forward(
+    def forward(  # pyrefly: ignore[bad-override]
         ctx,
         input: torch.Tensor,
         weight: torch.Tensor,
@@ -354,7 +354,7 @@ class RowParallelLinear(Linear):
                 spmd.assert_local_type_like(
                     output,
                     input,
-                    {tp_group: spmd.P},
+                    {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
             output = self._unflatten_output(linear_fn(input, weight, bias), weight)

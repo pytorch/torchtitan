@@ -27,11 +27,7 @@ class GptOssGroupedLinear(GroupedLinear):
         super().__init__(config)
         self.bias = nn.Parameter(torch.empty(self.weight.shape[:-1]))
 
-    def forward(
-        self,
-        input_RI: torch.Tensor,
-        offsets_E: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
         output_RO = super().forward(input_RI, offsets_E)
         # The bias add below reads the grouped_mm output with bare ops.
         remat.recompute_needs_tensor(output_RO)

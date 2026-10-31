@@ -155,18 +155,18 @@ class RoutedExperts(Module):
             remat.recompute_needs_tensor(gate_up_R2F)
             hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
             if routed_scores_R is not None:
-                # Absorb the router scores into W2's input: scale in float32, then
-                # restore the input dtype. The bare multiply reads the dispatch
-                # region's scores, so pin them for a replay.
+                # Absorb the router scores into W2's input, in float32; the bare
+                # multiply reads the dispatch region's scores, so pin them.
                 remat.recompute_needs_tensor(routed_scores_R)
                 hidden_RF = (hidden_RF.float() * routed_scores_R.reshape(-1, 1)).to(
                     hidden_RF.dtype
                 )
             routed_output_RD = self.w2(hidden_RF, offsets_E)
             # A real dtype cast and the output postprocess read the w2 output with
-            # bare ops, so pin it only then. Each dispatcher pins the w2 output for
-            # its own bare consumers, so in the common bf16 case without a
-            # postprocess this leaves the w2 output's lifetime to the combine.
+            # bare ops, so pin it only then. In the common bf16 case without a
+            # postprocess, type_as is a no-op and the w2 output goes straight to
+            # the combine region, so an unconditional pin would keep it alive
+            # even when w2 and the combine are both saved.
             if (
                 routed_output_RD.dtype != routed_input_RD.dtype
                 or self.output_postprocess is not None

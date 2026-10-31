@@ -163,7 +163,9 @@ class LocalTokenDispatcher(Module):
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
         """Weight expert-sorted outputs by their router scores and sum them per token."""
-        # Promote to float32 without saving a float32 copy of the output.
+        # Type promotion computes the product in float32 without materializing a
+        # float32 copy of the routed output, which the multiply would save for
+        # backward (twice the bytes of the routed output itself).
         routed_output_ND = (
             routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
         ).to(routed_output_ND.dtype)
@@ -824,12 +826,11 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     from its deduplicated output into expert-major order; expand dispatch already returns
     the static expert-major layout. Combine is synchronized before returning its result.
 
-    Dispatch and combine declare ``ep_communication.dispatch`` and
-    ``ep_communication.combine``. Dispatch follows the remat policy: a replay
-    must receive rows in the forward's order, so ``init_buffer`` then makes
-    the buffer deterministic (a sort per dispatch). Combine is never replayed
-    when the router scores were absorbed before W2, and follows the remat
-    policy otherwise.
+    Dispatch and combine share one remat policy (``ep_communication``) because combine
+    consumes the handle produced by dispatch. A remat policy replays both unless
+    ``ep_communication`` is saved (the full policy never saves it); a replay
+    must receive rows in the forward's order, so ``init_buffer`` then makes the buffer
+    deterministic (a sort per dispatch).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -866,7 +867,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
     def _replays_communication(self) -> bool:
-        """Whether activation remat replays the dispatch communication during backward."""
+        """Whether activation remat replays dispatch/combine during backward."""
         # Without activation remat the regions have no fqn and do not affect execution
         # (remat_should_recompute is then True, since nothing is saved).
         return bool(self._remat_module_fqn) and self.remat_should_recompute(
@@ -969,10 +970,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         combined_TD = remat.region(
             score_and_combine,
             self.remat_region_name("ep_communication.combine"),
-            # Absorbed scores leave a pure reduction that reads the w2 output only
-            # in this body, so never replay it and keep that output off the saved
-            # tensor set. Unabsorbed scores keep the policy the region had before
-            # absorption, so a scored combine is not forced to be saved.
+            # An absorbed combine reads the w2 output only in this body and is a
+            # pure reduction, so never replay it; unabsorbed combines follow the policy.
             recompute=False if absorbed else self._replays_communication(),
         )(routed_output_RD, metadata.combine_scores_R)
         if not absorbed:
@@ -1103,7 +1102,7 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
 
         from torchtitan.distributed.deepep import hybridep
 
-        # No remat region on this path, so the bare compute ops need the output pinned.
+        # combine_tokens applies routing scores and combines with bare ops.
         remat.recompute_needs_tensor(routed_output_RD)
         combined_TD = hybridep.combine_tokens(
             routed_output_RD,

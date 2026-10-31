@@ -187,6 +187,10 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
 
     @with_comms
     def test_dispatch_and_combine_are_saved_not_replayed(self):
+        # DeepEP fills receive slots with atomics, so a replayed dispatch can
+        # receive rows in another order than the forward's handle records.
+        # Backward would then pair each token's gradient with another token's
+        # activations. These policies save dispatch and combine instead.
         self._check_deepep_activation_checkpointing(
             (
                 DefaultActivationRematConfig(),
@@ -197,6 +201,9 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
 
     @with_comms
     def test_region_ac_replay_is_exact(self):
+        # The full policy and policies without ep_communication saved replay dispatch and
+        # combine. DeepEP then uses a deterministic buffer, which receives rows in
+        # the forward's order, so the gradients match the run without AC bitwise.
         self._check_deepep_activation_checkpointing(
             (
                 FullActivationRematConfig(),

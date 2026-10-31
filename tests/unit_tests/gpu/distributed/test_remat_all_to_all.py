@@ -155,6 +155,10 @@ class TestAllToAllRematRegions(DTensorTestBase):
             dense_sp_enabled=False,
         )
 
+        # dispatch holds the count exchange, its device-to-host sync, and the
+        # dispatch all-to-all; combine holds the combine all-to-all. The default
+        # policy recomputes the routed-expert projections but must retain both
+        # dispatcher regions under the same routed_experts prefix.
         dispatch = "routed_experts.token_dispatcher.dispatch"
         combine = "routed_experts.token_dispatcher.combine"
         for policy_config, expected_replay_collectives, expected_replay_syncs in (
@@ -218,6 +222,10 @@ class TestAllToAllRematRegions(DTensorTestBase):
 
     @with_comms
     def test_saved_w2_output_is_not_retained_under_ep(self):
+        # Unpermute and the combine all-to-all do not need the w2 output in
+        # backward, so saving w2 and the combine must not keep the w2 output
+        # alive. bf16 activations, as in mixed-precision training, need no cast
+        # after w2.
         mesh = init_device_mesh(
             self.device_type,
             (self.world_size,),

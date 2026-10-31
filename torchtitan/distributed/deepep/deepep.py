@@ -30,9 +30,10 @@ BOTH prefill and decode. Combine is handle-driven and mode-agnostic.
   device-side ``handle.psum_num_recv_tokens_per_expert`` (no CPU sync). Inference-only: the
   expanding layout "must not be backward" per the DeepEP kernels.
 
-Dispatch returns per-row routing scores separately from the combine state. The caller
-applies them before W2 when valid, or to the expert outputs otherwise. The custom ops
-stay pure communication, and autograd handles the score gradient.
+Routing scores are applied to expert outputs in plain PyTorch (in ``combine_tokens``,
+before the pure-reduction combine op), so autograd handles the score gradient, the custom
+ops stay pure communication, and combine works unchanged in both modes (``combine``
+ignores ``topk_weights`` in expand mode anyway).
 """
 
 import weakref
@@ -105,7 +106,12 @@ _lib.define(
 # autograd disables grad regardless of the outer context. When False (generator no_grad /
 # inference), the op frees the handle itself (setup_context never runs).
 _lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
-# Ordered effects preserve communication ordering when dispatch or combine replays.
+# Ordered effects, so graph-level selective checkpointing (the graph trainer's memory
+# policy) saves both ops instead of replaying them in backward. DeepEP assigns receive
+# slots with atomics, so a replayed dispatch can receive rows in another order, while
+# backward routes the gradients with the forward's handle. torch_remat ignores effects and
+# follows the ``recompute`` argument of dispatch_tokens/combine_tokens; dispatch_tokens
+# only replays with a deterministic buffer.
 _lib._register_effectful_op("deepep::dispatch", torch.library.EffectType.ORDERED)
 _lib._register_effectful_op("deepep::combine", torch.library.EffectType.ORDERED)
 
@@ -479,8 +485,8 @@ def dispatch_tokens(
     Returns tokens in expert-major order for the grouped-GEMM expert path. In compact mode
     (``cuda_graph_compatible=False``) the deduplicated dispatch output is gathered by ``_permute_tokens``
     (matching the v1 path for identical numerics); in expand mode (``cuda_graph_compatible=True``) the
-    static layout is already expert-grouped. Routing scores are returned in the same row
-    order for the caller to apply.
+    static layout is already expert-grouped. Routing scores are applied to the expert outputs
+    in ``combine_tokens``.
 
     Args:
         hidden_states: Input tokens [num_tokens, hidden_dim]
@@ -496,15 +502,15 @@ def dispatch_tokens(
             must not exceed that maximum.
         remat_region_name: Name for the dispatch communication region.
         recompute: Whether activation remat replays the dispatch communication during
-            backward. Requires a deterministic buffer (see below).
+            backward. Requires a deterministic buffer (see below), and must match
+            the ``recompute`` passed to ``combine_tokens``.
         cuda_graph_compatible: If True, use the static, no-host-sync expand layout so the forward is
             CUDA-graph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
             layout with a host sync and full autograd (training).
 
     Returns:
-        (routed_tokens [num_recv, hidden], tokens_per_expert [num_local_experts],
-        routed_scores [num_recv], state)
+        (routed_tokens [num_recv, hidden], tokens_per_expert [num_local_experts], state)
     """
     del num_local_experts  # counts come from the handle, not this hint
 
@@ -604,12 +610,29 @@ def combine_tokens(
     hidden_states: torch.Tensor,
     state: DispatchState,
 ) -> torch.Tensor:
-    """Reduce already-weighted expert outputs back to tokens via DeepEP v2.
+    """Combine expert outputs back to tokens via DeepEP v2.
 
-    Compact outputs are scatter-added back to deduplicated tokens before the
-    communication. Expand outputs already have the layout expected by the handle.
-    The caller MUST call ``sync_combine()`` before using the async result.
+    Routing scores are applied here (in plain PyTorch) before the pure-reduction combine
+    op, so autograd handles the score gradient. Combine is async; the caller MUST call
+    ``sync_combine()`` before using the result.
+
+    Compact (``cuda_graph_compatible=False``): weight each expert-major row, scatter-add back to the
+    deduplicated tokens (``_unpermute_tokens``), then combine -- matching the v1 path.
+    Expand (``cuda_graph_compatible=True``): weight per received row, then combine over the static
+    layout (the handle drives the expand reduction).
+
+    Args:
+        hidden_states: Raw (unweighted) expert outputs [num_recv, hidden].
+        state: Dispatch state from ``dispatch_tokens``.
+        remat_region_name: Name for the combine communication region.
+        recompute: Whether activation remat replays the combine communication during
+            backward. Must match the ``recompute`` passed to ``dispatch_tokens``.
+
+    Returns:
+        Combined tokens [num_tokens, hidden_dim].
     """
+    # Outer grad state decides whether the combine op frees the handle itself (no
+    # backward) or leaves it for combine-backward. Evaluated here, before the op.
     will_backward = torch.is_grad_enabled()
     if not state.cuda_graph_compatible:
         assert state.permuted_indices is not None
