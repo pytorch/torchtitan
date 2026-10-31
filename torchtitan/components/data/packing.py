@@ -16,6 +16,7 @@ import numpy as np
 from torchtitan.components.data.dataset import DatasetConfig, TextSequence
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.tools.utils import round_up
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -42,6 +43,12 @@ class ConcatThenSplitPackingConfig:
                 max_num_documents_per_row=context.max_num_documents,
                 max_context_length=context.max_context_length,
                 num_tokens_per_row=context.num_tokens_per_microbatch,
+                document_alignment=context.document_alignment,
+            )
+        if context.document_alignment is not None:
+            raise ValueError(
+                "document_alignment requires max_num_documents so documents are "
+                "emitted as separate segments."
             )
         dataset = dataset.map(
             partial(
@@ -79,11 +86,13 @@ class _DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
         max_num_documents_per_row: int,
         max_context_length: int,
         num_tokens_per_row: int,
+        document_alignment: int | None = None,
     ) -> None:
         super().__init__(parent)
         self._max_num_documents_per_row = max_num_documents_per_row
         self._max_context_length = max_context_length
         self._num_tokens_per_row = num_tokens_per_row
+        self._document_alignment = document_alignment
 
     def __iter__(self) -> grain.DatasetIterator:
         return _DocumentAwareConcatThenSplitIterator(
@@ -91,6 +100,7 @@ class _DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
             max_num_documents_per_row=self._max_num_documents_per_row,
             max_context_length=self._max_context_length,
             num_tokens_per_row=self._num_tokens_per_row,
+            document_alignment=self._document_alignment,
         )
 
 
@@ -104,11 +114,13 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
         max_num_documents_per_row: int,
         max_context_length: int,
         num_tokens_per_row: int,
+        document_alignment: int | None = None,
     ) -> None:
         super().__init__(parent)
         self._max_num_documents_per_row = max_num_documents_per_row
         self._max_context_length = max_context_length
         self._num_tokens_per_row = num_tokens_per_row
+        self._document_alignment = document_alignment
         self._remainder: TextSequence | None = None
         self._remainder_parent_state: dict[str, Any] | None = None
         self._remainder_offset = 0
@@ -154,26 +166,62 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
                 max_context_length=self._max_context_length,
             )
             available_tokens = self._num_tokens_per_row - num_tokens
-            num_segment_tokens = min(
+            real_tokens = min(
                 segment_end - self._remainder_offset,
                 available_tokens,
             )
+            pad_tokens = 0
+            if self._document_alignment is not None:
+                aligned = round_up(real_tokens, self._document_alignment)
+                if aligned > available_tokens:
+                    # Reserve the padding inside this row instead of spilling.
+                    aligned = (
+                        available_tokens // self._document_alignment
+                    ) * self._document_alignment
+                    if aligned == 0:
+                        break
+                    real_tokens = aligned
+                pad_tokens = aligned - real_tokens
+                if real_tokens == 0 and pad_tokens == 0:
+                    break
 
             token_slice = slice(
                 self._remainder_offset,
-                self._remainder_offset + num_segment_tokens,
+                self._remainder_offset + real_tokens,
             )
-            input_parts.append(np.asarray(sequence.input_ids[token_slice]))
-            label_parts.append(np.asarray(sequence.labels[token_slice]))
-            position_parts.append(np.arange(num_segment_tokens, dtype=np.int64))
+            segment_tokens = real_tokens + pad_tokens
+            input_parts.append(
+                np.concatenate(
+                    [
+                        np.asarray(sequence.input_ids[token_slice]),
+                        np.zeros(pad_tokens, dtype=np.int64),
+                    ]
+                )
+            )
+            label_parts.append(
+                np.concatenate(
+                    [
+                        np.asarray(sequence.labels[token_slice]),
+                        np.full(pad_tokens, IGNORE_INDEX, dtype=np.int64),
+                    ]
+                )
+            )
+            # Positions stay continuous across the padding, so the padded tail
+            # belongs to the same document segment (and its compression groups).
+            position_parts.append(np.arange(segment_tokens, dtype=np.int64))
             # Keep padding from an upstream packer marked as padding.
-            mask_parts.append(
-                np.zeros(num_segment_tokens, dtype=np.bool_)
+            source_mask = (
+                np.zeros(real_tokens, dtype=np.bool_)
                 if sequence.padding_mask is None
                 else np.asarray(sequence.padding_mask[token_slice], dtype=np.bool_)
             )
-            num_tokens += num_segment_tokens
-            self._remainder_offset += num_segment_tokens
+            mask_parts.append(
+                np.concatenate(
+                    [source_mask, np.ones(pad_tokens, dtype=np.bool_)]
+                )
+            )
+            num_tokens += segment_tokens
+            self._remainder_offset += real_tokens
             if self._remainder_offset == len(sequence.input_ids):
                 self._remainder = None
                 self._remainder_parent_state = None
@@ -258,6 +306,11 @@ class FirstFitPackingConfig:
                 max_context_length=context.max_context_length,
             ),
         )
+        if context.document_alignment is not None:
+            raise ValueError(
+                "document_alignment requires max_num_documents so documents are "
+                "emitted as separate segments."
+            )
         dataset = dataset.map(
             partial(
                 _text_sequence_to_packing_input,

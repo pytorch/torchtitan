@@ -48,6 +48,8 @@ class BaseDataLoader(Stateful, ABC, Configurable):
     class Config(Configurable.Config):
         max_num_documents: int | None = None
         """Maximum non-padding document segments in one local token microbatch."""
+        document_alignment: int | None = None
+        """Pad every packed document segment up to a multiple of this value."""
         num_mtp_layers: int = 0
         """Model-derived MTP depth used while preparing token counts."""
 
@@ -56,6 +58,8 @@ class BaseDataLoader(Stateful, ABC, Configurable):
                 raise ValueError("num_mtp_layers must be non-negative")
             if self.max_num_documents is not None and self.max_num_documents <= 0:
                 raise ValueError("max_num_documents must be positive")
+            if self.document_alignment is not None and self.document_alignment <= 0:
+                raise ValueError("document_alignment must be positive")
 
     @abstractmethod
     def __iter__(self) -> Iterator[TrainingMicrobatch]:
@@ -108,6 +112,21 @@ class GrainDataLoader(BaseDataLoader):
         self._dp_world_size = dp_world_size
         self._rank_id = f"dp_rank_{dp_rank}"
         self.max_num_documents = config.max_num_documents
+        if config.document_alignment is not None:
+            if config.max_num_documents is None:
+                raise ValueError(
+                    "document_alignment requires max_num_documents so documents "
+                    "are emitted as separate segments."
+                )
+            for value, name in (
+                (max_context_length, "max_context_length"),
+                (num_tokens_per_microbatch, "num_tokens_per_microbatch"),
+            ):
+                if value % config.document_alignment != 0:
+                    raise ValueError(
+                        f"document_alignment ({config.document_alignment}) must "
+                        f"divide {name} ({value})."
+                    )
 
         # Build the dataset graph and collator.
         read_options = config.read_options
@@ -117,6 +136,7 @@ class GrainDataLoader(BaseDataLoader):
             num_tokens_per_microbatch=num_tokens_per_microbatch,
             read_options=read_options,
             max_num_documents=config.max_num_documents,
+            document_alignment=config.document_alignment,
             num_mtp_layers=config.num_mtp_layers,
         )
         dataset_iteration_policy = DatasetIterationPolicy(
