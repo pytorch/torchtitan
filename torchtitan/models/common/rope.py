@@ -4,33 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Cache-owning RoPE modules and configurable prepared-cache rotation.
-
-Shape suffixes in rotary apply operations:
-- T = tokens, N = query heads, K = key heads, H = head dim, P = half head dim
-- X = broadcast-compatible leading dimensions of a cache or rotation input
-"""
-
 import math
-from abc import abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 import spmd_types as spmd
 import torch
 
-from torchtitan.config.function import Function
+from torchtitan.config.function import CallableFunction
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
 
 __all__ = [
     "ComplexRoPE",
-    "ComplexRoPEApply",
     "CosSinRoPE",
-    "CosSinRoPEApply",
-    "IdentityRoPEApply",
     "RoPE",
-    "RoPEApply",
 ]
 
 
@@ -92,152 +80,6 @@ def _yarn_inv_freq(
     return inv_freq / rope_factor * ramp + inv_freq * (1 - ramp)
 
 
-class RoPEApply(Function[torch.Tensor | tuple[torch.Tensor, torch.Tensor]]):
-    """Apply a prepared cache without owning parameters or cache buffers.
-
-    Returns query alone when key is None, otherwise the query/key pair.
-    Concrete implementations define the cache format and inverse support.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Function.Config):
-        pass
-
-    def __init__(self, config: Config) -> None:
-        pass
-
-    @abstractmethod
-    def __call__(
-        self,
-        query_TNH: torch.Tensor,
-        key_TKH: torch.Tensor | None,
-        rope_cache: torch.Tensor,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        pass
-
-
-class ComplexRoPEApply(RoPEApply):
-    """Rotate adjacent pairs using a complex cache."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(RoPEApply.Config):
-        pass
-
-    def __call__(
-        self,
-        query_TNH: torch.Tensor,
-        key_TKH: torch.Tensor | None,
-        rope_cache: torch.Tensor,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply complex RoPE using adjacent-dim pairs."""
-        if torch.compiler.is_compiling():
-            # Inductor can't compile a complex multiply, so rotate in real arithmetic: it fuses
-            # with the casts, within 1 bf16 ulp of eager. Eager keeps the complex ops.
-            # _reshape_cache hands over the real view, gathered as floats; direct callers may
-            # still pass the complex cache.
-            if rope_cache.is_complex():
-                cache_XP2 = torch.view_as_real(rope_cache)
-            else:
-                cache_XP2 = rope_cache.unflatten(-1, (-1, 2))
-            cos_XP, sin_XP = cache_XP2[..., 0], cache_XP2[..., 1]
-            if inverse:
-                sin_XP = -sin_XP
-            query_out_TNH = _RotatePairs.apply(query_TNH, cos_XP, sin_XP)
-            if key_TKH is None:
-                return query_out_TNH
-            return query_out_TNH, _RotatePairs.apply(key_TKH, cos_XP, sin_XP)
-
-        if inverse:
-            rope_cache = rope_cache.conj()
-
-        query_TNP = torch.view_as_complex(
-            query_TNH.float().reshape(*query_TNH.shape[:-1], -1, 2)
-        )
-        query_out_TNH = (
-            torch.view_as_real(query_TNP * rope_cache).flatten(-2).type_as(query_TNH)
-        )
-        if key_TKH is None:
-            return query_out_TNH
-
-        key_TKP = torch.view_as_complex(
-            key_TKH.float().reshape(*key_TKH.shape[:-1], -1, 2)
-        )
-        key_out_TKH = (
-            torch.view_as_real(key_TKP * rope_cache).flatten(-2).type_as(key_TKH)
-        )
-        return query_out_TNH, key_out_TKH
-
-
-class CosSinRoPEApply(RoPEApply):
-    """Rotate half-head pairs using a concatenated cos/sin cache."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(RoPEApply.Config):
-        pass
-
-    def __call__(
-        self,
-        query_TNH: torch.Tensor,
-        key_TKH: torch.Tensor | None,
-        rope_cache: torch.Tensor,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply cos/sin RoPE using the rotate-half convention."""
-        if inverse:
-            raise NotImplementedError("CosSinRoPE does not support inverse rotation.")
-
-        head_dim = query_TNH.shape[-1]
-        cos_XH = rope_cache[..., :head_dim]
-        sin_XH = rope_cache[..., head_dim:]
-        query_float_TNH = query_TNH.float()
-        query_out_TNH = (query_float_TNH * cos_XH) + (
-            CosSinRoPEApply._rotate_half(query_float_TNH) * sin_XH
-        )
-        if key_TKH is None:
-            return query_out_TNH.type_as(query_TNH)
-
-        key_float_TKH = key_TKH.float()
-        key_out_TKH = (key_float_TKH * cos_XH) + (
-            CosSinRoPEApply._rotate_half(key_float_TKH) * sin_XH
-        )
-        return query_out_TNH.type_as(query_TNH), key_out_TKH.type_as(key_TKH)
-
-    @staticmethod
-    def _rotate_half(input_XH: torch.Tensor) -> torch.Tensor:
-        first_XP = input_XH[..., : input_XH.shape[-1] // 2]
-        second_XP = input_XH[..., input_XH.shape[-1] // 2 :]
-        return torch.cat((-second_XP, first_XP), dim=-1)
-
-
-class IdentityRoPEApply(RoPEApply):
-    """Leave query and optional key tensors unrotated."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(RoPEApply.Config):
-        pass
-
-    def __call__(
-        self,
-        query_TNH: torch.Tensor,
-        key_TKH: torch.Tensor | None,
-        rope_cache: torch.Tensor,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if key_TKH is None:
-            return query_TNH
-        return query_TNH, key_TKH
-
-
-_DEFAULT_COMPLEX_ROPE_APPLY = ComplexRoPEApply.Config().build()
-_DEFAULT_COS_SIN_ROPE_APPLY = CosSinRoPEApply.Config().build()
-
-
 class RoPE(Module):
     """Shared Rotary Position Embedding module.
 
@@ -245,17 +87,15 @@ class RoPE(Module):
     complex exponential caches and ``CosSinRoPE.Config`` for concatenated
     cosine/sine caches.
 
-    ``Config.rope_apply`` selects the computation used by ``forward``. The
-    static ``apply_rotary_emb`` entry points retain the default algorithms;
-    subclasses overriding those methods must migrate to the apply config.
-    Construction rejects the old hook rather than silently ignoring it.
+    ``Config(...).build()`` constructs the module with its own cache.
+    ``apply_config().build()`` constructs a configurable rotary callable for
+    an external cache, without constructing a cache-owning RoPE module.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
         max_context_length: int
-        rope_apply: RoPEApply.Config
         theta: float = 10000.0
         scaling: Literal["none", "llama", "yarn"] = "none"
         # llama scaling params
@@ -272,19 +112,21 @@ class RoPE(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        if type(self).apply_rotary_emb not in (
-            RoPE.apply_rotary_emb,
-            ComplexRoPE.apply_rotary_emb,
-            CosSinRoPE.apply_rotary_emb,
-        ):
-            raise ValueError(
-                "Overriding RoPE.apply_rotary_emb is no longer supported. "
-                "Move the rotation implementation to RoPEApply and set "
-                "Config.rope_apply instead."
-            )
         self.config = config
-        self.rope_apply = config.rope_apply.build()
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
+
+    @classmethod
+    def apply_config(
+        cls,
+    ) -> CallableFunction.Config[torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
+        """Configure this class's rotation for an externally prepared cache.
+
+        Place the returned config in the caller's config tree and build it
+        during construction. Override the CallableFunction.Config node by FQN
+        to replace the function. The callable uses this class's apply_rotary_emb,
+        preserving its key=None and keyword-only inverse arguments.
+        """
+        return CallableFunction.Config(fn=cls.apply_rotary_emb)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Build the reusable cache for all positions up to ``max_context_length``.
@@ -344,7 +186,7 @@ class RoPE(Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Apply rotary embeddings to query and optional key tensors."""
         reshaped_cache = self._reshape_cache(query, positions)
-        return self.rope_apply(query, key, reshaped_cache, inverse=inverse)
+        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device
@@ -359,7 +201,7 @@ class RoPE(Module):
 class ComplexRoPE(RoPE):
     @dataclass(kw_only=True, slots=True)
     class Config(RoPE.Config):
-        rope_apply: RoPEApply.Config = field(default_factory=ComplexRoPEApply.Config)
+        pass
 
     # Cat options: only fp32/fp16 inputs reach the stack (bf16 writes int32 pairs); they write
     # each half with one store, instead of one masked kernel over both.
@@ -473,8 +315,35 @@ class ComplexRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Compatibility entry point for the default rotary implementation."""
-        return _DEFAULT_COMPLEX_ROPE_APPLY(query, key, rope_cache, inverse=inverse)
+        """Apply complex RoPE using adjacent-dim pairs."""
+        if torch.compiler.is_compiling():
+            # Inductor can't compile a complex multiply, so rotate in real arithmetic: it fuses
+            # with the casts, within 1 bf16 ulp of eager. Eager keeps the complex ops.
+            # _reshape_cache hands over the real view, gathered as floats; direct callers may
+            # still pass the complex cache.
+            if rope_cache.is_complex():
+                cache = torch.view_as_real(rope_cache)
+            else:
+                cache = rope_cache.unflatten(-1, (-1, 2))
+            cos, sin = cache[..., 0], cache[..., 1]
+            if inverse:
+                sin = -sin
+            query_out = _RotatePairs.apply(query, cos, sin)
+            if key is None:
+                return query_out
+            return query_out, _RotatePairs.apply(key, cos, sin)
+
+        if inverse:
+            rope_cache = rope_cache.conj()
+
+        xq_ = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
+        query_out = torch.view_as_real(xq_ * rope_cache).flatten(-2).type_as(query)
+        if key is None:
+            return query_out
+
+        xk_ = torch.view_as_complex(key.float().reshape(*key.shape[:-1], -1, 2))
+        key_out = torch.view_as_real(xk_ * rope_cache).flatten(-2).type_as(key)
+        return query_out, key_out
 
 
 class _RotatePairs(torch.autograd.Function):
@@ -534,7 +403,7 @@ class _RotatePairs(torch.autograd.Function):
 class CosSinRoPE(RoPE):
     @dataclass(kw_only=True, slots=True)
     class Config(RoPE.Config):
-        rope_apply: RoPEApply.Config = field(default_factory=CosSinRoPEApply.Config)
+        pass
 
     @local_compile("rope", batch_invariant=True)
     def forward(
@@ -608,8 +477,27 @@ class CosSinRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Compatibility entry point for the default rotary implementation."""
-        return _DEFAULT_COS_SIN_ROPE_APPLY(query, key, rope_cache, inverse=inverse)
+        """Apply cos/sin RoPE using the rotate-half convention."""
+        if inverse:
+            raise NotImplementedError("CosSinRoPE does not support inverse rotation.")
+
+        head_dim = query.shape[-1]
+        cos = rope_cache[..., :head_dim]
+        sin = rope_cache[..., head_dim:]
+        query_f = query.float()
+        xq_out = (query_f * cos) + (CosSinRoPE._rotate_half(query_f) * sin)
+        if key is None:
+            return xq_out.type_as(query)
+
+        key_f = key.float()
+        xk_out = (key_f * cos) + (CosSinRoPE._rotate_half(key_f) * sin)
+        return xq_out.type_as(query), xk_out.type_as(key)
+
+    @staticmethod
+    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
 
 
 @spmd.local_map(

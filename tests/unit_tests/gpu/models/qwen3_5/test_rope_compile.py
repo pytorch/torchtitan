@@ -359,7 +359,7 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
             for _ in range(2)
         )
         cache = rope.cache[torch.randperm(128, device="cuda")[:64]].unsqueeze(1)
-        compiled = torch.compile(ComplexRoPE.apply_rotary_emb, fullgraph=True)
+        compiled = torch.compile(ComplexRoPE.apply_config().build(), fullgraph=True)
         for out, ref in zip(
             compiled(query, key, cache),
             ComplexRoPE.apply_rotary_emb(query, key, cache),

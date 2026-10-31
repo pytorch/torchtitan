@@ -27,7 +27,7 @@ from torchtitan.models.common.attention.cp_mla import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import ComplexRoPE, IdentityRoPEApply
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 from torchtitan_recipes.overrides.fused_mla import (
@@ -95,9 +95,6 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
     def test_non_cp_backend_still_builds(self):
         config = fused_mla(self._attention_config())
         self.assertIsInstance(config.build(), FusedMLAAttention)
-        config.rope.rope_apply = IdentityRoPEApply.Config()
-        with self.assertRaisesRegex(ValueError, "cannot use a custom rope_apply"):
-            config.build()
 
     def test_all_kernels_are_autotuned_over_head_geometry(self):
         """Launch configuration is tuned per shape, not hard-coded."""

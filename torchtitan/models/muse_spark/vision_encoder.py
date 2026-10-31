@@ -16,6 +16,8 @@ Shape suffixes:
 - G = spatial grid tokens
 - M = merged visual tokens
 - O = adapter output dim
+- A = num attention heads
+- Dh = head dim
 
 """
 
@@ -27,15 +29,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.config.function import CallableFunction
 from torchtitan.models.base.module import Module, ModuleDict
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import IdentityRoPEApply
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     VisionTransformerBlock,
 )
+
+
+def _identity_rope(
+    query_TADh: torch.Tensor,
+    key_TADh: torch.Tensor,
+    rope_cache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return query_TADh, key_TADh
 
 
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
@@ -192,7 +202,10 @@ class NaViTEncoder(Module):
             # both nodes so disabling RoPE does not change a shared block config.
             block_config = replace(
                 block_config,
-                attn=replace(block_config.attn, rope_apply=IdentityRoPEApply.Config()),
+                attn=replace(
+                    block_config.attn,
+                    rope_apply=CallableFunction.Config(fn=_identity_rope),
+                ),
             )
         self.layers = ModuleDict(
             {str(index): block_config.build() for index in range(config.num_layers)}

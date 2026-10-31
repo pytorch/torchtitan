@@ -23,8 +23,6 @@ from torchtitan.models.common.rope import (
     _yarn_inv_freq,
     ComplexRoPE,
     CosSinRoPE,
-    CosSinRoPEApply,
-    IdentityRoPEApply,
     RoPE,
 )
 from torchtitan.models.qwen3_5.rope import MRoPE
@@ -45,7 +43,7 @@ class TestApplyRotaryEmbCosSin(unittest.TestCase):
         self.rope_cache = torch.randn(
             self.num_tokens, 1, self.head_dim * 2, dtype=torch.float32
         )
-        self.rope_apply = CosSinRoPEApply.Config().build()
+        self.rope_apply = CosSinRoPE.apply_config().build()
 
     def test_output_dtype_matches_input(self):
         xq_out, xk_out = self.rope_apply(
@@ -131,21 +129,26 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         xq = torch.randn(num_tokens, 4, self.head_dim)
         xk = torch.randn(num_tokens, 4, self.head_dim)
         positions = torch.arange(num_tokens) % 8
-        self.rope(xq, xk, positions)
-        config = dataclasses.replace(
-            self.rope.config, rope_apply=IdentityRoPEApply.Config()
-        )
-        torch.testing.assert_close(
-            config.build()(xq, xk, positions), (xq, xk), rtol=0, atol=0
-        )
+        expected = self.rope(xq, xk, positions)
+        apply_rope = ComplexRoPE.apply_config().build()
+        actual = apply_rope(xq, xk, self.rope._reshape_cache(xq, positions))
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
-        class LegacyRoPE(ComplexRoPE):
+        class IdentityComplexRoPE(ComplexRoPE):
             @staticmethod
             def apply_rotary_emb(query, key, rope_cache, *, inverse=False):
                 return query if key is None else (query, key)
 
-        with self.assertRaisesRegex(ValueError, "Config.rope_apply"):
-            LegacyRoPE(self.rope.config)
+        identity_rope = IdentityComplexRoPE(self.rope.config)
+        torch.testing.assert_close(
+            identity_rope(xq, xk, positions), (xq, xk), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            IdentityComplexRoPE.apply_config().build()(xq, xk, self.rope.cache),
+            (xq, xk),
+            rtol=0,
+            atol=0,
+        )
 
     def test_out_of_range_positions_raises(self):
         num_tokens = 4

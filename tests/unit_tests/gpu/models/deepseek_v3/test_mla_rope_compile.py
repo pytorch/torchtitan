@@ -9,7 +9,6 @@ import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
-from torchtitan.models.common.rope import IdentityRoPEApply
 from torchtitan.models.deepseek_v3 import build_model_config
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -29,12 +28,7 @@ def test_compiled_bf16_rope_matches_eager(use_positions: bool) -> None:
     # DeepSeek-V3's 128 query heads; an odd token count leaves a partial block.
     num_heads, num_tokens = 128, 1027
     attention = (
-        build_model_config(
-            "debugmodel",
-            attn_backend="flex",
-            parallelism=ParallelismConfig(),
-            seq_len=2048,
-        )
+        build_model_config("debugmodel", parallelism=ParallelismConfig(), seq_len=2048)
         .layers[0]
         .attention.build()
         .cuda()
@@ -82,20 +76,3 @@ def test_compiled_bf16_rope_matches_eager(use_positions: bool) -> None:
     for compiled in compiled_runs:
         for got, want in zip(compiled, eager, strict=True):
             torch.testing.assert_close(got, want)
-
-    config = (
-        build_model_config(
-            "debugmodel",
-            attn_backend="flex",
-            parallelism=ParallelismConfig(),
-            seq_len=2048,
-        )
-        .layers[0]
-        .attention
-    )
-    config.rope.rope_apply = IdentityRoPEApply.Config()
-    attention = config.build().cuda()
-    LocalCompileConfig(regions=["mla_qk"]).apply()
-    k_pe = kv.split([attention.kv_lora_rank, attention.qk_rope_head_dim], dim=-1)[1]
-    actual = attention._apply_rope_to_q_and_k_pe(q, k_pe, positions)
-    torch.testing.assert_close(actual, (q, k_pe.unsqueeze(1)), rtol=0, atol=0)

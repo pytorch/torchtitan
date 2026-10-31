@@ -5,13 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
 from torch.nn.attention.flex_attention import create_block_mask
 
+from torchtitan.config import apply_overrides, derive, override, OverrideConfig
+from torchtitan.config.function import CallableFunction
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rope import ComplexRoPEApply
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import VisionAttention
 
 
@@ -28,17 +31,32 @@ class _IdentityAttention(nn.Module):
 class TestVisionAttention(unittest.TestCase):
     def test_td_layout(self) -> None:
         dim, num_heads, num_tokens = 16, 4, 7
-        attention = VisionAttention(
-            VisionAttention.Config(
-                dim=dim,
-                num_heads=num_heads,
-                wq=Linear.Config(in_features=dim, out_features=dim),
-                wk=Linear.Config(in_features=dim, out_features=dim),
-                wv=Linear.Config(in_features=dim, out_features=dim),
-                proj=Linear.Config(in_features=dim, out_features=dim),
-                rope_apply=ComplexRoPEApply.Config(),
-            )
+        config = VisionAttention.Config(
+            dim=dim,
+            num_heads=num_heads,
+            wq=Linear.Config(in_features=dim, out_features=dim),
+            wk=Linear.Config(in_features=dim, out_features=dim),
+            wv=Linear.Config(in_features=dim, out_features=dim),
+            proj=Linear.Config(in_features=dim, out_features=dim),
+            rope_apply=ComplexRoPE.apply_config(),
         )
+
+        def offset_query(query_THDh, key_THDh, rope_cache):
+            return query_THDh + 1, key_THDh
+
+        with patch.dict("torchtitan.config.override._REGISTRY"):
+
+            @override(target=CallableFunction.Config, fqns=["rope_apply"], exact=True)
+            def replace_vision_rope(cfg):
+                self.assertIs(cfg.fn, ComplexRoPE.apply_rotary_emb)
+                return derive(cfg, CallableFunction.Config, fn=offset_query)
+
+            replacements = apply_overrides(
+                OverrideConfig(imports=[f"{__name__}.replace_vision_rope"]), config
+            )
+            self.assertEqual(len(replacements), 1)
+
+        attention = config.build()
         identity_attention = _IdentityAttention()
         attention.flex_attention = identity_attention
 
@@ -60,6 +78,9 @@ class TestVisionAttention(unittest.TestCase):
 
         self.assertEqual(identity_attention.input_shape, (num_tokens, num_heads, 4))
         self.assertEqual(out_TD.shape, (num_tokens, dim))
+        torch.testing.assert_close(
+            out_TD, attention.proj(attention.wq(x_TD) + 1), rtol=0, atol=0
+        )
 
 
 if __name__ == "__main__":

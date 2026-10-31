@@ -64,7 +64,7 @@ from torchtitan.models.common.moe.sharding import (
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.nn_modules import Conv1d, GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.common.rope import ComplexRoPE, ComplexRoPEApply
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -584,7 +584,7 @@ def _muse_spark_navit_attention_config(
             bias=True,
             sharding_config=vision_rowwise_sharding_config(),
         ),
-        rope_apply=ComplexRoPEApply.Config(),
+        rope_apply=ComplexRoPE.apply_config(),
         sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
     )
 

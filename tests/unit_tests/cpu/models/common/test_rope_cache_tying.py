@@ -12,7 +12,7 @@ import unittest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.rope import IdentityRoPEApply, RoPE
+from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v4 import build_model_config as build_dsv4_config
 from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
@@ -42,9 +42,7 @@ def _ropes(model: torch.nn.Module) -> list[RoPE]:
 
 class TestRoPECacheTying(unittest.TestCase):
     def test_caches_are_shared_after_build(self):
-        config = _make_config()
-        config.layers[1].attention.rope.rope_apply = IdentityRoPEApply.Config()
-        ropes = _ropes(Llama3Model(config))
+        ropes = _ropes(Llama3Model(_make_config()))
         self.assertGreater(len(ropes), 1)
         for rope in ropes[1:]:
             self.assertIs(rope.cache, ropes[0].cache)

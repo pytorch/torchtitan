@@ -20,14 +20,15 @@ Shape suffixes:
 - Dh = head dim
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import cast
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
+from torchtitan.config.function import Function
 from torchtitan.distributed.local_compile import compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
@@ -35,9 +36,13 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-from torchtitan.models.common.rope import RoPEApply
 
 compiled_create_block_mask = compile(create_block_mask)
+
+# Applies rotary position embedding: (query, key, rope_cache) -> (query, key).
+RopeApply = Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
+]
 
 
 class InvariantRowParallelLinear(Linear):
@@ -167,7 +172,7 @@ class VisionAttention(Module):
         wk: Linear.Config
         wv: Linear.Config
         proj: Linear.Config
-        rope_apply: RoPEApply.Config
+        rope_apply: Function.Config
         inner_attention: Module.Config = field(
             default_factory=FlexInnerAttention.Config
         )
@@ -185,7 +190,7 @@ class VisionAttention(Module):
         self.wk = config.wk.build()
         self.wv = config.wv.build()
         self.proj = config.proj.build()
-        self.rope_apply = config.rope_apply.build()
+        self.rope_apply: RopeApply = config.rope_apply.build()
         self.flex_attention = config.inner_attention.build()
 
     def _qkv(
@@ -211,10 +216,7 @@ class VisionAttention(Module):
         q_THDh, k_THDh, v_THDh = self._qkv(x)
 
         remat.recompute_needs_tensor(q_THDh, k_THDh)
-        q_THDh, k_THDh = cast(
-            tuple[torch.Tensor, torch.Tensor],
-            self.rope_apply(q_THDh, k_THDh, rope_cache),
-        )
+        q_THDh, k_THDh = self.rope_apply(q_THDh, k_THDh, rope_cache)
 
         out_THDh = remat.region(
             self.flex_attention,

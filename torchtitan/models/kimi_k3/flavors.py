@@ -59,7 +59,7 @@ from torchtitan.models.common.moe.sharding import (
     router_sharding_config,
 )
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
-from torchtitan.models.common.rope import ComplexRoPEApply
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -478,7 +478,7 @@ def _vision_encoder_config(
                 sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
             ),
             proj=_vision_row_parallel_linear(qkv_dim, dim),
-            rope_apply=ComplexRoPEApply.Config(),
+            rope_apply=ComplexRoPE.apply_config(),
             inner_attention=FlexInnerAttention.Config(
                 sharding_config=vision_inner_attention_sharding_config()
             ),

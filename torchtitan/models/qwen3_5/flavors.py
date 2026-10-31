@@ -55,7 +55,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
-from torchtitan.models.common.rope import CosSinRoPEApply
+from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -269,7 +269,7 @@ def _qwen35_vision_encoder_config(
                     sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
                 ),
                 proj=_vision_row_parallel_linear(dim, dim),
-                rope_apply=CosSinRoPEApply.Config(),
+                rope_apply=CosSinRoPE.apply_config(),
                 inner_attention=FlexInnerAttention.Config(
                     sharding_config=vision_inner_attention_sharding_config()
                 ),

@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import spmd_types as spmd
@@ -258,7 +258,7 @@ class Decoder(BaseModel):
         self._tie_rope_caches()
 
     def _tie_rope_caches(self) -> None:
-        """Share one cache tensor across RoPE modules with equal cache configs.
+        """Share one cache tensor across RoPE modules with equal configs.
 
         Every attention layer builds its own ``(max_context_length, ...)`` fp32
         RoPE cache, identical across layers with the same config; at long
@@ -282,10 +282,7 @@ class Decoder(BaseModel):
                 (
                     r
                     for r in representatives
-                    # Applying a cache does not change how it is generated.
-                    if type(r) is type(module)
-                    and r.config
-                    == replace(module.config, rope_apply=r.config.rope_apply)
+                    if type(r) is type(module) and r.config == module.config
                 ),
                 None,
             )

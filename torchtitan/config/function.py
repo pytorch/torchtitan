@@ -12,6 +12,8 @@ from typing import Any, Generic, TypeVar
 from torchtitan.config.configurable import Configurable
 
 R = TypeVar("R")
+# The nested Config binds its own result type; __init__ connects it to R.
+_ConfigResultT = TypeVar("_ConfigResultT")
 
 
 class Function(Generic[R], Configurable, ABC):
@@ -40,10 +42,10 @@ class CallableFunction(Function[R]):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Function.Config):
-        fn: Callable[..., R]
+    class Config(Function.Config, Generic[_ConfigResultT]):
+        fn: Callable[..., _ConfigResultT]
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config[R]) -> None:
         self.fn = config.fn
 
     def __call__(self, *args: Any, **kwargs: Any) -> R:

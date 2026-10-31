@@ -22,12 +22,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import (
-    _RotatePairs,
-    ComplexRoPE,
-    ComplexRoPEApply,
-    RoPE,
-)
+from torchtitan.models.common.rope import _RotatePairs, ComplexRoPE, RoPE
 
 __all__ = ["DeepSeekMLAAttention"]
 
@@ -192,13 +187,12 @@ class DeepSeekMLAAttention(Attention):
         if (
             torch.compiler.is_compiling()
             and type(self.rope) is ComplexRoPE
-            and type(self.rope.rope_apply) is ComplexRoPEApply
             and q.dtype == torch.bfloat16
             and q.is_contiguous()
         ):
             # Under compile, ComplexRoPE's cache holds adjacent (cos, sin) pairs, so a contiguous
             # bf16 q can rotate inside its row viewed as int32 pairs (_RotateTail). Eager and
-            # Custom RoPE modules and apply functions keep split -> rope -> cat below.
+            # ComplexRoPE subclasses, which may replace forward, keep split -> rope -> cat below.
             cache = self.rope._reshape_cache(q, positions).unflatten(-1, (-1, 2))
             cos, sin = cache[..., 0], cache[..., 1]
             return _RotateTail.apply(q, cos, sin), _RotatePairs.apply(k_pe, cos, sin)
