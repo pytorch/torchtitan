@@ -26,8 +26,7 @@ class LocalDispatchMetadata:
     """Metadata returned by LocalTokenDispatcher.dispatch() for use in combine()."""
 
     token_indices_experts_sorted_N: torch.Tensor  # noqa: N815
-    topk_scores_experts_sorted_N: torch.Tensor | None  # noqa: N815
-    routed_scores_R: torch.Tensor | None = None  # noqa: N815
+    topk_scores_experts_sorted_N: torch.Tensor  # noqa: N815
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -51,14 +50,11 @@ class LocalTokenDispatcher(Module):
     class Config(Module.Config):
         num_experts: int
         top_k: int
-        # None = auto: RoutedExperts decides from its output_postprocess.
-        absorb_router_scores: bool | None = False
 
     def __init__(self, config: Config):
         super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.top_k
-        self.absorb_router_scores = config.absorb_router_scores
 
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
@@ -131,12 +127,7 @@ class LocalTokenDispatcher(Module):
         ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N=(
-                None if self.absorb_router_scores else topk_scores_experts_sorted_N
-            ),
-            routed_scores_R=(
-                topk_scores_experts_sorted_N if self.absorb_router_scores else None
-            ),
+            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
         )
         return routed_input_RD, num_local_tokens_per_expert_E, metadata
 
@@ -155,11 +146,9 @@ class LocalTokenDispatcher(Module):
         Returns:
             out_TD: ``(T, D)`` combined output.
         """
-        return remat.region(
-            self._score_and_scatter_add,
-            self.remat_region_name("combine"),
-            recompute=False,  # never replayed; the w2 output is read only by this body
-        )(
+        # The scatter-add reads the expert outputs with bare ops.
+        remat.recompute_needs_tensor(routed_output_RD)
+        return self._score_and_scatter_add(
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
             metadata.token_indices_experts_sorted_N,
@@ -169,16 +158,15 @@ class LocalTokenDispatcher(Module):
     def _score_and_scatter_add(
         self,
         routed_output_ND: torch.Tensor,
-        topk_scores_N: torch.Tensor | None,
+        topk_scores_N: torch.Tensor,
         token_indices_N: torch.Tensor,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
         """Weight expert-sorted outputs by their router scores and sum them per token."""
-        if topk_scores_N is not None:
-            # Promote to float32 without saving a float32 copy of the output.
-            routed_output_ND = (
-                routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
-            ).to(routed_output_ND.dtype)
+        # Promote to float32 without saving a float32 copy of the output.
+        routed_output_ND = (
+            routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
+        ).to(routed_output_ND.dtype)
         return deterministic_scatter_add(
             torch.zeros_like(x_TD),
             token_indices_N.reshape(-1, 1).expand(-1, x_TD.shape[-1]),
@@ -413,7 +401,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             permuted_indices,
             input_splits,
             output_splits,
-            routed_scores_R,
         ) = remat.region(
             self._dispatch,
             self.remat_region_name("dispatch"),
@@ -436,16 +423,13 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         output_splits_list = output_splits.tolist()
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N=(
-                None if self.absorb_router_scores else topk_scores_experts_sorted_N
-            ),
+            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
             # Pre-permute shape: the all-to-all output, which padding
             # dispatchers (TorchAO) may grow in _permute.
             input_shape=torch.Size((sum(output_splits_list), x_TD.shape[-1])),
             permuted_indices=permuted_indices,
             input_splits=input_splits_list,
             output_splits=output_splits_list,
-            routed_scores_R=routed_scores_R,
         )
         return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
 
@@ -469,9 +453,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
         ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
-        routed_scores_N = (
-            topk_scores_experts_sorted_N if self.absorb_router_scores else None
-        )
 
         with maybe_set_sparse_mesh():
             ep_group = spmd_mesh_group(MeshAxisName.EP)
@@ -484,10 +465,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 routed_input_ND = spmd.reinterpret_mesh(
                     routed_input_ND, spmd.current_mesh()
                 )
-                if routed_scores_N is not None:
-                    routed_scores_N = spmd.reinterpret_mesh(
-                        routed_scores_N, spmd.current_mesh()
-                    )
 
             # generate the input splits and output splits for all-to-all
             with torch.no_grad():
@@ -510,15 +487,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 output_splits.tolist(),
                 input_splits.tolist(),
             )
-            routed_scores_rank_major_R = None
-            if routed_scores_N is not None:
-                # The scores ride the same all-to-all, staying aligned with the tokens.
-                routed_scores_rank_major_R = self._dispatch_token_exchange(
-                    routed_scores_N.reshape(-1, 1),
-                    ep_group,
-                    output_splits.tolist(),
-                    input_splits.tolist(),
-                ).reshape(-1)
             # Reorder from rank-major to expert-major via _permute.
             #
             # num_global_tokens_per_local_expert_E layout after all-to-all
@@ -533,12 +501,10 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 routed_input_RD,
                 permuted_indices,
                 num_global_tokens_per_local_expert_e,
-                routed_scores_R,
             ) = self._permute(
                 routed_input_RD,
                 num_global_tokens_per_local_expert_E,
                 ep_size,
-                routed_scores_R=routed_scores_rank_major_R,
             )
 
         return (
@@ -549,7 +515,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             permuted_indices,
             input_splits,
             output_splits,
-            routed_scores_R,
         )
 
     def _permute(
@@ -557,8 +522,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         routed_input_RD,
         num_global_tokens_per_local_expert_E,
         ep_size: int,
-        *,
-        routed_scores_R: torch.Tensor | None,
     ):
         """Reorder tokens from rank-major to expert-major layout.
 
@@ -604,7 +567,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_input_RD[permuted_indices, :],
             permuted_indices,
             num_global_tokens_per_local_expert_e,
-            None if routed_scores_R is None else routed_scores_R[permuted_indices],
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):
@@ -642,8 +604,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         out_TD = remat.region(
             self._combine,
             self.remat_region_name("combine"),
-            # Never replayed: the w2 output is read only by this saved body.
-            recompute=False,
+            recompute=self.remat_should_recompute("combine"),
         )(
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
@@ -747,27 +708,20 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             routed_input_RD,
             permuted_indices,
             num_tokens_per_local_expert_padded_e,
-            routed_scores_R,
         ) = self._permute(
             routed_input_ND,
             num_local_tokens_per_expert_E,
             ep_size=1,
-            routed_scores_R=(
-                topk_scores_experts_sorted_N if self.absorb_router_scores else None
-            ),
         )
 
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N=(
-                None if self.absorb_router_scores else topk_scores_experts_sorted_N
-            ),
+            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
             input_shape=input_shape,
             permuted_indices=permuted_indices,
             # Unused in the EP=1 combine path (no all-to-all to reverse).
             input_splits=[],
             output_splits=[],
-            routed_scores_R=routed_scores_R,
         )
         return routed_input_RD, num_tokens_per_local_expert_padded_e, metadata
 
@@ -788,36 +742,16 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # order, then apply the local score + scatter_add used by the EP=1
         # path. Mirrors LocalTokenDispatcher.combine, plus the unpad.
         assert isinstance(metadata, AllToAllDispatchMetadata)
-        return remat.region(
-            self._combine_padded_local,
-            self.remat_region_name("combine"),
-            recompute=False,  # never replayed; the w2 output is read only by this body
-        )(
+        # The unpermute reads the expert outputs with bare ops.
+        remat.recompute_needs_tensor(routed_output_RD)
+        routed_output_RD = self._unpermute(
+            routed_output_RD, metadata.input_shape, metadata.permuted_indices
+        )
+
+        return self._score_and_scatter_add(
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
             metadata.token_indices_experts_sorted_N,
-            metadata.permuted_indices,
-            metadata.input_shape,
-            x_TD,
-        )
-
-    def _combine_padded_local(
-        self,
-        routed_output_ND,
-        topk_scores_N,
-        token_indices_N,
-        permuted_indices,
-        input_shape,
-        x_TD,
-    ):
-        """Strip the padded permute, then score and scatter-add (EP=1 combine)."""
-        routed_output_ND = self._unpermute(
-            routed_output_ND, input_shape, permuted_indices
-        )
-        return self._score_and_scatter_add(
-            routed_output_ND,
-            topk_scores_N,
-            token_indices_N,
             x_TD,
         )
 
@@ -826,8 +760,6 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         routed_input_RD,
         num_global_tokens_per_local_expert_E,
         ep_size: int,
-        *,
-        routed_scores_R: torch.Tensor | None,
     ):
         # MXFP8 requires groups to be permuted to expert major order AND
         # padded to nearest multiple of 16.
@@ -854,16 +786,10 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             e,
             self.pad_multiple,
         )
-        if routed_scores_R is not None:
-            # Pad rows gather index -1; append one zero score so they read 0.
-            routed_scores_R = torch.cat(
-                [routed_scores_R, routed_scores_R.new_zeros(1)]
-            )[permuted_indices]
         return (
             routed_input_RD,
             permuted_indices,
             num_global_tokens_per_local_expert_padded_e,
-            routed_scores_R,
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):
@@ -880,6 +806,13 @@ class EPDispatchMetadata:
     """Metadata for DeepEP and HybridEP token dispatch."""
 
     state: object  # Backend-specific dispatch state.
+
+
+@dataclass(frozen=True, kw_only=True)
+class DeepEPDispatchMetadata(EPDispatchMetadata):
+    """DeepEP scores applied either before W2 or in combine."""
+
+    combine_scores_R: torch.Tensor | None  # noqa: N815
     routed_scores_R: torch.Tensor | None = None  # noqa: N815
 
 
@@ -894,7 +827,9 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     Dispatch and combine declare ``ep_communication.dispatch`` and
     ``ep_communication.combine``. Dispatch follows the remat policy: a replay
     must receive rows in the forward's order, so ``init_buffer`` then makes
-    the buffer deterministic (a sort per dispatch). Combine is never replayed.
+    the buffer deterministic (a sort per dispatch). Combine is never replayed
+    when the router scores were absorbed before W2, and follows the remat
+    policy otherwise.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -965,7 +900,9 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         routing_map_TE: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
+        *,
+        absorb_router_scores: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
         """Dispatch through the preallocated ElasticBuffer."""
         # Ignore input routing_map_TE. DeepEP returns the number
         # of global routed tokens for every local expert using other inputs.
@@ -979,7 +916,12 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
         from torchtitan.distributed.deepep.deepep import dispatch_tokens
 
-        hidden_states_RD, num_global_tokens_per_local_expert_e, state = dispatch_tokens(
+        (
+            hidden_states_RD,
+            num_global_tokens_per_local_expert_e,
+            routed_scores_R,
+            state,
+        ) = dispatch_tokens(
             x_TD,
             topk_expert_ids_TK,
             topk_scores_TK,
@@ -991,41 +933,51 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             cuda_graph_compatible=self.cuda_graph_compatible,
         )
 
-        routed_scores_R = None
-        if self.absorb_router_scores:
-            # Take the tracked scores so combine skips the multiply.
-            if state.cuda_graph_compatible:
-                recv_scores = state.recv_scores
-                state.recv_scores = None
-                if recv_scores is not None:
-                    routed_scores_R = (
-                        recv_scores.reshape(hidden_states_RD.shape[0], -1)
-                        .sum(dim=-1)
-                        .reshape(-1)
-                    )
-            else:
-                routed_scores_R = state.permuted_scores
-                state.permuted_scores = None
-
-        metadata = EPDispatchMetadata(state=state, routed_scores_R=routed_scores_R)
+        metadata = DeepEPDispatchMetadata(
+            state=state,
+            routed_scores_R=routed_scores_R if absorb_router_scores else None,
+            combine_scores_R=None if absorb_router_scores else routed_scores_R,
+        )
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]
     def combine(
         self,
         routed_output_RD: torch.Tensor,
-        metadata: EPDispatchMetadata,
+        metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
         """Combine tokens via DeepEP and wait for completion."""
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
-        combined_TD = combine_tokens(
-            routed_output_RD,
-            metadata.state,  # pyrefly: ignore [bad-argument-type]
-            remat_region_name=self.remat_region_name("ep_communication.combine"),
-        )
+        def score_and_combine(
+            routed_output_RD: torch.Tensor,
+            combine_scores_R: torch.Tensor | None,
+        ) -> torch.Tensor:
+            """Apply unabsorbed scores, then run the pure-reduction combine."""
+            if combine_scores_R is not None:
+                routed_output_RD = routed_output_RD * combine_scores_R.to(
+                    routed_output_RD.dtype
+                ).reshape(-1, 1)
+            return combine_tokens(
+                routed_output_RD,
+                metadata.state,  # pyrefly: ignore [bad-argument-type]
+            )
+
+        absorbed = metadata.combine_scores_R is None
+        combined_TD = remat.region(
+            score_and_combine,
+            self.remat_region_name("ep_communication.combine"),
+            # Absorbed scores leave a pure reduction that reads the w2 output only
+            # in this body, so never replay it and keep that output off the saved
+            # tensor set. Unabsorbed scores keep the policy the region had before
+            # absorption, so a scored combine is not forced to be saved.
+            recompute=False if absorbed else self._replays_communication(),
+        )(routed_output_RD, metadata.combine_scores_R)
+        if not absorbed:
+            # The caller consumes this output outside another remat region.
+            remat.recompute_needs_tensor(combined_TD)
         sync_combine()
         return combined_TD
 
@@ -1136,13 +1088,7 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             pad_multiple=self.pad_multiple,
         )
 
-        routed_scores_R = None
-        if self.absorb_router_scores:
-            # Take the tracked padded scores so combine skips the multiply.
-            routed_scores_R = state.permuted_scores
-            state.permuted_scores = None
-
-        metadata = EPDispatchMetadata(state=state, routed_scores_R=routed_scores_R)
+        metadata = EPDispatchMetadata(state=state)
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]

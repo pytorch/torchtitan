@@ -31,22 +31,13 @@ class GptOssGroupedLinear(GroupedLinear):
         self,
         input_RI: torch.Tensor,
         offsets_E: torch.Tensor,
-        *,
-        routed_scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        output_RO = super().forward(
-            input_RI,
-            offsets_E,
-            routed_scores_R=routed_scores_R,
-        )
+        output_RO = super().forward(input_RI, offsets_E)
         # The bias add below reads the grouped_mm output with bare ops.
         remat.recompute_needs_tensor(output_RO)
         bias_RO = self._expand_grouped_bias(
             self.bias.flatten(1), offsets_E, output_RO.shape[0]
         ).reshape_as(output_RO)
-        if routed_scores_R is not None:
-            # Scale the bias rows too, keeping score * (h @ W2 + b2).
-            bias_RO = bias_RO.float() * routed_scores_R.reshape(-1, 1)
         return self._add_grouped_bias(output_RO, bias_RO)
 
     @staticmethod

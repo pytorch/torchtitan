@@ -41,7 +41,7 @@ from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
-from .token_dispatcher import LocalTokenDispatcher
+from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -85,16 +85,6 @@ class RoutedExperts(Module):
                 raise ValueError("w13 output and w2 input dimensions must match")
             if self.w2.num_linears != 1:
                 raise ValueError("w2 must contain one down projection")
-            if (
-                self.output_postprocess is not None
-                and self.token_dispatcher.absorb_router_scores
-            ):
-                raise ValueError(
-                    "output_postprocess and absorb_router_scores cannot be "
-                    "combined: absorbed router scores are applied before W2, "
-                    "while output_postprocess runs after it. Set "
-                    "absorb_router_scores=False or drop output_postprocess."
-                )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -107,9 +97,6 @@ class RoutedExperts(Module):
             else None
         )
         self.token_dispatcher = config.token_dispatcher.build()
-        if config.token_dispatcher.absorb_router_scores is None:
-            # Auto: a post-W2 postprocess must see unscaled expert outputs.
-            self.token_dispatcher.absorb_router_scores = self.output_postprocess is None
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         del buffer_device
@@ -136,6 +123,12 @@ class RoutedExperts(Module):
         # TODO(acisseJZhong): skip padding rows' dispatch, expert compute and
         # combine in the stock token dispatchers too, as Dist-MoE does.
         del padding_mask_T
+        dispatch_kwargs = {}
+        if isinstance(self.token_dispatcher, DeepEPTokenDispatcher):
+            dispatch_kwargs["absorb_router_scores"] = (
+                self.output_postprocess is None
+                and getattr(self.w2, "bias", None) is None
+            )
         (
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
@@ -145,6 +138,7 @@ class RoutedExperts(Module):
             topk_scores_TK,
             topk_expert_ids_TK,
             routing_map_TE,
+            **dispatch_kwargs,
         )
         offsets_E = torch.cumsum(
             num_global_tokens_per_local_expert_e,
@@ -160,16 +154,19 @@ class RoutedExperts(Module):
             gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
             hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
-            # Pass the scores only when absorbed, so other W2 modules keep working.
-            w2_kwargs = (
-                {} if routed_scores_R is None else {"routed_scores_R": routed_scores_R}
-            )
-            routed_output_RD = self.w2(hidden_RF, offsets_E, **w2_kwargs)
+            if routed_scores_R is not None:
+                # Absorb the router scores into W2's input: scale in float32, then
+                # restore the input dtype. The bare multiply reads the dispatch
+                # region's scores, so pin them for a replay.
+                remat.recompute_needs_tensor(routed_scores_R)
+                hidden_RF = (hidden_RF.float() * routed_scores_R.reshape(-1, 1)).to(
+                    hidden_RF.dtype
+                )
+            routed_output_RD = self.w2(hidden_RF, offsets_E)
             # A real dtype cast and the output postprocess read the w2 output with
-            # bare ops, so pin it only then. In the common bf16 case without a
-            # postprocess, type_as is a no-op and the w2 output goes straight to
-            # the combine region, so an unconditional pin would keep it alive
-            # even when w2 and the combine are both saved.
+            # bare ops, so pin it only then. Each dispatcher pins the w2 output for
+            # its own bare consumers, so in the common bf16 case without a
+            # postprocess this leaves the w2 output's lifetime to the combine.
             if (
                 routed_output_RD.dtype != routed_input_RD.dtype
                 or self.output_postprocess is not None

@@ -30,10 +30,9 @@ BOTH prefill and decode. Combine is handle-driven and mode-agnostic.
   device-side ``handle.psum_num_recv_tokens_per_expert`` (no CPU sync). Inference-only: the
   expanding layout "must not be backward" per the DeepEP kernels.
 
-Routing scores are applied to expert outputs in plain PyTorch (in ``combine_tokens``,
-before the pure-reduction combine op), so autograd handles the score gradient, the custom
-ops stay pure communication, and combine works unchanged in both modes (``combine``
-ignores ``topk_weights`` in expand mode anyway).
+Dispatch returns per-row routing scores separately from the combine state. The caller
+applies them before W2 when valid, or to the expert outputs otherwise. The custom ops
+stay pure communication, and autograd handles the score gradient.
 """
 
 import weakref
@@ -106,7 +105,7 @@ _lib.define(
 # autograd disables grad regardless of the outer context. When False (generator no_grad /
 # inference), the op frees the handle itself (setup_context never runs).
 _lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
-# Ordered effects: a replayed dispatch can reorder rows; combine_tokens never replays.
+# Ordered effects preserve communication ordering when dispatch or combine replays.
 _lib._register_effectful_op("deepep::dispatch", torch.library.EffectType.ORDERED)
 _lib._register_effectful_op("deepep::combine", torch.library.EffectType.ORDERED)
 
@@ -461,9 +460,6 @@ class DispatchState:
     cuda_graph_compatible: bool = False
     # Compact path (cuda_graph_compatible=False): gather/scatter mapping for the grouped GEMM.
     permuted_indices: torch.Tensor | None = None
-    permuted_scores: torch.Tensor | None = None
-    # Expand path (cuda_graph_compatible=True): per-received-row routing scores.
-    recv_scores: torch.Tensor | None = None
 
 
 def dispatch_tokens(
@@ -477,14 +473,14 @@ def dispatch_tokens(
     remat_region_name: str,
     recompute: bool,
     cuda_graph_compatible: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
 
     Returns tokens in expert-major order for the grouped-GEMM expert path. In compact mode
     (``cuda_graph_compatible=False``) the deduplicated dispatch output is gathered by ``_permute_tokens``
     (matching the v1 path for identical numerics); in expand mode (``cuda_graph_compatible=True``) the
-    static layout is already expert-grouped. Routing scores are applied to the expert outputs
-    in ``combine_tokens``.
+    static layout is already expert-grouped. Routing scores are returned in the same row
+    order for the caller to apply.
 
     Args:
         hidden_states: Input tokens [num_tokens, hidden_dim]
@@ -507,7 +503,8 @@ def dispatch_tokens(
             layout with a host sync and full autograd (training).
 
     Returns:
-        (routed_tokens [num_recv, hidden], tokens_per_expert [num_local_experts], state)
+        (routed_tokens [num_recv, hidden], tokens_per_expert [num_local_experts],
+        routed_scores [num_recv], state)
     """
     del num_local_experts  # counts come from the handle, not this hint
 
@@ -583,9 +580,10 @@ def dispatch_tokens(
             handle_id=handle_id,
             num_recv_tokens=recv_x.shape[0],
             cuda_graph_compatible=True,
-            recv_scores=recv_scores,
         )
-        return recv_x, num_tokens_per_expert, state
+        # Expand scores can have a trailing top-k axis; reduce to one score per row.
+        routed_scores = recv_scores.reshape(recv_x.shape[0], -1).sum(dim=-1)
+        return recv_x, num_tokens_per_expert, routed_scores, state
 
     # Compact layout is deduplicated; gather into expert-major order (plain autograd, so the
     # gather's gradient flows back through the dispatch custom op's combine-backward).
@@ -598,61 +596,24 @@ def dispatch_tokens(
         num_recv_tokens=num_recv_tokens,
         cuda_graph_compatible=False,
         permuted_indices=permuted_indices,
-        permuted_scores=permuted_scores,
     )
-    return routed_input, num_tokens_per_expert, state
+    return routed_input, num_tokens_per_expert, permuted_scores, state
 
 
 def combine_tokens(
     hidden_states: torch.Tensor,
     state: DispatchState,
-    *,
-    remat_region_name: str,
 ) -> torch.Tensor:
-    """Combine expert outputs back to tokens via DeepEP v2.
+    """Reduce already-weighted expert outputs back to tokens via DeepEP v2.
 
-    Routing scores are applied here (in plain PyTorch) before the pure-reduction combine
-    op, so autograd handles the score gradient. Combine is async; the caller MUST call
-    ``sync_combine()`` before using the result.
-
-    Compact (``cuda_graph_compatible=False``): weight each expert-major row, scatter-add back to the
-    deduplicated tokens (``_unpermute_tokens``), then combine -- matching the v1 path.
-    Expand (``cuda_graph_compatible=True``): weight per received row, then combine over the static
-    layout (the handle drives the expand reduction).
-
-    Args:
-        hidden_states: Raw (unweighted) expert outputs [num_recv, hidden].
-        state: Dispatch state from ``dispatch_tokens``.
-        remat_region_name: Name for the combine communication region.
-
-    Returns:
-        Combined tokens [num_tokens, hidden_dim].
+    Compact outputs are scatter-added back to deduplicated tokens before the
+    communication. Expand outputs already have the layout expected by the handle.
+    The caller MUST call ``sync_combine()`` before using the async result.
     """
-    # Outer grad state decides whether the combine op frees the handle itself (no
-    # backward) or leaves it for combine-backward. Evaluated here, before the op.
     will_backward = torch.is_grad_enabled()
-
-    def _scored_combine(hidden_states: torch.Tensor) -> torch.Tensor:
-        """Apply scores/unpermute and launch the combine op in one saved region."""
-        if not state.cuda_graph_compatible:
-            assert state.permuted_indices is not None
-            if state.permuted_scores is not None:
-                hidden_states = hidden_states * state.permuted_scores.to(
-                    hidden_states.dtype
-                ).reshape(-1, 1)
-            hidden_states = _unpermute_tokens(
-                hidden_states, state.permuted_indices, state.num_recv_tokens
-            )
-        elif state.recv_scores is not None:
-            # Sum the trailing dim: works for [num_recv], [num_recv, 1] or [num_recv, topk].
-            per_row_score = state.recv_scores.reshape(hidden_states.shape[0], -1).sum(
-                dim=-1, keepdim=True
-            )
-            hidden_states = hidden_states * per_row_score.to(hidden_states.dtype)
-        return torch.ops.deepep.combine(hidden_states, state.handle_id, will_backward)
-
-    return remat.region(
-        _scored_combine,
-        remat_region_name,
-        recompute=False,  # never replayed; the W2 output is read only by this body
-    )(hidden_states)
+    if not state.cuda_graph_compatible:
+        assert state.permuted_indices is not None
+        hidden_states = _unpermute_tokens(
+            hidden_states, state.permuted_indices, state.num_recv_tokens
+        )
+    return torch.ops.deepep.combine(hidden_states, state.handle_id, will_backward)

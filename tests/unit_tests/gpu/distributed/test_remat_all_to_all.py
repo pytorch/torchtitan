@@ -155,12 +155,11 @@ class TestAllToAllRematRegions(DTensorTestBase):
             dense_sp_enabled=False,
         )
 
-        # Dispatch follows the policy; combine never replays, so a combine-only save changes nothing.
         dispatch = "routed_experts.token_dispatcher.dispatch"
         combine = "routed_experts.token_dispatcher.combine"
         for policy_config, expected_replay_collectives, expected_replay_syncs in (
-            (ActivationRematConfig(save_regions=[]), 2, 1),
-            (ActivationRematConfig(save_regions=[dispatch]), 0, 0),
+            (ActivationRematConfig(save_regions=[]), 3, 1),
+            (ActivationRematConfig(save_regions=[dispatch]), 1, 0),
             (ActivationRematConfig(save_regions=[combine]), 2, 1),
             (ActivationRematConfig(save_regions=[dispatch, combine]), 0, 0),
             (DefaultActivationRematConfig(), 0, 0),
@@ -219,7 +218,6 @@ class TestAllToAllRematRegions(DTensorTestBase):
 
     @with_comms
     def test_saved_w2_output_is_not_retained_under_ep(self):
-        # Saving w2 does not retain its output: the always-saved combine reads it in its body.
         mesh = init_device_mesh(
             self.device_type,
             (self.world_size,),
@@ -242,9 +240,12 @@ class TestAllToAllRematRegions(DTensorTestBase):
                 self.device_type, torch.bfloat16
             )
             remat_model.load_state_dict(baseline.state_dict())
-            ActivationRematConfig(save_regions=["routed_experts.w2.grouped_mm"]).apply(
-                remat_model
-            )
+            ActivationRematConfig(
+                save_regions=[
+                    "routed_experts.w2.grouped_mm",
+                    "routed_experts.token_dispatcher.combine",
+                ]
+            ).apply(remat_model)
             w2 = remat_model.layers["0"].routed_experts.w2
             w2_output_refs = []
             original_forward = GroupedLinear.forward

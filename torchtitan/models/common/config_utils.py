@@ -469,14 +469,11 @@ def make_routed_experts_config(
     top_k: int,
     param_init: dict[str, Callable],
     enable_ep: bool,
-    absorb_router_scores: bool | None = None,
 ) -> RoutedExperts.Config:
     """Build sharded routed experts with gate/up and down projections.
 
     Expert weights use sparse ``{EP}`` placements when ``enable_ep`` and
     dense replicated placements otherwise.
-
-    ``absorb_router_scores`` is forwarded to the standard dispatcher; see RoutedExperts for ``None``.
     """
     missing = {"w1_EFD", "w2_EDF", "w3_EFD"} - param_init.keys()
     if param_init and missing:
@@ -503,7 +500,6 @@ def make_routed_experts_config(
         token_dispatcher=AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            absorb_router_scores=absorb_router_scores,
         ),
         sharding_config=routed_experts_sharding_config(),
     )

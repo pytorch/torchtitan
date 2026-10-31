@@ -65,7 +65,6 @@ class _DeepEPBlock(Module):
             num_experts=num_experts,
             top_k=_TOP_K,
             hidden_dim=_MODEL_DIM,
-            absorb_router_scores=True,
             num_max_tokens_per_rank=_NUM_TOKENS,
         ).build()
         self.gate = torch.nn.Linear(_MODEL_DIM, num_experts, bias=False)
@@ -164,9 +163,12 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
             routing_map_TE = torch.nn.functional.one_hot(expert_ids_TK, 8).any(dim=1)
             results = []
             for absorb in (False, True):
-                dispatcher.absorb_router_scores = absorb
                 routed_RD, _, metadata = dispatcher.dispatch(
-                    x_TD, scores_TK, expert_ids_TK, routing_map_TE
+                    x_TD,
+                    scores_TK,
+                    expert_ids_TK,
+                    routing_map_TE,
+                    absorb_router_scores=absorb,
                 )
                 remat.recompute_needs_tensor(routed_RD)
                 if absorb:

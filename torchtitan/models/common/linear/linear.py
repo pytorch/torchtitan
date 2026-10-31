@@ -191,7 +191,7 @@ class _LinearFunction(torch.autograd.Function):
         )
 
     @staticmethod
-    def forward(  # pyrefly: ignore[bad-override]
+    def forward(
         ctx,
         input: torch.Tensor,
         weight: torch.Tensor,
@@ -354,7 +354,7 @@ class RowParallelLinear(Linear):
                 spmd.assert_local_type_like(
                     output,
                     input,
-                    {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
+                    {tp_group: spmd.P},
                 )
         else:
             output = self._unflatten_output(linear_fn(input, weight, bias), weight)
@@ -422,30 +422,17 @@ class GroupedLinear(Module):
             torch.empty(config.group_size, *output_shape, config.in_features)
         )
 
-    def forward(
-        self,
-        input_RI: torch.Tensor,
-        offsets_E: torch.Tensor,
-        *,
-        routed_scores_R: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
         """Apply each grouped linear to rows selected by cumulative offsets.
 
         Args:
             input_RI: Input rows grouped by the selected linear.
             offsets_E: Exclusive cumulative row end for each group.
-            routed_scores_R: Optional per-row router scores, absorbed in float32.
 
         Returns:
             Output rows with an optional ``num_linears`` axis before the output
             feature axis.
         """
-        if routed_scores_R is not None:
-            # A bare consumer of the dispatch region's output, so pin it for replay.
-            remat.recompute_needs_tensor(routed_scores_R)
-            input_RI = (input_RI.float() * routed_scores_R.reshape(-1, 1)).to(
-                input_RI.dtype
-            )
         output_shape = self.weight.shape[1:-1]
         weight_EOI = self.weight.flatten(1, -2)
         output_RO = remat.region(
