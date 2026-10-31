@@ -111,12 +111,7 @@ from .sharding import (
     residual_gate_sharding_config,
     transformer_block_sharding_config,
 )
-from .vision_encoder import (
-    IdentityVisionRoPEApply,
-    MuseSparkNaViTAdapter,
-    NaViTEncoder,
-    VisionRopeFreq,
-)
+from .vision_encoder import MuseSparkNaViTAdapter, NaViTEncoder, VisionRopeFreq
 from .vision_encoder_sharding import (
     cp_replicated_vision_sharding_config,
     navit_encoder_sharding_config,
@@ -559,7 +554,6 @@ def _muse_spark_navit_attention_config(
     *,
     latent_dim: int,
     num_heads: int,
-    use_rope: bool,
 ) -> VisionAttention.Config:
     return VisionAttention.Config(
         dim=latent_dim,
@@ -591,11 +585,7 @@ def _muse_spark_navit_attention_config(
             bias=True,
             sharding_config=vision_rowwise_sharding_config(),
         ),
-        rope_apply=(
-            ComplexVisionRoPEApply.Config()
-            if use_rope
-            else IdentityVisionRoPEApply.Config()
-        ),
+        rope_apply=ComplexVisionRoPEApply.Config(),
         sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
     )
 
@@ -681,7 +671,6 @@ def muse_spark_navit_encoder_config(
             attn=_muse_spark_navit_attention_config(
                 latent_dim=latent_dim,
                 num_heads=num_heads,
-                use_rope=use_rope,
             ),
             mlp=_muse_spark_navit_mlp_config(
                 latent_dim=latent_dim,

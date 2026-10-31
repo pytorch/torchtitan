@@ -60,11 +60,11 @@ class ComplexVisionRoPEApply(VisionRoPEApply):
         pass
 
     def __call__(
-        self, query: torch.Tensor, key: torch.Tensor, rope_cache: torch.Tensor
+        self, query_THDh: torch.Tensor, key_THDh: torch.Tensor, rope_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return cast(
             tuple[torch.Tensor, torch.Tensor],
-            ComplexRoPE.apply_rotary_emb(query, key, rope_cache),
+            ComplexRoPE.apply_rotary_emb(query_THDh, key_THDh, rope_cache),
         )
 
 
@@ -76,11 +76,11 @@ class CosSinVisionRoPEApply(VisionRoPEApply):
         pass
 
     def __call__(
-        self, query: torch.Tensor, key: torch.Tensor, rope_cache: torch.Tensor
+        self, query_THDh: torch.Tensor, key_THDh: torch.Tensor, rope_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return cast(
             tuple[torch.Tensor, torch.Tensor],
-            CosSinRoPE.apply_rotary_emb(query, key, rope_cache),
+            CosSinRoPE.apply_rotary_emb(query_THDh, key_THDh, rope_cache),
         )
 
 

@@ -16,11 +16,13 @@ Shape suffixes:
 - G = spatial grid tokens
 - M = merged visual tokens
 - O = adapter output dim
+- A = num attention heads
+- Dh = head dim
 
 """
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import spmd_types as spmd
 import torch
@@ -46,9 +48,9 @@ class IdentityVisionRoPEApply(VisionRoPEApply):
         pass
 
     def __call__(
-        self, query: torch.Tensor, key: torch.Tensor, rope_cache: torch.Tensor
+        self, query_TADh: torch.Tensor, key_TADh: torch.Tensor, rope_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return query, key
+        return query_TADh, key_TADh
 
 
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
@@ -199,8 +201,18 @@ class NaViTEncoder(Module):
             )
         )
         self.ln_pre = config.ln_pre.build()
+        block_config = config.block
+        if not config.use_rope:
+            # Recipes may change use_rope after constructing the config. Copy
+            # both nodes so disabling RoPE does not change a shared block config.
+            block_config = replace(
+                block_config,
+                attn=replace(
+                    block_config.attn, rope_apply=IdentityVisionRoPEApply.Config()
+                ),
+            )
         self.layers = ModuleDict(
-            {str(index): config.block.build() for index in range(config.num_layers)}
+            {str(index): block_config.build() for index in range(config.num_layers)}
         )
         self.ln_post = config.ln_post.build()
 
